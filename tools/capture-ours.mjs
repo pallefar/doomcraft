@@ -6,6 +6,19 @@
  *   node tools/capture-ours.mjs --mobile --landscape  # 915x412  + 4x CPU throttle
  *   node tools/capture-ours.mjs --headed              # real window, real GPU
  *   node tools/capture-ours.mjs --prod                # build + preview instead of dev
+ *   node tools/capture-ours.mjs --mode horde          # enter a mode and shoot it
+ *
+ * `--mode <quest|builder|horde|deathmatch>` enters that mode through the real
+ * mode registry (`window.__DC__.enterMode`) and then drives it with a script
+ * written for THAT mode — Quest walks the authored level and uses a door,
+ * Builder places and breaks and flies, Horde skips the fortify clock to get the
+ * wave on screen, Deathmatch rotates weapons and opens the scoreboard. Output
+ * lands in `shots/ours-<mode>-*.png` with `shots/ours-<mode>-metrics.json`.
+ *
+ * Without `--mode` nothing changes: same twelve shot points, same tag, same
+ * metrics keys, same `shots/ours-metrics.json` alias. Every critic depends on
+ * that, so the default path is left exactly as it was and the mode path is an
+ * addition beside it.
  *
  * Same viewports, same twelve screenshot points and the same metrics keys as the
  * reference capture, so `shots/ours-<tag>-NN-*.png` lines up 1:1 with
@@ -43,6 +56,16 @@ const val = (f, d) => {
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : d;
 };
 
+const MODES = ['quest', 'builder', 'horde', 'deathmatch'];
+const MODE = String(val('--mode', '')).toLowerCase();
+if (MODE !== '' && !MODES.includes(MODE)) {
+  console.error(`--mode must be one of ${MODES.join(', ')} (got "${MODE}")`);
+  process.exit(2);
+}
+/** Quest level id. Empty asks the build which levels it actually ships. */
+const LEVEL = String(val('--level', '')).toLowerCase();
+const SKILL = Number(val('--skill', '2'));
+
 const MOBILE = has('--mobile');
 const LAND = has('--landscape');
 const HEADED = has('--headed');
@@ -50,7 +73,10 @@ const PROD = has('--prod');
 const NO_SERVE = has('--no-serve');
 const KEEP = has('--keep');
 const THROTTLE = Number(val('--throttle', MOBILE ? '4' : '1'));
-const TAG = val('--tag', MOBILE ? (LAND ? 'mobileland' : 'mobile') : 'desktop');
+const VIEWPORT_TAG = MOBILE ? (LAND ? 'mobileland' : 'mobile') : 'desktop';
+// A mode run is tagged by the mode so it never overwrites the baseline set;
+// on a phone viewport the two are combined ("horde-mobileland").
+const TAG = val('--tag', MODE === '' ? VIEWPORT_TAG : (MOBILE ? `${MODE}-${VIEWPORT_TAG}` : MODE));
 const PORT = Number(val('--port', PROD ? '4173' : '5173'));
 const URL = val('--url', `http://localhost:${PORT}/`);
 
@@ -240,8 +266,29 @@ async function main() {
   const cx = box ? box.x + box.width / 2 : VIEWPORT.width / 2;
   const cy = box ? box.y + box.height / 2 : VIEWPORT.height / 2;
 
+  /* Which mode this run photographs.
+   *
+   * With no `--mode` that is DEATHMATCH, and deliberately so: the default run is
+   * the A/B against voxiom Battle Royale (ref/BAR.md), it is the run whose
+   * shots and `ours-metrics.json` every critic already holds, and it is the only
+   * mode where the default drive script means anything — all seven weapons, the
+   * rocket crater and build mode. The shell's own Play button follows the
+   * player's save instead, which on a fresh device opens on Quest; the harness
+   * must not inherit that or the baseline would quietly become a different
+   * game between one run and the next. */
+  const ENTER = MODE === '' ? 'deathmatch' : MODE;
   const tClick = Date.now();
-  await page.evaluate(() => window.__DC__.play());
+  {
+    // Pick a level the build actually ships rather than hardcoding an id here;
+    // the campaign is content, and a capture script must not pin it.
+    const level = ENTER !== 'quest' ? '' : (LEVEL || (await page.evaluate(() => window.__DC__.levelIds()))[0] || '');
+    const got = await page.evaluate(
+      ([m, lvl, sk]) => window.__DC__.enterMode(m, { level: lvl, skill: sk }),
+      [ENTER, level, SKILL],
+    );
+    if (got !== ENTER) throw new Error(`enterMode("${ENTER}") ended up in "${got}"`);
+    log(`MODE ${ENTER}${level ? ` level=${level}` : ''} skill=${SKILL}`);
+  }
   await page.mouse.click(cx, cy);
   await page.waitForTimeout(260);
   // Pointer lock is not granted in every environment. Fall back to unlocked
@@ -349,88 +396,352 @@ async function main() {
     }
   };
 
-  await faceOpenGround();
-  await sweep(220, 0);
-  await holdWhile('KeyW', 1200, () => sweep(120, -20, 6));
-  await faceOpenGround();
-  await shot('02-fwd');
+  /* --- driving scripts, one per mode ---------------------------------- *
+   * The default run is unchanged, byte for byte, so the baseline shots and the
+   * metrics that critics diff against keep meaning the same thing. Each mode
+   * run is a different script because each mode is a different game: shooting
+   * a shotgun in Builder photographs nothing, and rotating weapons in Quest
+   * photographs a weapon you have not found yet.
+   * ------------------------------------------------------------------- */
 
-  await sweep(-300, 24);
-  await hold('KeyA', 900);
-  await faceOpenGround();
-  await shot('03-strafe');
+  const modeStatus = async () => page.evaluate(() => window.__DC__.modeStats());
 
-  // Catch the shot itself. The muzzle flash lives for 60 ms and the bar has no
-  // flash at all (ref/BAR.md weakness #2) — photographing the recovery frame
-  // would throw away the whole comparison.
-  await faceEnemy();
-  await clicks(2);
-  await page.mouse.down();
-  await page.waitForTimeout(24);
-  await page.screenshot({ path: path.join(OUT, `ours-${TAG}-04-shoot.png`) });
-  await page.mouse.up();
+  async function driveDefault() {
+    await faceOpenGround();
+    await sweep(220, 0);
+    await holdWhile('KeyW', 1200, () => sweep(120, -20, 6));
+    await faceOpenGround();
+    await shot('02-fwd');
 
-  // Shotgun: 70 ms of flash, so this one can be photographed mid-shot.
-  await page.keyboard.press('Digit2');
-  await page.waitForTimeout(520);
-  await faceOpenGround();
-  await page.mouse.down();
-  await page.waitForTimeout(20);
-  await page.screenshot({ path: path.join(OUT, `ours-${TAG}-05-weapon2.png`) });
-  await page.mouse.up();
-  await page.waitForTimeout(200);
+    await sweep(-300, 24);
+    await hold('KeyA', 900);
+    await faceOpenGround();
+    await shot('03-strafe');
 
-  // Chaingun: spun up and firing, so the barrels are turning in the frame.
-  await page.keyboard.press('Digit3');
-  await page.waitForTimeout(520);
-  await faceOpenGround();
-  await page.mouse.down();
-  await page.waitForTimeout(650);
-  await page.screenshot({ path: path.join(OUT, `ours-${TAG}-06-weapon3.png`) });
-  await page.mouse.up();
-  await page.waitForTimeout(150);
+    // Catch the shot itself. The muzzle flash lives for 60 ms and the bar has no
+    // flash at all (ref/BAR.md weakness #2) — photographing the recovery frame
+    // would throw away the whole comparison.
+    await faceEnemy();
+    await clicks(2);
+    await page.mouse.down();
+    await page.waitForTimeout(24);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-04-shoot.png`) });
+    await page.mouse.up();
 
-  await hold('Space', 220);
-  await shot('07-jump');
+    // Shotgun: 70 ms of flash, so this one can be photographed mid-shot.
+    await page.keyboard.press('Digit2');
+    await page.waitForTimeout(520);
+    await faceOpenGround();
+    await page.mouse.down();
+    await page.waitForTimeout(20);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-05-weapon2.png`) });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
 
-  // The combat frame. A rocket, because the thing the bar cannot do at all is
-  // blow a hole in the level: flash, blast shell, shockwave ring, debris and a
-  // crater, all in one frame.
-  await page.keyboard.press('Digit4');
-  await page.waitForTimeout(600);
-  const found = await faceEnemy();
-  if (!found) await faceOpenGround();
-  await holdWhile('KeyW', 900, async () => { await faceEnemy(); });
-  // Put something in front of the rocket, then time the shutter to the flight.
-  // A rocket travels at 46 m/s: fired at a wall 12 m away the blast is 260 ms
-  // out, and photographing 90 ms after that catches the shell still expanding.
-  // With nothing in range, tilt 15 degrees down and blow up the floor instead —
-  // 6 m out, which is outside the 4.4 m splash that would kill the cameraman.
-  let range = await page.evaluate(() => window.__DC__.clearance());
-  if (range > 26) {
-    await look(0, 120, 4);
-    range = await page.evaluate(() => window.__DC__.clearance());
+    // Chaingun: spun up and firing, so the barrels are turning in the frame.
+    await page.keyboard.press('Digit3');
+    await page.waitForTimeout(520);
+    await faceOpenGround();
+    await page.mouse.down();
+    await page.waitForTimeout(650);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-06-weapon3.png`) });
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+
+    await hold('Space', 220);
+    await shot('07-jump');
+
+    // The combat frame. A rocket, because the thing the bar cannot do at all is
+    // blow a hole in the level: flash, blast shell, shockwave ring, debris and a
+    // crater, all in one frame.
+    await page.keyboard.press('Digit4');
+    await page.waitForTimeout(600);
+    const found = await faceEnemy();
+    if (!found) await faceOpenGround();
+    await holdWhile('KeyW', 900, async () => { await faceEnemy(); });
+    // Put something in front of the rocket, then time the shutter to the flight.
+    // A rocket travels at 46 m/s: fired at a wall 12 m away the blast is 260 ms
+    // out, and photographing 90 ms after that catches the shell still expanding.
+    // With nothing in range, tilt 15 degrees down and blow up the floor instead —
+    // 6 m out, which is outside the 4.4 m splash that would kill the cameraman.
+    let range = await page.evaluate(() => window.__DC__.clearance());
+    if (range > 26) {
+      await look(0, 120, 4);
+      range = await page.evaluate(() => window.__DC__.clearance());
+    }
+    await page.mouse.down();
+    await page.waitForTimeout(50);
+    await page.mouse.up();
+    await page.waitForTimeout(Math.min(760, (Math.min(range, 30) / 46) * 1000 + 90));
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-08-combat.png`) });
+    await page.waitForTimeout(400);
+    await look(0, -120, 4);
+    await page.keyboard.press('Digit1');
+    await page.waitForTimeout(300);
+
+    await page.keyboard.press('KeyB');
+    await page.waitForTimeout(420);
+    await faceOpenGround();
+    await shot('09-build');
+
+    await look(0, 200, 6);              // aim at the floor
+    await clicks(2, 'right');           // place blocks
+    await clicks(2, 'left');            // and dig one out
+    await shot('10-place');
+    await page.keyboard.press('KeyB');
   }
-  await page.mouse.down();
-  await page.waitForTimeout(50);
-  await page.mouse.up();
-  await page.waitForTimeout(Math.min(760, (Math.min(range, 30) / 46) * 1000 + 90));
-  await page.screenshot({ path: path.join(OUT, `ours-${TAG}-08-combat.png`) });
-  await page.waitForTimeout(400);
-  await look(0, -120, 4);
-  await page.keyboard.press('Digit1');
-  await page.waitForTimeout(300);
 
-  await page.keyboard.press('KeyB');
-  await page.waitForTimeout(420);
-  await faceOpenGround();
-  await shot('09-build');
+  /* --- QUEST --------------------------------------------------------- *
+   * The bar is DOOM E1M1: a readable silhouette, dark corridors against lit
+   * rooms, a keycard objective and something bright moving in the dark. So the
+   * script opens on the authored heading, walks the level, hunts a demon and
+   * presses USE on whatever is in front of it.
+   * ------------------------------------------------------------------- */
+  async function driveQuest() {
+    await shot('02-silhouette');            // the opening view, unturned
 
-  await look(0, 200, 6);              // aim at the floor
-  await clicks(2, 'right');           // place blocks
-  await clicks(2, 'left');            // and dig one out
-  await shot('10-place');
-  await page.keyboard.press('KeyB');
+    await holdWhile('KeyW', 1400, () => sweep(90, 0, 6));
+    await shot('03-corridor');
+
+    // Wake something. Authored enemies fire on sight or proximity, so walking
+    // the room is the trigger; then turn onto whatever woke.
+    for (let i = 0; i < 4; i++) {
+      await holdWhile('KeyW', 700, () => sweep(140, 0, 6));
+      if (await faceEnemy()) break;
+    }
+    const sawEnemy = await faceEnemy();
+    await shot('04-enemy');
+
+    await page.mouse.down();
+    await page.waitForTimeout(24);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-05-fire.png`) });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    await clicks(3);
+    await shot('06-fight');
+
+    // USE: doors and switches are the level graph, and E is how you read it.
+    await faceOpenGround();
+    await holdWhile('KeyW', 900, async () => {});
+    await page.keyboard.press('KeyE');
+    await page.waitForTimeout(320);
+    await shot('07-use');
+
+    await holdWhile('KeyW', 1500, () => sweep(-180, 0, 8));
+    await shot('08-explore');
+
+    await hold('KeyA', 700);
+    await faceOpenGround();
+    await shot('09-room');
+
+    await page.keyboard.press('Tab');
+    await page.waitForTimeout(260);
+    await shot('10-tally');
+    await page.keyboard.press('Tab');
+    log(`QUEST_SAW_ENEMY ${sawEnemy}`);
+  }
+
+  /* --- BUILDER ------------------------------------------------------- *
+   * The bar is Minecraft Classic: the highlight wireframe on the targeted
+   * block, instant place, held break, the creative palette, and a no-clip
+   * camera. Every one of those is a frame here.
+   * ------------------------------------------------------------------- */
+  async function driveBuilder() {
+    await faceOpenGround();
+    await shot('02-world');
+
+    await look(0, 150, 5);                  // look down at the ground
+    await page.waitForTimeout(200);
+    await shot('03-highlight');             // the targeted-block wireframe
+
+    await clicks(3, 'right');               // place
+    await shot('04-place');
+
+    // Held break, photographed WHILE the progress ring is running.
+    await page.mouse.down();
+    await page.waitForTimeout(160);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-05-break.png`) });
+    await page.mouse.up();
+    await page.waitForTimeout(220);
+
+    await page.keyboard.press('KeyB');      // the creative palette
+    await page.waitForTimeout(420);
+    await shot('06-palette');
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(200);
+    // Escape from a modal must not leave us on the pause screen.
+    if (await page.evaluate(() => window.__DC__.screen) !== 'playing') {
+      await page.evaluate(() => window.__DC__.play());
+      await page.waitForTimeout(260);
+    }
+
+    await page.keyboard.press('Digit4');    // a different material
+    await page.waitForTimeout(200);
+    await clicks(2, 'right');
+    await page.keyboard.press('Digit8');
+    await page.waitForTimeout(200);
+    await clicks(2, 'right');
+    await shot('07-stack');
+
+    // Build something with a shape, not a pile: strafe while placing.
+    await holdWhile('KeyD', 900, async () => { await clicks(3, 'right'); });
+    await look(0, -90, 4);
+    await shot('08-build');
+
+    await page.keyboard.press('KeyF');      // no-clip creative camera
+    await page.waitForTimeout(300);
+    await hold('Space', 500);
+    await holdWhile('KeyW', 700, () => sweep(120, 0, 5));
+    await shot('09-freecam');
+    await page.keyboard.press('KeyF');
+    await page.waitForTimeout(300);
+
+    await page.keyboard.press('KeyZ');      // undo my own last placements
+    await page.waitForTimeout(160);
+    await page.keyboard.press('KeyZ');
+    await page.waitForTimeout(300);
+    await shot('10-undo');
+  }
+
+  /* --- HORDE --------------------------------------------------------- *
+   * The whole thesis is that the building and the fighting are the same
+   * decision. So: photograph the fortify window with the gates lit, build the
+   * wall, then skip the clock (F) and photograph the wave walking into it.
+   * ------------------------------------------------------------------- */
+  async function driveHorde() {
+    await faceOpenGround();
+    await shot('02-fortify');               // banner + clock + lit gate
+
+    await sweep(240, 0);
+    await shot('03-gates');                 // the compass strip
+
+    await look(0, 150, 5);
+    await clicks(4, 'right');               // spend credits on wall
+    await holdWhile('KeyD', 700, async () => { await clicks(3, 'right'); });
+    await look(0, -110, 4);
+    await shot('04-wall');
+
+    await page.keyboard.press('KeyG');      // cycle the wall material
+    await page.waitForTimeout(200);
+    await page.keyboard.press('KeyX');      // the armoury
+    await page.waitForTimeout(460);
+    await shot('05-shop');
+    await page.keyboard.press('Digit1');    // buy the first offer
+    await page.waitForTimeout(320);
+    await page.keyboard.press('KeyX');
+    await page.waitForTimeout(260);
+    if (await page.evaluate(() => window.__DC__.screen) !== 'playing') {
+      await page.evaluate(() => window.__DC__.play());
+      await page.waitForTimeout(260);
+    }
+
+    // Skip the build clock: the wave is the picture.
+    await page.keyboard.press('KeyF');
+    await page.waitForTimeout(1400);
+    await faceOpenGround();
+    await shot('06-wave');
+
+    for (let i = 0; i < 8; i++) {
+      if (await faceEnemy()) break;
+      await sweep(150, 0, 5);
+      await page.waitForTimeout(220);
+    }
+    const sawEnemy = await faceEnemy();
+    await page.mouse.down();
+    await page.waitForTimeout(26);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-07-fire.png`) });
+    await page.mouse.up();
+    await clicks(4);
+    await shot('08-combat');
+
+    await page.waitForTimeout(1500);
+    await faceEnemy();
+    await shot('09-siege');
+
+    await page.keyboard.press('Tab');
+    await page.waitForTimeout(260);
+    await shot('10-run');
+    await page.keyboard.press('Tab');
+    log(`HORDE_SAW_ENEMY ${sawEnemy}`);
+  }
+
+  /* --- DEATHMATCH ---------------------------------------------------- *
+   * Straight A/B against voxiom Battle Royale. Its own-goal is the 25-second
+   * "Waiting for players" card, so the entry ribbon is shot first; then the
+   * things it has none of — weapon rotation, a kill confirmation, a scoreboard.
+   * ------------------------------------------------------------------- */
+  async function driveDeathmatch() {
+    await shot('02-ribbon');                // "MATCH LIVE", the anti-lobby
+
+    await faceOpenGround();
+    await holdWhile('KeyW', 1200, () => sweep(140, -20, 6));
+    await faceOpenGround();
+    await shot('03-fwd');
+
+    await faceEnemy();
+    await clicks(2);
+    await page.mouse.down();
+    await page.waitForTimeout(24);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-04-shoot.png`) });
+    await page.mouse.up();
+
+    await page.keyboard.press('Digit2');
+    await page.waitForTimeout(520);
+    await faceOpenGround();
+    await page.mouse.down();
+    await page.waitForTimeout(20);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-05-weapon2.png`) });
+    await page.mouse.up();
+    await page.waitForTimeout(220);
+
+    await page.keyboard.press('Digit3');
+    await page.waitForTimeout(520);
+    await faceOpenGround();
+    await page.mouse.down();
+    await page.waitForTimeout(650);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-06-weapon3.png`) });
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+
+    await hold('Space', 220);
+    await shot('07-jump');
+
+    await page.keyboard.press('Digit4');
+    await page.waitForTimeout(600);
+    if (!(await faceEnemy())) await faceOpenGround();
+    let range = await page.evaluate(() => window.__DC__.clearance());
+    if (range > 26) { await look(0, 120, 4); range = await page.evaluate(() => window.__DC__.clearance()); }
+    await page.mouse.down();
+    await page.waitForTimeout(50);
+    await page.mouse.up();
+    await page.waitForTimeout(Math.min(760, (Math.min(range, 30) / 46) * 1000 + 90));
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-08-combat.png`) });
+    await look(0, -120, 4);
+    await page.keyboard.press('Digit1');
+    await page.waitForTimeout(300);
+
+    await page.keyboard.down('Tab');        // the scoreboard the bar has not got
+    await page.waitForTimeout(500);
+    await shot('09-scoreboard');
+    await page.keyboard.up('Tab');
+    await page.waitForTimeout(260);
+
+    // Hunt one more body so the killfeed has something in it.
+    for (let i = 0; i < 6; i++) {
+      if (await faceEnemy()) { await clicks(4); break; }
+      await sweep(160, 0, 5);
+    }
+    await shot('10-killfeed');
+  }
+
+  const DRIVES = {
+    '': driveDefault,
+    quest: driveQuest,
+    builder: driveBuilder,
+    horde: driveHorde,
+    deathmatch: driveDeathmatch,
+  };
+  await DRIVES[MODE]();
 
   // A last stretch of continuous motion so the 1% low is measured under load,
   // not while standing still.
@@ -463,6 +774,13 @@ async function main() {
   const stats = await page.evaluate(() => window.__DC__.stats());
   log('GAME ' + JSON.stringify(stats));
 
+  const modeStats = await modeStatus();
+  log('MODE_STATS ' + JSON.stringify(modeStats));
+  if (modeStats.activeKey !== ENTER) {
+    log(`MODE_LOST expected "${ENTER}", registry says "${modeStats.activeKey}"`);
+  }
+  if (modeStats.fault) log('MODE_FAULT ' + modeStats.fault);
+
   await page.keyboard.press('Escape');
   await page.waitForTimeout(500);
   await shot('11-esc-menu');
@@ -490,11 +808,17 @@ async function main() {
     mode: PROD ? 'preview(prod build)' : 'vite dev',
     url: URL,
     game: stats,
+    /* the mode layer — new keys only, so every existing consumer is untouched */
+    gameMode: ENTER,
+    questLevel: ENTER === 'quest' ? LEVEL : '',
+    modeStats,
     consoleErrors,
     pageErrors,
   };
   fs.writeFileSync(path.join(OUT, `ours-${TAG}-metrics.json`), JSON.stringify(metrics, null, 2));
-  fs.writeFileSync(path.join(OUT, 'ours-metrics.json'), JSON.stringify(metrics, null, 2));
+  // `ours-metrics.json` is the baseline alias every critic reads. A mode run is
+  // an extra measurement, not a replacement for it, so it does not claim it.
+  if (MODE === '') fs.writeFileSync(path.join(OUT, 'ours-metrics.json'), JSON.stringify(metrics, null, 2));
 
   if (consoleErrors.length > 0) log('CONSOLE_ERRORS ' + JSON.stringify(consoleErrors.slice(0, 10), null, 1));
   if (pageErrors.length > 0) log('PAGE_ERRORS ' + JSON.stringify(pageErrors.slice(0, 10), null, 1));

@@ -300,6 +300,13 @@ export interface ModeHost {
   setStatus(text: string): void;
   /** Ask the shell to leave to the main menu (the mode failed, or the run ended). */
   requestExit(reason: string): void;
+  /**
+   * Losing pointer lock normally means the player walked away, so the shell
+   * opens the pause menu. A mode that releases the lock ON PURPOSE — to show a
+   * palette, a shop, an intermission — must say so first, or the shell pauses
+   * the game on top of the panel the mode just opened.
+   */
+  suppressAutoPause?(on: boolean): void;
 }
 
 /**

@@ -125,7 +125,7 @@
       <div class="sub">Gauntlet vs voxiom.io</div>
     </div>
     <div class="readouts">
-      <div class="ro"><div class="k">Pieces won</div><div class="v c-bone">0<i>/ 17</i></div><div class="d">blind A/B</div></div>
+      <div class="ro"><div class="k">Pieces won</div><div class="v c-bone">0<i>/ 23</i></div><div class="d">blind A/B</div></div>
       <div class="ro"><div class="k">Our FPS</div><div class="v c-tox">60.2</div><div class="d">bar 60.2</div></div>
       <div class="ro"><div class="k">1% low</div><div class="v c-amber">53.8</div><div class="d">bar 56.8</div></div>
       <div class="ro"><div class="k">Interactive</div><div class="v c-tox">312<i>ms</i></div><div class="d">bar 3.16s</div></div>
@@ -296,6 +296,60 @@
           <div class="rounds">0 rounds</div>
           <div class="chip v-pending">PENDING</div>
         </div>
+        <div class="piece is-pending">
+          <div>
+            <div class="nm">Points &amp; progression</div>
+            <div class="note">Two currencies: XP (never spent, gates unlocks) + Scrap (spendable). Server-granted only, with per-match and per-day anti-farm caps.</div>
+            
+          </div>
+          <div class="rounds">0 rounds</div>
+          <div class="chip v-pending">PENDING</div>
+        </div>
+        <div class="piece is-pending">
+          <div>
+            <div class="nm">Weapons, skins &amp; items</div>
+            <div class="note">Weapon variants as sidegrades, skins as palette+emissive masks so cosmetics cost zero frames. 5 rarity tiers.</div>
+            
+          </div>
+          <div class="rounds">0 rounds</div>
+          <div class="chip v-pending">PENDING</div>
+        </div>
+        <div class="piece is-pending">
+          <div>
+            <div class="nm">Trading</div>
+            <div class="note">Two-sided escrow with confirm-reset on offer change, atomic settlement, audit log, cooldowns. Titles and trophies untradable.</div>
+            
+          </div>
+          <div class="rounds">0 rounds</div>
+          <div class="chip v-pending">PENDING</div>
+        </div>
+        <div class="piece is-pending">
+          <div>
+            <div class="nm">Viral sharing</div>
+            <div class="note">Server-rendered share cards, referrals paid on engagement not signup, fraud caps and review queue built in from the start.</div>
+            
+          </div>
+          <div class="rounds">0 rounds</div>
+          <div class="chip v-pending">PENDING</div>
+        </div>
+        <div class="piece is-pending">
+          <div>
+            <div class="nm">Competitions &amp; sponsors</div>
+            <div class="note">Seasons, tournaments, prize claim, sponsor console. I can build the platform; I cannot sign a sponsor.</div>
+            
+          </div>
+          <div class="rounds">0 rounds</div>
+          <div class="chip v-pending">PENDING</div>
+        </div>
+        <div class="piece is-pending">
+          <div>
+            <div class="nm">Sponsor placement &amp; measurement</div>
+            <div class="note">39 surfaces rated; 7 rejected on measurement grounds. Impression defs: MRC 50%/1s for DOM, IAB Intrinsic In-Game 2.0 for 3D. Server-side viewability = 0.000 ms client cost.</div>
+            
+          </div>
+          <div class="rounds">0 rounds</div>
+          <div class="chip v-pending">PENDING</div>
+        </div>
       </div>
     </section>
 
@@ -361,6 +415,11 @@
   <section>
     <div class="shead"><h2>Run log</h2><span class="meta">newest first</span></div>
     <div class="log">
+      <div><time>23:20</time><span>User decisions: run BOTH programmatic (AdSense/networks) as fill AND direct-sold as it arrives; support ALL THREE prize shapes. Flagged: AdSense covers page slots only — in-game/rewarded needs a games network (the bar uses AdInPlay).</span></div>
+      <div><time>23:10</time><span>TWO REAL BUGS found, unrelated to ads: net pump runs inside rAF so backgrounding the tab 15 s DISCONNECTS you mid-match; and there is no CSP anywhere on the server. See docs/BUGS-FOUND.md.</span></div>
+      <div><time>23:08</time><span>Rejected client-side WebGL2 occlusion queries: 0.19 ms spike lands on the 18.6 ms p99 tail = 53.2 fps 1% low, under our 53.8 line. Chose server-side reconstruction from existing yaw/pitch inputs — 0.000 ms client cost.</span></div>
+      <div><time>23:05</time><span>Sponsor spec done. Key finding: the 1.5% screen-coverage floor (not fog) is the binding constraint on in-world ads — a 4x2 m billboard only qualifies within 7.7 m, so author at 16x8 m minimum.</span></div>
+      <div><time>22:20</time><span>Economy layer specced (docs/ECONOMY.md): 2 currencies, tradable cosmetics, escrow trading, viral sharing, competitions. Three architecture calls: server grants all rewards; no loot boxes / no real-money tradables by default; sponsor PLATFORM is buildable, a sponsor deal is not mine to make.</span></div>
       <div><time>19:55</time><span>Queued by user: advertiser-buyable in-game ads, GTA mode, ElevenLabs voices. GTA bar NOT yet obtainable — flagged, not faked. Paused for handover; resume 22:00.</span></div>
       <div><time>19:50</time><span>Mode framework landed (level format = data, 3 Quest levels). Four mode builders still in flight at pause.</span></div>
       <div><time>19:35</time><span>Mobile PORTRAIT confirmed playable by eye — big FIRE pad, labelled JUMP/CRCH/RUN/RLD/BLD, real joystick. The bar refuses portrait entirely. Decisive win.</span></div>

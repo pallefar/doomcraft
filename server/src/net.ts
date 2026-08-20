@@ -69,6 +69,21 @@ import {
   playerDeltaMask,
   readMessageId,
 } from '@doomcraft/shared';
+import {
+  C2S_MODE,
+  createModeActionMessage,
+  createModeSelectMessage,
+  decodeModeAction,
+  decodeModeSelect,
+  encodeModeContext,
+  encodeModeEvent,
+  encodeModeState,
+  type ModeActionMessage,
+  type ModeContextMessage,
+  type ModeEventMessage,
+  type ModeSelectMessage,
+  type ModeStateBuffer,
+} from '@doomcraft/shared/modes';
 import type { PlayerEntity } from './sim.js';
 import { EditResult, Simulation } from './sim.js';
 import { ServerWorld } from './world.js';
@@ -125,6 +140,13 @@ export interface NetHost {
   onDisconnect(conn: Connection): void;
   onChat(conn: Connection, text: string): void;
   onRespawnRequest(conn: Connection): void;
+  /**
+   * `C2S_MODE.SELECT`. Optional: a room that does not implement it simply runs
+   * whatever mode it was constructed with, which is what the tests do.
+   */
+  onModeSelect?(conn: Connection, msg: ModeSelectMessage): void;
+  /** `C2S_MODE.ACTION` — use, buy, undo, ready, restart. Optional. */
+  onModeAction?(conn: Connection, msg: ModeActionMessage): void;
   readonly seed: number;
   readonly gameMode: number;
   readonly matchOver: boolean;
@@ -264,6 +286,8 @@ export class NetHub {
   private nextConnId = 1;
 
   private readonly hello = createHelloMessage();
+  private readonly modeSelectMsg = createModeSelectMessage();
+  private readonly modeActionMsg = createModeActionMessage();
   private readonly input = createInputCommand();
   private readonly edit = createBlockEditCommand();
   private readonly reader = new PacketReader();
@@ -352,6 +376,8 @@ export class NetHub {
         case C2S.CHAT: this.onChat(conn, bytes); break;
         case C2S.RESPAWN: this.onRespawn(conn); break;
         case C2S.PING: this.onPing(conn, bytes); break;
+        case C2S_MODE.SELECT: this.onModeSelect(conn, bytes); break;
+        case C2S_MODE.ACTION: this.onModeAction(conn, bytes); break;
         default:
           conn.stats.violations++;
           break;
@@ -480,6 +506,63 @@ export class NetHub {
     encodePong(w, clientTime, this.nowMs >>> 0, this.sim.tick);
     conn.send(w.copy());
     conn.lastPongMs = this.clock();
+  }
+
+  /* -------------------------------------------------------------- *
+   * Mode sidecar
+   *
+   * The base protocol does not know what a mode is; it only knows these three
+   * ids belong to somebody else. Decode, hand to the host, and treat a host
+   * that does not implement the hook as "this room has no modes" rather than
+   * as a protocol violation — that is what keeps every existing test green.
+   * -------------------------------------------------------------- */
+
+  private onModeSelect(conn: Connection, bytes: Uint8Array): void {
+    if (!conn.ready) { conn.stats.violations++; return; }
+    decodeModeSelect(this.reader.reset(bytes), this.modeSelectMsg);
+    this.host.onModeSelect?.(conn, this.modeSelectMsg);
+  }
+
+  private onModeAction(conn: Connection, bytes: Uint8Array): void {
+    if (!conn.ready) { conn.stats.violations++; return; }
+    decodeModeAction(this.reader.reset(bytes), this.modeActionMsg);
+    this.host.onModeAction?.(conn, this.modeActionMsg);
+  }
+
+  sendModeState(conn: Connection, state: ModeStateBuffer): void {
+    if (!conn.ready) return;
+    encodeModeState(this.shared, state);
+    conn.send(this.shared.copy());
+  }
+
+  sendModeContext(conn: Connection, context: ModeContextMessage): void {
+    if (!conn.ready) return;
+    encodeModeContext(this.shared, context);
+    conn.send(this.shared.copy());
+  }
+
+  broadcastModeContext(context: ModeContextMessage): void {
+    encodeModeContext(this.shared, context);
+    const packet = this.shared.copy();
+    for (let i = 0; i < this.connections.length; i++) {
+      const c = this.connections[i];
+      if (c.ready) c.send(packet);
+    }
+  }
+
+  sendModeEvent(conn: Connection, event: ModeEventMessage): void {
+    if (!conn.ready) return;
+    encodeModeEvent(this.shared, event);
+    conn.send(this.shared.copy());
+  }
+
+  broadcastModeEvent(event: ModeEventMessage): void {
+    encodeModeEvent(this.shared, event);
+    const packet = this.shared.copy();
+    for (let i = 0; i < this.connections.length; i++) {
+      const c = this.connections[i];
+      if (c.ready) c.send(packet);
+    }
   }
 
   /* -------------------------------------------------------------- *

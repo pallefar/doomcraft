@@ -353,6 +353,7 @@ export class Hud {
   private elRes!: HTMLElement;
   private elWep!: HTMLElement;
   private readonly slots: HTMLElement[] = [];
+  private elHotbar!: HTMLElement;
   private elCross!: HTMLCanvasElement;
   private crossCtx!: CanvasRenderingContext2D;
   private elStatus!: HTMLElement;
@@ -504,6 +505,7 @@ export class Hud {
       bar.appendChild(s);
       this.slots.push(s);
     }
+    this.elHotbar = bar;
     root.appendChild(bar);
 
     /* crosshair */
@@ -711,6 +713,22 @@ export class Hud {
     window.setTimeout(() => {
       if (ln.parentNode !== null) { ln.remove(); this.feedCount--; }
     }, 7200);
+  }
+
+  /** Drop every line. A mode switch must not leave the last mode talking. */
+  clearFeed(): void {
+    while (this.elFeed.firstChild !== null) this.elFeed.firstChild.remove();
+    this.feedCount = 0;
+  }
+
+  /**
+   * Show or hide the gun half of the HUD — the ammo readout and the seven-slot
+   * hotbar. Builder has no weapons, so leaving "120 BULLETS / PISTOL" on screen
+   * over a block palette is just a lie in the corner of the frame.
+   */
+  setWeaponUiVisible(on: boolean): void {
+    this.elAmmo.style.display = on ? '' : 'none';
+    this.elHotbar.style.display = on ? '' : 'none';
   }
 
   /** A shot connected. Drives the crosshair pop — the bar has no equivalent. */

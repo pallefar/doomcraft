@@ -29,7 +29,43 @@ import {
   type GameSettings, type SaveProgress, type QualityPreset, type CrosshairStyle,
 } from '@shared/constants';
 
+import {
+  MODE_KEYS,
+  ModeId,
+  encodeModeSelect,
+  getMode,
+  isModeId,
+  legacyGameMode,
+  modeFromKey,
+} from '@shared/modes';
+import { PacketWriter } from '@shared/protocol';
+import {
+  MemorySaveStorage,
+  addBuilderWorld,
+  loadSave,
+  removeBuilderWorld,
+  storeSave,
+  type SaveFile,
+  type SaveStorage,
+} from '@shared/saves';
+
 import { Game } from '@/game/game';
+import {
+  ModeRegistry,
+  createEnterParams,
+  paramsFromQuery,
+  toModeSelectMessage,
+  type ModeEnterParams,
+  type ModeHost,
+  type ModeScopeStats,
+} from '@/modes/registry';
+import {
+  createModeSelect,
+  levelRowFrom,
+  worldRowsFrom,
+  type ModeSelect,
+  type ModeSelectLevel,
+} from '@/ui/modeSelect';
 
 /* ------------------------------------------------------------------------ *
  * Persistence
@@ -148,6 +184,23 @@ const SHELL_CSS = `
 .dc-ad-house b{display:block;color:#f0a020;font-size:13px;letter-spacing:.1em}
 .dc-ad-house u{display:inline-block;margin-top:5px;color:#e8e6e3;text-decoration:none;
   border:1px solid rgba(255,255,255,.28);padding:3px 9px;border-radius:2px;cursor:pointer}
+
+/* --- the mode layer ------------------------------------------------------ */
+.dc-menu-inner{width:min(1080px,96vw)}
+.dc-select{margin-top:14px}
+/* The bar puts "Loading Terrain (100.00%)..." dead centre; so do we, and it is
+   the one thing a mode is allowed to write into the middle of the screen. */
+.dc-status{position:absolute;left:50%;top:calc(50% - 96px);transform:translateX(-50%);
+  padding:5px 14px;border-radius:2px;background:rgba(8,8,11,.78);color:#e8e6e3;
+  border:1px solid rgba(255,255,255,.13);white-space:nowrap;pointer-events:none;
+  font:12px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  letter-spacing:.06em;z-index:6}
+.dc-status[hidden]{display:none}
+.dc-fault{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);
+  max-width:min(680px,92vw);padding:8px 14px;border-radius:2px;
+  background:rgba(30,6,4,.92);border:1px solid rgba(224,60,28,.65);color:#ffcabb;
+  font:12px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;z-index:9}
+.dc-fault[hidden]{display:none}
 `;
 
 /* ------------------------------------------------------------------------ *
@@ -180,7 +233,43 @@ const params = new URLSearchParams(location.search);
 const autoplay = params.get('autoplay') === '1';
 const forceTouch = params.get('touch') === '1';
 const seedParam = params.get('seed');
-let mode: number = GameMode.DEATHMATCH;
+
+/* --- saves ------------------------------------------------------------- *
+ * One document holds all four modes' progress (`shared/src/saves.ts`). It is
+ * separate from the legacy `progress` blob above, which the menu's stat strip
+ * and the ad entitlement still read, and which migrates into it on first load.
+ * --------------------------------------------------------------------- */
+
+const saveStorage: SaveStorage = (() => {
+  try {
+    if (typeof localStorage !== 'undefined') return localStorage;
+  } catch { /* private mode */ }
+  return new MemorySaveStorage();
+})();
+
+let save: SaveFile = loadSave(saveStorage, Date.now());
+
+function flushSave(): void { storeSave(saveStorage, save, Date.now()); }
+
+/* --- which mode are we booting into? ----------------------------------- *
+ * `?mode=` wins (that is how the capture harness enters a mode), then the last
+ * mode this device played, then Deathmatch — the instant-start mode, which is
+ * the one that answers the bar's 25-second wait.
+ * --------------------------------------------------------------------- */
+
+const bootParams: ModeEnterParams = paramsFromQuery(
+  location.search,
+  isModeId(save.profile.lastMode) ? save.profile.lastMode : ModeId.DEATHMATCH,
+);
+/** The params the next Play will use. The picker writes into this. */
+const pendingParams: ModeEnterParams = createEnterParams(bootParams.modeId);
+pendingParams.skill = bootParams.skill;
+pendingParams.levelId = bootParams.levelId;
+pendingParams.worldId = bootParams.worldId;
+pendingParams.seed = bootParams.seed;
+pendingParams.flags = bootParams.flags;
+
+const mode: number = legacyGameMode(bootParams.modeId);
 
 const game = new Game({
   canvas,
@@ -243,18 +332,34 @@ mark.innerHTML = 'DOOM<span>CRAFT</span>';
 menuInner.appendChild(mark);
 menuInner.appendChild(el('p', 'dc-tag', 'Rip and build · voxel arena · no install'));
 
-const modeRow = el('div', 'dc-modes');
-const modeButtons: HTMLElement[] = [];
-for (let i = 0; i < GAME_MODE_NAMES.length; i++) {
-  const b = button(GAME_MODE_NAMES[i], 'dc-mode', () => selectMode(i));
-  modeRow.appendChild(b);
-  modeButtons.push(b);
-}
-menuInner.appendChild(modeRow);
+/**
+ * The mode picker. Four tiles, an inline picker per mode and one Play button —
+ * `client/src/ui/modeSelect.ts` owns all of it. The shell's only jobs are to
+ * feed it content (levels, worlds, the save) and to turn its `onPlay` into a
+ * registry activation.
+ */
+const selectMount = el('div', 'dc-select');
+menuInner.appendChild(selectMount);
 
-const playBtn = button('Play', 'dc-cta', () => startPlaying());
-playBtn.innerHTML = 'Play <small>instantly — bots are already fighting</small>';
-menuInner.appendChild(playBtn);
+const modeSelect: ModeSelect = createModeSelect({
+  root: selectMount,
+  save,
+  initialMode: bootParams.modeId,
+  worlds: worldRowsFrom(save),
+  onPlay: (p) => { void startMode(p); },
+  onModeChange: (m) => { pendingParams.modeId = m; },
+  onCreateWorld: (name, seed) => {
+    const w = addBuilderWorld(save, name, seed >>> 0, Date.now());
+    flushSave();
+    modeSelect.setWorlds(worldRowsFrom(save));
+    return w.id;
+  },
+  onDeleteWorld: (id) => {
+    if (!removeBuilderWorld(save, id)) return;
+    flushSave();
+    modeSelect.setWorlds(worldRowsFrom(save));
+  },
+});
 
 const statRow = el('div', 'dc-stats');
 const statKills = el('span', undefined);
@@ -281,11 +386,6 @@ menuInner.appendChild(el(
 
 uiRoot.appendChild(menu);
 
-function selectMode(m: number): void {
-  mode = m;
-  for (let i = 0; i < modeButtons.length; i++) modeButtons[i].classList.toggle('on', i === m);
-}
-selectMode(mode);
 
 /* ------------------------------------------------------------------------ *
  * Pause + settings panel
@@ -398,6 +498,141 @@ function applySettings(): void {
 }
 
 /* ------------------------------------------------------------------------ *
+ * The mode layer
+ *
+ * Four modes, one renderer, one net client, one frame loop. `ModeRegistry`
+ * owns the switch; every resource a mode creates is registered in its scope and
+ * unwound in reverse on exit, so `registry.scopeStats().live` reads zero
+ * between modes — which is a thing the harness asserts, not a thing we hope.
+ *
+ * Factories are dynamic imports on purpose. A player who only ever plays
+ * Deathmatch never downloads the campaign, the level compiler or the creative
+ * inventory; the boot bundle stays the boot bundle.
+ * ------------------------------------------------------------------------ */
+
+/** Centre-screen status line — the surface the bar uses for "Loading Terrain". */
+const statusLine = el('div', 'dc-status');
+statusLine.hidden = true;
+hudRoot.appendChild(statusLine);
+
+/** A mode that fails to start says so on screen rather than in the console. */
+const faultLine = el('div', 'dc-fault');
+faultLine.hidden = true;
+uiRoot.appendChild(faultLine);
+
+function showFault(text: string): void {
+  faultLine.textContent = text;
+  faultLine.hidden = text.length === 0;
+}
+
+const host: ModeHost = {
+  game,
+  uiRoot,
+  hudRoot,
+  canvas,
+  settings,
+  send(bytes: Uint8Array): void { game.net.send(bytes); },
+  setStatus(text: string): void {
+    statusLine.textContent = text;
+    statusLine.hidden = text.length === 0;
+  },
+  requestExit(reason: string): void {
+    if (reason.length > 0) game.hud.pushFeed(reason, 's');
+    void backToMenu();
+  },
+  suppressAutoPause(on: boolean): void { autoPauseSuppressed = on; },
+};
+
+/** See `ModeHost.suppressAutoPause`. Cleared on every mode exit. */
+let autoPauseSuppressed = false;
+
+const registry = new ModeRegistry(host, {
+  onEntered: (id) => {
+    showFault('');
+    save.profile.lastMode = id;
+    flushSave();
+  },
+  onExited: (_id, stats) => {
+    autoPauseSuppressed = false;
+    // A disposer that threw is a leak with a name. Surface it; never swallow it.
+    if (stats.errors > 0) showFault(`Mode teardown reported ${stats.errors} failing disposer(s).`);
+  },
+  onError: (id, error) => {
+    const msg = error instanceof Error ? error.message : String(error);
+    showFault(`${getMode(id).name} could not start: ${msg}`);
+    host.setStatus('');
+  },
+});
+
+registry.register(ModeId.QUEST, async (ctx) => (await import('@/modes/quest/quest')).questMode(ctx));
+registry.register(ModeId.BUILDER, async (ctx) => (await import('@/modes/builder/builder')).builderMode(ctx));
+registry.register(ModeId.HORDE, async (ctx) => (await import('@/modes/horde/horde')).createHordeMode(ctx));
+registry.register(
+  ModeId.DEATHMATCH,
+  async (ctx) => (await import('@/modes/deathmatch/deathmatch')).createDeathmatchMode(ctx),
+);
+
+/* --- the wire ---------------------------------------------------------- *
+ * `Game` owns the NetClient; the three mode messages are handed straight to
+ * whichever mode is live. A room that never sends them costs nothing.
+ * --------------------------------------------------------------------- */
+game.net.events.onModeState = (state) => { registry.dispatchState(state); };
+game.net.events.onModeEvent = (event) => { registry.dispatchEvent(event); };
+game.net.events.onModeContext = (context) => { registry.dispatchContext(context); };
+
+/* ------------------------------------------------------------------------ *
+ * Quest level discovery for the picker
+ *
+ * The picker needs names and denominators before anything is loaded, and the
+ * campaign must stay data: this reads the same `content/levels/*.json` the mode
+ * does, but only the `meta` block and the array lengths — no compile, no
+ * validation, no voxels. Six small parses, off the boot critical path.
+ * ------------------------------------------------------------------------ */
+
+const MENU_LEVEL_SOURCES = import.meta.glob(
+  '../../content/levels/*.json',
+  { query: '?raw', import: 'default' },
+) as Record<string, () => Promise<string>>;
+
+function levelIdFromPath(path: string): string {
+  const slash = path.lastIndexOf('/');
+  const name = slash < 0 ? path : path.slice(slash + 1);
+  return name.endsWith('.json') ? name.slice(0, -5) : name;
+}
+
+async function discoverLevels(): Promise<ModeSelectLevel[]> {
+  const rows: ModeSelectLevel[] = [];
+  for (const path of Object.keys(MENU_LEVEL_SOURCES)) {
+    const fallbackId = levelIdFromPath(path);
+    try {
+      const doc = JSON.parse(await MENU_LEVEL_SOURCES[path]()) as Record<string, unknown>;
+      const meta = (doc.meta ?? {}) as Record<string, unknown>;
+      const len = (k: string): number => (Array.isArray(doc[k]) ? (doc[k] as unknown[]).length : 0);
+      const str = (k: string, d: string): string =>
+        (typeof meta[k] === 'string' && (meta[k] as string).length > 0 ? meta[k] as string : d);
+      const num = (k: string, d: number): number => (typeof meta[k] === 'number' ? meta[k] as number : d);
+      rows.push(levelRowFrom({
+        id: str('id', fallbackId),
+        name: str('name', fallbackId),
+        episodeId: str('episodeId', 'e1'),
+        episodeName: str('episodeName', 'Episode 1'),
+        episodeIndex: num('episodeIndex', 1),
+        levelIndex: num('levelIndex', rows.length + 1),
+        parTimeSec: num('parTimeSec', 0),
+        enemies: len('enemies'),
+        items: len('pickups'),
+        secrets: len('secrets'),
+        valid: true,
+      }, save));
+    } catch {
+      // A level file that will not parse is not offered. It is not a crash.
+    }
+  }
+  rows.sort((a, b) => (a.episodeIndex - b.episodeIndex) || (a.levelIndex - b.levelIndex));
+  return rows;
+}
+
+/* ------------------------------------------------------------------------ *
  * Screens
  * ------------------------------------------------------------------------ */
 
@@ -415,26 +650,77 @@ function setScreen(s: Screen): void {
 function onReady(): void {
   hideBoot();
   fillAdSlots();
-  if (autoplay) startPlaying();
+  void discoverLevels().then((rows) => { modeSelect.setLevels(rows); });
+  if (autoplay) void startMode(bootParams);
   else setScreen('menu');
   const w = window as unknown as { __DC__?: Record<string, unknown> };
   if (w.__DC__ !== undefined) w.__DC__.interactiveAtMs = performance.now() - t0;
 }
 
-function startPlaying(): void {
+/** Reused across every mode switch; the shell must not allocate to send. */
+const selectWriter = new PacketWriter(96);
+
+function announceMode(p: ModeEnterParams): void {
+  game.net.send(encodeModeSelect(selectWriter, toModeSelectMessage(p)).copy());
+}
+
+/**
+ * Enter a mode and start playing it. One promise chain: the registry serialises
+ * activations internally, so two fast clicks on two tiles cannot leave two
+ * modes half-alive.
+ */
+async function startMode(p: ModeEnterParams): Promise<void> {
+  if (!game.ready) return;
   if (uiRoot!.dataset.screen === 'menu') {
     progress.gamesPlayed++;
     progressDirty = true;
   }
+  pendingParams.modeId = p.modeId;
+  pendingParams.skill = p.skill;
+  pendingParams.levelId = p.levelId;
+  pendingParams.worldId = p.worldId;
+  pendingParams.seed = p.seed;
+  pendingParams.flags = p.flags;
+
+  modeSelect.setBusy(true, `Starting ${getMode(p.modeId).name}…`);
   setScreen('playing');
   game.enterPlay();
+  registry.setPaused(false);
+
+  // The last mode's kill feed is not this mode's news.
+  game.hud.clearFeed();
+
+  /* Tell the room before the mode comes up. Three of the four modes also send
+   * their own `SELECT` from `enter()`; that duplicate is free (the room only
+   * re-streams the world when the mode id actually changes), and doing it here
+   * as well is what covers the fourth — and any mode added later that forgets. */
+  announceMode(pendingParams);
+
+  try {
+    await registry.activate(pendingParams);
+  } finally {
+    modeSelect.setBusy(false);
+  }
+  registry.resize(canvas!.clientWidth, canvas!.clientHeight);
+}
+
+/** Resume the mode that is already active, or start the pending one. */
+function startPlaying(): void {
+  if (registry.activeId >= 0) {
+    setScreen('playing');
+    game.enterPlay();
+    registry.setPaused(false);
+    return;
+  }
+  void startMode(pendingParams);
 }
 
 function openPause(): void {
   if (!game.playing) return;
   game.leavePlay();
+  registry.setPaused(true);
   panelTitle.textContent = 'Paused';
-  panelSub.textContent = 'The match keeps running';
+  panelSub.textContent = `${registry.activeId >= 0 ? getMode(registry.activeId).name : 'The match'} keeps running`;
   resumeBtn.textContent = 'Resume';
   menuBtn.textContent = 'Leave match';
   settingsReturn = 'game';
@@ -455,15 +741,29 @@ function openSettings(from: 'menu' | 'game'): void {
   setScreen('paused');
 }
 
-function backToMenu(): void {
+/**
+ * Leave to the menu. The mode is torn down completely — not paused — which is
+ * the whole point of the scope ledger: the next mode starts on a clean scene
+ * graph, a clean `#hud`, no stray listeners and no orphaned workers.
+ */
+async function backToMenu(): Promise<void> {
   game.leavePlay();
+  host.setStatus('');
+  await registry.deactivate();
   progress.level = levelForXp(progress.xp);
   saveJson(STORAGE_KEYS.progress, progress);
+  save = loadSave(saveStorage, Date.now());
+  modeSelect.setSave(save);
+  modeSelect.setWorlds(worldRowsFrom(save));
   refreshStats();
   setScreen('menu');
 }
 
 setScreen('boot');
+
+window.addEventListener('resize', () => {
+  registry.resize(canvas!.clientWidth, canvas!.clientHeight);
+}, { passive: true });
 
 /* ------------------------------------------------------------------------ *
  * Global input that the game itself must not swallow
@@ -484,6 +784,7 @@ window.addEventListener('keydown', (e) => {
 
 // Losing pointer lock (alt-tab, Esc) means the player is no longer driving.
 document.addEventListener('pointerlockchange', () => {
+  if (autoPauseSuppressed) return;
   if (document.pointerLockElement === null && game.playing && !unlockedLookMode) openPause();
 });
 
@@ -619,13 +920,49 @@ function refreshStats(): void {
  * Frame loop
  * ------------------------------------------------------------------------ */
 
+/**
+ * One loop drives the game and the mode. Order matters:
+ *
+ *   1. `game.tick` runs the fixed simulation, reconciles the prediction and
+ *      draws the scene. Everything the mode reads — `net.renderPos`, the
+ *      snapshot, the chunk store — is current after it returns.
+ *   2. `registry.fixedUpdate` at the sim's own 1/60 cadence, from an
+ *      accumulator kept here so a mode's fixed step is not tied to the frame.
+ *   3. `registry.update` then `registry.render`, both once per frame.
+ *
+ * Nothing in this function allocates.
+ */
+const MODE_FIXED_DT = 1 / 60;
+const MODE_MAX_FIXED_STEPS = 5;
+
 let raf = 0;
 let lastFrameMs = 0;
+let modeAccumulator = 0;
+let modeTick = 0;
+
 function frame(now: number): void {
   raf = requestAnimationFrame(frame);
   game.tick(now);
+
   const dt = lastFrameMs === 0 ? 0 : Math.min(0.25, (now - lastFrameMs) / 1000);
   lastFrameMs = now;
+
+  if (registry.activeId >= 0) {
+    modeAccumulator += dt;
+    let steps = 0;
+    while (modeAccumulator >= MODE_FIXED_DT && steps < MODE_MAX_FIXED_STEPS) {
+      modeAccumulator -= MODE_FIXED_DT;
+      steps++;
+      modeTick++;
+      registry.fixedUpdate(MODE_FIXED_DT, modeTick);
+    }
+    if (steps === MODE_MAX_FIXED_STEPS) modeAccumulator = 0;
+    registry.update(dt, now);
+    registry.render(modeAccumulator / MODE_FIXED_DT);
+  } else {
+    modeAccumulator = 0;
+  }
+
   accumulateProgress(dt);
 }
 raf = requestAnimationFrame(frame);
@@ -653,7 +990,67 @@ window.addEventListener('pagehide', () => {
   get screen(): string { return uiRoot!.dataset.screen ?? ''; },
   play(): void { startPlaying(); },
   pause(): void { openPause(); },
-  menu(): void { backToMenu(); },
+  menu(): Promise<void> { return backToMenu(); },
+
+  /* --- the mode layer, for tools/capture-ours.mjs --------------------- */
+
+  /** Mode slugs in registry order: quest, builder, horde, deathmatch. */
+  modeKeys: MODE_KEYS.slice(),
+  /** The live mode's slug, or '' between modes. */
+  get modeKey(): string {
+    return registry.activeId < 0 ? '' : MODE_KEYS[registry.activeId];
+  },
+  get switching(): boolean { return registry.switching; },
+  /**
+   * Enter a mode by slug and wait until it is live. Returns the slug that is
+   * actually running, so a harness cannot mistake a failed activation for a
+   * successful one.
+   */
+  async enterMode(key: string, opts?: {
+    level?: string; world?: string; skill?: number; seed?: number;
+  }): Promise<string> {
+    const id = modeFromKey(String(key ?? '').toLowerCase());
+    if (id < 0 || !isModeId(id)) throw new Error(`unknown mode "${String(key)}"`);
+    const p = createEnterParams(id);
+    if (opts?.level !== undefined) p.levelId = String(opts.level).toLowerCase();
+    if (opts?.world !== undefined) p.worldId = String(opts.world).toLowerCase();
+    if (opts?.skill !== undefined) p.skill = Number(opts.skill) | 0;
+    if (opts?.seed !== undefined) p.seed = Number(opts.seed) >>> 0;
+    await startMode(p);
+    return registry.activeId < 0 ? '' : MODE_KEYS[registry.activeId];
+  },
+  /** Tear the live mode down and go back to the picker. */
+  async leaveMode(): Promise<void> { await backToMenu(); },
+  /**
+   * Resources the ACTIVE mode still holds. After `leaveMode()` every field is
+   * zero — that is the leak assertion the mode-switch loop makes.
+   */
+  modeScope(): ModeScopeStats { return registry.scopeStats(); },
+  modeStats(): Record<string, unknown> {
+    const r = registry.stats();
+    const scope = registry.scopeStats();
+    return {
+      activeKey: r.activeKey,
+      activations: r.activations,
+      teardownErrors: r.teardownErrors,
+      liveResources: r.liveResources,
+      registered: registry.registered().map((i) => MODE_KEYS[i]),
+      scope,
+      fault: faultLine.hidden ? '' : (faultLine.textContent ?? ''),
+      status: statusLine.hidden ? '' : (statusLine.textContent ?? ''),
+      sceneChildren: game.renderer.scene.children.length,
+      hudChildren: hudRoot.childElementCount,
+      uiChildren: uiRoot.childElementCount,
+      modeStateSeen: game.net.modeStateSeen,
+      modeStatePhase: game.net.modeState.phase,
+      modeStateIndex: game.net.modeState.index,
+      modeStateMode: MODE_KEYS[game.net.modeState.modeId] ?? '',
+    };
+  },
+  /** Levels the picker is offering, for a harness that must not hardcode ids. */
+  levelIds(): string[] {
+    return Object.keys(MENU_LEVEL_SOURCES).map(levelIdFromPath).sort();
+  },
   unlockedLook(on: boolean): void { unlockedLookMode = on; game.allowUnlockedLook(on); },
   /** Freeze look/move so a harness can warp the pointer without turning. */
   suspendInput(on: boolean): void {

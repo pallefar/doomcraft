@@ -715,8 +715,20 @@ export enum ModeAction {
   SET_SKILL = 8,
   /** Teleport to a saved spot. Builder. `a` = bookmark index. */
   WARP = 9,
+  /**
+   * Quest only: an authored enemy has woken and the room must give it a body.
+   * `a` = EntityType, `x`/`y`/`z` = where the level actually put it.
+   *
+   * The client asks because the client is the only side that knows: an authored
+   * level is blitted by `levelRuntime.ts`, and when the room does not know about
+   * levels the whole level is RELOCATED onto wherever the player spawned
+   * (`alignSpawnTo`). The authored coordinates in the file are therefore not the
+   * coordinates the monster has to stand at. A room that owns the level ignores
+   * this and spawns its own roster.
+   */
+  SPAWN_ENEMY = 10,
 }
-export const MODE_ACTION_COUNT = 10;
+export const MODE_ACTION_COUNT = 11;
 
 export interface ModeActionMessage {
   action: ModeAction;

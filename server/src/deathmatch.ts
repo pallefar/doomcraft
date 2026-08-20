@@ -207,6 +207,11 @@ export interface DmPickupSpot {
   respawnMs: number;
   /** Entity id while it is on the floor, -1 while it is gone. */
   entityId: number;
+  /**
+   * Last entity-table slot this spot's pickup was seen in. A HINT, always
+   * revalidated before use — never trust it to identify an entity.
+   */
+  entSlot: number;
   /** Server clock at which it comes back. 0 while it is on the floor. */
   readyAtMs: number;
   /** Body that took it last. 0 = never taken. */
@@ -309,6 +314,7 @@ export class DmPickupField {
       variant,
       respawnMs: pickupRespawnMs(type, variant),
       entityId: -1,
+      entSlot: -1,
       readyAtMs: 0,
       takenBy: 0,
       takenCount: 0,
@@ -327,6 +333,7 @@ export class DmPickupField {
       const slot = sim.spawnPickup(s.type, s.x, s.y, s.z, s.variant);
       if (slot < 0) continue;          // entity table full; try again next tick
       s.entityId = sim.entId[slot];
+      s.entSlot = slot;
       s.readyAtMs = 0;
       n++;
     }
@@ -343,8 +350,9 @@ export class DmPickupField {
     for (let i = 0; i < this.spots.length; i++) {
       const s = this.spots[i];
       if (s.entityId < 0) continue;
-      if (this.liveSlotOf(sim, s.entityId) >= 0) continue;
+      if (this.liveSlotOf(sim, s) >= 0) continue;
       s.entityId = -1;
+      s.entSlot = -1;
       s.readyAtMs = nowMs + s.respawnMs;
       s.takenCount++;
       n++;
@@ -377,9 +385,10 @@ export class DmPickupField {
 
     if (!applyPickupTo(body, s.type, s.variant)) return DmTake.NO_EFFECT;
 
-    const slot = this.liveSlotOf(sim, s.entityId);
+    const slot = this.liveSlotOf(sim, s);
     if (slot >= 0) sim.removeEntity(slot, RemoveReason.PICKED_UP);
     s.entityId = -1;
+    s.entSlot = -1;
     s.readyAtMs = nowMs + s.respawnMs;
     s.takenBy = body.id;
     s.takenCount++;
@@ -401,10 +410,27 @@ export class DmPickupField {
     return best;
   }
 
-  private liveSlotOf(sim: DmSim, entityId: number): number {
-    for (let i = 0; i < sim.entCapacity; i++) {
-      if (sim.entActive[i] === 1 && sim.entId[i] === entityId) return i;
+  /**
+   * The entity-table slot this spot's pickup is living in, or -1 once the
+   * simulation has removed it.
+   *
+   * The slot is remembered and revalidated rather than searched. `syncRemovals`
+   * asks this question once per spot per tick and a linear scan of the 256
+   * entity slots would turn a 28-spot arena into 7,168 comparisons per tick for
+   * an answer that is "the same slot as last time" on all but the one tick
+   * where it changed. The hint is never trusted on its own: the id at the slot
+   * must still match, so a recycled slot falls back to the scan.
+   */
+  private liveSlotOf(sim: DmSim, spot: DmPickupSpot): number {
+    const id = spot.entityId;
+    const hint = spot.entSlot;
+    if (hint >= 0 && hint < sim.entCapacity && sim.entActive[hint] === 1 && sim.entId[hint] === id) {
+      return hint;
     }
+    for (let i = 0; i < sim.entCapacity; i++) {
+      if (sim.entActive[i] === 1 && sim.entId[i] === id) { spot.entSlot = i; return i; }
+    }
+    spot.entSlot = -1;
     return -1;
   }
 }

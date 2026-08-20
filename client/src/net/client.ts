@@ -78,6 +78,18 @@ import {
   rleDecode,
   voxelIndex,
 } from '@shared';
+
+import {
+  ModeStateBuffer,
+  S2C_MODE,
+  createModeContextMessage,
+  createModeEventMessage,
+  decodeModeContext,
+  decodeModeEvent,
+  decodeModeState,
+  type ModeContextMessage,
+  type ModeEventMessage,
+} from '@shared/modes';
 import type { ChatMessage, DamageEvent, KillEvent, SolidAt, WelcomeMessage } from '@shared';
 import { createMoveState, eyeHeightOf, moveStep } from '@doomcraft/server/src/sim.js';
 import type { CollisionWorld, MoveState } from '@doomcraft/server/src/sim.js';
@@ -276,6 +288,15 @@ export interface NetClientEvents {
   onSnapshot?(s: SnapshotBuffer): void;
   /** Fired when reconciliation had to move the local player. */
   onCorrection?(errorMetres: number): void;
+  /**
+   * The mode sidecar (`S2C_MODE.STATE`). The buffer is REUSED — read it now or
+   * copy it; never keep the reference.
+   */
+  onModeState?(state: ModeStateBuffer): void;
+  /** One-shot mode notification. The record is reused. */
+  onModeEvent?(event: ModeEventMessage): void;
+  /** Which level/world the room is running. The record is reused. */
+  onModeContext?(context: ModeContextMessage): void;
 }
 
 export interface NetClientOptions {
@@ -409,6 +430,18 @@ export class NetClient {
   chunksReceived = 0;
   chunksExpected = 1;
   matchOver = false;
+
+  /**
+   * The mode sidecar, as last received. Kept on the client rather than in the
+   * mode so a mode entered AFTER the packet landed still sees current state —
+   * a room announces itself once, and a mode switch must not lose that.
+   */
+  readonly modeState = new ModeStateBuffer();
+  readonly modeEvent: ModeEventMessage = createModeEventMessage();
+  readonly modeContext: ModeContextMessage = createModeContextMessage();
+  /** False until the room has ever sent a STATE — modes fall back on it. */
+  modeStateSeen = false;
+  modeContextSeen = false;
 
   /** Predicted body. `pos` is feet centre; the camera sits at pos.y + eye height. */
   readonly predicted: MoveState = createMoveState();
@@ -632,6 +665,9 @@ export class NetClient {
     this.entitySlotUsed.fill(0);
     this.projSlotUsed.fill(0);
     this.snapshot.reset();
+    this.modeStateSeen = false;
+    this.modeContextSeen = false;
+    this.modeState.reset();
   }
 
   private setStatus(s: NetStatus, detail?: string): void {
@@ -644,6 +680,18 @@ export class NetClient {
     const t = this.transport;
     if (!t || t.readyState !== 1) return;
     t.send(bytes);
+  }
+
+  /**
+   * Send an already-encoded packet. This is how a mode puts `C2S_MODE.SELECT`
+   * and `C2S_MODE.ACTION` on the wire without the net client having to know
+   * what either one means.
+   */
+  send(bytes: Uint8Array): boolean {
+    const t = this.transport;
+    if (!t || t.readyState !== 1) return false;
+    t.send(bytes);
+    return true;
   }
 
   get connected(): boolean { return this.transport !== null && this.transport.readyState === 1; }
@@ -797,6 +845,9 @@ export class NetClient {
       case S2C.KILL: this.onKill(r); break;
       case S2C.CHAT: this.onChat(r); break;
       case S2C.PONG: this.onPong(r); break;
+      case S2C_MODE.STATE: this.onModeState(r); break;
+      case S2C_MODE.EVENT: this.onModeEvent(r); break;
+      case S2C_MODE.CONTEXT: this.onModeContext(r); break;
       default: break;
     }
   }
@@ -896,6 +947,30 @@ export class NetClient {
     const rtt = Math.max(0, this.nowMs - p.clientTimeMs);
     this.rttMs = this.rttMs === 0 ? rtt : this.rttMs * 0.8 + rtt * 0.2;
     this.serverTick = p.tick;
+  }
+
+  /* -------------------------------------------------------------- *
+   * Mode sidecar
+   *
+   * Three cold messages, three reused records. The registry hands each one to
+   * whichever mode is live; a room that never sends them costs nothing.
+   * -------------------------------------------------------------- */
+
+  private onModeState(r: PacketReader): void {
+    decodeModeState(r, this.modeState);
+    this.modeStateSeen = true;
+    this.events.onModeState?.(this.modeState);
+  }
+
+  private onModeEvent(r: PacketReader): void {
+    decodeModeEvent(r, this.modeEvent);
+    this.events.onModeEvent?.(this.modeEvent);
+  }
+
+  private onModeContext(r: PacketReader): void {
+    decodeModeContext(r, this.modeContext);
+    this.modeContextSeen = true;
+    this.events.onModeContext?.(this.modeContext);
   }
 
   /* -------------------------------------------------------------- *

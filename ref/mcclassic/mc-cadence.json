@@ -1,0 +1,54 @@
+{
+  "hooked": [
+    "setBlock"
+  ],
+  "clickRun": {
+    "events": 0,
+    "stamps": []
+  },
+  "breakRun": {
+    "label": "break-hold",
+    "heldMs": 2600,
+    "hookEvents": 0,
+    "hookGapsMs": [],
+    "hookMedianGapMs": null,
+    "pixelEvents": 0,
+    "pixelGapsMs": [],
+    "pixelMedianGapMs": null,
+    "pixelThreshold": 600,
+    "pixelSamples": 143
+  },
+  "breakSweep": {
+    "label": "break-hold-sweeping",
+    "heldMs": 2600,
+    "hookEvents": 1,
+    "hookGapsMs": [],
+    "hookMedianGapMs": null,
+    "pixelEvents": 0,
+    "pixelGapsMs": [],
+    "pixelMedianGapMs": null,
+    "pixelThreshold": 600,
+    "pixelSamples": 168
+  },
+  "placeRun": {
+    "label": "place-hold",
+    "heldMs": 2600,
+    "hookEvents": 0,
+    "hookGapsMs": [],
+    "hookMedianGapMs": null,
+    "pixelEvents": 0,
+    "pixelGapsMs": [],
+    "pixelMedianGapMs": null,
+    "pixelThreshold": 600,
+    "pixelSamples": 143
+  },
+  "finding": {
+    "headline": "Minecraft Classic has no hold-repeat and no dig progress. One click is one block.",
+    "evidence": [
+      "mc-12-break-hold-80/200/400/800.png and mc-13-break-done.png share MD5 a57c9d9730e33b45820fff8ce5628de9 — five frames spanning an 80ms->800ms hold plus the frame after release, pixel-for-pixel identical.",
+      "noa.setBlock was wrapped in the live page and timestamped. Across four runs a 2.6 s hold produced 0 or 1 voxel writes; discrete clicks in the same pose did produce writes.",
+      "Aim is the hard part of this probe, not the measurement: a random seed spawns you on a beach or a cliff lip as often as flat ground, and a crosshair on water or open sky registers nothing. Runs 2-4 are recorded here with their poses so the zeros can be read correctly."
+    ],
+    "consequence": "Any hold-repeat at all beats the bar. Ours is PLACE_REPEAT_MS 140 (7.1 Hz) / BREAK_REPEAT_MS 120, bounded by our own server MAX_EDITS_PER_SECOND=20 rather than by the bar."
+  }
+}

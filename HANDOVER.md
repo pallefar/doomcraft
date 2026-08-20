@@ -23,6 +23,31 @@ The framework phase already completed and its files are on disk, so the re-run w
 is partly done — read `docs/MODES-API.md` and `shared/src/{modes,level}.ts` first and consider
 trimming the framework phase out of the script before re-running.
 
+## The level format — the answer to "many levels with options to expand"
+
+A new episode is a **file, never a code change**. Drop a `.json` into `content/levels/` with a unique
+`meta.id` and `episodeId`; `LevelLibrary.load()` compiles, validates, encodes and hashes it at boot,
+and it appears in mode select, on `GET /api/levels`, and as a joinable room key
+`quest:<id>:<skill>` with nothing else touched.
+
+Three representations, one truth:
+`*.json --parseLevelSource--> LevelSource --compileLevel--> Level --encodeLevel--> *.dcl`
+
+- **Authoring is brush-based**, not per-voxel — box, hollow room, cylinder, stairs, clear. Nobody
+  hand-writes 589,824 voxels, and a brush list diffs readably. The Doom way, used by E1M1: fill the
+  whole volume with stone, then carve every room as a CLEAR, so a carve can never leak into a void.
+- **Runtime sections are byte-identical to engine chunks** in `voxelIndex` order, so they stream over
+  the existing `S2C.CHUNK` message. No new chunk protocol.
+- **`.dcl` round-trips byte-identically** (all authored floats are f64), asserted in a test. Shipped
+  E1M1 is 15,531 bytes for 248,439 solid voxels.
+
+**Validation is a real gate, not a formality.** `validateLevel()` runs a lock-and-key reachability
+solve: flood standable cells from the player spawn (headroom checked before a climb, closed door = a
+wall, one-way drops modelled correctly), collect reachable keys, throw reachable switches whose key
+requirement is met, then re-flood to a fixpoint. The exit counts only if the flood entered its sector
+AND its switch was thrown. Deleting E1M1's blue keycard drops reachable cells 3,214 → 1,799 and fails
+the level. An invalid level is never served — `/data` answers 409 and the picker greys the row.
+
 ## State: what is DONE and verified
 
 **Spine — complete, running, verified by eye (not by agent self-report).**
@@ -39,9 +64,12 @@ reachable (`ref/mcclassic/` still to be filled by the Builder agent).
 format), `server/src/{modes,levels}.ts`, `client/src/modes/registry.ts`, three Quest levels in
 `content/levels/`. API documented in `docs/MODES-API.md`.
 
-**Four mode builders — IN FLIGHT, incomplete.** Only `client/src/modes/builder/undo.ts` and
-`client/src/modes/deathmatch/killfeed.ts` had landed. Quest, Horde, most of Builder and most of
-Deathmatch are unwritten. The repo still typechecks, so nothing is broken — it is just unfinished.
+**Four mode builders — cut off by the weekly usage limit, not by any technical failure.** They got
+further than the journal showed: six Quest levels in `content/levels/`, `modes/quest/quest.ts`, and
+most of Builder landed before the cut. Two TS errors remain from the interruption
+(`quest.ts:387` touching a private `ChunkRenderer.renderDistance`, and a stale 5-arg call in
+`worlds.test.ts:352`). **Resumed at 22:00** from the saved run — the framework replayed from cache
+and the five killed agents re-ran.
 
 ## The one honest negative
 

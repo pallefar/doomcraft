@@ -1,0 +1,295 @@
+{
+  "$schema": "doomcraft-level-source/1",
+  "sourceVersion": 1,
+
+  "meta": {
+    "id": "e1m6-throne",
+    "name": "Throne of Rock",
+    "episodeId": "e1",
+    "episodeName": "Knee-Deep in the Blocks",
+    "episodeIndex": 1,
+    "levelIndex": 6,
+    "author": "Doomcraft",
+    "description": "A causeway over a lava basin, a crypt with the red keycard, and one gate. Behind the gate is a hall with a throne in it, and the switch that ends this is on the wall behind the throne. Nothing between you and it is small.",
+    "parTimeSec": 300,
+    "musicCue": "e1m6",
+    "outsideBlock": "bedrock",
+    "defaultSkill": 2,
+    "palette": {
+      "skyTop": "#360a06",
+      "skyHorizon": "#7a1c08",
+      "fog": "#1e0705",
+      "fogNear": 18,
+      "fogFar": 62,
+      "ambient": 0.22,
+      "sun": 0.36
+    }
+  },
+
+  "bounds": { "minCX": 0, "minCZ": 0, "maxCX": 2, "maxCZ": 2 },
+
+  "//geometry": [
+    "Three rooms and one gate. The level is deliberately short and vertical: the",
+    "whole map is a walk toward a thing that is bigger than you.",
+    "",
+    "  R0  landing        x 42..54  z 84..92  y8..14   (spawn)",
+    "  LB  lava basin     x 30..66  z 58..83  y8..22   floor is lava except the causeway",
+    "  CW  causeway       x 45..51  z 59..82           a metal path, seven blocks wide",
+    "  A   antechamber    x 24..72  z 40..57  y8..22   pillars, bone floor, the first barons",
+    "  CR  crypt          x  4..22  z 40..57  y8..16   the RED keycard on a bone plinth",
+    "  GP  crypt throat   x 23      z 46..50  y8..12",
+    "  D1  RED GATE       x 46..50  z 39      y8..13",
+    "  T   throne hall    x 10..86  z  8..38  y8..26",
+    "  TH  throne dais    x 40..56  z 12..22  rises to y12, stair on the south face",
+    "  EX  exit           x 44..52  z  8..11            behind the throne",
+    "  SW  exit switch    x 48      y10  z 7            on the wall behind the throne",
+    "  S1  secret vault   x 88..92  z 20..26            behind a fake wall at x 87",
+    "  S2  secret armoury x 74..80  z 44..52            behind a fake wall at x 73",
+    "",
+    "The red gate is the only way north, so the crypt is not optional, and the",
+    "exit switch is on the far wall of the throne hall: you cannot touch it",
+    "without crossing the whole floor the barons are standing on."
+  ],
+
+  "brushes": [
+    { "kind": "box", "block": "stone",   "x": 0, "y": 2, "z": 0, "w": 96, "h": 29, "d": 96 },
+    { "kind": "box", "block": "bedrock", "x": 0, "y": 0, "z": 0, "w": 96, "h": 2,  "d": 96 },
+
+    { "kind": "clear", "x": 10, "y": 8, "z": 8, "w": 77, "h": 19, "d": 31 },
+    { "kind": "box", "block": "hellstone", "x": 9, "y": 7, "z": 7, "w": 79, "h": 1, "d": 33 },
+    { "kind": "box", "block": "bone", "x": 40, "y": 7, "z": 8, "w": 17, "h": 1, "d": 4 },
+
+    { "kind": "box", "block": "obsidian", "x": 40, "y": 8, "z": 12, "w": 17, "h": 5, "d": 11 },
+    { "kind": "stairs", "block": "obsidian", "dir": "-z", "thickness": 1, "x": 44, "y": 8, "z": 23, "w": 9, "h": 5, "d": 5 },
+    { "kind": "box", "block": "hellstone", "x": 42, "y": 13, "z": 14, "w": 3, "h": 4, "d": 3 },
+    { "kind": "box", "block": "hellstone", "x": 52, "y": 13, "z": 14, "w": 3, "h": 4, "d": 3 },
+    { "kind": "box", "block": "neon", "x": 43, "y": 17, "z": 15, "w": 1, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 53, "y": 17, "z": 15, "w": 1, "h": 1, "d": 1 },
+
+    { "kind": "cylinder", "block": "obsidian", "x": 16, "y": 8, "z": 14, "w": 6, "h": 18, "d": 6 },
+    { "kind": "cylinder", "block": "obsidian", "x": 16, "y": 8, "z": 30, "w": 6, "h": 18, "d": 6 },
+    { "kind": "cylinder", "block": "obsidian", "x": 76, "y": 8, "z": 14, "w": 6, "h": 18, "d": 6 },
+    { "kind": "cylinder", "block": "obsidian", "x": 76, "y": 8, "z": 30, "w": 6, "h": 18, "d": 6 },
+    { "kind": "box", "block": "hellstone", "x": 22, "y": 7, "z": 30, "w": 9, "h": 1, "d": 8 },
+    { "kind": "box", "block": "lava",      "x": 23, "y": 7, "z": 31, "w": 7, "h": 1, "d": 6 },
+    { "kind": "box", "block": "hellstone", "x": 66, "y": 7, "z": 30, "w": 9, "h": 1, "d": 8 },
+    { "kind": "box", "block": "lava",      "x": 67, "y": 7, "z": 31, "w": 7, "h": 1, "d": 6 },
+
+    { "kind": "clear", "x": 88, "y": 8, "z": 20, "w": 5, "h": 5, "d": 7 },
+    { "kind": "box", "block": "bone", "x": 87, "y": 7, "z": 19, "w": 7, "h": 1, "d": 9 },
+
+    { "kind": "clear", "x": 24, "y": 8, "z": 40, "w": 49, "h": 15, "d": 18 },
+    { "kind": "box", "block": "hellstone", "x": 23, "y": 7, "z": 39, "w": 51, "h": 1, "d": 20 },
+    { "kind": "box", "block": "bone", "x": 40, "y": 7, "z": 44, "w": 17, "h": 1, "d": 10 },
+    { "kind": "box", "block": "obsidian", "x": 30, "y": 8, "z": 44, "w": 3, "h": 10, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 30, "y": 8, "z": 52, "w": 3, "h": 10, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 64, "y": 8, "z": 44, "w": 3, "h": 10, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 64, "y": 8, "z": 52, "w": 3, "h": 10, "d": 3 },
+    { "kind": "box", "block": "neon", "x": 47, "y": 21, "z": 41, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 47, "y": 21, "z": 56, "w": 3, "h": 1, "d": 1 },
+
+    { "kind": "clear", "x": 74, "y": 8, "z": 44, "w": 7, "h": 6, "d": 9 },
+    { "kind": "box", "block": "bone", "x": 73, "y": 7, "z": 43, "w": 9, "h": 1, "d": 11 },
+
+    { "kind": "clear", "x": 4, "y": 8, "z": 40, "w": 19, "h": 9, "d": 18 },
+    { "kind": "box", "block": "bone", "x": 3, "y": 7, "z": 39, "w": 21, "h": 1, "d": 20 },
+    { "kind": "box", "block": "bone", "x": 11, "y": 8, "z": 47, "w": 4, "h": 1, "d": 4 },
+    { "kind": "box", "block": "obsidian", "x": 7,  "y": 8, "z": 42, "w": 2, "h": 8, "d": 2 },
+    { "kind": "box", "block": "obsidian", "x": 19, "y": 8, "z": 42, "w": 2, "h": 8, "d": 2 },
+    { "kind": "box", "block": "obsidian", "x": 7,  "y": 8, "z": 54, "w": 2, "h": 8, "d": 2 },
+    { "kind": "box", "block": "obsidian", "x": 19, "y": 8, "z": 54, "w": 2, "h": 8, "d": 2 },
+    { "kind": "box", "block": "neon", "x": 12, "y": 15, "z": 48, "w": 2, "h": 1, "d": 2 },
+
+    { "kind": "clear", "x": 23, "y": 8, "z": 46, "w": 1, "h": 5, "d": 5 },
+
+    { "kind": "clear", "x": 30, "y": 8, "z": 58, "w": 37, "h": 15, "d": 26 },
+    { "kind": "box", "block": "hellstone", "x": 29, "y": 7, "z": 57, "w": 39, "h": 1, "d": 28 },
+    { "kind": "box", "block": "lava", "x": 31, "y": 7, "z": 59, "w": 35, "h": 1, "d": 24 },
+    { "kind": "box", "block": "metal", "x": 45, "y": 7, "z": 58, "w": 7, "h": 1, "d": 26 },
+    { "kind": "box", "block": "obsidian", "x": 36, "y": 8, "z": 64, "w": 3, "h": 12, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 58, "y": 8, "z": 72, "w": 3, "h": 12, "d": 3 },
+
+    { "kind": "clear", "x": 42, "y": 8, "z": 84, "w": 13, "h": 7, "d": 9 },
+    { "kind": "box", "block": "tech_panel", "x": 41, "y": 7, "z": 84, "w": 15, "h": 1, "d": 10 },
+    { "kind": "box", "block": "neon", "x": 47, "y": 13, "z": 91, "w": 3, "h": 1, "d": 1 }
+  ],
+
+  "spawns": [
+    { "kind": "player", "x": 48.5, "y": 8, "z": 90.5, "yaw": 0, "index": 0 },
+    { "kind": "coop",   "x": 45.5, "y": 8, "z": 90.5, "yaw": 0, "index": 1 },
+    { "kind": "coop",   "x": 51.5, "y": 8, "z": 90.5, "yaw": 0, "index": 2 },
+    { "kind": "coop",   "x": 48.5, "y": 8, "z": 87.5, "yaw": 0, "index": 3 },
+    { "kind": "deathmatch", "x": 14.5, "y": 8, "z": 22.5, "yaw": 4.71238898038469, "index": 0 },
+    { "kind": "deathmatch", "x": 83.5, "y": 8, "z": 22.5, "yaw": 1.5707963267948966, "index": 1 },
+    { "kind": "deathmatch", "x": 48.5, "y": 13, "z": 17.5, "yaw": 3.141592653589793, "index": 2 },
+    { "kind": "deathmatch", "x": 28.5, "y": 8, "z": 48.5, "yaw": 4.71238898038469, "index": 3 },
+    { "kind": "deathmatch", "x": 12.5, "y": 8, "z": 44.5, "yaw": 4.71238898038469, "index": 4 }
+  ],
+
+  "enemies": [
+    { "id": "z-land-1", "type": "zombie", "x": 44.5, "y": 8, "z": 86.5, "yaw": 0,
+      "trigger": "sight", "minSkill": 1 },
+    { "id": "i-land-2", "type": "imp", "x": 52.5, "y": 8, "z": 86.5, "yaw": 0,
+      "trigger": "sight", "minSkill": 3 },
+
+    { "id": "i-cause-1", "type": "imp", "x": 48.5, "y": 8, "z": 76.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-cause-2", "type": "imp", "x": 48.5, "y": 8, "z": 66.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "c-cause-3", "type": "cacodemon", "x": 37.5, "y": 12, "z": 70.5, "yaw": 1.5707963267948966,
+      "trigger": "proximity", "radius": 22, "minSkill": 0 },
+    { "id": "c-cause-4", "type": "cacodemon", "x": 59.5, "y": 12, "z": 66.5, "yaw": 4.71238898038469,
+      "trigger": "proximity", "radius": 22, "minSkill": 2 },
+    { "id": "s-cause-5", "type": "lost_soul", "x": 43.5, "y": 11, "z": 62.5, "yaw": 3.141592653589793,
+      "trigger": "proximity", "radius": 18, "minSkill": 3 },
+    { "id": "s-cause-6", "type": "lost_soul", "x": 53.5, "y": 11, "z": 62.5, "yaw": 3.141592653589793,
+      "trigger": "proximity", "radius": 18, "minSkill": 4 },
+
+    { "id": "i-ante-1", "type": "imp", "x": 28.5, "y": 8, "z": 48.5, "yaw": 4.71238898038469,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-ante-2", "type": "imp", "x": 68.5, "y": 8, "z": 48.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "z-ante-3", "type": "zombie", "x": 48.5, "y": 8, "z": 54.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 0,
+      "patrol": [[48.5, 8, 54.5], [28.5, 8, 54.5], [28.5, 8, 42.5], [68.5, 8, 42.5]] },
+    { "id": "b-ante-4", "type": "baron", "x": 48.5, "y": 8, "z": 43.5, "yaw": 3.141592653589793,
+      "trigger": "proximity", "radius": 20, "minSkill": 2 },
+    { "id": "c-ante-5", "type": "cacodemon", "x": 36.5, "y": 13, "z": 48.5, "yaw": 4.71238898038469,
+      "trigger": "proximity", "radius": 20, "minSkill": 3 },
+
+    { "id": "i-crypt-1", "type": "imp", "x": 8.5,  "y": 8, "z": 48.5, "yaw": 4.71238898038469,
+      "trigger": "proximity", "radius": 12, "ambush": true, "minSkill": 0 },
+    { "id": "i-crypt-2", "type": "imp", "x": 18.5, "y": 8, "z": 43.5, "yaw": 4.71238898038469,
+      "trigger": "proximity", "radius": 12, "ambush": true, "minSkill": 0 },
+    { "id": "i-crypt-3", "type": "imp", "x": 18.5, "y": 8, "z": 53.5, "yaw": 4.71238898038469,
+      "trigger": "proximity", "radius": 12, "ambush": true, "minSkill": 1 },
+    { "id": "s-crypt-4", "type": "lost_soul", "x": 12.5, "y": 12, "z": 43.5, "yaw": 4.71238898038469,
+      "trigger": "proximity", "radius": 14, "minSkill": 2 },
+    { "id": "b-crypt-5", "type": "baron", "x": 12.5, "y": 8, "z": 54.5, "yaw": 0,
+      "trigger": "proximity", "radius": 16, "minSkill": 4 },
+
+    { "id": "b-throne-1", "type": "baron", "x": 34.5, "y": 8, "z": 30.5, "yaw": 3.141592653589793,
+      "trigger": "door", "triggerId": "d-red", "minSkill": 0 },
+    { "id": "b-throne-2", "type": "baron", "x": 62.5, "y": 8, "z": 30.5, "yaw": 3.141592653589793,
+      "trigger": "door", "triggerId": "d-red", "minSkill": 2 },
+    { "id": "b-throne-3", "type": "baron", "x": 48.5, "y": 13, "z": 16.5, "yaw": 3.141592653589793,
+      "trigger": "door", "triggerId": "d-red", "minSkill": 3 },
+    { "id": "b-throne-4", "type": "baron", "x": 24.5, "y": 8, "z": 12.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 4 },
+    { "id": "c-throne-5", "type": "cacodemon", "x": 26.5, "y": 14, "z": 22.5, "yaw": 1.5707963267948966,
+      "trigger": "door", "triggerId": "d-red", "minSkill": 0 },
+    { "id": "c-throne-6", "type": "cacodemon", "x": 70.5, "y": 14, "z": 22.5, "yaw": 4.71238898038469,
+      "trigger": "door", "triggerId": "d-red", "minSkill": 1 },
+    { "id": "c-throne-7", "type": "cacodemon", "x": 48.5, "y": 18, "z": 30.5, "yaw": 3.141592653589793,
+      "trigger": "proximity", "radius": 26, "minSkill": 3 },
+    { "id": "i-throne-8", "type": "imp", "x": 14.5, "y": 8, "z": 10.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-throne-9", "type": "imp", "x": 82.5, "y": 8, "z": 10.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-throne-10", "type": "imp", "x": 14.5, "y": 8, "z": 36.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 1 },
+    { "id": "i-throne-11", "type": "imp", "x": 82.5, "y": 8, "z": 36.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 1 },
+    { "id": "s-throne-12", "type": "lost_soul", "x": 44.5, "y": 16, "z": 18.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-exit", "minSkill": 2 },
+    { "id": "s-throne-13", "type": "lost_soul", "x": 52.5, "y": 16, "z": 18.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-exit", "minSkill": 3 },
+    { "id": "b-throne-14", "type": "baron", "x": 48.5, "y": 8, "z": 9.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-exit", "minSkill": 4 }
+  ],
+
+  "pickups": [
+    { "id": "p-bonus-1", "kind": "health", "variant": "bonus", "x": 43.5, "y": 8.1, "z": 91.5 },
+    { "id": "p-bonus-2", "kind": "health", "variant": "bonus", "x": 53.5, "y": 8.1, "z": 91.5 },
+    { "id": "p-shells-1", "kind": "ammo", "variant": "shells", "amount": 8, "x": 46.5, "y": 8.1, "z": 80.5 },
+    { "id": "p-clip-1",   "kind": "ammo", "variant": "bullets", "amount": 40, "x": 50.5, "y": 8.1, "z": 80.5 },
+    { "id": "p-armor-1",  "kind": "armor", "variant": "green", "x": 48.5, "y": 8.1, "z": 70.5 },
+    { "id": "p-medikit-1","kind": "health", "variant": "medikit", "x": 46.5, "y": 8.1, "z": 60.5 },
+
+    { "id": "p-shotgun",  "kind": "weapon", "variant": "shotgun", "x": 48.5, "y": 8.1, "z": 50.5 },
+    { "id": "p-shells-2", "kind": "ammo", "variant": "shells", "amount": 16, "x": 44.5, "y": 8.1, "z": 50.5 },
+    { "id": "p-chaingun", "kind": "weapon", "variant": "chaingun", "x": 52.5, "y": 8.1, "z": 50.5 },
+    { "id": "p-medikit-2","kind": "health", "variant": "medikit", "x": 26.5, "y": 8.1, "z": 42.5 },
+    { "id": "p-medikit-3","kind": "health", "variant": "medikit", "x": 70.5, "y": 8.1, "z": 42.5 },
+    { "id": "p-backpack", "kind": "backpack", "x": 48.5, "y": 8.1, "z": 56.5 },
+
+    { "id": "p-crypt-rocket",  "kind": "weapon", "variant": "rocket", "x": 6.5,  "y": 8.1, "z": 48.5 },
+    { "id": "p-crypt-rockets", "kind": "ammo", "variant": "rockets", "amount": 10, "x": 6.5, "y": 8.1, "z": 46.5 },
+    { "id": "p-crypt-armor",   "kind": "armor", "variant": "blue", "x": 6.5, "y": 8.1, "z": 50.5 },
+    { "id": "k-red", "kind": "key", "variant": "red", "x": 12.5, "y": 9.1, "z": 48.5, "countsAsItem": false },
+
+    { "id": "p-throne-cells-1", "kind": "ammo", "variant": "cells", "amount": 40, "x": 30.5, "y": 8.1, "z": 36.5 },
+    { "id": "p-throne-cells-2", "kind": "ammo", "variant": "cells", "amount": 40, "x": 66.5, "y": 8.1, "z": 36.5 },
+    { "id": "p-throne-soul",    "kind": "health", "variant": "soulsphere", "x": 48.5, "y": 13.1, "z": 20.5 },
+    { "id": "p-throne-shells",  "kind": "ammo", "variant": "shells", "amount": 16, "x": 20.5, "y": 8.1, "z": 10.5 },
+    { "id": "p-throne-rockets", "kind": "ammo", "variant": "rockets", "amount": 10, "x": 76.5, "y": 8.1, "z": 10.5 },
+    { "id": "p-throne-medikit", "kind": "health", "variant": "medikit", "x": 48.5, "y": 8.1, "z": 34.5 },
+
+    { "id": "p-secret1-bfg",   "kind": "weapon", "variant": "bfg", "x": 90.5, "y": 8.1, "z": 23.5, "secret": true },
+    { "id": "p-secret1-cells", "kind": "ammo", "variant": "cells", "amount": 60, "x": 90.5, "y": 8.1, "z": 21.5, "secret": true },
+    { "id": "p-secret1-soul",  "kind": "health", "variant": "soulsphere", "x": 90.5, "y": 8.1, "z": 25.5, "secret": true },
+
+    { "id": "p-secret2-plasma", "kind": "weapon", "variant": "plasma", "x": 77.5, "y": 8.1, "z": 48.5, "secret": true },
+    { "id": "p-secret2-cells",  "kind": "ammo", "variant": "cells", "amount": 40, "x": 77.5, "y": 8.1, "z": 46.5, "secret": true },
+    { "id": "p-secret2-armor",  "kind": "armor", "variant": "blue", "x": 77.5, "y": 8.1, "z": 50.5, "secret": true }
+  ],
+
+  "doors": [
+    {
+      "id": "d-red",
+      "x": 46, "y": 8, "z": 39, "w": 5, "h": 6, "d": 1,
+      "key": "red", "block": "metal", "frameBlock": "hellstone",
+      "openMs": 1400, "lockedMessage": "The gate is sealed. You need the red keycard."
+    },
+    {
+      "id": "d-secret-1",
+      "x": 87, "y": 8, "z": 22, "w": 1, "h": 3, "d": 3,
+      "key": "none", "block": "hellstone",
+      "switchOnly": true, "secret": true, "openMs": 900
+    },
+    {
+      "id": "d-secret-2",
+      "x": 73, "y": 8, "z": 47, "w": 1, "h": 3, "d": 3,
+      "key": "none", "block": "hellstone",
+      "switchOnly": true, "secret": true, "openMs": 900
+    }
+  ],
+
+  "switches": [
+    {
+      "id": "sw-secret-1",
+      "x": 87, "y": 11, "z": 18,
+      "face": 1, "block": "hellstone", "activeBlock": "neon", "hidden": true,
+      "targets": ["d-secret-1"],
+      "message": "A crack opens in the east wall."
+    },
+    {
+      "id": "sw-secret-2",
+      "x": 73, "y": 11, "z": 43,
+      "face": 1, "block": "hellstone", "activeBlock": "neon", "hidden": true,
+      "targets": ["d-secret-2"],
+      "message": "Bone grinds on stone somewhere east."
+    },
+    {
+      "id": "sw-exit",
+      "x": 48, "y": 10, "z": 7,
+      "face": 4, "block": "hellstone", "activeBlock": "neon",
+      "targets": ["exit"],
+      "message": "The rock splits. Knee-Deep in the Blocks is over."
+    }
+  ],
+
+  "secrets": [
+    { "id": "s-bfg", "x": 88, "y": 8, "z": 20, "w": 5, "h": 5, "d": 7,
+      "message": "A secret is revealed!" },
+    { "id": "s-armoury", "x": 74, "y": 8, "z": 44, "w": 7, "h": 6, "d": 9,
+      "message": "A secret is revealed!" }
+  ],
+
+  "exit": {
+    "x": 44, "y": 8, "z": 8, "w": 9, "h": 3, "d": 4,
+    "requiresSwitch": "sw-exit",
+    "nextLevelId": "",
+    "endsEpisode": true
+  }
+}

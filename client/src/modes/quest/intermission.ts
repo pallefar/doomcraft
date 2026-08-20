@@ -1,0 +1,384 @@
+/**
+ * DOOMCRAFT — Quest: the intermission.
+ *
+ * DOOM's between-levels screen is a real piece of design, not a summary. It
+ * grades you on three axes you could not have optimised for simultaneously —
+ * kills, items, secrets — against a clock with a par time, and it *counts each
+ * row up* so the number arriving at 100% is an event rather than a fact. The
+ * count is skippable, and a skip snaps the current row and moves on rather than
+ * dumping the whole screen, so mashing the key still feels like progress.
+ *
+ * All four of those behaviours are reproduced here:
+ *
+ *   - one row at a time, counting from zero at a fixed rate with a tick,
+ *   - a short beat between rows,
+ *   - a key press snaps the row in flight and advances,
+ *   - time versus par, with the delta called out.
+ *
+ * COST. The counter is driven from the mode's existing `update(dt)` — no timers,
+ * no `requestAnimationFrame` of its own — and each row writes DOM only when its
+ * integer percentage actually changes.
+ */
+
+import { formatTime, percentOf, type IntermissionStats } from '@shared/modes';
+
+/* ------------------------------------------------------------------------ *
+ * Styles
+ * ------------------------------------------------------------------------ */
+
+const STYLE_ID = 'dc-quest-inter-css';
+let styleRefs = 0;
+
+const CSS = `
+.dcqi{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(120% 90% at 50% 40%,rgba(28,10,6,.86),rgba(6,5,8,.97));
+  pointer-events:auto;-webkit-user-select:none;user-select:none;
+  font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e8e6e3;
+  padding:16px;overflow-y:auto}
+.dcqi-panel{width:min(560px,94vw);text-align:center}
+.dcqi-ep{font-size:11px;letter-spacing:.3em;text-transform:uppercase;color:#8f7a62}
+.dcqi-name{margin-top:6px;font:800 clamp(24px,4.6vw,42px)/1 "Arial Black",Impact,system-ui,sans-serif;
+  letter-spacing:.02em;color:#f0e2c8;text-shadow:0 3px 0 #40120a,0 8px 28px rgba(0,0,0,.8)}
+.dcqi-fin{margin-top:8px;font:800 15px/1 "Arial Black",Impact,system-ui,sans-serif;
+  letter-spacing:.34em;color:#e03c1c}
+
+.dcqi-rows{margin:24px auto 0;width:min(420px,100%);display:flex;flex-direction:column;gap:11px}
+.dcqi-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+  opacity:.18;transition:opacity .12s linear}
+.dcqi-row.live,.dcqi-row.done{opacity:1}
+.dcqi-row .k{font:800 15px/1 "Arial Black",Impact,system-ui,sans-serif;letter-spacing:.2em;
+  text-transform:uppercase;color:#c9beb6}
+.dcqi-row .v{font:800 26px/1 "Arial Black",Impact,system-ui,sans-serif;
+  font-variant-numeric:tabular-nums;color:#e03c1c;text-shadow:0 2px 0 #40120a;min-width:4ch;
+  text-align:right}
+.dcqi-row.live .v{animation:dcqi-tick .09s steps(2,end) infinite}
+.dcqi-row.perfect .v{color:#ffd76a;text-shadow:0 2px 0 #5a3200,0 0 20px rgba(255,190,70,.45)}
+@keyframes dcqi-tick{50%{filter:brightness(1.7)}}
+
+.dcqi-time{margin-top:22px;display:flex;justify-content:center;gap:28px;flex-wrap:wrap}
+.dcqi-time div{text-align:center}
+.dcqi-time .k{font-size:10px;letter-spacing:.24em;text-transform:uppercase;color:#8f8a85}
+.dcqi-time .v{margin-top:3px;font:800 22px/1 "Arial Black",Impact,system-ui,sans-serif;
+  font-variant-numeric:tabular-nums;color:#e8e6e3}
+.dcqi-time .v.under{color:#7ef0a8}
+.dcqi-time .v.over{color:#e07a4a}
+
+.dcqi-note{margin-top:14px;font-size:12px;color:#b4aea8;min-height:18px}
+.dcqi-note b{color:#ffd76a;font-weight:700}
+
+.dcqi-actions{margin-top:26px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.dcqi-btn{appearance:none;border:1px solid rgba(255,255,255,.18);border-radius:3px;
+  background:rgba(255,255,255,.05);color:#e8e6e3;padding:11px 20px;min-height:44px;
+  font:800 12px/1 "Arial Black",Impact,system-ui,sans-serif;letter-spacing:.16em;
+  text-transform:uppercase;cursor:pointer}
+.dcqi-btn:hover{background:rgba(255,255,255,.1)}
+.dcqi-btn:focus-visible{outline:2px solid #f0a020;outline-offset:2px}
+.dcqi-btn.go{background:#8f1a08;border-color:#e03c1c;color:#ffe6d8}
+.dcqi-btn.go:hover{background:#b02510}
+.dcqi-hint{margin-top:12px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+  color:#736c66}
+`;
+
+function ensureStyle(): void {
+  styleRefs++;
+  if (document.getElementById(STYLE_ID) !== null) return;
+  const el = document.createElement('style');
+  el.id = STYLE_ID;
+  el.textContent = CSS;
+  document.head.appendChild(el);
+}
+function releaseStyle(): void {
+  styleRefs = Math.max(0, styleRefs - 1);
+  if (styleRefs > 0) return;
+  document.getElementById(STYLE_ID)?.remove();
+}
+
+/* ------------------------------------------------------------------------ *
+ * Options
+ * ------------------------------------------------------------------------ */
+
+export interface QuestIntermissionOptions {
+  /** `#ui`. */
+  root: HTMLElement;
+  stats: IntermissionStats;
+  episodeName: string;
+  /** Display name of the level the exit points at. '' ends the episode. */
+  nextLevelName: string;
+  /** True when this exit ends the episode. */
+  endsEpisode: boolean;
+  onAdvance(): void;
+  onRestart(): void;
+  onQuit(): void;
+}
+
+/** Percentage points per second while a row counts. */
+const COUNT_RATE = 92;
+/** Beat between rows, seconds. */
+const ROW_PAUSE = 0.3;
+
+const ROW_KILLS = 0;
+const ROW_ITEMS = 1;
+const ROW_SECRETS = 2;
+const ROW_TIME = 3;
+const ROW_DONE = 4;
+
+/* ------------------------------------------------------------------------ *
+ * QuestIntermission
+ * ------------------------------------------------------------------------ */
+
+export class QuestIntermission {
+  readonly element: HTMLElement;
+
+  private readonly stats: IntermissionStats;
+  private readonly targets: Int32Array = new Int32Array(3);
+  private readonly rowEls: HTMLElement[] = [];
+  private readonly valueEls: HTMLElement[] = [];
+  private readonly elTime: HTMLElement;
+  private readonly elPar: HTMLElement;
+  private readonly elNote: HTMLElement;
+  private readonly elTimeBlock: HTMLElement;
+  private readonly btnGo: HTMLButtonElement;
+
+  private readonly onAdvance: () => void;
+
+  private phase = ROW_KILLS;
+  private value = 0;
+  private pause = 0.45;
+  private shown: Int32Array = new Int32Array([-1, -1, -1]);
+  private disposed = false;
+
+  private readonly onKey: (e: KeyboardEvent) => void;
+
+  constructor(opts: QuestIntermissionOptions) {
+    ensureStyle();
+    const s = opts.stats;
+    this.stats = s;
+    this.onAdvance = opts.onAdvance;
+    this.targets[ROW_KILLS] = percentOf(s.kills, s.killsTotal);
+    this.targets[ROW_ITEMS] = percentOf(s.items, s.itemsTotal);
+    this.targets[ROW_SECRETS] = percentOf(s.secrets, s.secretsTotal);
+
+    const wrap = div('dcqi');
+    const panel = div('dcqi-panel');
+
+    const ep = div('dcqi-ep');
+    ep.textContent = opts.episodeName;
+    const name = div('dcqi-name');
+    name.textContent = s.levelName || s.levelId;
+    const fin = div('dcqi-fin');
+    fin.textContent = 'FINISHED';
+    panel.append(ep, name, fin);
+
+    const rows = div('dcqi-rows');
+    this.buildRow(rows, 'Kills');
+    this.buildRow(rows, 'Items');
+    this.buildRow(rows, 'Secrets');
+    panel.appendChild(rows);
+
+    const time = div('dcqi-time');
+    this.elTimeBlock = time;
+    this.elTime = timeCell(time, 'Time', '--:--');
+    this.elPar = timeCell(time, 'Par', formatTime(s.parSec));
+    time.style.opacity = '0.18';
+    panel.appendChild(time);
+
+    this.elNote = div('dcqi-note');
+    panel.appendChild(this.elNote);
+
+    const actions = div('dcqi-actions');
+    this.btnGo = button(
+      opts.endsEpisode ? 'Episode complete' : `Next: ${opts.nextLevelName || 'continue'}`,
+      'dcqi-btn go',
+    );
+    this.btnGo.addEventListener('click', () => { this.advance(); });
+    const restart = button('Replay level', 'dcqi-btn');
+    restart.addEventListener('click', () => { if (!this.disposed) opts.onRestart(); });
+    const quit = button('Main menu', 'dcqi-btn');
+    quit.addEventListener('click', () => { if (!this.disposed) opts.onQuit(); });
+    actions.append(this.btnGo, restart, quit);
+    panel.appendChild(actions);
+
+    const hint = div('dcqi-hint');
+    hint.textContent = 'Enter or Space to continue';
+    panel.appendChild(hint);
+
+    wrap.appendChild(panel);
+    this.element = wrap;
+    opts.root.appendChild(wrap);
+
+    this.onKey = (e: KeyboardEvent): void => {
+      if (this.disposed) return;
+      if (e.code !== 'Enter' && e.code !== 'NumpadEnter' && e.code !== 'Space') return;
+      e.preventDefault();
+      this.advance();
+    };
+    window.addEventListener('keydown', this.onKey);
+
+    // The button takes focus so a keyboard-only player is never stranded, but
+    // the count still runs — focus does not imply the screen is finished.
+    this.btnGo.focus({ preventScroll: true });
+    this.setRowState();
+  }
+
+  private buildRow(host: HTMLElement, label: string): void {
+    const row = div('dcqi-row');
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = label;
+    const v = document.createElement('span');
+    v.className = 'v';
+    v.textContent = '0%';
+    row.append(k, v);
+    host.appendChild(row);
+    this.rowEls.push(row);
+    this.valueEls.push(v);
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Count-up
+   * -------------------------------------------------------------------- */
+
+  /** Drive from the mode's frame loop. Cheap and idempotent once finished. */
+  update(dt: number): void {
+    if (this.disposed || this.phase >= ROW_DONE) return;
+
+    if (this.pause > 0) {
+      this.pause -= dt;
+      return;
+    }
+
+    if (this.phase === ROW_TIME) {
+      this.revealTime();
+      return;
+    }
+
+    const target = this.targets[this.phase];
+    this.value += COUNT_RATE * dt;
+    if (this.value >= target) {
+      this.value = target;
+      this.writeRow(this.phase, target);
+      this.finishRow(this.phase);
+      return;
+    }
+    this.writeRow(this.phase, Math.floor(this.value));
+  }
+
+  private writeRow(row: number, pct: number): void {
+    if (this.shown[row] === pct) return;
+    this.shown[row] = pct;
+    this.valueEls[row].textContent = `${pct}%`;
+  }
+
+  private finishRow(row: number): void {
+    this.rowEls[row].classList.remove('live');
+    this.rowEls[row].classList.add('done');
+    if (this.targets[row] >= 100) this.rowEls[row].classList.add('perfect');
+    this.phase = row + 1;
+    this.value = 0;
+    this.pause = ROW_PAUSE;
+    this.setRowState();
+  }
+
+  private setRowState(): void {
+    for (let i = 0; i < this.rowEls.length; i++) {
+      this.rowEls[i].classList.toggle('live', i === this.phase);
+    }
+  }
+
+  private revealTime(): void {
+    const s = this.stats;
+    this.elTimeBlock.style.opacity = '1';
+    this.elTime.textContent = formatTime(s.timeSec);
+    if (s.parSec > 0) {
+      const under = s.timeSec <= s.parSec;
+      this.elTime.classList.toggle('under', under);
+      this.elTime.classList.toggle('over', !under);
+    }
+    this.elNote.innerHTML = this.noteHtml();
+    this.phase = ROW_DONE;
+    this.setRowState();
+  }
+
+  private noteHtml(): string {
+    const s = this.stats;
+    const bits: string[] = [];
+    if (s.parSec > 0) {
+      const delta = s.parSec - s.timeSec;
+      bits.push(delta >= 0
+        ? `<b>${formatTime(Math.abs(delta))}</b> under par`
+        : `${formatTime(Math.abs(delta))} over par`);
+    }
+    if (s.secretsTotal > 0 && s.secrets >= s.secretsTotal) bits.push('every secret found');
+    if (s.killsTotal > 0 && s.kills >= s.killsTotal) bits.push('100% kills');
+    if (s.newRecord) bits.push('<b>NEW RECORD</b>');
+    return bits.join(' &nbsp;·&nbsp; ');
+  }
+
+  /**
+   * Enter, Space or the button. A count in flight is snapped and the screen
+   * moves on one row; a finished screen loads the next level.
+   */
+  advance(): void {
+    if (this.disposed) return;
+    if (this.phase < ROW_DONE) {
+      this.skipAll();
+      return;
+    }
+    this.onAdvance();
+  }
+
+  /** Snap every row to its final value. */
+  skipAll(): void {
+    if (this.disposed) return;
+    for (let row = 0; row < 3; row++) {
+      if (this.phase > row) continue;
+      this.writeRow(row, this.targets[row]);
+      this.rowEls[row].classList.remove('live');
+      this.rowEls[row].classList.add('done');
+      if (this.targets[row] >= 100) this.rowEls[row].classList.add('perfect');
+    }
+    this.phase = ROW_TIME;
+    this.pause = 0;
+    this.value = 0;
+    this.revealTime();
+  }
+
+  get finished(): boolean { return this.phase >= ROW_DONE; }
+
+  destroy(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    window.removeEventListener('keydown', this.onKey);
+    this.element.remove();
+    releaseStyle();
+  }
+}
+
+/* ------------------------------------------------------------------------ *
+ * helpers
+ * ------------------------------------------------------------------------ */
+
+function div(cls: string): HTMLElement {
+  const d = document.createElement('div');
+  d.className = cls;
+  return d;
+}
+
+function button(label: string, cls: string): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = cls;
+  b.textContent = label;
+  return b;
+}
+
+function timeCell(host: HTMLElement, label: string, initial: string): HTMLElement {
+  const wrap = div('');
+  const k = div('k');
+  k.textContent = label;
+  const v = div('v');
+  v.textContent = initial;
+  wrap.append(k, v);
+  host.appendChild(wrap);
+  return v;
+}

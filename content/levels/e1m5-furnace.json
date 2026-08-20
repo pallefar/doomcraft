@@ -1,0 +1,339 @@
+{
+  "$schema": "doomcraft-level-source/1",
+  "sourceVersion": 1,
+
+  "meta": {
+    "id": "e1m5-furnace",
+    "name": "The Furnace",
+    "episodeId": "e1",
+    "episodeName": "Knee-Deep in the Blocks",
+    "episodeIndex": 1,
+    "levelIndex": 5,
+    "author": "Doomcraft",
+    "description": "One room, four cages, two lava trenches and a keycard on a dais in the middle of all of it. There is no corridor to retreat into here. Throw a gauntlet switch and something comes out of a wall.",
+    "parTimeSec": 250,
+    "musicCue": "e1m5",
+    "outsideBlock": "bedrock",
+    "defaultSkill": 2,
+    "palette": {
+      "skyTop": "#2a0d06",
+      "skyHorizon": "#59180a",
+      "fog": "#1b0a06",
+      "fogNear": 22,
+      "fogFar": 78,
+      "ambient": 0.3,
+      "sun": 0.4
+    }
+  },
+
+  "bounds": { "minCX": 0, "minCZ": 0, "maxCX": 2, "maxCZ": 2 },
+
+  "//geometry": [
+    "An arena, not a maze. Everything is one sightline and the pacing comes from",
+    "the cages, not from doors:",
+    "",
+    "  R0  antechamber   x  6..20  z 44..56  y8..14   (spawn)",
+    "  S1  secret cache  x  1.. 4  z 47..53            behind a fake wall at x 5",
+    "  C0  throat        x 21..28  z 48..52  y8..12",
+    "  AR  the furnace   x 29..86  z 14..82  y8..24",
+    "        two lava trenches at z 35..37 and z 59..61, each with two metal bridges",
+    "        six obsidian pillars, and a hellstone dais at x 54..62 z 44..52 rising",
+    "        to y10 with a stair on its west face",
+    "  RK  RED keycard   on the dais at 58.5, 11.1, 48.5",
+    "  CG-A cage north-west  x 30..40  z  4..12   door d-cage-a at z13",
+    "  CG-B cage north-east  x 44..56  z  4..12   door d-cage-b at z13",
+    "  CG-C cage east        x 88..93  z 30..44   door d-cage-c at x87",
+    "  CG-D cage south       x 30..44  z 84..92   door d-cage-d at z83",
+    "  SW1 gauntlet switch on the north-west pillar -> opens cages A and B",
+    "  SW2 gauntlet switch on the south-east pillar -> opens cages C and D",
+    "  D1  RED DOOR      x 71..73  z 13    y8..11",
+    "  ER  exit vault    x 60..86  z  4..12  y8..16   exit + exit switch",
+    "  S2  secret vault  x 88..92  z  5..11            behind a fake wall at x 87",
+    "",
+    "The cages hold the ammunition. You do not have enough without them, which is",
+    "the whole trade: open a cage, take what is in it, fight what came out of it."
+  ],
+
+  "brushes": [
+    { "kind": "box", "block": "stone",   "x": 0, "y": 2, "z": 0, "w": 96, "h": 29, "d": 96 },
+    { "kind": "box", "block": "bedrock", "x": 0, "y": 0, "z": 0, "w": 96, "h": 2,  "d": 96 },
+
+    { "kind": "clear", "x": 6, "y": 8, "z": 44, "w": 15, "h": 7, "d": 13 },
+    { "kind": "box", "block": "tech_panel", "x": 5, "y": 7, "z": 43, "w": 17, "h": 1, "d": 15 },
+
+    { "kind": "clear", "x": 1, "y": 8, "z": 47, "w": 4, "h": 4, "d": 7 },
+    { "kind": "box", "block": "bone", "x": 0, "y": 7, "z": 46, "w": 6, "h": 1, "d": 9 },
+
+    { "kind": "clear", "x": 21, "y": 8, "z": 48, "w": 8, "h": 5, "d": 5 },
+    { "kind": "box", "block": "rusted_metal", "x": 21, "y": 7, "z": 47, "w": 8, "h": 1, "d": 7 },
+
+    { "kind": "clear", "x": 29, "y": 8, "z": 14, "w": 58, "h": 17, "d": 69 },
+    { "kind": "box", "block": "hellstone", "x": 28, "y": 7, "z": 13, "w": 60, "h": 1, "d": 71 },
+
+    { "kind": "box", "block": "lava", "x": 31, "y": 7, "z": 35, "w": 54, "h": 1, "d": 3 },
+    { "kind": "box", "block": "lava", "x": 31, "y": 7, "z": 59, "w": 54, "h": 1, "d": 3 },
+    { "kind": "box", "block": "metal", "x": 46, "y": 7, "z": 35, "w": 5, "h": 1, "d": 3 },
+    { "kind": "box", "block": "metal", "x": 66, "y": 7, "z": 35, "w": 5, "h": 1, "d": 3 },
+    { "kind": "box", "block": "metal", "x": 46, "y": 7, "z": 59, "w": 5, "h": 1, "d": 3 },
+    { "kind": "box", "block": "metal", "x": 66, "y": 7, "z": 59, "w": 5, "h": 1, "d": 3 },
+
+    { "kind": "box", "block": "obsidian", "x": 36, "y": 8, "z": 24, "w": 3, "h": 9, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 76, "y": 8, "z": 24, "w": 3, "h": 9, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 36, "y": 8, "z": 47, "w": 3, "h": 9, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 76, "y": 8, "z": 47, "w": 3, "h": 9, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 36, "y": 8, "z": 70, "w": 3, "h": 9, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 76, "y": 8, "z": 70, "w": 3, "h": 9, "d": 3 },
+
+    { "kind": "box", "block": "hellstone", "x": 54, "y": 8, "z": 44, "w": 9, "h": 3, "d": 9 },
+    { "kind": "stairs", "block": "hellstone", "dir": "+x", "thickness": 1, "x": 51, "y": 8, "z": 47, "w": 3, "h": 3, "d": 3 },
+    { "kind": "box", "block": "neon", "x": 55, "y": 11, "z": 45, "w": 1, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 61, "y": 11, "z": 45, "w": 1, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 55, "y": 11, "z": 51, "w": 1, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 61, "y": 11, "z": 51, "w": 1, "h": 1, "d": 1 },
+
+    { "kind": "clear", "x": 30, "y": 8, "z": 4, "w": 11, "h": 6, "d": 9 },
+    { "kind": "box", "block": "brick", "x": 29, "y": 7, "z": 3, "w": 13, "h": 1, "d": 11 },
+    { "kind": "clear", "x": 44, "y": 8, "z": 4, "w": 13, "h": 6, "d": 9 },
+    { "kind": "box", "block": "brick", "x": 43, "y": 7, "z": 3, "w": 15, "h": 1, "d": 11 },
+    { "kind": "clear", "x": 88, "y": 8, "z": 30, "w": 6, "h": 6, "d": 15 },
+    { "kind": "box", "block": "brick", "x": 87, "y": 7, "z": 29, "w": 8, "h": 1, "d": 17 },
+    { "kind": "clear", "x": 30, "y": 8, "z": 84, "w": 15, "h": 6, "d": 9 },
+    { "kind": "box", "block": "brick", "x": 29, "y": 7, "z": 83, "w": 17, "h": 1, "d": 11 },
+
+    { "kind": "clear", "x": 60, "y": 8, "z": 4, "w": 27, "h": 9, "d": 9 },
+    { "kind": "box", "block": "tech_panel", "x": 59, "y": 7, "z": 3, "w": 29, "h": 1, "d": 11 },
+    { "kind": "box", "block": "obsidian", "x": 64, "y": 8, "z": 6, "w": 2, "h": 8, "d": 2 },
+    { "kind": "box", "block": "obsidian", "x": 64, "y": 8, "z": 10, "w": 2, "h": 8, "d": 2 },
+
+    { "kind": "clear", "x": 88, "y": 8, "z": 5, "w": 5, "h": 5, "d": 7 },
+    { "kind": "box", "block": "bone", "x": 87, "y": 7, "z": 4, "w": 7, "h": 1, "d": 9 },
+
+    { "kind": "box", "block": "neon", "x": 30, "y": 23, "z": 20, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 83, "y": 23, "z": 20, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 30, "y": 23, "z": 76, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 83, "y": 23, "z": 76, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 12, "y": 13, "z": 45, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 70, "y": 15, "z": 5,  "w": 5, "h": 1, "d": 1 }
+  ],
+
+  "spawns": [
+    { "kind": "player", "x": 8.5,  "y": 8, "z": 50.5, "yaw": 4.71238898038469, "index": 0 },
+    { "kind": "coop",   "x": 8.5,  "y": 8, "z": 47.5, "yaw": 4.71238898038469, "index": 1 },
+    { "kind": "coop",   "x": 8.5,  "y": 8, "z": 53.5, "yaw": 4.71238898038469, "index": 2 },
+    { "kind": "coop",   "x": 11.5, "y": 8, "z": 50.5, "yaw": 4.71238898038469, "index": 3 },
+    { "kind": "deathmatch", "x": 32.5, "y": 8, "z": 17.5, "yaw": 3.141592653589793, "index": 0 },
+    { "kind": "deathmatch", "x": 83.5, "y": 8, "z": 17.5, "yaw": 3.141592653589793, "index": 1 },
+    { "kind": "deathmatch", "x": 32.5, "y": 8, "z": 79.5, "yaw": 0, "index": 2 },
+    { "kind": "deathmatch", "x": 83.5, "y": 8, "z": 79.5, "yaw": 0, "index": 3 },
+    { "kind": "deathmatch", "x": 58.5, "y": 11, "z": 48.5, "yaw": 0, "index": 4 }
+  ],
+
+  "enemies": [
+    { "id": "z-ante-1", "type": "zombie", "x": 18.5, "y": 8, "z": 46.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "z-ante-2", "type": "zombie", "x": 18.5, "y": 8, "z": 54.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 1 },
+    { "id": "i-throat", "type": "imp", "x": 26.5, "y": 8, "z": 50.5, "yaw": 1.5707963267948966,
+      "trigger": "proximity", "radius": 8, "ambush": true, "minSkill": 2 },
+
+    { "id": "i-floor-1", "type": "imp", "x": 33.5, "y": 8, "z": 44.5, "yaw": 4.71238898038469,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-floor-2", "type": "imp", "x": 33.5, "y": 8, "z": 56.5, "yaw": 4.71238898038469,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-floor-3", "type": "imp", "x": 48.5, "y": 8, "z": 30.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-floor-4", "type": "imp", "x": 68.5, "y": 8, "z": 66.5, "yaw": 0,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "z-floor-5", "type": "zombie", "x": 82.5, "y": 8, "z": 48.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 0,
+      "patrol": [[82.5, 8, 48.5], [82.5, 8, 20.5], [48.5, 8, 20.5]] },
+    { "id": "z-floor-6", "type": "zombie", "x": 34.5, "y": 8, "z": 78.5, "yaw": 0,
+      "trigger": "sight", "minSkill": 1 },
+    { "id": "c-floor-7", "type": "cacodemon", "x": 58.5, "y": 16, "z": 24.5, "yaw": 3.141592653589793,
+      "trigger": "proximity", "radius": 26, "minSkill": 1 },
+    { "id": "c-floor-8", "type": "cacodemon", "x": 58.5, "y": 16, "z": 72.5, "yaw": 0,
+      "trigger": "proximity", "radius": 26, "minSkill": 2 },
+    { "id": "s-floor-9", "type": "lost_soul", "x": 44.5, "y": 12, "z": 48.5, "yaw": 1.5707963267948966,
+      "trigger": "proximity", "radius": 20, "minSkill": 3 },
+    { "id": "s-floor-10", "type": "lost_soul", "x": 72.5, "y": 12, "z": 48.5, "yaw": 1.5707963267948966,
+      "trigger": "proximity", "radius": 20, "minSkill": 3 },
+    { "id": "b-dais", "type": "baron", "x": 58.5, "y": 8, "z": 40.5, "yaw": 3.141592653589793,
+      "trigger": "proximity", "radius": 14, "minSkill": 4 },
+
+    { "id": "i-cage-a1", "type": "imp", "x": 33.5, "y": 8, "z": 7.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-gauntlet-1", "minSkill": 0 },
+    { "id": "i-cage-a2", "type": "imp", "x": 37.5, "y": 8, "z": 7.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-gauntlet-1", "minSkill": 0 },
+    { "id": "z-cage-a3", "type": "zombie", "x": 35.5, "y": 8, "z": 10.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-gauntlet-1", "minSkill": 2 },
+    { "id": "c-cage-a4", "type": "cacodemon", "x": 31.5, "y": 9, "z": 10.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-gauntlet-1", "minSkill": 3 },
+
+    { "id": "i-cage-b1", "type": "imp", "x": 47.5, "y": 8, "z": 7.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-gauntlet-1", "minSkill": 0 },
+    { "id": "i-cage-b2", "type": "imp", "x": 53.5, "y": 8, "z": 7.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-gauntlet-1", "minSkill": 1 },
+    { "id": "s-cage-b3", "type": "lost_soul", "x": 50.5, "y": 10, "z": 10.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-gauntlet-1", "minSkill": 2 },
+    { "id": "b-cage-b4", "type": "baron", "x": 50.5, "y": 8, "z": 5.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-gauntlet-1", "minSkill": 3 },
+
+    { "id": "i-cage-c1", "type": "imp", "x": 90.5, "y": 8, "z": 33.5, "yaw": 1.5707963267948966,
+      "trigger": "switch", "triggerId": "sw-gauntlet-2", "minSkill": 0 },
+    { "id": "i-cage-c2", "type": "imp", "x": 90.5, "y": 8, "z": 41.5, "yaw": 1.5707963267948966,
+      "trigger": "switch", "triggerId": "sw-gauntlet-2", "minSkill": 0 },
+    { "id": "z-cage-c3", "type": "zombie", "x": 92.5, "y": 8, "z": 37.5, "yaw": 1.5707963267948966,
+      "trigger": "switch", "triggerId": "sw-gauntlet-2", "minSkill": 1 },
+    { "id": "c-cage-c4", "type": "cacodemon", "x": 90.5, "y": 10, "z": 37.5, "yaw": 1.5707963267948966,
+      "trigger": "switch", "triggerId": "sw-gauntlet-2", "minSkill": 3 },
+
+    { "id": "i-cage-d1", "type": "imp", "x": 33.5, "y": 8, "z": 88.5, "yaw": 0,
+      "trigger": "switch", "triggerId": "sw-gauntlet-2", "minSkill": 0 },
+    { "id": "i-cage-d2", "type": "imp", "x": 41.5, "y": 8, "z": 88.5, "yaw": 0,
+      "trigger": "switch", "triggerId": "sw-gauntlet-2", "minSkill": 0 },
+    { "id": "z-cage-d3", "type": "zombie", "x": 37.5, "y": 8, "z": 90.5, "yaw": 0,
+      "trigger": "switch", "triggerId": "sw-gauntlet-2", "minSkill": 2 },
+    { "id": "b-cage-d4", "type": "baron", "x": 37.5, "y": 8, "z": 86.5, "yaw": 0,
+      "trigger": "switch", "triggerId": "sw-gauntlet-2", "minSkill": 4 },
+
+    { "id": "i-vault-1", "type": "imp", "x": 62.5, "y": 8, "z": 8.5, "yaw": 1.5707963267948966,
+      "trigger": "door", "triggerId": "d-red", "ambush": true, "minSkill": 0 },
+    { "id": "i-vault-2", "type": "imp", "x": 84.5, "y": 8, "z": 5.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 1 },
+    { "id": "c-vault-3", "type": "cacodemon", "x": 78.5, "y": 12, "z": 11.5, "yaw": 1.5707963267948966,
+      "trigger": "switch", "triggerId": "sw-exit", "minSkill": 2 }
+  ],
+
+  "pickups": [
+    { "id": "p-bonus-1", "kind": "health", "variant": "bonus", "x": 7.5, "y": 8.1, "z": 45.5 },
+    { "id": "p-bonus-2", "kind": "health", "variant": "bonus", "x": 7.5, "y": 8.1, "z": 55.5 },
+    { "id": "p-clip-1",  "kind": "ammo", "variant": "bullets", "amount": 20, "x": 19.5, "y": 8.1, "z": 50.5 },
+
+    { "id": "p-shotgun",  "kind": "weapon", "variant": "shotgun", "x": 31.5, "y": 8.1, "z": 50.5 },
+    { "id": "p-shells-1", "kind": "ammo", "variant": "shells", "amount": 8, "x": 31.5, "y": 8.1, "z": 46.5 },
+    { "id": "p-armor-1",  "kind": "armor", "variant": "green", "x": 31.5, "y": 8.1, "z": 54.5 },
+    { "id": "p-medikit-1","kind": "health", "variant": "medikit", "x": 84.5, "y": 8.1, "z": 50.5 },
+    { "id": "p-stim-1",   "kind": "health", "variant": "stimpack", "x": 48.5, "y": 8.1, "z": 24.5 },
+    { "id": "p-stim-2",   "kind": "health", "variant": "stimpack", "x": 68.5, "y": 8.1, "z": 72.5 },
+    { "id": "p-clip-2",   "kind": "ammo", "variant": "bullets", "amount": 20, "x": 44.5, "y": 8.1, "z": 78.5 },
+
+    { "id": "k-red", "kind": "key", "variant": "red", "x": 58.5, "y": 11.1, "z": 48.5, "countsAsItem": false },
+
+    { "id": "p-cage-a-chaingun", "kind": "weapon", "variant": "chaingun", "x": 35.5, "y": 8.1, "z": 6.5 },
+    { "id": "p-cage-a-clip",     "kind": "ammo", "variant": "bullets", "amount": 40, "x": 39.5, "y": 8.1, "z": 6.5 },
+    { "id": "p-cage-b-rocket",   "kind": "weapon", "variant": "rocket", "x": 50.5, "y": 8.1, "z": 8.5 },
+    { "id": "p-cage-b-rockets",  "kind": "ammo", "variant": "rockets", "amount": 8, "x": 45.5, "y": 8.1, "z": 8.5 },
+    { "id": "p-cage-b-armor",    "kind": "armor", "variant": "green", "x": 55.5, "y": 8.1, "z": 8.5 },
+    { "id": "p-cage-c-shells",   "kind": "ammo", "variant": "shells", "amount": 16, "x": 92.5, "y": 8.1, "z": 31.5 },
+    { "id": "p-cage-c-medikit",  "kind": "health", "variant": "medikit", "x": 92.5, "y": 8.1, "z": 43.5 },
+    { "id": "p-cage-d-backpack", "kind": "backpack", "x": 37.5, "y": 8.1, "z": 87.5 },
+    { "id": "p-cage-d-shells",   "kind": "ammo", "variant": "shells", "amount": 16, "x": 43.5, "y": 8.1, "z": 90.5 },
+
+    { "id": "p-vault-medikit", "kind": "health", "variant": "medikit", "x": 61.5, "y": 8.1, "z": 5.5 },
+    { "id": "p-vault-cells",   "kind": "ammo", "variant": "cells", "amount": 40, "x": 61.5, "y": 8.1, "z": 11.5 },
+
+    { "id": "p-secret1-plasma", "kind": "weapon", "variant": "plasma", "x": 2.5, "y": 8.1, "z": 50.5, "secret": true },
+    { "id": "p-secret1-cells",  "kind": "ammo", "variant": "cells", "amount": 40, "x": 2.5, "y": 8.1, "z": 48.5, "secret": true },
+    { "id": "p-secret1-armor",  "kind": "armor", "variant": "blue", "x": 2.5, "y": 8.1, "z": 52.5, "secret": true },
+
+    { "id": "p-secret2-soul",   "kind": "health", "variant": "soulsphere", "x": 90.5, "y": 8.1, "z": 8.5, "secret": true },
+    { "id": "p-secret2-rockets","kind": "ammo", "variant": "rockets", "amount": 10, "x": 90.5, "y": 8.1, "z": 6.5, "secret": true }
+  ],
+
+  "doors": [
+    {
+      "id": "d-red",
+      "x": 71, "y": 8, "z": 13, "w": 3, "h": 4, "d": 1,
+      "key": "red", "block": "metal", "frameBlock": "hellstone",
+      "openMs": 900, "lockedMessage": "You need the red keycard."
+    },
+    {
+      "id": "d-cage-a",
+      "x": 34, "y": 8, "z": 13, "w": 3, "h": 4, "d": 1,
+      "key": "none", "block": "brick", "frameBlock": "hellstone",
+      "switchOnly": true, "openMs": 500
+    },
+    {
+      "id": "d-cage-b",
+      "x": 49, "y": 8, "z": 13, "w": 3, "h": 4, "d": 1,
+      "key": "none", "block": "brick", "frameBlock": "hellstone",
+      "switchOnly": true, "openMs": 500
+    },
+    {
+      "id": "d-cage-c",
+      "x": 87, "y": 8, "z": 35, "w": 1, "h": 4, "d": 3,
+      "key": "none", "block": "brick", "frameBlock": "hellstone",
+      "switchOnly": true, "openMs": 500
+    },
+    {
+      "id": "d-cage-d",
+      "x": 35, "y": 8, "z": 83, "w": 3, "h": 4, "d": 1,
+      "key": "none", "block": "brick", "frameBlock": "hellstone",
+      "switchOnly": true, "openMs": 500
+    },
+    {
+      "id": "d-secret-1",
+      "x": 5, "y": 8, "z": 49, "w": 1, "h": 3, "d": 3,
+      "key": "none", "block": "tech_panel",
+      "switchOnly": true, "secret": true, "openMs": 900
+    },
+    {
+      "id": "d-secret-2",
+      "x": 87, "y": 8, "z": 7, "w": 1, "h": 3, "d": 3,
+      "key": "none", "block": "tech_panel",
+      "switchOnly": true, "secret": true, "openMs": 900
+    }
+  ],
+
+  "switches": [
+    {
+      "id": "sw-gauntlet-1",
+      "x": 37, "y": 10, "z": 26,
+      "face": 4, "block": "obsidian", "activeBlock": "neon",
+      "targets": ["d-cage-a", "d-cage-b"],
+      "message": "The north cages grind open."
+    },
+    {
+      "id": "sw-gauntlet-2",
+      "x": 77, "y": 10, "z": 70,
+      "face": 5, "block": "obsidian", "activeBlock": "neon",
+      "targets": ["d-cage-c", "d-cage-d"],
+      "message": "The east and south cages grind open."
+    },
+    {
+      "id": "sw-secret-1",
+      "x": 5, "y": 10, "z": 45,
+      "face": 0, "block": "tech_panel", "activeBlock": "neon", "hidden": true,
+      "targets": ["d-secret-1"],
+      "message": "A panel slides open behind you."
+    },
+    {
+      "id": "sw-secret-2",
+      "x": 87, "y": 11, "z": 5,
+      "face": 1, "block": "tech_panel", "activeBlock": "neon", "hidden": true,
+      "targets": ["d-secret-2"],
+      "message": "Something opens at the back of the vault."
+    },
+    {
+      "id": "sw-exit",
+      "x": 73, "y": 10, "z": 3,
+      "face": 4, "block": "tech_panel", "activeBlock": "neon",
+      "targets": ["exit"],
+      "message": "The furnace vents. The exit is live."
+    }
+  ],
+
+  "secrets": [
+    { "id": "s-cache", "x": 1, "y": 8, "z": 47, "w": 4, "h": 4, "d": 7,
+      "message": "A secret is revealed!" },
+    { "id": "s-vault", "x": 88, "y": 8, "z": 5, "w": 5, "h": 5, "d": 7,
+      "message": "A secret is revealed!" }
+  ],
+
+  "exit": {
+    "x": 78, "y": 8, "z": 5, "w": 7, "h": 3, "d": 7,
+    "requiresSwitch": "sw-exit",
+    "nextLevelId": "e1m6-throne",
+    "endsEpisode": false
+  }
+}

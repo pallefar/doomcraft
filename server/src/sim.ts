@@ -616,6 +616,13 @@ export class Simulation {
    * over the whole arsenal. Set once by the room, read by every respawn.
    */
   defaultWeaponMask = STARTING_WEAPON_MASK;
+  /**
+   * Environmental damage switches. A creative Builder world has no fall damage
+   * and no lava burn — `ModeSimPlan` says so, and this is where saying so has
+   * an effect. Both default true, which is the arena the rest of the game is.
+   */
+  fallDamageEnabled = true;
+  hazardsEnabled = true;
 
   readonly players: PlayerEntity[] = [];
   /**
@@ -827,7 +834,7 @@ export class Simulation {
     this.applyWeaponIntent(p, cmd, dtMs);
     moveStep(p, cmd.moveX, cmd.moveZ, cmd.buttons, dt, this.world);
 
-    if (p.landImpact > FALL_DAMAGE_MIN_SPEED) {
+    if (this.fallDamageEnabled && p.landImpact > FALL_DAMAGE_MIN_SPEED) {
       const dmg = Math.min(FALL_DAMAGE_MAX, (p.landImpact - FALL_DAMAGE_MIN_SPEED) * FALL_DAMAGE_PER_MPS);
       if (dmg >= 1) this.damagePlayer(p, 0, dmg, WeaponId.PISTOL, DMG_FALL | DMG_ENVIRONMENT, 0, -1, 0);
     }
@@ -1694,6 +1701,7 @@ export class Simulation {
 
   /** Lava, drowning and other ways the level itself kills you. */
   private applyEnvironment(p: PlayerEntity, dt: number): void {
+    if (!this.hazardsEnabled) { p.envDamageAccum = 0; p.breath = BREATH_SECONDS; return; }
     const bx = Math.floor(p.pos[0]);
     const bz = Math.floor(p.pos[2]);
     const feet = this.world.getBlock(bx, Math.floor(p.pos[1] + 0.1), bz);

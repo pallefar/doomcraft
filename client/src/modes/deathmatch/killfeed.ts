@@ -109,7 +109,9 @@ function streakName(streak: number): string {
 const STYLE_ID = 'dm-killfeed-css';
 
 const CSS = `
-#hud .dm-kf{position:absolute;top:12px;right:12px;width:min(340px,42vw);
+/* The inset is deliberately larger than the slide-in distance below, so a row
+   entering from the right is never clipped by the window edge mid-animation. */
+#hud .dm-kf{position:absolute;top:var(--dm-kf-top,12px);right:18px;width:min(340px,42vw);
   display:flex;flex-direction:column;align-items:flex-end;gap:4px;
   font:12px/1.1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;pointer-events:none;
   contain:layout style}
@@ -122,8 +124,8 @@ const CSS = `
   opacity:1;transform:translateX(0);
   transition:opacity .28s linear,transform .28s cubic-bezier(.2,.7,.3,1)}
 #hud .dm-kf .row.in{animation:dmkfin .22s cubic-bezier(.2,.9,.3,1) both}
-#hud .dm-kf .row.out{opacity:0;transform:translateX(14px)}
-@keyframes dmkfin{from{opacity:0;transform:translateX(22px)}to{opacity:1;transform:translateX(0)}}
+#hud .dm-kf .row.out{opacity:0;transform:translateX(12px)}
+@keyframes dmkfin{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:translateX(0)}}
 
 #hud .dm-kf .who{max-width:118px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-weight:700;letter-spacing:.01em;color:#cfc9c3}
@@ -196,16 +198,26 @@ const CSS = `
   100%{opacity:0;transform:translate(-50%,-14px) scale(1)}
 }
 
+/* The desktop FPS read-out sits in the top-right and would land under the
+   first row. Applied as a class, not an inline style, so the compact rules
+   below still win — an inline top would pin the feed over the chat lane on a
+   phone, which is the exact bug this file's layout is trying to avoid. */
+#hud .dm-kf.fps{--dm-kf-top:58px}
+
 /* ---- compact: 412px-tall phones. The bar ships its desktop feed here
        unchanged (weakness #11); this one halves and moves off the thumb. ---- */
-#hud[data-compact="1"] .dm-kf{top:8px;right:8px;width:min(230px,52vw);gap:3px;font-size:10px}
+#hud[data-compact="1"] .dm-kf{--dm-kf-top:8px;right:14px;width:min(230px,52vw);gap:3px;font-size:10px}
 #hud[data-compact="1"] .dm-kf .row{padding:2px 6px 2px 7px;gap:5px}
 #hud[data-compact="1"] .dm-kf .who{max-width:74px}
 #hud[data-compact="1"] .dm-kf .gun svg{width:18px;height:9px}
 #hud[data-compact="1"] .dm-conf .chip{top:-64px;font-size:11px}
 #hud[data-compact="1"] .dm-conf .plus{top:-40px;font-size:15px}
 #hud[data-compact="1"] .dm-conf .call{top:-96px}
-#hud[data-portrait="1"] .dm-kf{top:8px;right:8px;width:min(210px,58vw)}
+/* Portrait is 412 px WIDE, and the base HUD's chat lane already owns
+   x=116..366 at the top. Two right-aligned panels on one row would overlap, so
+   the killfeed drops to the row below the chat lane; the chip column under the
+   minimap ends at x=112, so nothing meets it there either. */
+#hud[data-portrait="1"] .dm-kf{--dm-kf-top:124px;right:10px;width:min(200px,52vw)}
 #hud[data-portrait="1"] .dm-conf .chip{top:-108px}
 #hud[data-portrait="1"] .dm-conf .call{top:-152px}
 
@@ -440,17 +452,15 @@ export class Killfeed {
     node.style.display = '';
   }
 
-  /** You died. Rendered as a feed row plus a short centre note. */
-  confirmDeath(killerName: string, weaponId: number, flags: number): void {
-    if (this.destroyed) return;
+  /**
+   * You died. There is deliberately no centre-screen chip here: the mode's
+   * death card owns that space and says the same thing with more in it, and two
+   * overlapping banners on the frame you die is worse than one.
+   * Dying breaks the multi-kill chain, which is the whole job of this call.
+   */
+  confirmDeath(): void {
     this.chain = 0;
     this.chainEndsAtMs = 0;
-    const node = this.nextConfirm();
-    const by = killerName === '' ? 'HELL' : killerName;
-    node.innerHTML =
-      `<div class="chip" style="border-color:rgba(224,60,28,.7);color:#ff9a7a">`
-      + `${svgGlyph(weaponId, flags)}<b>KILLED BY ${escapeHtml(by)}</b></div>`;
-    node.style.display = '';
   }
 
   /* ---------------------------------------------------------------- *

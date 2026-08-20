@@ -16,12 +16,22 @@
 //   mc-08-picker-hover.png a hovered palette cell
 //   mc-09-after-pick.png   back in the world holding the picked block
 //   mc-10-tower.png        a small built structure, to judge placement cadence
+//   mc-12-break-hold-*.png four frames of a held break at 80/200/400/800 ms
+//   mc-13-break-done.png   the frame after release
+//   mc-14/15/16-place-*    the same for a held place
 //   mc-gameplay.webm       canvas-only 60 fps recording of place/break/look
 //   mc-metrics.json        timings + fps distribution
 //   mc-uitext.txt          all DOM text (Classic's chrome is DOM, the game is canvas)
 //
+// `node tools/capture-mc.mjs --cadence` runs a separate, shorter probe instead and writes
+// mc-cadence.json + mc-cadence-pose.png + mc-cadence-after.png. See the block below.
+//
 // NOTE: Playwright's recordVideo does NOT capture an accelerated WebGL canvas — it writes a ~2 KB
 // file with nothing in it. tools/reccanvas.mjs runs captureStream(60) + MediaRecorder in-page.
+//
+// FINDING (four --cadence runs plus the stills): the bar has NO hold-repeat and NO dig progress.
+// mc-12-break-hold-{80,200,400,800}.png and mc-13-break-done.png all share one MD5, and the
+// engine hook counted 0-1 voxel writes per 2.6 s hold. One click is one block.
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -169,6 +179,144 @@ const look = async (dx, dy, steps = 12) => {
   }
 };
 const hold = async (key, ms) => { await p.keyboard.down(key); await p.waitForTimeout(ms); await p.keyboard.up(key); };
+
+/* -------------------------------------------------------------------------------------------- *
+ * --cadence: the one number a screenshot cannot give
+ *
+ * "A repeat-rate on hold that feels right rather than spammy" is the whole of placement feel, and
+ * it is invisible in a still. The four `mc-12-break-hold-*.png` frames are byte-identical, which
+ * proves the bar has no dig progress — but it says nothing about how fast a HELD button repeats.
+ *
+ * Two measurements, best first:
+ *
+ *  1. Hook the engine. This build is `noa` (Babylon under it) and it parks the instance on
+ *     `window.noa`. Wrapping `noa.setBlock` / `noa.world.setBlockID` records the exact
+ *     `performance.now()` of every voxel write, which is the ground truth.
+ *  2. Fall back to pixels. Downsample the GL canvas to 48x48 every ~20 ms and record the
+ *     sum-of-absolute-difference against the previous sample. A block appearing under the
+ *     crosshair is a step change; cloud drift is not. Peaks over a threshold are edit events.
+ *
+ * Either way the output is an array of event timestamps per held button, and the interesting
+ * statistic is the median gap between consecutive events.
+ * -------------------------------------------------------------------------------------------- */
+if (process.argv.includes('--cadence')) {
+  const hooked = await p.evaluate(() => {
+    window.__ev = [];
+    const stamp = () => { window.__ev.push(performance.now()); };
+    // Hook the OUTERMOST entry point only. `noa.setBlock` calls `noa.world.setBlockID`, so
+    // wrapping both double-counts every edit and makes a one-block hold look like two.
+    const cands = [];
+    const noa = window.noa;
+    if (noa && typeof noa.setBlock === 'function') cands.push([noa, 'setBlock']);
+    else if (noa && noa.world && typeof noa.world.setBlockID === 'function') cands.push([noa.world, 'setBlockID']);
+    for (const [obj, key] of cands) {
+      const orig = obj[key];
+      obj[key] = function wrapped(...a) { stamp(); return orig.apply(this, a); };
+    }
+    return cands.map(([, k]) => k);
+  });
+  log('CADENCE_HOOK', JSON.stringify(hooked));
+
+  // Pixel sampler, always on: it is the cross-check on the hook, and the only signal if the
+  // engine is not reachable from the page scope.
+  await p.evaluate(() => {
+    const c = document.getElementById('noa-canvas') || document.querySelector('canvas');
+    const g = document.createElement('canvas');
+    g.width = 48; g.height = 48;
+    const x = g.getContext('2d', { willReadFrequently: true });
+    let prev = null;
+    window.__px = [];
+    window.__pxTimer = setInterval(() => {
+      try { x.drawImage(c, 0, 0, 48, 48); } catch { return; }
+      const d = x.getImageData(0, 0, 48, 48).data;
+      if (prev !== null) {
+        let s = 0;
+        for (let i = 0; i < d.length; i += 4) s += Math.abs(d[i] - prev[i]) + Math.abs(d[i + 1] - prev[i + 1]) + Math.abs(d[i + 2] - prev[i + 2]);
+        window.__px.push([performance.now(), s]);
+      }
+      prev = d.slice();
+    }, 20);
+  });
+
+  const probe = async (label, button, ms, prep, during) => {
+    await prep();
+    await p.waitForTimeout(400);
+    await p.evaluate(() => { window.__ev = []; window.__px = []; });
+    await p.mouse.down({ button });
+    if (during === undefined) await p.waitForTimeout(ms); else await during();
+    await p.mouse.up({ button });
+    await p.waitForTimeout(250);
+    const r = await p.evaluate(() => ({ ev: window.__ev.slice(), px: window.__px.slice() }));
+    // Pixel events: a sample whose delta clears 6x the median delta and is a local maximum.
+    const vals = r.px.map((s) => s[1]).slice().sort((a, b) => a - b);
+    const med = vals.length ? vals[vals.length >> 1] : 0;
+    const thr = Math.max(600, med * 6);
+    const peaks = [];
+    for (let i = 1; i < r.px.length - 1; i++) {
+      if (r.px[i][1] > thr && r.px[i][1] >= r.px[i - 1][1] && r.px[i][1] > r.px[i + 1][1]) {
+        if (peaks.length === 0 || r.px[i][0] - peaks[peaks.length - 1] > 45) peaks.push(r.px[i][0]);
+      }
+    }
+    const gaps = (a) => { const g = []; for (let i = 1; i < a.length; i++) g.push(+(a[i] - a[i - 1]).toFixed(1)); return g; };
+    const median = (a) => (a.length === 0 ? null : [...a].sort((x, y) => x - y)[a.length >> 1]);
+    const out = {
+      label, heldMs: ms,
+      hookEvents: r.ev.length, hookGapsMs: gaps(r.ev), hookMedianGapMs: median(gaps(r.ev)),
+      pixelEvents: peaks.length, pixelGapsMs: gaps(peaks), pixelMedianGapMs: median(gaps(peaks)),
+      pixelThreshold: Math.round(thr), pixelSamples: r.px.length,
+    };
+    log('CADENCE', JSON.stringify(out));
+    return out;
+  };
+
+  // Park the camera once, at roughly 45 degrees onto the ground about two metres ahead, and do
+  // NOT move it again. Every probe below runs from the same pose, so the only variable is the
+  // button. Looking straight down would place blocks into the camera (the bar allows exactly
+  // that — weakness #3) and looking up would aim at sky and register nothing, and both of those
+  // are how the first run of this probe produced an unreadable answer.
+  // Do NOT walk first. The generator spawns on a beach as often as not, and the run that taught
+  // this lesson strolled into the sea and aimed the crosshair at water, which Classic does not
+  // target at all — zero events, and nothing to tell that apart from "the hold does not repeat".
+  // Pitch all the way to straight down (the engine clamps at -90). Two cells ahead on a random
+  // seed is a coin flip between flat grass and a cliff lip — the run that taught THIS lesson
+  // chewed a notch through the lip in two clicks and then aimed the remaining eight at open sea.
+  // Straight down is the one direction with guaranteed depth: terrain runs to bedrock, so every
+  // break exposes a fresh target, the shaft feeds itself, and the probe cannot run out of world.
+  await look(0, 900);
+  await p.waitForTimeout(500);
+  await shot(p, 'cadence-pose');
+
+  // CONTROL: ten discrete clicks 100 ms apart. If the engine registers ten edits here, then a
+  // hold that registers one is a hold that genuinely does not repeat — rather than a probe that
+  // is aiming at nothing.
+  await p.evaluate(() => { window.__ev = []; });
+  for (let i = 0; i < 10; i++) {
+    await p.mouse.down({ button: 'left' }); await p.waitForTimeout(20); await p.mouse.up({ button: 'left' });
+    await p.waitForTimeout(80);
+  }
+  await p.waitForTimeout(250);
+  const clickRun = await p.evaluate(() => ({ events: window.__ev.length, stamps: window.__ev.slice() }));
+  log('CADENCE_CLICKS', JSON.stringify(clickRun.events));
+
+  const breakRun = await probe('break-hold', 'left', 2600, async () => {});
+  // A second hold, this time with the crosshair crawling one pixel every 40 ms. If a hold repeats
+  // only when the AIMED CELL changes — rather than on a timer — this run fires and the still one
+  // does not, and that is a different design decision with a different answer in placement.ts.
+  const breakSweep = await probe('break-hold-sweeping', 'left', 2600, async () => {}, async () => {
+    for (let i = 0; i < 60; i++) { await p.mouse.move(mx + (i % 2 ? 1 : -1), my + i * 0.2); await p.waitForTimeout(40); }
+  });
+  // Climb back to 45 degrees so PLACE has a wall to extrude off rather than the camera's own cell.
+  const placeRun = await probe('place-hold', 'right', 2600, async () => { await look(0, -260); });
+  await p.evaluate(() => { clearInterval(window.__pxTimer); });
+  await shot(p, 'cadence-after');
+
+  fs.writeFileSync(path.join(OUT, 'mc-cadence.json'), JSON.stringify({
+    hooked, clickRun, breakRun, breakSweep, placeRun,
+  }, null, 2));
+  log('DONE_CADENCE ' + path.join(OUT, 'mc-cadence.json'));
+  await ctx.close();
+  process.exit(0);
+}
 
 // Walk a little so we are not standing in the spawn column, then look down at the ground:
 // the targeted-block wireframe is unmistakable against a flat grass field.

@@ -157,6 +157,54 @@
       "verdict": "pending",
       "gap": "Blocked: no API key configured.",
       "note": "Generate offline as build-time assets, never at runtime. Stream per level \u2014 we are at 3.3 MB cold."
+    },
+    {
+      "id": "points",
+      "name": "Points & progression",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Queued behind modes.",
+      "note": "Two currencies: XP (never spent, gates unlocks) + Scrap (spendable). Server-granted only, with per-match and per-day anti-farm caps."
+    },
+    {
+      "id": "items",
+      "name": "Weapons, skins & items",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Queued behind modes.",
+      "note": "Weapon variants as sidegrades, skins as palette+emissive masks so cosmetics cost zero frames. 5 rarity tiers."
+    },
+    {
+      "id": "trading",
+      "name": "Trading",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Queued behind modes.",
+      "note": "Two-sided escrow with confirm-reset on offer change, atomic settlement, audit log, cooldowns. Titles and trophies untradable."
+    },
+    {
+      "id": "viral",
+      "name": "Viral sharing",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Queued behind modes.",
+      "note": "Server-rendered share cards, referrals paid on engagement not signup, fraud caps and review queue built in from the start."
+    },
+    {
+      "id": "competitions",
+      "name": "Competitions & sponsors",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Queued behind modes.",
+      "note": "Seasons, tournaments, prize claim, sponsor console. I can build the platform; I cannot sign a sponsor."
+    },
+    {
+      "id": "sponsorsys",
+      "name": "Sponsor placement & measurement",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Spec done (docs/SPONSORS.md, 1389 lines). Phase 1 ready to build.",
+      "note": "39 surfaces rated; 7 rejected on measurement grounds. Impression defs: MRC 50%/1s for DOM, IAB Intrinsic In-Game 2.0 for 3D. Server-side viewability = 0.000 ms client cost."
     }
   ],
   "log": [
@@ -211,6 +259,26 @@
     {
       "t": "19:55",
       "m": "Queued by user: advertiser-buyable in-game ads, GTA mode, ElevenLabs voices. GTA bar NOT yet obtainable \u2014 flagged, not faked. Paused for handover; resume 22:00."
+    },
+    {
+      "t": "22:20",
+      "m": "Economy layer specced (docs/ECONOMY.md): 2 currencies, tradable cosmetics, escrow trading, viral sharing, competitions. Three architecture calls: server grants all rewards; no loot boxes / no real-money tradables by default; sponsor PLATFORM is buildable, a sponsor deal is not mine to make."
+    },
+    {
+      "t": "23:05",
+      "m": "Sponsor spec done. Key finding: the 1.5% screen-coverage floor (not fog) is the binding constraint on in-world ads \u2014 a 4x2 m billboard only qualifies within 7.7 m, so author at 16x8 m minimum."
+    },
+    {
+      "t": "23:08",
+      "m": "Rejected client-side WebGL2 occlusion queries: 0.19 ms spike lands on the 18.6 ms p99 tail = 53.2 fps 1% low, under our 53.8 line. Chose server-side reconstruction from existing yaw/pitch inputs \u2014 0.000 ms client cost."
+    },
+    {
+      "t": "23:10",
+      "m": "TWO REAL BUGS found, unrelated to ads: net pump runs inside rAF so backgrounding the tab 15 s DISCONNECTS you mid-match; and there is no CSP anywhere on the server. See docs/BUGS-FOUND.md."
+    },
+    {
+      "t": "23:20",
+      "m": "User decisions: run BOTH programmatic (AdSense/networks) as fill AND direct-sold as it arrives; support ALL THREE prize shapes. Flagged: AdSense covers page slots only \u2014 in-game/rewarded needs a games network (the bar uses AdInPlay)."
     }
   ],
   "bars": [
