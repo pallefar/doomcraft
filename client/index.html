@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0d">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="DOOMCRAFT — a browser voxel arena shooter. Doom's pace and guns inside a fully destructible blocky world. Free, no install.">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>DOOMCRAFT</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230a0a0d'/%3E%3Cpath d='M6 24V8h7c5 0 8 3 8 8s-3 8-8 8H6z' fill='%23e03c1c'/%3E%3Crect x='22' y='8' width='4' height='16' fill='%23f0a020'/%3E%3C/svg%3E">
+
+<!--
+  Critical CSS is inline on purpose: the boot screen must paint on the first
+  network round trip. The bar (voxiom.io) reaches an interactive menu in 3.16 s;
+  our budget is under 3.00 s and the loading screen is part of that number.
+
+  The three ad slots below are RESERVED, not overlaid. Their boxes exist at
+  first paint with hard width/height and `contain`, so filling them cannot
+  reflow or shift a single pixel of game UI.
+-->
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0a0a0d;color:#e8e6e3}
+html{-webkit-text-size-adjust:100%}
+body{
+  font:14px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  overscroll-behavior:none;touch-action:none;-webkit-tap-highlight-color:transparent;
+  -webkit-user-select:none;user-select:none;
+}
+canvas{display:block}
+
+:root{
+  --ink:#e8e6e3; --ink-dim:#9b9793; --hell:#e03c1c; --ember:#f0a020; --panel:rgba(12,12,16,.82);
+  --line:rgba(255,255,255,.14);
+  --ad-top-w:728px;  --ad-top-h:90px;
+  --ad-side-w:300px; --ad-side-h:250px;
+  --ad-bot-w:728px;  --ad-bot-h:90px;
+  --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-l:env(safe-area-inset-left,0px); --safe-r:env(safe-area-inset-right,0px);
+}
+@media (max-width:900px){
+  :root{
+    --ad-top-w:320px;  --ad-top-h:50px;
+    --ad-side-w:300px; --ad-side-h:250px;
+    --ad-bot-w:320px;  --ad-bot-h:100px;
+  }
+}
+
+/* ---- layers ------------------------------------------------------------ */
+#game{position:fixed;inset:0;width:100%;height:100%;z-index:0;background:#6ea9e0;outline:none}
+#hud{position:fixed;inset:0;z-index:10;pointer-events:none;contain:layout style}
+#ads{position:fixed;inset:0;z-index:20;pointer-events:none;contain:layout style}
+#ui{position:fixed;inset:0;z-index:30;pointer-events:none;overflow:hidden}
+#ui > *{pointer-events:auto}
+#ad-overlay{position:fixed;inset:0;z-index:40;display:none;background:rgba(4,4,6,.92)}
+#ad-overlay[data-open="1"]{display:grid;place-items:center}
+#boot{position:fixed;inset:0;z-index:100}
+
+/* ---- reserved ad slots ------------------------------------------------- */
+.ad-slot{
+  position:absolute;pointer-events:auto;
+  display:grid;place-items:center;overflow:hidden;
+  contain:strict;
+  background:#101016;
+  border:1px solid var(--line);
+  border-radius:2px;
+}
+.ad-slot::after{
+  content:attr(data-label);
+  position:absolute;top:2px;left:4px;
+  font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#4a4a55;pointer-events:none;
+}
+.ad-slot > iframe,.ad-slot > ins,.ad-slot > div{max-width:100%;max-height:100%}
+#ad-slot-top{
+  width:var(--ad-top-w);height:var(--ad-top-h);
+  top:calc(8px + var(--safe-t));left:50%;margin-left:calc(var(--ad-top-w) / -2);
+}
+#ad-slot-side{
+  width:var(--ad-side-w);height:var(--ad-side-h);
+  top:50%;margin-top:calc(var(--ad-side-h) / -2);
+  right:calc(12px + var(--safe-r));
+}
+#ad-slot-bottom{
+  width:var(--ad-bot-w);height:var(--ad-bot-h);
+  bottom:calc(8px + var(--safe-b));left:50%;margin-left:calc(var(--ad-bot-w) / -2);
+}
+/* Slots exist in the layout only while the menu is up. Toggle the whole root:
+   set #ads[data-mode] to "menu", "game" or "off" (off = purchase owned). */
+#ads[data-mode="game"] .ad-slot,#ads[data-mode="off"] .ad-slot{display:none}
+@media (max-width:900px){ #ad-slot-side{display:none} }
+
+/* ---- boot / loading screen --------------------------------------------- */
+#boot{
+  display:grid;place-items:center;
+  background:
+    radial-gradient(120% 90% at 50% 0%,#1c1116 0%,#0a0a0d 62%),
+    #0a0a0d;
+  transition:opacity .28s ease;
+}
+#boot[hidden]{display:none}
+#boot.is-done{opacity:0;pointer-events:none}
+.boot-inner{width:min(520px,88vw);text-align:center}
+.boot-mark{
+  font:900 clamp(38px,9vw,74px)/0.92 "Arial Black","Helvetica Neue",Impact,system-ui,sans-serif;
+  letter-spacing:.02em;margin:0 0 6px;
+  color:#f2efec;
+  text-shadow:0 2px 0 #7a1a08,0 4px 0 #4a1005,0 10px 26px rgba(224,60,28,.34);
+}
+.boot-mark span{color:var(--hell)}
+.boot-sub{
+  margin:0 0 26px;font-size:11px;letter-spacing:.34em;text-transform:uppercase;color:#8a8078;
+}
+.boot-track{
+  height:8px;border:1px solid rgba(255,255,255,.18);background:#131318;
+  border-radius:1px;overflow:hidden;
+}
+#boot-bar{
+  height:100%;width:0%;
+  background:linear-gradient(90deg,#8a1c08,var(--hell) 55%,var(--ember));
+  transition:width .18s linear;
+}
+.boot-meta{display:flex;justify-content:space-between;margin-top:9px;font-size:11px;color:var(--ink-dim)}
+#boot-pct{font-variant-numeric:tabular-nums}
+.boot-tip{margin-top:30px;font-size:12px;color:#6f6a66;min-height:1.4em}
+.boot-tip b{color:#b9b3ad;font-weight:600}
+
+/* ---- no-JS ------------------------------------------------------------- */
+#nojs{position:fixed;inset:0;z-index:200;display:grid;place-items:center;background:#0a0a0d;
+  text-align:center;padding:24px;font-size:15px;color:#c9c4bf}
+</style>
+</head>
+<body>
+
+<!-- The renderer. Sized by the client at runtime; never by CSS pixels alone. -->
+<canvas id="game" width="1280" height="720" tabindex="0" aria-label="Game viewport"></canvas>
+
+<!-- In-game HUD: crosshair, health/armour, hotbar, killfeed, minimap. Never interactive. -->
+<div id="hud" data-mode="idle"></div>
+
+<!-- Reserved advertising slots. Fixed boxes, `contain: strict`, zero CLS on fill. -->
+<div id="ads" data-mode="menu">
+  <div class="ad-slot" id="ad-slot-top"    data-label="Ad" data-w="728" data-h="90"  data-w-mobile="320" data-h-mobile="50"></div>
+  <div class="ad-slot" id="ad-slot-side"   data-label="Ad" data-w="300" data-h="250" data-w-mobile="300" data-h-mobile="250"></div>
+  <div class="ad-slot" id="ad-slot-bottom" data-label="Ad" data-w="728" data-h="90"  data-w-mobile="320" data-h-mobile="100"></div>
+</div>
+
+<!-- Menus, settings, shop, scoreboard, touch controls. Children opt into pointer events. -->
+<div id="ui" data-screen="boot"></div>
+
+<!-- Fullscreen interstitial / rewarded ad surface. Hidden until data-open="1". -->
+<div id="ad-overlay" aria-hidden="true"></div>
+
+<!-- Loading screen. Painted before any script runs. -->
+<div id="boot" role="status" aria-live="polite">
+  <div class="boot-inner">
+    <h1 class="boot-mark">DOOM<span>CRAFT</span></h1>
+    <p class="boot-sub">Voxel Arena &middot; Rip and Build</p>
+    <div class="boot-track"><div id="boot-bar"></div></div>
+    <div class="boot-meta">
+      <span id="boot-status">Booting engine</span>
+      <span id="boot-pct">0%</span>
+    </div>
+    <p class="boot-tip"><b>Tip</b> &nbsp;Rockets carve the world. Shoot the floor out from under them.</p>
+  </div>
+</div>
+
+<noscript><div id="nojs">DOOMCRAFT needs JavaScript and WebGL. Enable JavaScript and reload.</div></noscript>
+
+<script>
+  // First-paint timestamp for the interactive-time budget. main.ts reads it.
+  window.__DC_T0__ = performance.now();
+</script>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

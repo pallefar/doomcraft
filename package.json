@@ -1,0 +1,36 @@
+{
+  "name": "doomcraft",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n SRV,WEB -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:client": "vite --config client/vite.config.ts",
+    "dev:server": "tsx watch server/src/index.ts",
+    "build": "tsc -b && vite build --config client/vite.config.ts",
+    "preview": "vite preview --config client/vite.config.ts --port 4173",
+    "start": "node server/dist/index.js",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "bench": "node tools/bench.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/three": "^0.171.0",
+    "@types/ws": "^8.5.13",
+    "concurrently": "^9.1.0",
+    "playwright": "^1.62.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "three": "^0.171.0",
+    "ws": "^8.18.0"
+  }
+}

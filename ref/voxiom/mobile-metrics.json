@@ -1,0 +1,13 @@
+{
+  "tTitle": 571,
+  "tPlayable": 4019,
+  "fps": {
+    "frames": 2458,
+    "medianMs": 16.6,
+    "p95Ms": 17.6,
+    "p99Ms": 17.7,
+    "fpsMedian": 60.2,
+    "fps1pctLow": 56.5
+  },
+  "bytes": 279332
+}

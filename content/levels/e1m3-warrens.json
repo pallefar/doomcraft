@@ -1,0 +1,318 @@
+{
+  "$schema": "doomcraft-level-source/1",
+  "sourceVersion": 1,
+
+  "meta": {
+    "id": "e1m3-warrens",
+    "name": "The Warrens",
+    "episodeId": "e1",
+    "episodeName": "Knee-Deep in the Blocks",
+    "episodeIndex": 1,
+    "levelIndex": 3,
+    "author": "Doomcraft",
+    "description": "Three keycards, three doors, one hub you will cross six times. Every colour you pick up opens exactly one wing, and the wing behind it holds the next colour. Learn the hub or die in it.",
+    "parTimeSec": 200,
+    "musicCue": "e1m3",
+    "outsideBlock": "bedrock",
+    "defaultSkill": 2,
+    "palette": {
+      "skyTop": "#100c10",
+      "skyHorizon": "#26161a",
+      "fog": "#0e0b0d",
+      "fogNear": 16,
+      "fogFar": 66,
+      "ambient": 0.26,
+      "sun": 0.38
+    }
+  },
+
+  "bounds": { "minCX": 0, "minCZ": 0, "maxCX": 2, "maxCZ": 2 },
+
+  "//geometry": [
+    "A hub with four wings. The hub is the only place the wings touch, so the",
+    "level graph is a star and the keycards are its edges:",
+    "",
+    "  HUB               x 40..56  z 40..56  floor y7  ceiling y18  (spawn)",
+    "  NORTH  (open)     -> the BLUE keycard, plus a dead-end armoury and secret 1",
+    "  WEST   (BLUE)     -> the YELLOW keycard, plus a vault behind secret 2",
+    "  EAST   (YELLOW)   -> the RED keycard, on a gantry over a lava moat",
+    "  SOUTH  (RED)      -> the exit hall, its switch, and the way out",
+    "",
+    "  NC-a  x 47..49  z 28..39   hub -> north junction",
+    "  NJ    x 40..56  z 22..27   north junction, two ways on",
+    "  NC-b  x 40..42  z 10..21   west branch",
+    "  NR    x 24..44  z  4.. 9   blue keycard room",
+    "  NC-c  x 54..56  z 10..21   east branch",
+    "  ND    x 50..66  z  4.. 9   armoury dead end",
+    "  S1    x 68..71  z  5.. 8   secret 1, behind a fake wall at x 67",
+    "  WC-a  x 26..38  z 46..48   blue door -> west chamber",
+    "  WJ    x 10..25  z 40..54   yellow keycard chamber",
+    "  S2    x  3.. 8  z 44..50   secret 2, behind a fake wall at x 9",
+    "  EC-a  x 58..70  z 46..48   yellow door -> east hall",
+    "  ER    x 71..91  z 36..58   red keycard hall, lava moat, gantry to y10",
+    "  SC    x 47..49  z 58..70   red door -> south",
+    "  SR    x 34..62  z 71..90   exit hall, exit switch on the south wall"
+  ],
+
+  "brushes": [
+    { "kind": "box", "block": "stone",   "x": 0, "y": 2, "z": 0, "w": 96, "h": 29, "d": 96 },
+    { "kind": "box", "block": "bedrock", "x": 0, "y": 0, "z": 0, "w": 96, "h": 2,  "d": 96 },
+
+    { "kind": "clear", "x": 40, "y": 8, "z": 40, "w": 17, "h": 11, "d": 17 },
+    { "kind": "box", "block": "tech_panel", "x": 39, "y": 7, "z": 39, "w": 19, "h": 1, "d": 19 },
+    { "kind": "box", "block": "metal", "x": 46, "y": 8, "z": 46, "w": 5, "h": 1, "d": 5 },
+
+    { "kind": "clear", "x": 47, "y": 8, "z": 28, "w": 3, "h": 5, "d": 12 },
+    { "kind": "box", "block": "cobblestone", "x": 46, "y": 7, "z": 28, "w": 5, "h": 1, "d": 12 },
+
+    { "kind": "clear", "x": 40, "y": 8, "z": 22, "w": 17, "h": 6, "d": 6 },
+    { "kind": "box", "block": "cobblestone", "x": 39, "y": 7, "z": 21, "w": 19, "h": 1, "d": 8 },
+
+    { "kind": "clear", "x": 40, "y": 8, "z": 10, "w": 3, "h": 5, "d": 12 },
+    { "kind": "box", "block": "cobblestone", "x": 39, "y": 7, "z": 10, "w": 5, "h": 1, "d": 12 },
+
+    { "kind": "clear", "x": 54, "y": 8, "z": 10, "w": 3, "h": 5, "d": 12 },
+    { "kind": "box", "block": "cobblestone", "x": 53, "y": 7, "z": 10, "w": 5, "h": 1, "d": 12 },
+
+    { "kind": "clear", "x": 24, "y": 8, "z": 4, "w": 21, "h": 7, "d": 6 },
+    { "kind": "box", "block": "brick", "x": 23, "y": 7, "z": 3, "w": 23, "h": 1, "d": 8 },
+
+    { "kind": "clear", "x": 50, "y": 8, "z": 4, "w": 17, "h": 6, "d": 6 },
+    { "kind": "box", "block": "brick", "x": 49, "y": 7, "z": 3, "w": 19, "h": 1, "d": 8 },
+
+    { "kind": "clear", "x": 68, "y": 8, "z": 5, "w": 4, "h": 4, "d": 4 },
+    { "kind": "box", "block": "bone", "x": 67, "y": 7, "z": 4, "w": 6, "h": 1, "d": 6 },
+
+    { "kind": "clear", "x": 26, "y": 8, "z": 46, "w": 13, "h": 5, "d": 3 },
+    { "kind": "box", "block": "rusted_metal", "x": 26, "y": 7, "z": 45, "w": 14, "h": 1, "d": 5 },
+
+    { "kind": "clear", "x": 10, "y": 8, "z": 40, "w": 16, "h": 7, "d": 15 },
+    { "kind": "box", "block": "metal", "x": 9, "y": 7, "z": 39, "w": 18, "h": 1, "d": 17 },
+    { "kind": "box", "block": "tech_panel", "x": 16, "y": 8, "z": 46, "w": 4, "h": 1, "d": 4 },
+
+    { "kind": "clear", "x": 3, "y": 8, "z": 44, "w": 6, "h": 5, "d": 7 },
+    { "kind": "box", "block": "bone", "x": 2, "y": 7, "z": 43, "w": 8, "h": 1, "d": 9 },
+
+    { "kind": "clear", "x": 58, "y": 8, "z": 46, "w": 13, "h": 5, "d": 3 },
+    { "kind": "box", "block": "rusted_metal", "x": 57, "y": 7, "z": 45, "w": 14, "h": 1, "d": 5 },
+
+    { "kind": "clear", "x": 71, "y": 8, "z": 36, "w": 21, "h": 8, "d": 23 },
+    { "kind": "box", "block": "tech_panel", "x": 70, "y": 7, "z": 35, "w": 23, "h": 1, "d": 25 },
+    { "kind": "box", "block": "hellstone", "x": 72, "y": 7, "z": 52, "w": 9,  "h": 1, "d": 6 },
+    { "kind": "box", "block": "lava",      "x": 73, "y": 7, "z": 53, "w": 7,  "h": 1, "d": 4 },
+    { "kind": "box", "block": "tech_panel", "x": 80, "y": 8, "z": 42, "w": 7, "h": 3, "d": 7 },
+    { "kind": "stairs", "block": "metal", "dir": "+x", "thickness": 1, "x": 77, "y": 8, "z": 44, "w": 3, "h": 3, "d": 3 },
+    { "kind": "cylinder", "block": "obsidian", "x": 73, "y": 8, "z": 38, "w": 4, "h": 8, "d": 4 },
+    { "kind": "cylinder", "block": "obsidian", "x": 88, "y": 8, "z": 54, "w": 4, "h": 8, "d": 4 },
+
+    { "kind": "clear", "x": 47, "y": 8, "z": 58, "w": 3, "h": 5, "d": 13 },
+    { "kind": "box", "block": "rusted_metal", "x": 46, "y": 7, "z": 57, "w": 5, "h": 1, "d": 15 },
+
+    { "kind": "clear", "x": 34, "y": 8, "z": 71, "w": 29, "h": 9, "d": 20 },
+    { "kind": "box", "block": "hellstone", "x": 33, "y": 7, "z": 70, "w": 31, "h": 1, "d": 22 },
+    { "kind": "box", "block": "obsidian", "x": 38, "y": 8, "z": 76, "w": 3, "h": 7, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 56, "y": 8, "z": 76, "w": 3, "h": 7, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 38, "y": 8, "z": 84, "w": 3, "h": 7, "d": 3 },
+    { "kind": "box", "block": "obsidian", "x": 56, "y": 8, "z": 84, "w": 3, "h": 7, "d": 3 },
+    { "kind": "box", "block": "tech_panel", "x": 44, "y": 7, "z": 86, "w": 9, "h": 1, "d": 5 },
+
+    { "kind": "box", "block": "neon", "x": 47, "y": 17, "z": 41, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 47, "y": 17, "z": 55, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 41, "y": 17, "z": 47, "w": 1, "h": 1, "d": 3 },
+    { "kind": "box", "block": "neon", "x": 55, "y": 17, "z": 47, "w": 1, "h": 1, "d": 3 },
+    { "kind": "box", "block": "neon", "x": 47, "y": 26, "z": 24, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 33, "y": 13, "z": 6,  "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 57, "y": 12, "z": 6,  "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 17, "y": 13, "z": 41, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 82, "y": 14, "z": 38, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 82, "y": 14, "z": 56, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 44, "y": 15, "z": 80, "w": 1, "h": 1, "d": 3 },
+    { "kind": "box", "block": "neon", "x": 52, "y": 15, "z": 80, "w": 1, "h": 1, "d": 3 }
+  ],
+
+  "spawns": [
+    { "kind": "player", "x": 48.5, "y": 8, "z": 54.5, "yaw": 0, "index": 0 },
+    { "kind": "coop",   "x": 45.5, "y": 8, "z": 54.5, "yaw": 0, "index": 1 },
+    { "kind": "coop",   "x": 51.5, "y": 8, "z": 54.5, "yaw": 0, "index": 2 },
+    { "kind": "coop",   "x": 48.5, "y": 8, "z": 51.5, "yaw": 0, "index": 3 },
+    { "kind": "deathmatch", "x": 42.5, "y": 8, "z": 42.5, "yaw": 3.141592653589793, "index": 0 },
+    { "kind": "deathmatch", "x": 30.5, "y": 8, "z": 6.5,  "yaw": 3.141592653589793, "index": 1 },
+    { "kind": "deathmatch", "x": 13.5, "y": 8, "z": 52.5, "yaw": 4.71238898038469, "index": 2 },
+    { "kind": "deathmatch", "x": 74.5, "y": 8, "z": 46.5, "yaw": 1.5707963267948966, "index": 3 },
+    { "kind": "deathmatch", "x": 48.5, "y": 8, "z": 88.5, "yaw": 0, "index": 4 }
+  ],
+
+  "enemies": [
+    { "id": "z-hub-1", "type": "zombie", "x": 42.5, "y": 8, "z": 42.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 0,
+      "patrol": [[42.5, 8, 42.5], [54.5, 8, 42.5], [54.5, 8, 54.5], [42.5, 8, 54.5]] },
+    { "id": "i-hub-2", "type": "imp", "x": 54.5, "y": 8, "z": 43.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 2 },
+    { "id": "c-hub-3", "type": "cacodemon", "x": 48.5, "y": 14, "z": 44.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-secret-2", "minSkill": 3 },
+
+    { "id": "z-north-1", "type": "zombie", "x": 48.5, "y": 8, "z": 33.5, "yaw": 0,
+      "trigger": "proximity", "radius": 10, "ambush": true, "minSkill": 0 },
+    { "id": "i-north-2", "type": "imp", "x": 44.5, "y": 8, "z": 24.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-north-3", "type": "imp", "x": 52.5, "y": 8, "z": 24.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 1 },
+    { "id": "z-keyroom-1", "type": "zombie", "x": 28.5, "y": 8, "z": 6.5, "yaw": 4.71238898038469,
+      "trigger": "sight", "minSkill": 0,
+      "patrol": [[28.5, 8, 6.5], [42.5, 8, 6.5]] },
+    { "id": "i-keyroom-2", "type": "imp", "x": 38.5, "y": 8, "z": 7.5, "yaw": 1.5707963267948966,
+      "trigger": "proximity", "radius": 12, "ambush": true, "minSkill": 1 },
+    { "id": "s-keyroom-3", "type": "lost_soul", "x": 32.5, "y": 11, "z": 5.5, "yaw": 0,
+      "trigger": "proximity", "radius": 14, "minSkill": 3 },
+    { "id": "i-armoury-1", "type": "imp", "x": 62.5, "y": 8, "z": 6.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 0, "ambush": true },
+    { "id": "z-armoury-2", "type": "zombie", "x": 54.5, "y": 8, "z": 5.5, "yaw": 4.71238898038469,
+      "trigger": "sight", "minSkill": 2 },
+
+    { "id": "i-west-1", "type": "imp", "x": 32.5, "y": 8, "z": 47.5, "yaw": 1.5707963267948966,
+      "trigger": "door", "triggerId": "d-blue", "ambush": true, "minSkill": 0 },
+    { "id": "i-west-2", "type": "imp", "x": 14.5, "y": 8, "z": 43.5, "yaw": 4.71238898038469,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "z-west-3", "type": "zombie", "x": 22.5, "y": 8, "z": 52.5, "yaw": 4.71238898038469,
+      "trigger": "sight", "minSkill": 0,
+      "patrol": [[22.5, 8, 52.5], [12.5, 8, 52.5]] },
+    { "id": "c-west-4", "type": "cacodemon", "x": 20.5, "y": 12, "z": 44.5, "yaw": 4.71238898038469,
+      "trigger": "proximity", "radius": 16, "minSkill": 2 },
+
+    { "id": "i-east-1", "type": "imp", "x": 64.5, "y": 8, "z": 47.5, "yaw": 1.5707963267948966,
+      "trigger": "door", "triggerId": "d-yellow", "ambush": true, "minSkill": 0 },
+    { "id": "i-east-2", "type": "imp", "x": 75.5, "y": 8, "z": 43.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-east-3", "type": "imp", "x": 88.5, "y": 8, "z": 40.5, "yaw": 1.5707963267948966,
+      "trigger": "sight", "minSkill": 1 },
+    { "id": "z-east-4", "type": "zombie", "x": 84.5, "y": 8, "z": 56.5, "yaw": 0,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "c-east-5", "type": "cacodemon", "x": 78.5, "y": 13, "z": 50.5, "yaw": 1.5707963267948966,
+      "trigger": "proximity", "radius": 20, "minSkill": 2 },
+    { "id": "b-east-6", "type": "baron", "x": 88.5, "y": 8, "z": 46.5, "yaw": 1.5707963267948966,
+      "trigger": "proximity", "radius": 18, "minSkill": 4 },
+
+    { "id": "i-south-1", "type": "imp", "x": 48.5, "y": 8, "z": 64.5, "yaw": 3.141592653589793,
+      "trigger": "door", "triggerId": "d-red", "ambush": true, "minSkill": 0 },
+    { "id": "i-south-2", "type": "imp", "x": 42.5, "y": 8, "z": 79.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "i-south-3", "type": "imp", "x": 54.5, "y": 8, "z": 79.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 0 },
+    { "id": "z-south-4", "type": "zombie", "x": 48.5, "y": 8, "z": 88.5, "yaw": 0,
+      "trigger": "sight", "minSkill": 1 },
+    { "id": "s-south-5", "type": "lost_soul", "x": 44.5, "y": 12, "z": 82.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-exit", "minSkill": 2 },
+    { "id": "s-south-6", "type": "lost_soul", "x": 52.5, "y": 12, "z": 82.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-exit", "minSkill": 3 },
+    { "id": "b-south-7", "type": "baron", "x": 48.5, "y": 8, "z": 74.5, "yaw": 3.141592653589793,
+      "trigger": "switch", "triggerId": "sw-exit", "minSkill": 4 }
+  ],
+
+  "pickups": [
+    { "id": "p-bonus-1", "kind": "health", "variant": "bonus", "x": 48.5, "y": 9.1, "z": 48.5 },
+    { "id": "p-clip-1",  "kind": "ammo", "variant": "bullets", "amount": 20, "x": 41.5, "y": 8.1, "z": 55.5 },
+    { "id": "p-stim-1",  "kind": "health", "variant": "stimpack", "x": 55.5, "y": 8.1, "z": 55.5 },
+
+    { "id": "p-shotgun",  "kind": "weapon", "variant": "shotgun", "x": 48.5, "y": 8.1, "z": 24.5 },
+    { "id": "p-shells-1", "kind": "ammo", "variant": "shells", "amount": 8, "x": 41.5, "y": 8.1, "z": 25.5 },
+    { "id": "p-stim-2",   "kind": "health", "variant": "stimpack", "x": 26.5, "y": 8.1, "z": 5.5 },
+    { "id": "p-armor-1",  "kind": "armor", "variant": "green", "x": 43.5, "y": 8.1, "z": 8.5 },
+    { "id": "p-clip-2",   "kind": "ammo", "variant": "bullets", "amount": 20, "x": 52.5, "y": 8.1, "z": 8.5 },
+    { "id": "p-shells-2", "kind": "ammo", "variant": "shells", "amount": 8, "x": 65.5, "y": 8.1, "z": 5.5 },
+    { "id": "p-medikit-1","kind": "health", "variant": "medikit", "x": 65.5, "y": 8.1, "z": 8.5 },
+
+    { "id": "k-blue", "kind": "key", "variant": "blue", "x": 33.5, "y": 8.1, "z": 6.5, "countsAsItem": false },
+
+    { "id": "p-shells-3", "kind": "ammo", "variant": "shells", "amount": 8, "x": 12.5, "y": 8.1, "z": 41.5 },
+    { "id": "p-stim-3",   "kind": "health", "variant": "stimpack", "x": 24.5, "y": 8.1, "z": 53.5 },
+    { "id": "k-yellow", "kind": "key", "variant": "yellow", "x": 17.5, "y": 9.1, "z": 47.5, "countsAsItem": false },
+
+    { "id": "p-chaingun",  "kind": "weapon", "variant": "chaingun", "x": 74.5, "y": 8.1, "z": 38.5 },
+    { "id": "p-clip-3",    "kind": "ammo", "variant": "bullets", "amount": 40, "x": 76.5, "y": 8.1, "z": 38.5 },
+    { "id": "p-medikit-2", "kind": "health", "variant": "medikit", "x": 90.5, "y": 8.1, "z": 50.5 },
+    { "id": "p-armor-2",   "kind": "armor", "variant": "green", "x": 72.5, "y": 8.1, "z": 57.5 },
+    { "id": "k-red", "kind": "key", "variant": "red", "x": 83.5, "y": 11.1, "z": 45.5, "countsAsItem": false },
+
+    { "id": "p-medikit-3", "kind": "health", "variant": "medikit", "x": 36.5, "y": 8.1, "z": 72.5 },
+    { "id": "p-shells-4",  "kind": "ammo", "variant": "shells", "amount": 8, "x": 60.5, "y": 8.1, "z": 72.5 },
+    { "id": "p-backpack",  "kind": "backpack", "x": 48.5, "y": 8.1, "z": 80.5 },
+
+    { "id": "p-secret1-plasma", "kind": "weapon", "variant": "plasma", "x": 69.5, "y": 8.1, "z": 6.5, "secret": true },
+    { "id": "p-secret1-cells",  "kind": "ammo", "variant": "cells", "amount": 40, "x": 70.5, "y": 8.1, "z": 6.5, "secret": true },
+
+    { "id": "p-secret2-armor", "kind": "armor", "variant": "blue", "x": 5.5, "y": 8.1, "z": 47.5, "secret": true },
+    { "id": "p-secret2-soul",  "kind": "health", "variant": "soulsphere", "x": 6.5, "y": 8.1, "z": 45.5, "secret": true },
+    { "id": "p-secret2-rocket","kind": "weapon", "variant": "rocket", "x": 4.5, "y": 8.1, "z": 49.5, "secret": true }
+  ],
+
+  "doors": [
+    {
+      "id": "d-blue",
+      "x": 39, "y": 8, "z": 46, "w": 1, "h": 4, "d": 3,
+      "key": "blue", "block": "metal", "frameBlock": "tech_panel",
+      "openMs": 700, "lockedMessage": "You need the blue keycard."
+    },
+    {
+      "id": "d-yellow",
+      "x": 57, "y": 8, "z": 46, "w": 1, "h": 4, "d": 3,
+      "key": "yellow", "block": "metal", "frameBlock": "tech_panel",
+      "openMs": 700, "lockedMessage": "You need the yellow keycard."
+    },
+    {
+      "id": "d-red",
+      "x": 47, "y": 8, "z": 57, "w": 3, "h": 4, "d": 1,
+      "key": "red", "block": "metal", "frameBlock": "hellstone",
+      "openMs": 900, "lockedMessage": "You need the red keycard."
+    },
+    {
+      "id": "d-secret-1",
+      "x": 67, "y": 8, "z": 6, "w": 1, "h": 3, "d": 3,
+      "key": "none", "block": "brick",
+      "switchOnly": true, "secret": true, "openMs": 900
+    },
+    {
+      "id": "d-secret-2",
+      "x": 9, "y": 8, "z": 46, "w": 1, "h": 3, "d": 3,
+      "key": "none", "block": "metal",
+      "switchOnly": true, "secret": true, "openMs": 900
+    }
+  ],
+
+  "switches": [
+    {
+      "id": "sw-secret-1",
+      "x": 67, "y": 10, "z": 4,
+      "face": 1, "block": "brick", "activeBlock": "neon", "hidden": true,
+      "targets": ["d-secret-1"],
+      "message": "The armoury wall splits open."
+    },
+    {
+      "id": "sw-secret-2",
+      "x": 9, "y": 10, "z": 42,
+      "face": 0, "block": "metal", "activeBlock": "neon", "hidden": true,
+      "targets": ["d-secret-2"],
+      "message": "A vault seal releases somewhere west."
+    },
+    {
+      "id": "sw-exit",
+      "x": 48, "y": 10, "z": 91,
+      "face": 4, "block": "tech_panel", "activeBlock": "neon",
+      "targets": ["exit"],
+      "message": "The way out is open."
+    }
+  ],
+
+  "secrets": [
+    { "id": "s-armoury", "x": 68, "y": 8, "z": 5, "w": 4, "h": 4, "d": 4,
+      "message": "A secret is revealed!" },
+    { "id": "s-vault", "x": 3, "y": 8, "z": 44, "w": 6, "h": 4, "d": 7,
+      "message": "A secret is revealed!" }
+  ],
+
+  "exit": {
+    "x": 44, "y": 8, "z": 86, "w": 9, "h": 3, "d": 5,
+    "requiresSwitch": "sw-exit",
+    "nextLevelId": "e1m4-blackout",
+    "endsEpisode": false
+  }
+}

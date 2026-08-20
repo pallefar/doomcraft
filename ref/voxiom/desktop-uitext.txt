@@ -1,0 +1,24 @@
+Press Tab for full map
+2
+0
+00:00
+Soldier#001 joined the battle
+FHRTHTRNT<32> joined the battle
+FHRTHTRNT<32> left the battle
+Soldier#003 joined the battle
+Tip: You automatically pick up surrounding items if your inventory is not full.
+Shift to sprint
+C to crouch
+0 / 100
+100 / 100
+Press X to open inventory
+1
+99
+2
+3
+4
+5
+Click anywhere to respawn!
+Killed by Unknown
+Waiting for players...(2/50)
+Loading Terrain (100.00%)...

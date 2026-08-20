@@ -1,0 +1,9 @@
+{
+  "//": "Solution file. `npx tsc -b` builds shared, then client and server against its declarations.",
+  "files": [],
+  "references": [
+    { "path": "./shared" },
+    { "path": "./client" },
+    { "path": "./server" }
+  ]
+}

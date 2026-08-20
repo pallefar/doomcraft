@@ -1,0 +1,15 @@
+{
+  "tTitle": 848,
+  "tWorld": 3,
+  "live": true,
+  "started": false,
+  "fps": {
+    "frames": 1742,
+    "medianMs": 16.6,
+    "p95Ms": 18.2,
+    "p99Ms": 18.6,
+    "fpsMedian": 60.2,
+    "fps1pctLow": 53.8
+  },
+  "bytes": 621
+}

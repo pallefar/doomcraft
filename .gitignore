@@ -1,0 +1,10 @@
+node_modules/
+dist/
+tools/.profile/
+ref/**/video-*/
+shots/
+*.log
+.DS_Store
+
+# JsonFileStore writes here
+server/.data/

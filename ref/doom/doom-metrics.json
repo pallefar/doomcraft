@@ -1,0 +1,10 @@
+{
+  "source": "https://archive.org/details/DoomsharewareEpisode",
+  "engine": "em-dosbox",
+  "canvas": {
+    "w": 560,
+    "h": 384
+  },
+  "note": "DOOM 1993 runs at 320x200 internally, 35 tics/sec. fps is not comparable to a modern renderer; this bar is for LEVEL DESIGN, PACE, ENEMY BEHAVIOUR and READABILITY, not for frame rate.",
+  "videoBytes": 7362046
+}

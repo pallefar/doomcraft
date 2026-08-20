@@ -1,0 +1,229 @@
+{
+  "$schema": "doomcraft-level-source/1",
+  "sourceVersion": 1,
+
+  "meta": {
+    "id": "e1m1-hangar",
+    "name": "Hangar",
+    "episodeId": "e1",
+    "episodeName": "Knee-Deep in the Blocks",
+    "episodeIndex": 1,
+    "levelIndex": 1,
+    "author": "Doomcraft",
+    "description": "A UAC landing bay gone quiet. Dark service corridors feed a lit hangar floor; the blue keycard is out in the open and the thing guarding the east wing is not. Find the exit switch.",
+    "parTimeSec": 105,
+    "musicCue": "e1m1",
+    "outsideBlock": "bedrock",
+    "defaultSkill": 2,
+    "palette": {
+      "skyTop": "#120e18",
+      "skyHorizon": "#2a1620",
+      "fog": "#100d14",
+      "fogNear": 18,
+      "fogFar": 74,
+      "ambient": 0.3,
+      "sun": 0.42
+    }
+  },
+
+  "bounds": { "minCX": 0, "minCZ": 0, "maxCX": 2, "maxCZ": 2 },
+
+  "//geometry": [
+    "The level is carved out of solid rock, Doom-style: brush 0 fills the whole",
+    "3x3-chunk volume with stone and brush 1 lays bedrock under it, so no CLEAR",
+    "can ever leak into a void. Every room below is a CLEAR carving out of that",
+    "mass; floors are repainted afterwards so each space reads differently.",
+    "",
+    "  R1 start hangar   x  5..27  z  5..27   floor y7   ceiling y18",
+    "  C1 dark corridor  x 15..17  z 28..44   floor y7   ceiling y13",
+    "  R2 hangar floor   x  5..43  z 45..75   floor y7   ceiling y21   (blue key)",
+    "  D1 BLUE DOOR      x 44      z 56..58   y 8..11",
+    "  C2 airlock        x 45..55  z 56..58   floor y7   ceiling y13",
+    "  R3 east wing      x 57..87  z 45..75   floor y7   ceiling y21   (exit)",
+    "  C3 return duct    x 71..73  z 25..44   floor y7   ceiling y13",
+    "  R4 catwalk hall   x 29..73  z 17..24   floor y7, stairs up to y13 at the west end",
+    "  W1 one-way window x 28      z 19..21   y 14..16  -> 6-block drop into R1",
+    "  S1 secret alcove  x  1.. 3  z 13..17   behind a fake wall in R1",
+    "",
+    "The loop only runs one way. You cannot climb from R1 into R4, so the exit in",
+    "R3 is behind the blue door and nothing else; the catwalk is the shortcut home."
+  ],
+
+  "brushes": [
+    { "kind": "box", "block": "stone",   "x": 0, "y": 2, "z": 0, "w": 96, "h": 29, "d": 96 },
+    { "kind": "box", "block": "bedrock", "x": 0, "y": 0, "z": 0, "w": 96, "h": 2,  "d": 96 },
+
+    { "kind": "clear", "x": 5,  "y": 8, "z": 5,  "w": 23, "h": 10, "d": 23 },
+    { "kind": "box", "block": "tech_panel", "x": 4, "y": 7, "z": 4, "w": 25, "h": 1, "d": 25 },
+
+    { "kind": "clear", "x": 15, "y": 8, "z": 28, "w": 3, "h": 5, "d": 17 },
+    { "kind": "box", "block": "rusted_metal", "x": 14, "y": 7, "z": 28, "w": 5, "h": 1, "d": 17 },
+
+    { "kind": "clear", "x": 5,  "y": 8, "z": 45, "w": 39, "h": 13, "d": 31 },
+    { "kind": "box", "block": "metal", "x": 4, "y": 7, "z": 44, "w": 41, "h": 1, "d": 33 },
+
+    { "kind": "box", "block": "tech_panel", "x": 44, "y": 8, "z": 55, "w": 1, "h": 5, "d": 5 },
+
+    { "kind": "clear", "x": 45, "y": 8, "z": 56, "w": 11, "h": 5, "d": 3 },
+    { "kind": "box", "block": "rusted_metal", "x": 44, "y": 7, "z": 55, "w": 13, "h": 1, "d": 5 },
+    { "kind": "clear", "x": 56, "y": 8, "z": 56, "w": 1, "h": 4, "d": 3 },
+
+    { "kind": "clear", "x": 57, "y": 8, "z": 45, "w": 31, "h": 13, "d": 31 },
+    { "kind": "box", "block": "tech_panel", "x": 56, "y": 7, "z": 44, "w": 33, "h": 1, "d": 33 },
+
+    { "kind": "clear", "x": 71, "y": 8, "z": 25, "w": 3, "h": 5, "d": 20 },
+    { "kind": "box", "block": "rusted_metal", "x": 70, "y": 7, "z": 24, "w": 5, "h": 1, "d": 21 },
+
+    { "kind": "clear", "x": 29, "y": 8, "z": 17, "w": 45, "h": 9, "d": 8 },
+    { "kind": "box", "block": "rusted_metal", "x": 28, "y": 7, "z": 16, "w": 47, "h": 1, "d": 10 },
+    { "kind": "stairs", "block": "metal", "dir": "-x", "thickness": 1, "x": 29, "y": 8, "z": 17, "w": 6, "h": 6, "d": 8 },
+    { "kind": "clear", "x": 28, "y": 14, "z": 19, "w": 1, "h": 3, "d": 3 },
+
+    { "kind": "clear", "x": 1, "y": 8, "z": 13, "w": 3, "h": 4, "d": 5 },
+    { "kind": "box", "block": "bone", "x": 0, "y": 7, "z": 12, "w": 5, "h": 1, "d": 7 },
+
+    { "kind": "box", "block": "cobblestone", "x": 12, "y": 8, "z": 56, "w": 2, "h": 6, "d": 2 },
+    { "kind": "box", "block": "cobblestone", "x": 34, "y": 8, "z": 56, "w": 2, "h": 6, "d": 2 },
+    { "kind": "box", "block": "cobblestone", "x": 64, "y": 8, "z": 56, "w": 2, "h": 6, "d": 2 },
+    { "kind": "box", "block": "cobblestone", "x": 78, "y": 8, "z": 64, "w": 2, "h": 6, "d": 2 },
+
+    { "kind": "box", "block": "hellstone", "x": 35, "y": 7, "z": 63, "w": 7, "h": 1, "d": 7 },
+    { "kind": "box", "block": "lava", "x": 36, "y": 7, "z": 64, "w": 5, "h": 1, "d": 5 },
+
+    { "kind": "box", "block": "neon", "x": 15, "y": 17, "z": 14, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 14, "y": 20, "z": 52, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 30, "y": 20, "z": 68, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 66, "y": 20, "z": 52, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 76, "y": 20, "z": 68, "w": 3, "h": 1, "d": 1 },
+    { "kind": "box", "block": "neon", "x": 84, "y": 11, "z": 58, "w": 1, "h": 1, "d": 5 }
+  ],
+
+  "spawns": [
+    { "kind": "player", "x": 16.5, "y": 8, "z": 10.5, "yaw": 3.141592653589793, "index": 0 },
+    { "kind": "coop",   "x": 13.5, "y": 8, "z": 10.5, "yaw": 3.141592653589793, "index": 1 },
+    { "kind": "coop",   "x": 19.5, "y": 8, "z": 10.5, "yaw": 3.141592653589793, "index": 2 },
+    { "kind": "coop",   "x": 16.5, "y": 8, "z": 7.5,  "yaw": 3.141592653589793, "index": 3 },
+    { "kind": "deathmatch", "x": 10.5, "y": 8, "z": 50.5, "yaw": 1.5707963267948966, "index": 0 },
+    { "kind": "deathmatch", "x": 38.5, "y": 8, "z": 70.5, "yaw": 0, "index": 1 },
+    { "kind": "deathmatch", "x": 62.5, "y": 8, "z": 50.5, "yaw": 3.141592653589793, "index": 2 },
+    { "kind": "deathmatch", "x": 82.5, "y": 8, "z": 70.5, "yaw": 4.71238898038469, "index": 3 }
+  ],
+
+  "enemies": [
+    { "id": "z-corridor-1", "type": "zombie", "x": 16.5, "y": 8, "z": 33.5, "yaw": 0,
+      "trigger": "sight", "minSkill": 0,
+      "patrol": [[16.5, 8, 33.5], [16.5, 8, 42.5]] },
+    { "id": "z-corridor-2", "type": "zombie", "x": 16.5, "y": 8, "z": 41.5, "yaw": 0,
+      "trigger": "sight", "minSkill": 1, "ambush": true },
+
+    { "id": "i-floor-1", "type": "imp", "x": 13.5, "y": 8, "z": 52.5, "yaw": 3.141592653589793,
+      "trigger": "proximity", "radius": 15 },
+    { "id": "i-floor-2", "type": "imp", "x": 34.5, "y": 8, "z": 68.5, "yaw": 0,
+      "trigger": "proximity", "radius": 15 },
+    { "id": "z-floor-3", "type": "zombie", "x": 30.5, "y": 8, "z": 49.5, "yaw": 3.141592653589793,
+      "trigger": "sight", "minSkill": 1,
+      "patrol": [[30.5, 8, 49.5], [8.5, 8, 49.5], [8.5, 8, 72.5], [30.5, 8, 72.5]] },
+    { "id": "s-floor-4", "type": "lost_soul", "x": 20.5, "y": 12, "z": 66.5, "yaw": 0,
+      "trigger": "proximity", "radius": 18, "minSkill": 3 },
+
+    { "id": "i-airlock", "type": "imp", "x": 50.5, "y": 8, "z": 57.5, "yaw": 1.5707963267948966,
+      "trigger": "door", "triggerId": "d-blue", "ambush": true },
+
+    { "id": "i-east-1", "type": "imp", "x": 62.5, "y": 8, "z": 50.5, "yaw": 3.141592653589793,
+      "trigger": "sight" },
+    { "id": "i-east-2", "type": "imp", "x": 80.5, "y": 8, "z": 70.5, "yaw": 4.71238898038469,
+      "trigger": "sight" },
+    { "id": "c-east-3", "type": "cacodemon", "x": 72.5, "y": 12, "z": 60.5, "yaw": 4.71238898038469,
+      "trigger": "proximity", "radius": 20, "minSkill": 2 },
+    { "id": "s-east-4", "type": "lost_soul", "x": 66.5, "y": 13, "z": 68.5, "yaw": 0,
+      "trigger": "sight", "minSkill": 3 },
+    { "id": "b-east-5", "type": "baron", "x": 74.5, "y": 8, "z": 72.5, "yaw": 0,
+      "trigger": "switch", "triggerId": "sw-exit", "minSkill": 4 },
+
+    { "id": "z-catwalk", "type": "zombie", "x": 50.5, "y": 8, "z": 20.5, "yaw": 4.71238898038469,
+      "trigger": "sight",
+      "patrol": [[50.5, 8, 20.5], [70.5, 8, 20.5]] }
+  ],
+
+  "pickups": [
+    { "id": "p-bonus-1", "kind": "health", "variant": "bonus", "x": 6.5,  "y": 8.1, "z": 6.5 },
+    { "id": "p-bonus-2", "kind": "health", "variant": "bonus", "x": 6.5,  "y": 8.1, "z": 8.5 },
+    { "id": "p-bonus-3", "kind": "health", "variant": "bonus", "x": 8.5,  "y": 8.1, "z": 6.5 },
+    { "id": "p-stim-1",  "kind": "health", "variant": "stimpack", "x": 8.5, "y": 8.1, "z": 24.5 },
+    { "id": "p-clip-1",  "kind": "ammo", "variant": "bullets", "amount": 20, "x": 16.5, "y": 8.1, "z": 36.5 },
+
+    { "id": "p-shotgun", "kind": "weapon", "variant": "shotgun", "x": 24.5, "y": 8.1, "z": 50.5 },
+    { "id": "p-shell-1", "kind": "ammo", "variant": "shells", "amount": 8, "x": 20.5, "y": 8.1, "z": 70.5 },
+    { "id": "p-shell-2", "kind": "ammo", "variant": "shells", "amount": 8, "x": 28.5, "y": 8.1, "z": 70.5 },
+    { "id": "p-armor-green", "kind": "armor", "variant": "green", "x": 10.5, "y": 8.1, "z": 72.5 },
+
+    { "id": "k-blue", "kind": "key", "variant": "blue", "x": 24.5, "y": 8.1, "z": 60.5, "countsAsItem": false },
+
+    { "id": "p-medikit-1", "kind": "health", "variant": "medikit", "x": 60.5, "y": 8.1, "z": 70.5 },
+    { "id": "p-chaingun",  "kind": "weapon", "variant": "chaingun", "x": 84.5, "y": 8.1, "z": 50.5 },
+    { "id": "p-clip-2",    "kind": "ammo", "variant": "bullets", "amount": 40, "x": 82.5, "y": 8.1, "z": 50.5 },
+    { "id": "p-backpack",  "kind": "backpack", "x": 72.5, "y": 8.1, "z": 20.5 },
+
+    { "id": "p-secret-rocket", "kind": "weapon", "variant": "rocket", "x": 2.5, "y": 8.1, "z": 14.5, "secret": true },
+    { "id": "p-secret-ammo",   "kind": "ammo", "variant": "rockets", "amount": 4, "x": 2.5, "y": 8.1, "z": 13.5, "secret": true },
+    { "id": "p-secret-armor",  "kind": "armor", "variant": "blue", "x": 2.5, "y": 8.1, "z": 16.5, "secret": true }
+  ],
+
+  "doors": [
+    {
+      "id": "d-blue",
+      "x": 44, "y": 8, "z": 56, "w": 1, "h": 4, "d": 3,
+      "key": "blue",
+      "block": "metal",
+      "frameBlock": "tech_panel",
+      "openMs": 700,
+      "lockedMessage": "You need the blue keycard."
+    },
+    {
+      "id": "d-secret",
+      "x": 4, "y": 8, "z": 14, "w": 1, "h": 3, "d": 3,
+      "key": "none",
+      "block": "stone",
+      "switchOnly": true,
+      "secret": true,
+      "openMs": 900
+    }
+  ],
+
+  "switches": [
+    {
+      "id": "sw-secret",
+      "x": 4, "y": 10, "z": 10,
+      "face": 0,
+      "block": "stone",
+      "activeBlock": "neon",
+      "hidden": true,
+      "targets": ["d-secret"],
+      "message": "A hidden panel grinds open."
+    },
+    {
+      "id": "sw-exit",
+      "x": 88, "y": 10, "z": 60,
+      "face": 1,
+      "block": "tech_panel",
+      "activeBlock": "neon",
+      "targets": ["exit"],
+      "message": "The exit is live."
+    }
+  ],
+
+  "secrets": [
+    {
+      "id": "s-armoury",
+      "x": 1, "y": 8, "z": 13, "w": 3, "h": 4, "d": 5,
+      "message": "A secret is revealed!"
+    }
+  ],
+
+  "exit": {
+    "x": 84, "y": 8, "z": 58, "w": 4, "h": 3, "d": 5,
+    "requiresSwitch": "sw-exit",
+    "nextLevelId": "",
+    "endsEpisode": true
+  }
+}

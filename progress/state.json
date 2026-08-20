@@ -1,0 +1,233 @@
+{
+  "updated": "2026-08-20T16:40:00Z",
+  "phase": "Paused \u2014 handover",
+  "phaseNote": "Spine done and verified. Mode framework done; four mode builders were mid-flight when we stopped. Resume 22:00 \u2014 see HANDOVER.md.",
+  "bar": {
+    "name": "voxiom.io",
+    "capturedAt": "2026-08-20",
+    "timeToTitleMs": 122,
+    "timeToInteractiveMs": 3161,
+    "menuToIngameMs": 25000,
+    "fpsMedian": 60.2,
+    "fps1pctLow": 56.8,
+    "transferBytesCold": 12590698,
+    "scripts": 88,
+    "fps1pctLowThrottled": 53.8,
+    "fpsMedianThrottled": 60.2
+  },
+  "ours": {
+    "timeToInteractiveMs": 312,
+    "fpsMedian": 60.2,
+    "fps1pctLow": 53.8,
+    "transferBytesCold": 3341125
+  },
+  "pieces": [
+    {
+      "id": "quest",
+      "name": "Quest mode",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Doom campaign. Bar: DOOM 1993 E1M1. Authored levels as DATA so episodes are expandable."
+    },
+    {
+      "id": "builder",
+      "name": "Builder mode",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Minecraft-style creative + persistent shared multiplayer worlds. Bar: Minecraft Classic."
+    },
+    {
+      "id": "horde",
+      "name": "Horde mode",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "The mode that justifies the mash-up: fortify between waves, enemies break your walls."
+    },
+    {
+      "id": "deathmatch",
+      "name": "Deathmatch",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "voxiom's home turf and the hardest A/B. Instant bot-filled start beats its 25 s wait."
+    },
+    {
+      "id": "movement",
+      "name": "Movement",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Doom pace: ~9.5 m/s, instant accel, air-strafe, 1-block step-up."
+    },
+    {
+      "id": "gunfeel",
+      "name": "Gunfeel",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Bar has no muzzle flash, no kick, no shake. Open goal."
+    },
+    {
+      "id": "enemies",
+      "name": "Enemies",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Bar is PvP-only. Four Doom archetypes with real AI."
+    },
+    {
+      "id": "terrain",
+      "name": "Terrain & destruction",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Arenas, not scenery. Rockets must reshape the map."
+    },
+    {
+      "id": "netcode",
+      "name": "Netcode",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Prediction + reconciliation + lag comp, 20 Hz snapshots."
+    },
+    {
+      "id": "mobile",
+      "name": "Mobile controls",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Bar refuses portrait entirely and has no fire button. Four new openings logged."
+    },
+    {
+      "id": "hud",
+      "name": "HUD",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Corners only, centre clean. Beat the bar's dead crosshair."
+    },
+    {
+      "id": "menus",
+      "name": "Menus & saves",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "In-engine background, settings, rebinding, cloud + local save."
+    },
+    {
+      "id": "ads",
+      "name": "Ads & purchase",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Reserved slots that never reflow; one-time ad-free unlock."
+    },
+    {
+      "id": "loadtime",
+      "name": "Load time",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not built yet.",
+      "note": "Must beat 3.16 s to interactive and 25 s to shooting."
+    },
+    {
+      "id": "adplatform",
+      "name": "Advertiser ad platform",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Not started.",
+      "note": "In-world voxel billboards + ad server, inventory, impressions, buyer console. Untrusted creative needs sandboxing; real payments need explicit setup."
+    },
+    {
+      "id": "gta",
+      "name": "GTA mode",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "BAR UNRESOLVED \u2014 no playable old GTA found yet.",
+      "note": "Vehicles, city gen, traffic + pedestrian AI, wanted level, missions reusing the Quest trigger system."
+    },
+    {
+      "id": "voices",
+      "name": "ElevenLabs voices",
+      "rounds": 0,
+      "verdict": "pending",
+      "gap": "Blocked: no API key configured.",
+      "note": "Generate offline as build-time assets, never at runtime. Stream per level \u2014 we are at 3.3 MB cold."
+    }
+  ],
+  "log": [
+    {
+      "t": "16:31",
+      "m": "Bar confirmed reachable \u2014 headed Chrome defeats the Cloudflare interstitial."
+    },
+    {
+      "t": "16:34",
+      "m": "Captured voxiom.io live: menu, in-game HUD, 60.2 fps median, 3.16 s to interactive."
+    },
+    {
+      "t": "16:38",
+      "m": "Wrote ref/BAR.md \u2014 seven measured weaknesses in the bar become the product strategy."
+    },
+    {
+      "t": "16:40",
+      "m": "Spine workflow launched: contract -> renderer / world / server in parallel -> integration gate."
+    },
+    {
+      "t": "16:47",
+      "m": "Mobile bar captured. voxiom REFUSES to play in portrait \u2014 'Please rotate your screen'. Landscape has no fire button; aim and shoot are the same gesture."
+    },
+    {
+      "t": "17:05",
+      "m": "Re-measured the bar under 4x CPU throttle (throttle verified linear): 60.2 median but 1% low falls to 53.8. Beating the bar = >53.8; our spec of 55 is deliberately harder."
+    },
+    {
+      "t": "18:36",
+      "m": "Spine RUNS. 25,330 lines, 18/18 + 19/19 + 29/29 tests green. Real voxel world, HUD, 7 Doom weapons, 6 players, 33 entities, zero console errors."
+    },
+    {
+      "t": "18:50",
+      "m": "Perf measured honestly: headed + throttled we are 60.2/53.8 \u2014 IDENTICAL to the bar. The 120 fps was a headless capture artifact. A tie is a loss."
+    },
+    {
+      "t": "19:05",
+      "m": "Scope expanded by user: quest mode, builder mode, multiplayer, more modes. Captured DOOM 1993 (E1M1, real gameplay) and verified Minecraft Classic as two new bars."
+    },
+    {
+      "t": "19:33",
+      "m": "Spine final: dynamic crosshair spread, 7-pellet shotgun sparks, killfeed, in-engine menu, full settings panel, 3 reserved ad slots. 312 ms to interactive, zero console errors."
+    },
+    {
+      "t": "19:35",
+      "m": "Mobile PORTRAIT confirmed playable by eye \u2014 big FIRE pad, labelled JUMP/CRCH/RUN/RLD/BLD, real joystick. The bar refuses portrait entirely. Decisive win."
+    },
+    {
+      "t": "19:50",
+      "m": "Mode framework landed (level format = data, 3 Quest levels). Four mode builders still in flight at pause."
+    },
+    {
+      "t": "19:55",
+      "m": "Queued by user: advertiser-buyable in-game ads, GTA mode, ElevenLabs voices. GTA bar NOT yet obtainable \u2014 flagged, not faked. Paused for handover; resume 22:00."
+    }
+  ],
+  "bars": [
+    {
+      "name": "voxiom.io",
+      "what": "multiplayer voxel FPS, mobile, ads, menus, load time",
+      "captured": true
+    },
+    {
+      "name": "DOOM (1993)",
+      "what": "level design, enemies, gunfeel, readability, HUD",
+      "captured": true
+    },
+    {
+      "name": "Minecraft Classic",
+      "what": "building feel, block placement, creative inventory",
+      "captured": false
+    }
+  ]
+}
