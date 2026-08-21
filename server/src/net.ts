@@ -15,6 +15,7 @@
 import {
   BlockDeltaBuffer,
   C2S,
+  CAP_INFLATE,
   CAP_LOW_SPEC,
   CHUNK_HEIGHT,
   CHUNK_SIZE,
@@ -30,8 +31,13 @@ import {
   PF_REMOVED,
   PF_SPAWN,
   EF_ALL,
+  EF_HEALTH,
+  EF_POS,
   EF_REMOVED,
   EF_SPAWN,
+  EF_STATE,
+  EF_VEL,
+  EF_YAW,
   RF_ALL,
   RF_REMOVED,
   RF_SPAWN,
@@ -48,6 +54,7 @@ import {
   WORLD_MIN_CHUNK,
   MAX_ENTITIES,
   MAX_PROJECTILES,
+  EntityType,
   clamp,
   copyPlayerRecord,
   createBlockEditCommand,
@@ -61,15 +68,23 @@ import {
   decodeInput,
   decodePing,
   encodeBlockDeltas,
+  CHUNK_HEADER_BYTES,
+  CHUNK_Z_HEADER_BYTES,
   encodeChatS2C,
   encodeChunk,
+  encodeChunkZ,
   encodeDamage,
   encodeKill,
   encodePong,
   encodeSnapshot,
   encodeWelcome,
   playerDeltaMask,
+  quantizeAngle,
+  quantizePos,
+  quantizeVel,
   readMessageId,
+  rleEncodeInto,
+  rleMaxBytes,
 } from '@doomcraft/shared';
 import {
   C2S_MODE,
@@ -115,11 +130,85 @@ export const CHUNK_STEADY_BYTES = 16 * 1024;
 export const SOCKET_BACKLOG_LIMIT = 512 * 1024;
 /** A full (baseline-free) snapshot at least this often, for safety. */
 export const FULL_SNAPSHOT_INTERVAL_MS = 3000;
+/**
+ * Cold-cache deflates one room may run in one 20 ms slice of its 50 ms tick.
+ *
+ * Compressing a chunk costs ~0.48 ms; the cache makes that a once-per-chunk
+ * cost for the whole room's lifetime, but the *first* joiner into a fresh room
+ * pays all of it. Uncapped, a 96 KB burst budget buys ~19 compressed chunks in
+ * one tick — 9 ms of deflate in a room whose whole tick is normally 0.4 ms.
+ * Six keeps the worst tick under 3 ms and still streams 120 chunks/s, which is
+ * faster than the uncompressed path manages today.
+ */
+export const CHUNK_DEFLATES_PER_TICK = 6;
 
 const CHUNK_SLOTS = WORLD_CHUNK_COUNT;
 
+/**
+ * Zero-length sentinel, never sent. It means two things depending on where it
+ * is found, and both are "do not deflate this chunk right now":
+ *   - returned from `compressedChunk`: cold chunk, this tick's deflate budget
+ *     is spent, come back next tick;
+ *   - stored in `chunkZCache`: this chunk does not compress, stop trying.
+ */
+const EMPTY_PACKET = new Uint8Array(0);
+
 function chunkSlot(cx: number, cz: number): number {
   return (cx - WORLD_MIN_CHUNK) + (cz - WORLD_MIN_CHUNK) * WORLD_CHUNKS_PER_AXIS;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Chunk compression
+ *
+ * The join burst is 169 chunks and 2.99 MB, and it is the same 2.99 MB for
+ * every player who ever joins the room. RLE'd voxels deflate 3.8x, so the
+ * bytes are the easy part; the trap is *where* the CPU goes.
+ *
+ *   - `ws` permessage-deflate gets the same 3.8x but costs a zlib context per
+ *     socket and compresses every 20 Hz snapshot forever. Measured on this
+ *     tree: server CPU per joiner 67 -> 253 ms, and steady-state throughput
+ *     5.7 -> 13.2 millicores/player (players/core 177 -> 76). Rejected.
+ *   - Compressing here instead means the deflate is per *chunk*, so it is
+ *     cached and the second joiner pays a memcpy. It also never touches the
+ *     snapshot path, which is where the tick budget lives.
+ *
+ * This module cannot import `node:zlib` — it also runs inside the browser's
+ * local-server Worker. So the deflate arrives by injection. No compressor
+ * registered (the Worker) or no `CAP_INFLATE` from the client (an older build)
+ * and the uncompressed `S2C.CHUNK` path runs exactly as it always has.
+ * ------------------------------------------------------------------------ */
+
+/** Raw-deflate `src`, or return null to fall back to the uncompressed path. */
+export type ChunkCompressor = (src: Uint8Array) => Uint8Array | null;
+
+let chunkCompressor: ChunkCompressor | null = null;
+
+/**
+ * Install the raw-deflate used for `S2C.CHUNK_Z`. Called once at boot by
+ * `server/src/index.ts`; left unset everywhere else, including the Worker.
+ */
+export function setChunkCompressor(fn: ChunkCompressor | null): void {
+  chunkCompressor = fn;
+}
+
+/** Whether compressed chunks are available in this process at all. */
+export function hasChunkCompressor(): boolean {
+  return chunkCompressor !== null;
+}
+
+/**
+ * One RLE staging buffer for the whole process, not one per room.
+ *
+ * It only lives between `rleEncodeInto` and the synchronous deflate on the very
+ * next line, and a Node server is single threaded, so there is no room in which
+ * two users of it can overlap. Per-room it would be 192 KB of permanently idle
+ * memory on a box that runs eighty rooms per core.
+ */
+let rleScratch: Uint8Array | null = null;
+function rleScratchFor(voxelCount: number): Uint8Array {
+  const need = rleMaxBytes(voxelCount);
+  if (rleScratch === null || rleScratch.length < need) rleScratch = new Uint8Array(need);
+  return rleScratch;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -225,6 +314,27 @@ export class Connection {
   readonly knownEntityGen = new Uint16Array(MAX_ENTITIES);
   readonly knownProj = new Uint8Array(MAX_PROJECTILES);
   readonly knownProjGen = new Uint16Array(MAX_PROJECTILES);
+  /**
+   * Per-entity delta baseline: the last **quantised** values this connection
+   * was actually sent, indexed by *sim slot* and only valid while
+   * `knownEntity[slot] === 1 && knownEntityGen[slot] === sim.entGen[slot]`, so
+   * a recycled slot can never inherit its predecessor's baseline.
+   *
+   * Quantised, not raw, for the same reason `playerDeltaMask` compares
+   * quantised values: "changed" has to mean the same thing here as it does in
+   * `encodeSnapshot`, or sub-quantum jitter would bill bytes that carry no
+   * information — or worse, a real change would round to the same wire value
+   * and never be sent again.
+   */
+  readonly entBaseQX = new Int16Array(MAX_ENTITIES);
+  readonly entBaseQY = new Int16Array(MAX_ENTITIES);
+  readonly entBaseQZ = new Int16Array(MAX_ENTITIES);
+  readonly entBaseQVX = new Int16Array(MAX_ENTITIES);
+  readonly entBaseQVY = new Int16Array(MAX_ENTITIES);
+  readonly entBaseQVZ = new Int16Array(MAX_ENTITIES);
+  readonly entBaseQYaw = new Uint16Array(MAX_ENTITIES);
+  readonly entBaseHealth = new Uint16Array(MAX_ENTITIES);
+  readonly entBaseState = new Uint8Array(MAX_ENTITIES);
   readonly chunkSent = new Uint8Array(CHUNK_SLOTS);
   chunksAcked = 0;
   loadingIn = true;
@@ -297,6 +407,17 @@ export class NetHub {
   private readonly edit = createBlockEditCommand();
   private readonly reader = new PacketReader();
   private readonly shared = new PacketWriter(16384);
+
+  /* --- compressed chunk cache (see "Chunk compression" above) --- */
+  /**
+   * slot -> the finished `S2C.CHUNK_Z` packet for that chunk, ready to hand
+   * straight to a socket. Built lazily on first send and dropped whenever the
+   * chunk's voxels change, so it is never stale and idle rooms never pay for
+   * it. ~4.9 KB per cached chunk, ~0.83 MB if a room ends up streaming all 169.
+   */
+  private readonly chunkZCache: (Uint8Array | null)[] = new Array(CHUNK_SLOTS).fill(null);
+  /** Deflates spent this tick, reset by `flush`. */
+  private deflateBudget = 0;
 
   /** Simulation clock, advanced by the room each tick. */
   nowMs = 0;
@@ -654,12 +775,28 @@ export class NetHub {
   /** Ship everything produced by this tick. Call after the simulation stepped. */
   flush(): void {
     this.sendEvents();
+    this.invalidateEditedChunks();
     this.sendBlockDeltas();
+    this.deflateBudget = CHUNK_DEFLATES_PER_TICK;
     for (let i = 0; i < this.connections.length; i++) {
       const conn = this.connections[i];
       if (!conn.ready) continue;
       this.streamChunks(conn);
       this.sendSnapshot(conn);
+    }
+  }
+
+  /**
+   * Drop the cached packet for any chunk this tick's edits touched, so a joiner
+   * arriving after a firefight is never handed pre-demolition terrain. Runs off
+   * the same journal `sendBlockDeltas` reads, before the room clears it.
+   */
+  private invalidateEditedChunks(): void {
+    const j = this.world.journal;
+    if (j.count === 0) return;
+    for (let i = 0; i < j.count; i++) {
+      const slot = chunkSlot(j.x[i] >> 5, j.z[i] >> 5);
+      if (slot >= 0 && slot < CHUNK_SLOTS) this.chunkZCache[slot] = null;
     }
   }
 
@@ -757,18 +894,69 @@ export class NetHub {
         return;
       }
 
-      const voxels = this.world.ensureChunk(bestCX, bestCZ);
-      encodeChunk(w, bestCX, bestCZ, voxels);
-      conn.send(w.copy());
+      let packet = this.compressedChunk(bestSlot, bestCX, bestCZ, conn);
+      if (packet === null) {
+        // Uncompressed path: unchanged since the beginning. This is what the
+        // browser's local-server Worker and any pre-v3 client get.
+        const voxels = this.world.ensureChunk(bestCX, bestCZ);
+        encodeChunk(w, bestCX, bestCZ, voxels);
+        packet = w.copy();
+      } else if (packet.length === 0) {
+        // The deflate budget for this tick is spent and this chunk is cold.
+        // Stop here; the next tick picks the same chunk up.
+        return;
+      }
+      conn.send(packet);
       conn.chunkSent[bestSlot] = 1;
       conn.chunksAcked++;
       conn.stats.chunksSent++;
-      budget -= w.offset;
+      budget -= packet.length;
 
       // The spawn neighbourhood is what "interactive" means; once it is out the
       // rest can trickle at the steady rate.
       if (conn.loadingIn && conn.chunksAcked >= 25) conn.loadingIn = false;
     }
+  }
+
+  /**
+   * The cached `S2C.CHUNK_Z` packet for one chunk.
+   *
+   * Returns `null` when this connection or this process has no compressed path
+   * (caller falls back to `S2C.CHUNK`), and a zero-length view when the chunk
+   * is cold and this tick's deflate budget is already spent.
+   *
+   * Cache hits are the common case by a wide margin: the deflate is per chunk
+   * per room, so joiner #2 onwards costs a `send` and nothing else.
+   */
+  private compressedChunk(
+    slot: number, cx: number, cz: number, conn: Connection,
+  ): Uint8Array | null {
+    const deflate = chunkCompressor;
+    if (deflate === null || (conn.caps & CAP_INFLATE) === 0) return null;
+
+    const cached = this.chunkZCache[slot];
+    // A chunk already judged incompressible goes down the raw path for free.
+    if (cached === EMPTY_PACKET) return null;
+    if (cached !== null) return cached;
+    if (this.deflateBudget <= 0) return EMPTY_PACKET;
+
+    const voxels = this.world.ensureChunk(cx, cz);
+    const scratch = rleScratchFor(voxels.length);
+    const rleLen = rleEncodeInto(voxels, scratch, 0);
+    const z = deflate(scratch.subarray(0, rleLen));
+    // A compressor that gave up, or one that made the chunk bigger, is not
+    // worth a second message type. Fall back and never ask again this tick.
+    if (z === null || z.length + CHUNK_Z_HEADER_BYTES >= rleLen + CHUNK_HEADER_BYTES) {
+      this.deflateBudget--;
+      // Remember the verdict. Without this every joiner re-deflates a chunk
+      // that has already proved it will not shrink.
+      this.chunkZCache[slot] = EMPTY_PACKET;
+      return null;
+    }
+    this.deflateBudget--;
+    const packet = encodeChunkZ(conn.writer, cx, cz, rleLen, z).copy();
+    this.chunkZCache[slot] = packet;
+    return packet;
   }
 
   /** Assemble and send one delta snapshot for a connection. */
@@ -853,10 +1041,90 @@ export class NetHub {
       }
     }
 
-    /* --- entities --- */
+    /* --- entities ---
+     *
+     * Delta-encoded against `conn.entBase*`. An entity whose quantised state is
+     * identical to what this connection was last sent is OMITTED ENTIRELY: it
+     * costs zero bytes, not the 23 a full record costs. ~33 stationary pickups
+     * used to be retransmitted in full 20x/s for the whole match.
+     *
+     * TRANSPORT ASSUMPTION — READ THIS BEFORE ADDING A TRANSPORT.
+     * `knownEntity` and `entBase*` advance at SEND time, never on an ack, so
+     * "the last thing we sent" is taken to be "the baseline the client holds".
+     * On `ws` and on the local-server Worker's MessagePort that is exactly
+     * true: both are reliable and ordered, a sent snapshot arrives once and in
+     * order, and this costs nothing.
+     *
+     * It is NOT true on a lossy transport, and this tree has one: the peer-host
+     * WebRTC path (client/src/net/webrtc.ts) deliberately carries snapshots on
+     * an unreliable, unordered data channel. A dropped datagram there leaves
+     * the client decoding against a baseline it never received — for entities
+     * that means a stale record (or, if the lost snapshot held the EF_REMOVED,
+     * a ghost) that no later snapshot repairs, because we will never re-send a
+     * field we believe the client already has.
+     *
+     * That transport pays for it one layer down and the repair is now
+     * LOAD-BEARING, not a nicety: every unreliable datagram carries a sequence
+     * number, the receiver notices a gap, the guest asks for a resync on the
+     * reliable channel, and `peerHost` answers by setting `conn.baselineTick
+     * = 0` — which lands on the `full` test above and re-describes every
+     * entity. Before entities were delta-coded a lost EF_REMOVED healed itself
+     * on the next tick, because the client pruned anything the server stopped
+     * mentioning; it does not any more (see the SNAP_FULL prune in
+     * client/src/net/client.ts).
+     *
+     * So: any new transport that can drop or reorder must either provide the
+     * same gap-detect-and-resync, or the honest fix — the client echoes the
+     * tick it applied, the server keeps a ring of per-tick baselines, and
+     * `entBase*` only ever advances to an ACKNOWLEDGED tick. Widening
+     * FULL_SNAPSHOT_INTERVAL_MS is not a fix; it only bounds the damage.
+     */
     for (let e = 0; e < MAX_ENTITIES; e++) {
       if (sim.entActive[e] !== 1) continue;
+
+      const isPickup = sim.entType[e] >= EntityType.PICKUP_HEALTH;
+      const qx = quantizePos(sim.entX[e]);
+      const qy = quantizePos(sim.entY[e]);
+      const qz = quantizePos(sim.entZ[e]);
+      const qvx = quantizeVel(sim.entVX[e]);
+      const qvy = quantizeVel(sim.entVY[e]);
+      const qvz = quantizeVel(sim.entVZ[e]);
+      // A pickup's yaw is server-side decoration: `Simulation.stepPickups`
+      // spins it every single tick, and nothing on the client ever reads it —
+      // pickups are drawn spinning off the renderer's own clock, and every
+      // consumer of `RemoteEntityView.yaw` filters to monsters first. Sending
+      // it would turn each pickup into a 6-byte delta 20x/s and give back most
+      // of what this whole block saves. Pin the baseline at 0 so the compare
+      // below can never resurrect it.
+      const qyaw = isPickup ? 0 : quantizeAngle(sim.entYaw[e]);
+      const health = Math.max(0, Math.min(65535, sim.entHealth[e]));
+      const state = sim.entState[e];
+
+      // A full snapshot carries no baseline, so every entity must be complete.
+      const known = !full
+        && conn.knownEntity[e] === 1
+        && conn.knownEntityGen[e] === sim.entGen[e];
+
+      let mask: number;
+      if (!known) {
+        // Self-describing: type and variant ride along so the client can key
+        // the record by id without inheriting a recycled slot's identity.
+        mask = EF_SPAWN | EF_ALL;
+        if (isPickup) mask &= ~EF_YAW;
+      } else {
+        mask = 0;
+        if (qx !== conn.entBaseQX[e] || qy !== conn.entBaseQY[e] || qz !== conn.entBaseQZ[e]) mask |= EF_POS;
+        if (qyaw !== conn.entBaseQYaw[e]) mask |= EF_YAW;
+        if (health !== conn.entBaseHealth[e]) mask |= EF_HEALTH;
+        if (state !== conn.entBaseState[e]) mask |= EF_STATE;
+        if (qvx !== conn.entBaseQVX[e] || qvy !== conn.entBaseQVY[e] || qvz !== conn.entBaseQVZ[e]) mask |= EF_VEL;
+        // Nothing the wire can express has changed. Say nothing at all.
+        if (mask === 0) continue;
+      }
+
       const slot = s.addEntity(sim.entId[e]);
+      // Scratch is full. Leave the baseline alone: this entity is simply not in
+      // this snapshot, and the next one will still see it as changed.
       if (slot < 0) break;
       s.entityType[slot] = sim.entType[e];
       s.entityVariant[slot] = sim.entVariant[e];
@@ -867,13 +1135,21 @@ export class NetHub {
       s.entityVY[slot] = sim.entVY[e];
       s.entityVZ[slot] = sim.entVZ[e];
       s.entityYaw[slot] = sim.entYaw[e];
-      s.entityHealth[slot] = Math.max(0, Math.min(65535, sim.entHealth[e]));
-      s.entityState[slot] = sim.entState[e];
-      // Always self-describing: type and variant ride along so a client can key
-      // records by id without ever inheriting a recycled slot's identity.
-      s.entityMask[slot] = EF_SPAWN | EF_ALL;
+      s.entityHealth[slot] = health;
+      s.entityState[slot] = state;
+      s.entityMask[slot] = mask;
+
       conn.knownEntity[e] = 1;
       conn.knownEntityGen[e] = sim.entGen[e];
+      conn.entBaseQX[e] = qx;
+      conn.entBaseQY[e] = qy;
+      conn.entBaseQZ[e] = qz;
+      conn.entBaseQVX[e] = qvx;
+      conn.entBaseQVY[e] = qvy;
+      conn.entBaseQVZ[e] = qvz;
+      conn.entBaseQYaw[e] = qyaw;
+      conn.entBaseHealth[e] = health;
+      conn.entBaseState[e] = state;
     }
     for (let i = 0; i < sim.removedEntityCount; i++) {
       const slot = s.addEntity(sim.removedEntityId[i]);
@@ -948,6 +1224,9 @@ export class NetHub {
 
   /** Force every client to re-download the world (round restart). */
   resetWorldStreams(): void {
+    // Every caller has just regenerated or repainted the world, so every
+    // cached compressed chunk now describes terrain that no longer exists.
+    this.chunkZCache.fill(null);
     for (let i = 0; i < this.connections.length; i++) {
       const c = this.connections[i];
       c.chunkSent.fill(0);

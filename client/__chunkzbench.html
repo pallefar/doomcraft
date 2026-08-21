@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>chunk decode bench</title>
+<!--
+  Dev-only probe page, in the same spirit as __hudprobe.html. It is NOT part of
+  the build: vite's default input is index.html alone, so nothing here ships.
+
+  What it measures: the client half of the compressed join burst. Three paths,
+  the same 169 chunks, in a real browser with a real DecompressionStream:
+
+    A  main thread, uncompressed RLE   — what shipped before this change
+    B  worker, deflate + RLE           — what ships now
+    C  main thread, deflate + RLE      — the ChunkInflater fallback
+
+  The number that decides whether this was worth doing is not total CPU, it is
+  MAIN-THREAD time and long tasks: this project protects the frame budget, and
+  the whole point of the worker is that A's cost leaves the thread that draws.
+-->
+<style>body{font:13px ui-monospace,monospace;background:#0a0a0d;color:#ddd;padding:16px}</style>
+</head>
+<body>
+<pre id="out">idle</pre>
+<script type="module">
+import { CHUNK_VOLUME, rleDecode } from '@shared';
+
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += '\n' + s; };
+
+/** Split a `u32 length + bytes` stream back into packets. */
+function unframe(buf) {
+  const view = new DataView(buf);
+  const bytes = new Uint8Array(buf);
+  const packets = [];
+  let o = 0;
+  while (o + 4 <= bytes.length) {
+    const n = view.getUint32(o, true);
+    o += 4;
+    packets.push(bytes.subarray(o, o + n));
+    o += n;
+  }
+  return packets;
+}
+
+function b64ToBuf(b64) {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8.buffer;
+}
+
+/** Longest single task the main thread was stuck inside, per the platform. */
+function watchLongTasks() {
+  const tasks = [];
+  let obs = null;
+  try {
+    obs = new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) tasks.push(e.duration);
+    });
+    obs.observe({ entryTypes: ['longtask'] });
+  } catch { /* not everywhere */ }
+  return {
+    stop() {
+      try { obs?.disconnect(); } catch { /* fine */ }
+      return { count: tasks.length, maxMs: tasks.length ? Math.max(...tasks) : 0,
+               totalMs: tasks.reduce((a, b) => a + b, 0) };
+    },
+  };
+}
+
+/** A 4 ms heartbeat. Its worst gap is what a dropped frame feels like. */
+function watchHeartbeat() {
+  let last = performance.now();
+  let worst = 0;
+  const t = setInterval(() => {
+    const now = performance.now();
+    const gap = now - last - 4;
+    if (gap > worst) worst = gap;
+    last = now;
+  }, 4);
+  return { stop() { clearInterval(t); return worst; } };
+}
+
+async function inflateRaw(src, outLen) {
+  const ds = new DecompressionStream('deflate-raw');
+  const w = ds.writable.getWriter();
+  void w.write(src);
+  void w.close();
+  const dst = new Uint8Array(outLen);
+  const reader = ds.readable.getReader();
+  let off = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    dst.set(value, off);
+    off += value.length;
+  }
+  return dst;
+}
+
+/** One macrotask, so a heartbeat tick can land and report the gap it saw. */
+const yieldOnce = () => new Promise((r) => setTimeout(r, 12));
+
+/* --- A: main thread, uncompressed (the path this change replaces) --- */
+async function runRawOnMain(packets) {
+  const lt = watchLongTasks();
+  const hb = watchHeartbeat();
+  const t0 = performance.now();
+  let checksum = 0;
+  for (const p of packets) {
+    const view = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    const len = view.getUint32(5, true);
+    const voxels = new Uint8Array(CHUNK_VOLUME);
+    voxels.fill(0);
+    rleDecode(p, 9, len, voxels);
+    checksum = (checksum + voxels[1234] + voxels[45678]) | 0;
+  }
+  const ms = performance.now() - t0;
+  await yieldOnce();
+  return { ms, mainMs: ms, checksum, longTasks: lt.stop(), worstGapMs: hb.stop() };
+}
+
+/* --- B: the shipped worker --- */
+async function runZInWorker(packets) {
+  const worker = new Worker(new URL('./src/net/chunkInflate.worker.ts', import.meta.url),
+    { type: 'module', name: 'bench-inflate' });
+  // Warm the module graph so startup is not counted as decode time.
+  const bootT0 = performance.now();
+  await new Promise((done) => {
+    const probe = packets[0];
+    const v = new DataView(probe.buffer, probe.byteOffset, probe.byteLength);
+    const rleLen = v.getUint32(5, true);
+    const zLen = v.getUint32(9, true);
+    const buf = probe.slice(13, 13 + zLen).buffer;
+    worker.onmessage = () => done();
+    worker.postMessage({ cx: 0, cz: 0, seq: -1, rleLen, buf }, [buf]);
+  });
+  const bootMs = performance.now() - bootT0;
+
+  const lt = watchLongTasks();
+  const hb = watchHeartbeat();
+  let mainMs = 0;
+  let checksum = 0;
+  const t0 = performance.now();
+
+  await new Promise((done) => {
+    let left = packets.length;
+    worker.onmessage = (ev) => {
+      const a = performance.now();
+      const voxels = new Uint8Array(ev.data.voxels);
+      checksum = (checksum + voxels[1234] + voxels[45678]) | 0;
+      mainMs += performance.now() - a;
+      if (--left === 0) done();
+    };
+    for (const p of packets) {
+      const a = performance.now();
+      const v = new DataView(p.buffer, p.byteOffset, p.byteLength);
+      const rleLen = v.getUint32(5, true);
+      const zLen = v.getUint32(9, true);
+      const cx = v.getInt16(1, true);
+      const cz = v.getInt16(3, true);
+      const buf = p.slice(13, 13 + zLen).buffer;
+      worker.postMessage({ cx, cz, seq: 0, rleLen, buf }, [buf]);
+      mainMs += performance.now() - a;
+    }
+  });
+
+  const ms = performance.now() - t0;
+  worker.terminate();
+  await yieldOnce();
+  return { ms, mainMs, bootMs, checksum, longTasks: lt.stop(), worstGapMs: hb.stop() };
+}
+
+/* --- C: the main-thread fallback --- */
+async function runZOnMain(packets) {
+  const lt = watchLongTasks();
+  const hb = watchHeartbeat();
+  const t0 = performance.now();
+  let checksum = 0;
+  for (const p of packets) {
+    const v = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    const rleLen = v.getUint32(5, true);
+    const zLen = v.getUint32(9, true);
+    const rle = await inflateRaw(p.subarray(13, 13 + zLen), rleLen);
+    const voxels = new Uint8Array(CHUNK_VOLUME);
+    rleDecode(rle, 0, rleLen, voxels);
+    checksum = (checksum + voxels[1234] + voxels[45678]) | 0;
+  }
+  const ms = performance.now() - t0;
+  await yieldOnce();
+  return { ms, mainMs: ms, checksum, longTasks: lt.stop(), worstGapMs: hb.stop() };
+}
+
+window.__CHUNKZ__ = {
+  supported: (() => {
+    try { new DecompressionStream('deflate-raw'); return true; } catch { return false; }
+  })(),
+  async run(rawB64, zB64) {
+    const raw = unframe(b64ToBuf(rawB64));
+    const z = unframe(b64ToBuf(zB64));
+    log(`packets: ${raw.length} raw, ${z.length} compressed`);
+    const a = await runRawOnMain(raw);
+    await new Promise((r) => setTimeout(r, 200));
+    const b = await runZInWorker(z);
+    await new Promise((r) => setTimeout(r, 200));
+    const c = await runZOnMain(z);
+    log(JSON.stringify({ a, b, c }, null, 1));
+    return { chunks: raw.length, a, b, c };
+  },
+};
+out.textContent = 'ready';
+</script>
+</body>
+</html>

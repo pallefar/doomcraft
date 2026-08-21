@@ -1,0 +1,6 @@
+TAG                 baseline
+SAMPLES             25
+MEDIAN_MS           0.300
+MEDIAN_MS_FINAL     0.200
+ONE_PCT_LOW_FPS     3333.3332008785724
+DRAW_CALLS          32

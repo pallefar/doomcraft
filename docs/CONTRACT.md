@@ -599,11 +599,12 @@ stamps its own arena furniture (platforms, towers, cover) on the terraced ground
 
 ## 5. `shared/src/protocol.ts`
 
-Binary, little-endian, one `uint8` message id first. `PROTOCOL_VERSION = 1`.
+Binary, little-endian, one `uint8` message id first. `PROTOCOL_VERSION = 3`.
 
 ```ts
 enum C2S { HELLO=1, INPUT=2, BLOCK_EDIT=3, CHAT=4, RESPAWN=5, PING=6 }
-enum S2C { WELCOME=1, CHUNK=2, SNAPSHOT=3, BLOCK_DELTA=4, DAMAGE=5, KILL=6, CHAT=7, PONG=8 }
+enum S2C { WELCOME=1, CHUNK=2, SNAPSHOT=3, BLOCK_DELTA=4, DAMAGE=5, KILL=6, CHAT=7, PONG=8,
+           CHUNK_Z=9 }
 readMessageId(data: ArrayBuffer | Uint8Array | DataView): number
 ```
 
@@ -665,7 +666,8 @@ snapshot       SNAP_FULL=1, SNAP_MATCH_OVER=2
 damage flags   DMG_HEADSHOT=1, DMG_SPLASH=2, DMG_FATAL=4, DMG_SELF=8, DMG_FALL=16,
                DMG_ENVIRONMENT=32, DMG_YOU_ARE_VICTIM=64
 kill flags     KILL_HEADSHOT=1, KILL_MELEE=2, KILL_SELF=4, KILL_ENVIRONMENT=8
-hello caps     CAP_TOUCH=1, CAP_LOW_SPEC=2, CAP_ADS_REMOVED=4, CAP_RETURNING=8
+hello caps     CAP_TOUCH=1, CAP_LOW_SPEC=2, CAP_ADS_REMOVED=4, CAP_RETURNING=8,
+               CAP_INFLATE=16
 ```
 
 ```ts
@@ -746,6 +748,33 @@ rleEncode(src: Uint8Array): Uint8Array                           // allocates; c
 rleDecode(src, srcOffset, srcLength, dst): number                // voxels written
 ```
 `rleDecode` skips id 0 runs, so **`dst` must arrive zeroed** (`decodeChunk` does this for you).
+
+#### `CHUNK_Z` — the same chunk, raw-deflated
+
+```ts
+CHUNK_HEADER_BYTES = 9          // id, cx, cz, len
+CHUNK_Z_HEADER_BYTES = 13       // id, cx, cz, rleLen, zLen
+encodeChunkZ(w, cx, cz, rleLen, z: Uint8Array): PacketWriter
+interface ChunkZHeader { cx, cz, rleLen, zLen }
+createChunkZHeader(): ChunkZHeader
+decodeChunkZHeader(r, out): ChunkZHeader     // leaves r.offset on the first deflate byte
+```
+Layout: `u8 id, i16 cx, i16 cz, u32 rleByteLength, u32 deflateByteLength, <deflate-raw>`.
+The compressed payload is `deflateRaw` of **exactly** the byte range `encodeChunk` would have
+written, so a receiver inflates to `rleLen` bytes and then runs the same `rleDecode`. On measured
+terrain that is **3.79x** smaller: 2.99 MB -> 0.79 MB for the 169-chunk join burst.
+
+**Negotiated, never assumed.** The server sends `CHUNK_Z` only to a connection whose HELLO set
+`CAP_INFLATE`, and only when the process registered a compressor
+(`setChunkCompressor` in `server/src/net.ts` — the browser's local-server Worker does not, so
+single player still receives plain `CHUNK`). A client sets `CAP_INFLATE` only when it has both
+`DecompressionStream('deflate-raw')` and a `Worker` to run it in. Everything else keeps the
+uncompressed path, unchanged. `decodeChunkZHeader` deliberately does not inflate: on the client
+the inflate and the RLE expansion both belong in `client/src/net/chunkInflate.worker.ts`, off the
+main thread.
+
+The server caches the finished `CHUNK_Z` packet per chunk per room and drops it whenever that
+chunk's voxels change, so the deflate is paid once and every later joiner gets a `send`.
 
 ```ts
 interface BlockDelta { x, y, z, id }
@@ -877,6 +906,24 @@ Struct-of-arrays, allocation-free after construction. The **server** keeps one
 frame; `playerDeltaMask` compares **quantised** values, so "changed" means the same thing to
 both sides and sub-quantum jitter costs zero bytes. `PF_SPAWN`, `PF_REMOVED`, `PF_LOCAL` and
 `PF_AMMO` are policy bits the server ORs in itself.
+
+**Who is sent, and what absence means.** Players and projectiles appear in **every** snapshot, so
+for those two a missing record still means *gone*. **Entities do not**: they are delta-coded
+against a per-connection baseline (`Connection.entBase*`, keyed by sim slot and validated by
+`knownEntityGen`) and an entity whose quantised state has not changed since that client's last
+snapshot is **omitted entirely** — a missing entity record means *unchanged*, never *removed*.
+Removal is only ever `EF_REMOVED`. A client must therefore apply **only** the fields whose mask bit
+is set (`decodeSnapshot` fills its buffer positionally, so an unmasked field holds whatever entity
+occupied that record index last time) and may prune unseen entities **only** on a `SNAP_FULL`
+snapshot, which does enumerate every entity. Two consequences worth knowing:
+
+- A pickup's `EF_YAW` is never transmitted. `Simulation.stepPickups` spins it server-side and no
+  client reads it; the renderer spins pickups off its own clock.
+- The per-connection baseline advances at **send** time, not on an ack, which is exact on `ws` and
+  on the Worker MessagePort. The peer-host WebRTC transport carries snapshots on an unreliable
+  channel and repairs a detected gap by setting `conn.baselineTick = 0` (a full snapshot). That
+  repair is load-bearing: an omitted entity or a dropped `EF_REMOVED` is no longer self-healing on
+  the next tick.
 
 The **client** decodes into one long-lived `SnapshotBuffer`: only fields whose mask bit is set
 were transmitted, every other field keeps its previous value — so decode into the buffer that

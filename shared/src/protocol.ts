@@ -27,8 +27,14 @@ import {
  * PF_AVATAR, plus a trailing uint32 on HELLO and a new C2S.APPEARANCE message.
  * The spawn record is byte-identical to v1, but a v1 decoder cannot skip an
  * unknown field bit, so the version still had to move.
+ *
+ * 2 -> 3: the join burst is compressible. `S2C.CHUNK_Z` carries the same RLE
+ * stream as `S2C.CHUNK` behind a raw-deflate frame, and `CAP_INFLATE` in HELLO
+ * is how a client says it can unwrap one. Nothing about `S2C.CHUNK` changed —
+ * a server that has no deflate available, or a client that cannot inflate,
+ * keeps using it and the two paths are byte-identical once decoded.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /* ------------------------------------------------------------------------ *
  * Message ids
@@ -60,6 +66,13 @@ export enum S2C {
   KILL = 6,
   CHAT = 7,
   PONG = 8,
+  /**
+   * A CHUNK whose RLE payload is raw-deflated. Sent only to a client that set
+   * `CAP_INFLATE`, and only by a server that was handed a deflate function
+   * (`setChunkCompressor` in server/src/net.ts). Same chunk, same RLE, ~3.8x
+   * smaller on the wire.
+   */
+  CHUNK_Z = 9,
 }
 
 /* ------------------------------------------------------------------------ *
@@ -153,6 +166,13 @@ export const CAP_TOUCH = 1 << 0;
 export const CAP_LOW_SPEC = 1 << 1;
 export const CAP_ADS_REMOVED = 1 << 2;
 export const CAP_RETURNING = 1 << 3;
+/**
+ * "I can inflate a raw-deflate stream off the main thread." Set only when the
+ * client has both `DecompressionStream` and somewhere to run it. A server that
+ * sees this bit may answer with `S2C.CHUNK_Z` instead of `S2C.CHUNK`; a server
+ * that sees it and has no compressor simply ignores it.
+ */
+export const CAP_INFLATE = 1 << 4;
 
 /* ------------------------------------------------------------------------ *
  * Enums carried in payloads
@@ -708,6 +728,55 @@ export function decodeChunk(r: PacketReader, out: ChunkMessage): ChunkMessage {
   out.voxels.fill(0);
   rleDecode(r.bytes, r.offset, len, out.voxels);
   r.offset += len;
+  return out;
+}
+
+/**
+ * Header size of both CHUNK and CHUNK_Z: id + cx + cz + length. CHUNK_Z carries
+ * one extra uint32 (the inflated length) so the receiver can hand `rleDecode` a
+ * length without trusting the inflate to have produced one.
+ */
+export const CHUNK_HEADER_BYTES = 9;
+export const CHUNK_Z_HEADER_BYTES = 13;
+
+/**
+ * The compressed twin of `encodeChunk`. `z` is the raw-deflate of exactly the
+ * `rleLen` bytes `rleEncodeInto` would have written — so a receiver inflates,
+ * then runs the *same* `rleDecode` the uncompressed path runs. Splitting it
+ * this way is what lets the server cache the finished packet: the deflate is
+ * per chunk, not per client.
+ */
+export function encodeChunkZ(
+  w: PacketWriter, cx: number, cz: number, rleLen: number, z: Uint8Array,
+): PacketWriter {
+  w.reset();
+  w.u8(S2C.CHUNK_Z);
+  w.i16(cx);
+  w.i16(cz);
+  w.u32(rleLen >>> 0);
+  w.u32(z.length >>> 0);
+  w.raw(z, 0, z.length);
+  return w;
+}
+
+export interface ChunkZHeader {
+  cx: number;
+  cz: number;
+  /** Byte length of the RLE stream once inflated. */
+  rleLen: number;
+  /** Byte length of the deflate stream that follows the header. */
+  zLen: number;
+}
+export function createChunkZHeader(): ChunkZHeader {
+  return { cx: 0, cz: 0, rleLen: 0, zLen: 0 };
+}
+/** Reads the header and leaves `r.offset` on the first deflate byte. */
+export function decodeChunkZHeader(r: PacketReader, out: ChunkZHeader): ChunkZHeader {
+  r.u8();
+  out.cx = r.i16();
+  out.cz = r.i16();
+  out.rleLen = r.u32();
+  out.zLen = r.u32();
   return out;
 }
 

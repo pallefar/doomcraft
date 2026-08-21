@@ -23,6 +23,7 @@ import {
   BlockAction,
   BlockId,
   BLOCK_SOLID,
+  CAP_INFLATE,
   CAP_RETURNING,
   CHUNK_HEIGHT,
   CHUNK_SIZE_MASK,
@@ -45,8 +46,15 @@ import {
   PacketWriter,
   RECONNECT_BACKOFF_MS,
   RF_REMOVED,
+  EF_HEALTH,
+  EF_POS,
   EF_REMOVED,
+  EF_SPAWN,
+  EF_STATE,
+  EF_VEL,
+  EF_YAW,
   S2C,
+  SNAP_FULL,
   SNAPSHOT_HISTORY,
   SnapshotBuffer,
   TICK_MS,
@@ -56,12 +64,14 @@ import {
   chunkKey,
   clamp,
   createChatMessage,
+  createChunkZHeader,
   createDamageEvent,
   createKillEvent,
   createPongMessage,
   createWelcomeMessage,
   decodeBlockDeltas,
   decodeChatS2C,
+  decodeChunkZHeader,
   decodeDamage,
   decodeKill,
   decodePong,
@@ -100,6 +110,7 @@ import { createMoveState, eyeHeightOf, moveStep } from '@doomcraft/server/src/si
 import type { CollisionWorld, MoveState } from '@doomcraft/server/src/sim.js';
 import { defaultServerUrl, webSocketTransport } from './transport.js';
 import type { ClientTransport } from './transport.js';
+import type { InflateRequest, InflateResult } from './chunkInflate.worker.js';
 
 /* ------------------------------------------------------------------------ *
  * Transport
@@ -229,6 +240,161 @@ export function createKeepaliveClock(): KeepaliveClock {
       if (interval !== null) { clearInterval(interval); interval = null; }
     },
   };
+}
+
+/* ------------------------------------------------------------------------ *
+ * Compressed chunks
+ *
+ * The server sends `S2C.CHUNK_Z` — the same RLE stream as `S2C.CHUNK`, raw
+ * deflated — but only to a client that asked for it with `CAP_INFLATE`. This
+ * is the whole negotiation, and it is why the change cannot strand anyone:
+ *
+ *   - `DecompressionStream('deflate-raw')` is Chrome 103+, Firefox 113+,
+ *     Safari 16.4+ (March 2023, so iOS 16.4). Everything older, plus anything
+ *     with a CSP that forbids workers, simply never sets the bit and keeps
+ *     receiving `S2C.CHUNK`. The bytes cost more; nothing breaks.
+ *   - The browser's local-server Worker has no compressor at all, so single
+ *     player never sees a compressed chunk and its load path is untouched.
+ *
+ * Support is probed once, up front, because HELLO goes out before the first
+ * chunk arrives and the answer has to be honest at that moment.
+ * ------------------------------------------------------------------------ */
+
+/** Can this browser inflate a raw-deflate stream off the main thread? */
+export function chunkInflateSupported(): boolean {
+  if (typeof Worker === 'undefined') return false;
+  const DS = (globalThis as { DecompressionStream?: unknown }).DecompressionStream;
+  if (typeof DS !== 'function') return false;
+  try {
+    // `deflate-raw` landed after `gzip` in every engine; constructing one is
+    // the only way to know this build has it.
+    new (DS as new (f: string) => unknown)('deflate-raw');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Owns the inflate worker and the main-thread path of last resort.
+ *
+ * The worker is created on the FIRST compressed chunk, never at connect: the
+ * shipped single-player build never receives one, and a worker nobody uses is
+ * a thread and a module fetch on the critical path to interactive.
+ *
+ * If the worker cannot be built or dies mid-session the fallback runs the same
+ * `DecompressionStream` on the main thread. That is not a frame-budget hazard
+ * the way a bulk inflate would be — chunks arrive as ~4.9 KB messages, one
+ * inflate each, and the API is asynchronous so the work lands off the current
+ * task either way. It is the safety net, not the design.
+ */
+class ChunkInflater {
+  private worker: Worker | null = null;
+  private workerFailed = false;
+  private disposed = false;
+
+  constructor(private readonly onResult: (r: InflateResult) => void) {}
+
+  /** `z` is borrowed: it is copied into a transferable before this returns. */
+  submit(cx: number, cz: number, seq: number, rleLen: number, z: Uint8Array): void {
+    if (this.disposed) return;
+    // The reader's buffer is reused for the next packet, so the worker gets its
+    // own copy. One 4.9 KB copy per chunk, then zero copies both ways after.
+    const buf = z.slice().buffer;
+    const w = this.ensureWorker();
+    if (w !== null) {
+      const req: InflateRequest = { cx, cz, seq, rleLen, buf };
+      try {
+        w.postMessage(req, [buf]);
+        return;
+      } catch {
+        this.killWorker();
+      }
+    }
+    void this.inflateOnPage(cx, cz, seq, rleLen, new Uint8Array(buf));
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.killWorker();
+  }
+
+  private ensureWorker(): Worker | null {
+    if (this.worker !== null || this.workerFailed) return this.worker;
+    try {
+      const w = new Worker(new URL('./chunkInflate.worker.ts', import.meta.url), {
+        type: 'module',
+        name: 'doomcraft-chunk-inflate',
+      });
+      w.onmessage = (ev: MessageEvent): void => {
+        if (!this.disposed) this.onResult(ev.data as InflateResult);
+      };
+      w.onerror = (): void => { this.killWorker(); this.workerFailed = true; };
+      this.worker = w;
+    } catch {
+      this.workerFailed = true;
+      this.worker = null;
+    }
+    return this.worker;
+  }
+
+  private killWorker(): void {
+    const w = this.worker;
+    this.worker = null;
+    if (w === null) return;
+    w.onmessage = null;
+    w.onerror = null;
+    try { w.terminate(); } catch { /* already gone */ }
+  }
+
+  private async inflateOnPage(
+    cx: number, cz: number, seq: number, rleLen: number, z: Uint8Array,
+  ): Promise<void> {
+    try {
+      const ds = new DecompressionStream('deflate-raw');
+      const writer = ds.writable.getWriter();
+      void writer.write(z).catch(() => { /* surfaces on the read side */ });
+      void writer.close().catch(() => { /* ditto */ });
+      const rle = new Uint8Array(rleLen);
+      const reader = ds.readable.getReader();
+      let off = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value === undefined) continue;
+        if (off + value.length > rleLen) throw new Error('inflate overflow');
+        rle.set(value, off);
+        off += value.length;
+      }
+      if (off !== rleLen) throw new Error('inflate short');
+      const voxels = new Uint8Array(CHUNK_VOLUME);
+      rleDecode(rle, 0, rleLen, voxels);
+      if (!this.disposed) this.onResult({ cx, cz, seq, voxels: voxels.buffer });
+    } catch (e) {
+      if (!this.disposed) {
+        this.onResult({ cx, cz, seq, err: e instanceof Error ? e.message : String(e) });
+      }
+    }
+  }
+}
+
+/**
+ * A chunk that has been received but not yet decoded, plus any BLOCK_DELTA that
+ * landed in it while it was in flight.
+ *
+ * The server marks a chunk "sent" the instant it queues the packet, so from
+ * that moment it will happily stream edits for it. Decoding is now asynchronous,
+ * so those edits can beat the chunk home. Applying them to a chunk that is not
+ * there yet loses them silently and desyncs the client's collision world from
+ * the server's — so they are held here and baked into the voxels the moment
+ * they arrive, before anything downstream ever sees the chunk.
+ */
+interface PendingChunk {
+  seq: number;
+  x: number[];
+  y: number[];
+  z: number[];
+  id: number[];
 }
 
 /* ------------------------------------------------------------------------ *
@@ -673,7 +839,38 @@ export class NetClient {
   private readonly playerSeen = new Uint8Array(MAX_PLAYERS);
   private readonly entitySeen = new Uint8Array(MAX_ENTITIES);
   private readonly projSeen = new Uint8Array(MAX_PROJECTILES);
+  /**
+   * Last transform the server actually transmitted for each entity slot, in
+   * world units. Entity records are delta-encoded: a snapshot may carry
+   * `EF_HEALTH` and nothing else, and `decodeSnapshot` fills its buffer
+   * POSITIONALLY, so any field whose mask bit is clear holds whatever unrelated
+   * entity happened to occupy that record index last time. These arrays are the
+   * per-entity state the masks are applied to, and they are what gets pushed
+   * into the interpolation track.
+   */
+  private readonly entNetX = new Float32Array(MAX_ENTITIES);
+  private readonly entNetY = new Float32Array(MAX_ENTITIES);
+  private readonly entNetZ = new Float32Array(MAX_ENTITIES);
+  private readonly entNetYaw = new Float32Array(MAX_ENTITIES);
+  private readonly entNetVX = new Float32Array(MAX_ENTITIES);
+  private readonly entNetVY = new Float32Array(MAX_ENTITIES);
+  private readonly entNetVZ = new Float32Array(MAX_ENTITIES);
   private readonly pendingEdits: PendingEdit[] = [];
+
+  /* --- compressed chunk decode (see "Compressed chunks" above) --- */
+  private readonly chunkZ = createChunkZHeader();
+  private inflater: ChunkInflater | null = null;
+  /**
+   * chunkKey -> deltas that arrived while the chunk was still inflating.
+   * Empty except during a join burst on a live, being-edited world.
+   */
+  private readonly pendingChunks = new Map<number, PendingChunk>();
+  /**
+   * Bumped by `resetSession`. A worker result stamped with an older epoch
+   * belongs to a connection that no longer exists and is dropped.
+   */
+  private chunkEpoch = 0;
+
   private clockOffsetMs = 0;
   private clockReady = false;
   /** Client clock in ms; monotonic. */
@@ -761,6 +958,9 @@ export class NetClient {
   dispose(): void {
     this.disposed = true;
     this.disconnect();
+    this.inflater?.dispose();
+    this.inflater = null;
+    this.pendingChunks.clear();
   }
 
   /* -------------------------------------------------------------- *
@@ -844,7 +1044,9 @@ export class NetClient {
   private onOpen(): void {
     this.setStatus('loading');
     this.reconnectAttempts = 0;
-    const caps = this.hello.caps | (this.everConnected ? CAP_RETURNING : 0);
+    const caps = this.hello.caps
+      | (this.everConnected ? CAP_RETURNING : 0)
+      | (chunkInflateSupported() ? CAP_INFLATE : 0);
     this.everConnected = true;
     encodeHello(this.writer, this.hello.name, this.hello.skin, caps, this.hello.avatar);
     this.rawSend(this.writer.copy());
@@ -872,6 +1074,10 @@ export class NetClient {
 
   /** Forget everything session-scoped; the world survives a reconnect. */
   private resetSession(): void {
+    // Anything still inside the inflate worker belongs to the connection that
+    // just went away. Bumping the epoch drops those results on arrival.
+    this.chunkEpoch++;
+    this.pendingChunks.clear();
     this.hHead = 0;
     this.hCount = 0;
     this.inputSeq = 0;
@@ -889,6 +1095,9 @@ export class NetClient {
     this.playerSlotUsed.fill(0);
     this.entitySlotUsed.fill(0);
     this.projSlotUsed.fill(0);
+    this.entNetX.fill(0); this.entNetY.fill(0); this.entNetZ.fill(0);
+    this.entNetYaw.fill(0);
+    this.entNetVX.fill(0); this.entNetVY.fill(0); this.entNetVZ.fill(0);
     this.snapshot.reset();
     this.modeStateSeen = false;
     this.modeContextSeen = false;
@@ -1080,6 +1289,7 @@ export class NetClient {
     switch (id) {
       case S2C.WELCOME: this.onWelcome(r); break;
       case S2C.CHUNK: this.onChunk(r); break;
+      case S2C.CHUNK_Z: this.onChunkZ(r); break;
       case S2C.SNAPSHOT: this.onSnapshot(r); break;
       case S2C.BLOCK_DELTA: this.onBlockDelta(r); break;
       case S2C.DAMAGE: this.onDamage(r); break;
@@ -1130,9 +1340,86 @@ export class NetClient {
     this.events.onChunk?.(existingCx, existingCz, target, this.chunksReceived, this.chunksExpected);
   }
 
+  /**
+   * The compressed twin of `onChunk`. All this thread does is read a 13-byte
+   * header and hand the deflate stream to the worker; the inflate, the RLE
+   * expansion and the 64 KB allocation all happen off the main thread and come
+   * back as a transferred buffer in `onChunkDecoded`.
+   */
+  private onChunkZ(r: PacketReader): void {
+    const h = decodeChunkZHeader(r, this.chunkZ);
+    if (h.rleLen <= 0 || h.zLen <= 0 || h.zLen > r.remaining) return;
+    const z = r.bytes.subarray(r.offset, r.offset + h.zLen);
+    r.skip(h.zLen);
+
+    const key = chunkKey(h.cx, h.cz);
+    // Claim the slot before the async hop, so BLOCK_DELTAs arriving in the gap
+    // know to queue rather than vanish.
+    const prior = this.pendingChunks.get(key);
+    if (prior !== undefined) {
+      // Same chunk re-sent (a round restart re-streams the world). The older
+      // decode is now stale; its result is dropped by the seq check.
+      prior.seq = this.chunkEpoch;
+      prior.x.length = 0; prior.y.length = 0; prior.z.length = 0; prior.id.length = 0;
+    } else {
+      this.pendingChunks.set(key, { seq: this.chunkEpoch, x: [], y: [], z: [], id: [] });
+    }
+
+    if (this.inflater === null) {
+      this.inflater = new ChunkInflater((res) => this.onChunkDecoded(res));
+    }
+    this.inflater.submit(h.cx, h.cz, this.chunkEpoch, h.rleLen, z);
+  }
+
+  /** A chunk came back from the inflate worker. Publish it exactly like `onChunk`. */
+  private onChunkDecoded(res: InflateResult): void {
+    const key = chunkKey(res.cx, res.cz);
+    const pending = this.pendingChunks.get(key);
+    // Stale: the session was reset, or a newer copy of this chunk is in flight.
+    if (pending === undefined || pending.seq !== res.seq || res.seq !== this.chunkEpoch) return;
+    this.pendingChunks.delete(key);
+
+    if (res.voxels === undefined) {
+      // The decode failed. Say nothing to the world rather than publish
+      // garbage; the chunk stays missing and the round restart re-sends it.
+      this.events.onStatus?.('error', `chunk ${res.cx},${res.cz}: ${res.err ?? 'decode failed'}`);
+      return;
+    }
+
+    const voxels = new Uint8Array(res.voxels);
+    if (voxels.length !== CHUNK_VOLUME) return;
+
+    // Bake in every edit that overtook the chunk, BEFORE anyone sees it. The
+    // renderer and the collision world then agree by construction.
+    for (let i = 0; i < pending.x.length; i++) {
+      const y = pending.y[i];
+      if (y < 0 || y >= CHUNK_HEIGHT) continue;
+      voxels[voxelIndex(pending.x[i] & CHUNK_SIZE_MASK, y, pending.z[i] & CHUNK_SIZE_MASK)] = pending.id[i];
+    }
+
+    const fresh = this.world.chunkAt(res.cx, res.cz) === undefined;
+    this.world.putChunk(res.cx, res.cz, voxels);
+    if (fresh) this.chunksReceived++;
+
+    this.loadProgress = Math.min(1, this.chunksReceived / this.chunksExpected);
+    this.events.onChunk?.(res.cx, res.cz, voxels, this.chunksReceived, this.chunksExpected);
+  }
+
   private onBlockDelta(r: PacketReader): void {
     const d = decodeBlockDeltas(r, this.deltas);
     for (let i = 0; i < d.count; i++) {
+      const pending = this.pendingChunks.size === 0
+        ? undefined
+        : this.pendingChunks.get(chunkKey(blockToChunk(d.x[i]), blockToChunk(d.z[i])));
+      if (pending !== undefined) {
+        // The chunk is still in the inflate worker. Hold the edit; it is baked
+        // into the voxels in `onChunkDecoded`.
+        pending.x.push(d.x[i]);
+        pending.y.push(d.y[i]);
+        pending.z.push(d.z[i]);
+        pending.id.push(d.id[i]);
+        continue;
+      }
       this.world.setBlock(d.x[i], d.y[i], d.z[i], d.id[i]);
     }
     this.ackedEditSeq = d.ackEditSeq;
@@ -1293,13 +1580,30 @@ export class NetClient {
       const view = this.entities[slot];
       view.id = id;
       view.active = true;
-      view.type = s.entityType[i];
-      view.variant = s.entityVariant[i];
-      view.state = s.entityState[i];
-      view.health = s.entityHealth[i];
+      // Apply ONLY the fields the server transmitted. Everything else keeps the
+      // value this entity already had — `s.entity*[i]` is positional and would
+      // otherwise hand us a different entity's leftovers. `EF_SPAWN` is the
+      // server's promise that the record is complete.
+      if ((mask & EF_SPAWN) !== 0) {
+        view.type = s.entityType[i];
+        view.variant = s.entityVariant[i];
+      }
+      if ((mask & EF_STATE) !== 0) view.state = s.entityState[i];
+      if ((mask & EF_HEALTH) !== 0) view.health = s.entityHealth[i];
+      if ((mask & EF_POS) !== 0) {
+        this.entNetX[slot] = s.entityX[i];
+        this.entNetY[slot] = s.entityY[i];
+        this.entNetZ[slot] = s.entityZ[i];
+      }
+      if ((mask & EF_YAW) !== 0) this.entNetYaw[slot] = s.entityYaw[i];
+      if ((mask & EF_VEL) !== 0) {
+        this.entNetVX[slot] = s.entityVX[i];
+        this.entNetVY[slot] = s.entityVY[i];
+        this.entNetVZ[slot] = s.entityVZ[i];
+      }
       this.entityTracks[slot].push(
-        serverTimeMs, s.entityX[i], s.entityY[i], s.entityZ[i],
-        s.entityYaw[i], 0, s.entityVX[i], s.entityVY[i], s.entityVZ[i],
+        serverTimeMs, this.entNetX[slot], this.entNetY[slot], this.entNetZ[slot],
+        this.entNetYaw[slot], 0, this.entNetVX[slot], this.entNetVY[slot], this.entNetVZ[slot],
       );
     }
 
@@ -1320,12 +1624,19 @@ export class NetClient {
       if (isNew) view.age = 0;
     }
 
-    // Anything the server stopped mentioning is gone, removal message or not.
+    // Players and projectiles are sent in full every snapshot, so for them
+    // silence still means gone, removal message or not.
     for (let slot = 0; slot < MAX_PLAYERS; slot++) {
       if (this.playerSlotUsed[slot] === 1 && this.playerSeen[slot] === 0) this.releasePlayerSlot(slot);
     }
-    for (let slot = 0; slot < MAX_ENTITIES; slot++) {
-      if (this.entitySlotUsed[slot] === 1 && this.entitySeen[slot] === 0) this.releaseEntitySlot(slot);
+    // Entities are delta-encoded: an absent record means "nothing changed since
+    // your baseline", NOT "gone". Only a full snapshot enumerates every entity,
+    // so only a full snapshot may prune — it is the resync that catches an
+    // EF_REMOVED the client somehow never applied.
+    if ((s.flags & SNAP_FULL) !== 0) {
+      for (let slot = 0; slot < MAX_ENTITIES; slot++) {
+        if (this.entitySlotUsed[slot] === 1 && this.entitySeen[slot] === 0) this.releaseEntitySlot(slot);
+      }
     }
     for (let slot = 0; slot < MAX_PROJECTILES; slot++) {
       if (this.projSlotUsed[slot] === 1 && this.projSeen[slot] === 0) this.releaseProjectileSlot(slot);
@@ -1568,6 +1879,11 @@ export class NetClient {
     this.entityTracks[slot].reset();
     view.active = false;
     view.id = 0;
+    // Clear the delta target too: the next tenant of this slot is a different
+    // entity, and the server only re-sends the fields it considers changed.
+    this.entNetX[slot] = 0; this.entNetY[slot] = 0; this.entNetZ[slot] = 0;
+    this.entNetYaw[slot] = 0;
+    this.entNetVX[slot] = 0; this.entNetVY[slot] = 0; this.entNetVZ[slot] = 0;
   }
 
   private releaseProjectile(id: number): void {

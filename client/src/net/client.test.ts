@@ -20,7 +20,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { C2S, CLIENT_TIMEOUT_MS, GameMode } from '@shared';
+import { C2S, CLIENT_TIMEOUT_MS, EntityType, GameMode, RemoveReason, quantizePos } from '@shared';
 import { Room } from '@doomcraft/server/src/room.js';
 import type { NetTransport } from '@doomcraft/server/src/net.js';
 
@@ -138,14 +138,14 @@ interface Fixture {
 
 const live: Fixture[] = [];
 
-function makeFixture(opts: { keepalive?: boolean } = {}): Fixture {
+function makeFixture(opts: { keepalive?: boolean; mode?: GameMode } = {}): Fixture {
   const withKeepalive = opts.keepalive ?? true;
   let nowMs = 0;
   const now = (): number => nowMs;
 
   const room = new Room({
     seed: 4242,
-    mode: GameMode.SANDBOX,
+    mode: opts.mode ?? GameMode.SANDBOX,
     botFill: 0,
     enemies: 0,
     eagerWorld: false,
@@ -366,5 +366,139 @@ describe('coming back from the background', () => {
     expect(f.net.playerId).toBe(id);
     expect(f.net.world.chunkCount).toBeGreaterThanOrEqual(chunks);
     expect(f.net.status).toBe('playing');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Delta-encoded entities
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The other half of the entity-delta change in `server/src/net.ts`.
+ *
+ * The server now omits an entity whose quantised state has not changed, and
+ * sends partial records (say `EF_STATE` and nothing else) for one that has.
+ * Two client behaviours had to change to match, and both fail silently rather
+ * than loudly if they regress:
+ *
+ *   1. `decodeSnapshot` fills its buffer POSITIONALLY — record index 0 is
+ *      whichever entity the server happened to put first this tick. Any field
+ *      whose mask bit is clear still holds the *previous* snapshot's value for
+ *      that index, which belongs to a completely different entity. The client
+ *      must apply masked fields only.
+ *   2. "Not mentioned" used to mean "gone". It now means "unchanged", and only
+ *      a full snapshot may prune.
+ */
+describe('delta-encoded entities', () => {
+  /** Live pickups in the room, as [simSlot, entityId]. */
+  function pickups(f: Fixture): Array<[number, number]> {
+    const out: Array<[number, number]> = [];
+    for (let e = 0; e < f.room.sim.entCapacity; e++) {
+      if (f.room.sim.entActive[e] !== 1) continue;
+      if (f.room.sim.entType[e] < EntityType.PICKUP_HEALTH) continue;
+      out.push([e, f.room.sim.entId[e]]);
+    }
+    return out;
+  }
+
+  function viewOf(f: Fixture, id: number): (typeof f.net.entities)[number] | undefined {
+    return f.net.entities.find((v) => v.active && v.id === id);
+  }
+
+  it('keeps a stationary pickup alive through snapshots that never mention it', () => {
+    const f = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(f, 120);
+    const live = pickups(f);
+    expect(live.length).toBeGreaterThan(20);
+
+    // Ten seconds of play. Nothing touches these pickups, so the server stops
+    // describing them; the client must not quietly delete them.
+    playFor(f, 600);
+
+    for (const [slot, id] of live) {
+      const view = viewOf(f, id);
+      expect(view, `pickup ${id} vanished from the client`).toBeDefined();
+      expect(view!.type).toBe(f.room.sim.entType[slot]);
+      expect(quantizePos(view!.x)).toBe(quantizePos(f.room.sim.entX[slot]));
+      expect(quantizePos(view!.z)).toBe(quantizePos(f.room.sim.entZ[slot]));
+    }
+  });
+
+  it('does not let a partial record inherit another entity\'s fields', () => {
+    const f = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(f, 240);
+
+    // Two pickups of different types, standing well apart. Without the mask
+    // check on the client, B would take on A's type and A's position the
+    // instant B is the only record in a snapshot.
+    const live = pickups(f);
+    let a = -1; let b = -1;
+    for (let i = 0; i < live.length && b < 0; i++) {
+      for (let j = i + 1; j < live.length; j++) {
+        const [si] = live[i]; const [sj] = live[j];
+        const far = Math.abs(f.room.sim.entX[si] - f.room.sim.entX[sj]) > 4;
+        if (f.room.sim.entType[si] !== f.room.sim.entType[sj] && far) { a = i; b = j; break; }
+      }
+    }
+    expect(b, 'fixture needs two distinguishable pickups').toBeGreaterThanOrEqual(0);
+    const [slotA, idA] = live[a];
+    const [slotB, idB] = live[b];
+    const typeB = f.room.sim.entType[slotB];
+    const xB = f.room.sim.entX[slotB];
+    const zB = f.room.sim.entZ[slotB];
+
+    // Tick 1: only A changes, so A is the sole record — decode index 0 is now
+    // full of A's data.
+    f.room.sim.entX[slotA] += 6;
+    f.frame(); f.frame(); f.frame();
+
+    // Tick 2: only B changes, and only its state byte. B is now the sole record
+    // at index 0, on top of A's leftovers.
+    f.room.sim.entState[slotB] = 0x20;
+    playFor(f, 30);
+
+    const viewB = viewOf(f, idB);
+    expect(viewB).toBeDefined();
+    expect(viewB!.state).toBe(0x20);
+    expect(viewB!.type, 'B inherited A\'s type from the positional decode buffer').toBe(typeB);
+    expect(quantizePos(viewB!.x), 'B teleported onto A').toBe(quantizePos(xB));
+    expect(quantizePos(viewB!.z)).toBe(quantizePos(zB));
+
+    // A is still where the server put it, too.
+    const viewA = viewOf(f, idA);
+    expect(viewA).toBeDefined();
+    expect(quantizePos(viewA!.x)).toBe(quantizePos(f.room.sim.entX[slotA]));
+  });
+
+  it('removes a taken pickup at once, without waiting for a full snapshot', () => {
+    const f = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(f, 240);
+    const [slot, id] = pickups(f)[0];
+    expect(viewOf(f, id)).toBeDefined();
+
+    const seen: number[] = [];
+    f.net.events.onEntityGone = (view, reason): void => { if (view.id === id) seen.push(reason); };
+
+    f.room.sim.removeEntity(slot, RemoveReason.PICKED_UP);
+    // Two frames is a third of a snapshot interval — far inside the 3 s full
+    // snapshot, which is the whole point.
+    f.frame(); f.frame(); f.frame(); f.frame();
+
+    expect(viewOf(f, id), 'a picked-up entity was still being drawn').toBeUndefined();
+    expect(seen).toEqual([RemoveReason.PICKED_UP]);
+  });
+
+  it('re-adopts an entity the server re-describes in a full snapshot', () => {
+    const f = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(f, 240);
+    const before = f.net.entities.filter((v) => v.active).length;
+    expect(before).toBeGreaterThan(20);
+
+    // A round restart wipes every client baseline and forces a full snapshot.
+    f.room.net.resetWorldStreams();
+    playFor(f, 20);
+
+    const after = f.net.entities.filter((v) => v.active).length;
+    expect(after).toBe(before);
   });
 });

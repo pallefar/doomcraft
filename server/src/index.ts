@@ -18,6 +18,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
+import { deflateRawSync } from 'node:zlib';
 
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +28,7 @@ import type { WebSocket } from 'ws';
 import { DEFAULT_SERVER_PORT, GameMode, WS_PATH } from '@doomcraft/shared';
 import { SIGNAL_PATH } from '@doomcraft/shared/signal';
 import { Room } from './room.js';
+import { setChunkCompressor } from './net.js';
 import type { NetTransport } from './net.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
 import { JsonFileStore, isValidDeviceId, migrateProfile, publicProfile } from './persistence.js';
@@ -529,7 +531,41 @@ class WsTransport implements NetTransport {
   }
 }
 
+/*
+ * `perMessageDeflate` stays OFF, deliberately, and the join burst is compressed
+ * one layer up instead (`setChunkCompressor` below).
+ *
+ * Measured on this tree, not assumed. Turning it on does get the join burst
+ * from 3.01 MB to 0.80 MB — but it also:
+ *   - compresses every 20 Hz snapshot forever, taking steady-state cost from
+ *     5.7 to 13.2 millicores/player (players/core 177 -> 76),
+ *   - costs 253 ms of server CPU per joiner instead of 67 ms, because a
+ *     per-socket deflate stream cannot be shared or cached between joiners,
+ *   - allocates a zlib context per connection: +181 KB RSS per connection pair
+ *     over 500 sockets, which is the fragmentation caveat in the `ws` README
+ *     showing up as a real number on a box the cost model sizes at 2 GB.
+ * Compressing the chunk payload explicitly gets the same 3.8x for a one-off
+ * per-chunk deflate that every later joiner reads out of a cache.
+ */
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024, perMessageDeflate: false });
+
+/**
+ * The join burst's compressor. `net.ts` cannot import `node:zlib` (it also runs
+ * in the browser's local-server Worker), so the real server hands it one here.
+ *
+ * Level 6 on the RLE stream: 3.79x on measured terrain against 3.59x at level 4
+ * and 3.83x at level 9. Bandwidth is the hosting bill, so the extra 0.3 ms of
+ * once-per-chunk CPU is bought gladly; level 9 triples it for 1%.
+ */
+setChunkCompressor((src) => {
+  try {
+    return deflateRawSync(src, { level: 6 });
+  } catch {
+    // Never let a compressor fault cost a player their world: net.ts falls
+    // back to the uncompressed S2C.CHUNK path on null.
+    return null;
+  }
+});
 
 /* ------------------------------------------------------------------------ *
  * WebRTC signalling

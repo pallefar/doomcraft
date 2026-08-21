@@ -51,12 +51,13 @@
  * round trip of stale player positions instead of three seconds, and requests
  * are rate limited so a lossy link cannot beg for a full snapshot 20x/s.
  *
- * Note the one thing that is NOT at risk: entities and projectiles are already
- * transmitted in full every snapshot (`net.ts` sets `EF_SPAWN | EF_ALL` and
- * `RF_SPAWN | RF_ALL` unconditionally — the egress bug the cost assessment
- * wants fixed), so only the player records are delta coded. When that bug is
- * fixed the resync path above is what keeps this transport correct, which is
- * why it is built now rather than later.
+ * That bug is now fixed, and the resync path above is what keeps this
+ * transport correct — exactly as anticipated. Entities are delta coded too:
+ * `net.ts` omits an entity whose quantised state has not changed, and the
+ * client only prunes entities on a full snapshot. So a lost datagram here can
+ * strand a stale entity or a ghost pickup, and steps 1-4 are the repair. They
+ * are load-bearing now, not a refinement. Projectiles are still sent in full
+ * (`RF_SPAWN | RF_ALL`) and remain self-healing.
  */
 
 import {
