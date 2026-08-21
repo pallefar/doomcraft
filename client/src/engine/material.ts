@@ -378,6 +378,15 @@ const BLOCK_JITTER_ABS = 0.013;
 const SEAM_STRENGTH = 0.12;
 
 /**
+ * Where the highlight shoulder starts, in graded linear units.
+ *
+ * Below this the grade is untouched; above it, everything is compressed into
+ * the remaining headroom instead of being clipped flat. 0.80 leaves four fifths
+ * of the range exactly as authored and gives a muzzle flash somewhere to go.
+ */
+const HIGHLIGHT_KNEE = 0.80;
+
+/**
  * What each quality tier does to the surface term.
  *
  * This is half of the escape hatch the atlas shipped without: `setQuality` used
@@ -537,6 +546,8 @@ uniform vec3  uTint;
 uniform float uContrast;
 uniform float uSaturation;
 uniform float uExposure;
+/** Where the highlight shoulder starts. 1.0 restores the old hard clamp. */
+uniform float uKnee;
 // Shared with the vertex stage, which runs highp: a uniform of the same name
 // must carry the same precision in both or the program fails to validate.
 uniform highp float uTime;
@@ -672,7 +683,10 @@ void main() {
   // distant wall, and the whole grid faded out once a block cannot hold one.
   float bw = max(uBevel.x, 1.3 / pxPerBlock);
   float grid = vSurf.w * smoothstep(2.5, 8.0, pxPerBlock);
-  vec2 loE = smoothstep(vec2(bw), vec2(0.0), cell);
+  // Both smoothsteps run edge0 < edge1. GLSL leaves a descending smoothstep
+  // undefined and most drivers happen to do the right thing with it; "most" is
+  // not a rendering contract, so the low edge is inverted explicitly instead.
+  vec2 loE = 1.0 - smoothstep(vec2(0.0), vec2(bw), cell);
   vec2 hiE = smoothstep(vec2(1.0 - bw), vec2(1.0), cell);
   float shadowEdge = max(loE.x, loE.y);
   float lightEdge = max(hiE.x, hiE.y);
@@ -722,13 +736,30 @@ void main() {
     float nl = max(dot(vNormal, d * inversesqrt(max(dd, 1e-4))), 0.0);
     add += uLightColor[i] * att * (0.30 + 0.70 * nl);
   }
-  c += base * add;
+  // Riding vAo for the same reason the emissive does: a muzzle flash that
+  // ignores occlusion fills every corner it is supposed to be throwing into
+  // relief, and the one frame in the game where the lighting is dramatic is the
+  // frame where AO matters most.
+  c += base * add * vAo;
 #endif
 
   // Grade. The shared block palette is authored bright and saturated to match
   // the bar; Doomcraft pulls it down and desaturates so muzzle flashes, lava
   // and enemies are the only saturated things on screen.
   c *= uExposure;
+
+  // SOFT SHOULDER, not a clamp.
+  //
+  // A muzzle flash is a point light at arm's length, so att is near 1 and the
+  // near wall is driven far past white. A hard clamp turns that whole wall into
+  // one flat 255 — measured on shots/ours-r3final-05-weapon2.png, the left-hand
+  // wall lost its block grid, its texture and its AO for the duration of the
+  // flash, on the exact frame the player is reading for a hit. The shoulder is
+  // the identity below uKnee and compresses everything above it into the
+  // remaining headroom, so an over-bright surface goes pale and KEEPS its
+  // structure. Four ALU, no branch, and it cannot exceed 1.
+  vec3 over = max(c - uKnee, vec3(0.0));
+  c = min(c, vec3(uKnee)) + over / (1.0 + over / max(1.0 - uKnee, 1e-3));
   c = clamp(c, 0.0, 1.0);
   float lum = dot(c, vec3(0.299, 0.587, 0.114));
   c = mix(vec3(lum), c, uSaturation);
@@ -870,6 +901,7 @@ export class VoxelMaterials {
       uContrast: { value: 0.26 },
       uSaturation: { value: 0.80 },
       uExposure: { value: 1.0 },
+      uKnee: { value: HIGHLIGHT_KNEE },
       uRipple: { value: 0.085 },
       uSurfaceAtlas: { value: this.atlasTexture },
       uSurfaceLut: { value: this.lutTexture },

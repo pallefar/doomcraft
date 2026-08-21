@@ -14,7 +14,10 @@
  *       viewport we are handed, so 412×915 is a first-class way to play.
  *   #9  the bar has no fire button; a tap on the right half both looks and
  *       shoots. We mount a real trigger with slide-off aiming, a tap-to-shoot
- *       look surface that a drag can never trip, and an optional auto-fire.
+ *       look surface that a drag can never trip, and an optional auto-fire —
+ *       and we draw the fire-and-look slab (`.mc-zone`) that the trigger sits
+ *       in, because the whole bottom corner behaving as one gesture is the
+ *       piece's central claim and an unmarked region is an unusable one.
  *   #10 the bar's controls are near-invisible: its stick ring measures 1.24:1
  *       against grass and its knob 2.39:1, both under the 3:1 WCAG floor for a
  *       non-text control. Every control here is stroked light AND dark, which
@@ -320,6 +323,7 @@ export const HUD_BAND_CLEARANCE = 6;
  */
 export const REANCHORED_HUD: readonly string[] = Object.freeze([
   '.dc-vitals', '.dc-ammo', '.dc-hotbar', '.dc-map', '.dc-feed', '.dc-perf',
+  '.dc-rail',
 ]);
 
 /** Below this the centre column is not worth using for the hotbar. */
@@ -476,6 +480,36 @@ export const MOBILE_CSS = `
 .mc-stick[data-live="1"] .mc-knob{background:rgba(255,214,140,.55)}
 .mc-stick[data-sprint="1"] .mc-knob{background:rgba(255,110,48,.62)}
 
+/* --- the fire-and-look slab ---------------------------------------------
+   The region TouchGeom.fireZone describes, drawn so that the player can see
+   what the thumb owns. Everything inside this bracket is one gesture: press to
+   fire, keep dragging and you are still firing while the camera pans. It is
+   the answer to the round-1 verdict — "A's right-thumb sweep arc is paved with
+   buttons, so you can never fire and turn in the same gesture" — and an
+   invisible region would be a fix nobody can see.
+
+   Drawn as a corner BRACKET, not a filled box: two dashed edges (the two that
+   face the world; the other two are the bezel) plus a solid black underlay for
+   the two-tone rule, and no fill at all, because the one thing this region
+   must not do is obscure the fight happening inside it. Dashes rather than a
+   solid line say "threshold" rather than "button", which is exactly what it
+   is — the drawn trigger disc inside it is the button. */
+.mc-zone{position:absolute;box-sizing:border-box;pointer-events:none;
+  border-top:${MIN_EDGE_STROKE_PX}px dashed ${LIGHT};
+  border-left:${MIN_EDGE_STROKE_PX}px dashed ${LIGHT};
+  border-top-left-radius:22px}
+.mc-zone>i{position:absolute;left:-4px;top:-4px;right:-2px;bottom:-2px;
+  box-sizing:border-box;border-top:${MIN_EDGE_STROKE_PX}px solid ${DARK};
+  border-left:${MIN_EDGE_STROKE_PX}px solid ${DARK};border-top-left-radius:24px}
+.mc-zone>b{position:absolute;left:10px;top:-7px;padding:2px 5px;border-radius:2px;
+  background:${DARK};color:${LIGHT};font-size:9px;letter-spacing:.10em;line-height:1}
+.mc[data-hand="left"] .mc-zone{border-left:0;border-top-left-radius:0;
+  border-right:${MIN_EDGE_STROKE_PX}px dashed ${LIGHT};border-top-right-radius:22px}
+.mc[data-hand="left"] .mc-zone>i{left:-2px;right:-4px;border-left:0;
+  border-top-left-radius:0;border-right:${MIN_EDGE_STROKE_PX}px solid ${DARK};
+  border-top-right-radius:24px}
+.mc[data-hand="left"] .mc-zone>b{left:auto;right:10px}
+
 /* --- trigger ------------------------------------------------------------
    The primary verb, so it gets the thickest stroke on the screen and the only
    fully saturated fill. Both are opaque; the tint is what says "attack" from
@@ -575,10 +609,14 @@ export const MOBILE_CSS = `
 .mc[data-paused="1"] .mc-chip{opacity:1}
 /* What stays is the thumb surface itself — stick, trigger, JUMP, DUCK and the
    two comfort toggles. The three utility glyphs (RLD/BLD/WEP) are the only
-   controls whose column can land on top of the shell's 560 px panel, and not
-   one of them is an attack or a movement verb, so they stand down rather than
-   litter the frame. */
+   controls whose row can land on top of the shell's 560 px panel, and not one
+   of them is an attack or a movement verb, so they stand down rather than
+   litter the frame. The slab's bracket goes with them: its inboard edge is a
+   full-height line that crosses the panel, and a dashed rule drawn through the
+   Resume button reads as a rendering fault rather than as an affordance. The
+   trigger it belongs to stays exactly where it is. */
 .mc[data-paused="1"] .mc-small{display:none}
+.mc[data-paused="1"] .mc-zone{display:none}
 
 /* ------------------------------------------------------------------------ *
  * HUD re-layout — weakness #11
@@ -603,6 +641,7 @@ export const MOBILE_CSS = `
 #hud#hud[data-pad="1"] .dc-hotbar,
 #hud#hud[data-pad="1"] .dc-map,
 #hud#hud[data-pad="1"] .dc-feed,
+#hud#hud[data-pad="1"] .dc-rail,
 #hud#hud[data-pad="1"] .dc-perf{transform:none}
 
 /* Vitals hug the movement thumb's side, ammo hugs the trigger's, and both are
@@ -617,12 +656,12 @@ export const MOBILE_CSS = `
 #hud#hud[data-pad="1"][data-hand="right"] .dc-vitals{
   left:${READOUT_MARGIN}px;right:auto;bottom:var(--mc-el);width:var(--mc-wl)}
 #hud#hud[data-pad="1"][data-hand="right"] .dc-ammo{
-  right:var(--mc-corner);left:auto;bottom:var(--mc-er);max-width:var(--mc-wr);
+  right:${READOUT_MARGIN}px;left:auto;bottom:var(--mc-er);max-width:var(--mc-wr);
   text-align:right}
 #hud#hud[data-pad="1"][data-hand="left"] .dc-vitals{
   right:${READOUT_MARGIN}px;left:auto;bottom:var(--mc-er);width:var(--mc-wr)}
 #hud#hud[data-pad="1"][data-hand="left"] .dc-ammo{
-  left:var(--mc-corner);right:auto;bottom:var(--mc-el);max-width:var(--mc-wl);
+  left:${READOUT_MARGIN}px;right:auto;bottom:var(--mc-el);max-width:var(--mc-wl);
   text-align:left}
 /* The weapon name is the one line in the plate that can outgrow the width the
    solver promised, and a plate that overflows its promise is a plate back on
@@ -645,11 +684,18 @@ export const MOBILE_CSS = `
 /* …and above the ammo when the viewport is too narrow to have a middle. The
    84 px is the ammo plate's own height on a phone — 26 px mag + the round
    strip + the weapon line + padding comes to about 70, plus clearance — so the
-   two stack instead of printing over one another. */
+   two stack instead of printing over one another.
+
+   The second term is the fire-and-look slab, and it is not cosmetic: a press
+   on the hotbar is a press on the slab, so a slot drawn inside it answers a
+   tap with a gunshot rather than a weapon change. A read-out may sit in the
+   slab (the ammo plate does); anything that LOOKS pressable may not. */
 #hud#hud[data-pad="1"][data-stack="1"] .dc-hotbar{
-  right:8px;left:auto;transform:none;bottom:calc(var(--mc-er) + 84px);gap:2px}
+  left:8px;right:auto;transform:none;gap:2px;
+  bottom:max(calc(var(--mc-el) + 84px), calc(var(--mc-zh) + 8px))}
 #hud#hud[data-pad="1"][data-stack="1"][data-hand="left"] .dc-hotbar{
-  left:8px;right:auto;bottom:calc(var(--mc-el) + 84px)}
+  right:8px;left:auto;
+  bottom:max(calc(var(--mc-er) + 84px), calc(var(--mc-zh) + 8px))}
 #hud#hud[data-pad="1"][data-stack="1"] .dc-slot{width:28px;height:28px;font-size:8px}
 
 /* Top strip: the minimap shrinks and the feed is kept clear of the option
@@ -661,6 +707,12 @@ export const MOBILE_CSS = `
   top:6px;bottom:auto;left:106px;width:calc(100% - 106px - var(--mc-corner));
   font-size:11px}
 #hud#hud[data-pad="1"][data-hand="left"] .dc-map{left:auto;right:6px}
+/* The match rail sits directly under the minimap and has to travel with it.
+   It did not, and in southpaw that left the clock/kills/players strip parked in
+   the TRIGGER hand's corner — which is where JUMP and DUCK went when they were
+   pulled out of the thumb's sweep arc, so the two printed through each other.
+   A mirrored HUD is mirrored all the way or it is not mirrored. */
+#hud#hud[data-pad="1"][data-hand="left"] .dc-rail{left:auto;right:8px}
 #hud#hud[data-pad="1"][data-hand="left"] .dc-feed{
   left:var(--mc-corner);right:106px;width:auto}
 #hud#hud[data-pad="1"] .dc-dmg span{--r:120px;left:-26px;width:52px;height:46px}
@@ -687,6 +739,16 @@ export const CONTROL_LABELS: Readonly<Record<number, string>> = Object.freeze({
 export const DETENT_LABEL = 'RUN';
 
 /**
+ * Tag printed on the fire-and-look slab's inboard corner.
+ *
+ * The slab is the answer to the round-1 loss and it is a *region*, not a
+ * button, so nothing about it is self-evident from a still frame. Two words
+ * and a plus sign say what the whole corner does, which is more than any
+ * mobile shooter — the bar included — tells you about its right thumb.
+ */
+export const ZONE_LABEL = 'FIRE + AIM';
+
+/**
  * Paint order of the stick's concentric marks, back to front. The constructor
  * builds from this list, so the order is a testable fact rather than a comment
  * about `append` arguments.
@@ -708,8 +770,8 @@ export const STICK_LAYERS: readonly string[] = Object.freeze([
  * trigger can do both at once), line 2 is the sprint detent.
  */
 export const COACH_LINES: readonly string[] = Object.freeze([
-  'DRAG TO AIM · TAP TO FIRE · HOLD FIRE AND SLIDE TO DO BOTH',
-  'PUSH THE STICK TO ITS RIM TO RUN',
+  'THE WHOLE MARKED CORNER FIRES — DRAG IT TO AIM WHILE FIRING',
+  'TAP ANYWHERE ELSE TO SHOOT · PUSH THE STICK TO ITS RIM TO RUN',
 ]);
 
 /* ------------------------------------------------------------------------ *
@@ -765,6 +827,7 @@ export class MobileControls {
   private readonly elDead: HTMLElement;
   private readonly elRing: HTMLElement;
   private readonly elKnob: HTMLElement;
+  private readonly elZone: HTMLElement;
   private readonly elAssist: HTMLElement;
   private elCoach: HTMLElement | null = null;
   private coachTimer: ReturnType<typeof setTimeout> | null = null;
@@ -820,9 +883,21 @@ export class MobileControls {
     injectCss();
 
     this.layer = div('mc mc-off');
+    this.layer.dataset.hand = 'right';
     this.safeProbe = document.createElement('i');
     this.safeProbe.className = 'mc-safe';
     this.layer.appendChild(this.safeProbe);
+
+    /* The fire-and-look slab, first so every control paints over it. It is a
+       region rather than a control: no fill, no pointer handling, just the two
+       edges that tell the thumb where the one-gesture corner begins. */
+    this.elZone = div('mc-zone');
+    const halo = document.createElement('i');
+    this.elZone.appendChild(halo);
+    const zoneTag = document.createElement('b');
+    zoneTag.textContent = ZONE_LABEL;
+    this.elZone.appendChild(zoneTag);
+    this.layer.appendChild(this.elZone);
 
     /* stick — painted back to front. The dead-zone ring goes LAST because it
        is measured against the knob's centre pip, and a marker painted under
@@ -1106,6 +1181,7 @@ export class MobileControls {
 
     for (const v of this.views) place(v);
     this.placeStick(g.stickHome.x, g.stickHome.y, g.stickHome.r);
+    this.placeZone(g);
 
     // A dead zone dialled to zero has no threshold to draw, and a 1 px dashed
     // ring reads as dirt on the screen rather than as information.
@@ -1156,6 +1232,28 @@ export class MobileControls {
     s.setProperty('--mc-corner', `${corner.toFixed(1)}px`);
     this.root.dataset.stack = b.stacked ? '1' : '0';
     this.root.dataset.hand = b.southpaw ? 'left' : 'right';
+  }
+
+  /**
+   * Draw the fire-and-look slab where the solver put it.
+   *
+   * Resize only — the region never moves per frame. The handedness goes on the
+   * LAYER rather than on the HUD root because the layer re-parents to `body`
+   * while the game is paused, and a bracket that flips to the wrong corner the
+   * moment the pause panel opens would be worse than not drawing it.
+   */
+  private placeZone(g: TouchGeom): void {
+    const z = g.fireZone;
+    const st = this.elZone.style;
+    st.left = `${z.x0.toFixed(1)}px`;
+    st.top = `${z.y0.toFixed(1)}px`;
+    st.width = `${(z.x1 - z.x0).toFixed(1)}px`;
+    st.height = `${(z.y1 - z.y0).toFixed(1)}px`;
+    const hand = g.southpaw ? 'left' : 'right';
+    if (this.layer.dataset.hand !== hand) this.layer.dataset.hand = hand;
+    // The HUD needs the slab's height too: nothing that looks pressable may be
+    // drawn inside a region where a press is a gunshot.
+    this.root.style.setProperty('--mc-zh', `${(z.y1 - z.y0).toFixed(1)}px`);
   }
 
   private placeStick(x: number, y: number, r: number): void {

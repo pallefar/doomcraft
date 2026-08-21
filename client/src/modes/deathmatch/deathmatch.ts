@@ -79,6 +79,7 @@ import {
   type ModeHost,
   type ModeInstance,
 } from '@/modes/registry';
+import { MatchRail, type RailCellSpec } from '@/hud/hud';
 
 import { Killfeed, type KillfeedEvent } from './killfeed';
 import {
@@ -86,7 +87,6 @@ import {
   ScoreRowBuffer,
   clockText,
   createScoreboardHeader,
-  scoreColour,
   type ScoreboardHeader,
 } from './scoreboard';
 
@@ -104,8 +104,42 @@ export const DM_TOAST_MS = 2200;
 export const DM_TOAST_SLOTS = 4;
 /** Pickup diffs inside this window after a respawn are the loadout, not a pickup. */
 export const DM_RESPAWN_QUIET_MS = 500;
-/** Round clock under this many seconds turns the strip red. */
+/** Round clock under this many seconds turns the clock cell red. */
 export const DM_CLOCK_URGENT_SEC = 30;
+
+/* ------------------------------------------------------------------------ *
+ * The match rail
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The three cells this mode puts above the sightline, and the whole of the
+ * mode's answer to "what is the state of the match".
+ *
+ * Round 1 shipped six pills here — ROUND 1 / TIME 7:43 / FRAG LIMIT 0/30 /
+ * LEADER Marine 0 / YOU 0 / IN MATCH 1+5 — twelve strings across ~650 px of
+ * the one band of screen the player is aiming through. FRAG LIMIT, LEADER and
+ * YOU were three views of one number; "1+5" was not decodable at all.
+ *
+ * What survives is what only the top-centre can carry:
+ *   - the clock, the one match fact checked on a rhythm rather than an event;
+ *   - `YOU n / limit`, which fuses the three score cells into the pair you
+ *     actually play against;
+ *   - `PLAYERS n`, the roster size in plain digits.
+ *
+ * Leader and round went to the Tab board — a ranking is a sorted list, and the
+ * board already sorts by frags and prints the round in its title — and the
+ * humans/bots split went to the board's footer, in words. `MatchRail` refuses
+ * to build a fourth cell, so this list cannot quietly grow back.
+ */
+export const RAIL_CELLS: readonly RailCellSpec[] = Object.freeze([
+  { label: '', kind: 'clock' },
+  { label: 'You', kind: 'you' },
+  { label: 'Players', kind: '' },
+]);
+
+export const RAIL_CLOCK = 0;
+export const RAIL_YOU = 1;
+export const RAIL_PLAYERS = 2;
 
 /* ------------------------------------------------------------------------ *
  * Telemetry
@@ -168,40 +202,17 @@ const CSS = `
 #hud[data-dm="1"] .dc-feed .ln.k{display:none!important}
 #hud[data-dm="1"][data-dm-death="1"] .dc-status{display:none!important}
 
-#hud .dm-strip{position:absolute;left:50%;top:10px;transform:translateX(-50%);
-  display:flex;align-items:stretch;gap:6px;pointer-events:none;
-  font:12px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  contain:layout style;max-width:min(96vw,720px)}
-#hud .dm-strip .cell{display:flex;align-items:center;gap:7px;padding:6px 10px;border-radius:3px;
-  background:rgba(8,8,11,.84);border:1px solid rgba(255,255,255,.11);
-  box-shadow:0 2px 10px rgba(0,0,0,.5);text-shadow:0 1px 2px rgba(0,0,0,.9);
-  white-space:nowrap}
-#hud .dm-strip .cell i{font-style:normal;font-size:9px;letter-spacing:.16em;color:#6f6a66;
-  text-transform:uppercase}
-#hud .dm-strip .cell b{font-weight:800;color:#e8e6e3;font-variant-numeric:tabular-nums}
-#hud .dm-strip .clock b{font:800 19px/1 "Arial Black",Impact,system-ui,sans-serif;
-  font-variant-numeric:tabular-nums;letter-spacing:.02em}
-#hud .dm-strip .clock.urgent b{color:#ff6a48}
-#hud .dm-strip .clock.urgent{border-color:rgba(224,60,28,.6);
-  animation:dmurge 1s steps(2,end) infinite}
-@keyframes dmurge{50%{background:rgba(48,10,6,.9)}}
-#hud .dm-strip .warm{border-color:rgba(79,184,74,.45);color:#bfe6bc}
-#hud .dm-strip .warm b{color:#8fe08a}
-
-#hud .dm-strip .limit{min-width:132px;flex-direction:column;align-items:stretch;gap:5px}
-#hud .dm-strip .limit .lr{display:flex;justify-content:space-between;gap:10px;align-items:baseline}
-#hud .dm-strip .limit .bar{position:relative;height:4px;border-radius:2px;
-  background:rgba(255,255,255,.10);overflow:hidden}
-#hud .dm-strip .limit .bar u{position:absolute;inset:0;transform-origin:left center;
-  transform:scaleX(0);text-decoration:none;
-  background:linear-gradient(90deg,#8f1a08,#e03c1c 62%,#f0a020);transition:transform .2s linear}
-#hud .dm-strip .lead .sw{width:8px;height:8px;border-radius:2px;box-shadow:0 0 0 1px rgba(0,0,0,.6)}
-#hud .dm-strip .lead b{max-width:110px;overflow:hidden;text-overflow:ellipsis;display:inline-block;
-  vertical-align:bottom}
-#hud .dm-strip .you b{color:#f0a020}
+/* The round strip that used to live here is gone. It was six pills and twelve
+   strings across ~650 px directly above the sightline — ROUND / TIME / FRAG
+   LIMIT / LEADER / YOU / IN MATCH — three of which said the same thing about
+   the score and one of which ("1+5") could not be decoded at all. The mode now
+   fills the HUD's own three-cell MatchRail (client/src/hud/hud.ts), which
+   caps the cell count in code and carries the HUD's shared plate tokens, so
+   there is no per-mode container treatment here to drift out of sync. Leader
+   and round moved to the Tab board, which is where a ranking belongs. */
 
 /* ---- the entry ribbon ----------------------------------------------------
-   It sits under the round strip, NOT over the crosshair. Centre screen belongs
+   It sits under the match rail, NOT over the crosshair. Centre screen belongs
    to combat feedback — the kill confirmation, the multi-kill callout and the
    death card all live there, and a welcome banner has no business competing
    with any of them. It also never blocks: it is 2.6 s of text you can shoot
@@ -222,7 +233,7 @@ const CSS = `
 /* ---- death card ---- */
 #hud .dm-death{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
   width:min(360px,84vw);padding:16px 18px 14px;text-align:center;display:none;
-  background:rgba(12,5,4,.9);border:1px solid rgba(224,60,28,.42);border-radius:4px;
+  background:rgba(12,5,4,.9);border:1px solid rgba(224,60,28,.42);border-radius:var(--dc-r);
   box-shadow:0 22px 60px rgba(0,0,0,.7);pointer-events:none;contain:layout style}
 #hud .dm-death.on{display:block}
 #hud .dm-death .t{font:900 clamp(20px,3vw,30px)/1 "Arial Black",Impact,system-ui,sans-serif;
@@ -251,8 +262,8 @@ const CSS = `
 #hud .dm-toasts{position:absolute;left:50%;top:56px;transform:translateX(-50%);
   display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;
   font:700 12px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;contain:layout style}
-#hud .dm-toasts .toast{display:none;padding:4px 11px;border-radius:2px;
-  background:rgba(8,8,11,.86);border:1px solid rgba(255,255,255,.12);
+#hud .dm-toasts .toast{display:none;padding:4px 11px;border-radius:var(--dc-r);
+  background:var(--dc-plate);border:1px solid var(--dc-line);
   border-left:3px solid #f0a020;color:#f2efec;letter-spacing:.06em;
   text-shadow:0 1px 2px rgba(0,0,0,.95);
   animation:dmtoast var(--life,2200ms) cubic-bezier(.2,.8,.3,1) forwards}
@@ -282,14 +293,8 @@ const CSS = `
    minimap ends at y=112, the thumb stick starts at y=286, and nothing else
    claims the left gutter in between. Nothing overlaps, nothing is clipped, and
    the four numbers that decide the match stay full size. */
-#hud[data-compact="1"] .dm-strip{
-  left:8px;top:116px;transform:none;max-width:none;
-  flex-direction:column;align-items:flex-start;gap:3px;font-size:10px}
-#hud[data-compact="1"] .dm-strip .cell{
-  width:104px;padding:4px 7px;gap:5px;justify-content:space-between}
-#hud[data-compact="1"] .dm-strip .clock b{font-size:15px}
-#hud[data-compact="1"] .dm-strip .lead,#hud[data-compact="1"] .dm-strip .round{display:none}
-#hud[data-compact="1"] .dm-strip .limit{min-width:0;justify-content:flex-start}
+/* The rail's own compact re-zoning lives with the rail, in hud.ts: on a short
+   screen it leaves the centre entirely for the left gutter under the minimap. */
 /* The ribbon and the toasts drop into the band between the chat lane (which
    ends around y=110) and the crosshair (y=206 on a 412 px screen). Both are
    transient, both are centred, and neither is ever on screen at the same time
@@ -299,9 +304,6 @@ const CSS = `
 #hud[data-compact="1"][data-dm-ribbon="1"] .dm-toasts{top:176px}
 #hud[data-compact="1"] .dm-death{width:min(300px,82vw);padding:12px 14px 11px}
 #hud[data-compact="1"] .dm-shield span{margin-top:74px}
-/* Portrait keeps YOUR frag count and drops the roster size: the number you are
-   playing for outranks the number of bodies in the room. */
-#hud[data-portrait="1"] .dm-strip .bodies{display:none}
 /* 412 px of width cannot hold a 420 px ribbon beside a chip column, so in
    portrait the ribbon drops below the column instead of printing over it.
    There is room: the chips end at y=194 and the crosshair is at y=457. */
@@ -310,7 +312,7 @@ const CSS = `
 #hud[data-portrait="1"][data-dm-ribbon="1"] .dm-toasts{top:282px}
 
 @media (prefers-reduced-motion:reduce){
-  #hud .dm-strip .clock.urgent,#hud .dm-shield.on{animation:none}
+  #hud .dm-shield.on{animation:none}
   #hud .dm-toasts .toast{animation-duration:1ms;opacity:1}
 }
 `;
@@ -326,14 +328,6 @@ function div(cls: string, parent?: HTMLElement): HTMLElement {
   return n;
 }
 
-function span(cls: string, text: string, parent: HTMLElement): HTMLElement {
-  const n = document.createElement(cls === 'b' ? 'b' : cls === 'i' ? 'i' : 'span');
-  if (cls !== 'b' && cls !== 'i') n.className = cls;
-  n.textContent = text;
-  parent.appendChild(n);
-  return n;
-}
-
 /** Write only when the value differs. Every hot DOM write in this file goes through it. */
 function setText(node: HTMLElement, value: string, cache: string): string {
   if (value === cache) return cache;
@@ -346,7 +340,7 @@ function setText(node: HTMLElement, value: string, cache: string): string {
  * ------------------------------------------------------------------------ */
 
 /**
- * What the strip and the scoreboard header need, filled either from the
+ * What the rail and the scoreboard header need, filled either from the
  * server's state sidecar or — while the shell has not wired it yet — derived
  * from the snapshot so nothing on screen is ever blank.
  */
@@ -388,19 +382,13 @@ export class DeathmatchMode implements ModeInstance {
   };
 
   /* --- DOM --- */
-  private strip!: HTMLElement;
-  private roundCell!: HTMLElement;
-  private roundValue!: HTMLElement;
-  private clockCell!: HTMLElement;
-  private clockValue!: HTMLElement;
-  private limitCell!: HTMLElement;
-  private limitValue!: HTMLElement;
-  private limitFill!: HTMLElement;
-  private leadCell!: HTMLElement;
-  private leadSwatch!: HTMLElement;
-  private leadValue!: HTMLElement;
-  private youValue!: HTMLElement;
-  private bodiesValue!: HTMLElement;
+  /**
+   * The HUD's three-cell rail, filled here rather than re-implemented: clock,
+   * your frags against the limit, roster size. `RAIL_CLOCK`/`RAIL_YOU`/
+   * `RAIL_PLAYERS` are its only three indices and `MatchRail` will not build a
+   * fourth cell, which is the point.
+   */
+  private rail!: MatchRail;
 
   private ribbon!: HTMLElement;
   private ribbonTitle!: HTMLElement;
@@ -417,17 +405,8 @@ export class DeathmatchMode implements ModeInstance {
   private toastCursor = 0;
 
   /* --- cached DOM text, so an unchanged cell is never written --- */
-  private cRound = '';
-  private cClock = '';
-  private cLimit = '';
-  private cLead = '';
-  private cYou = '';
-  private cBodies = '';
   private cDeathBy = '';
   private cDeathCta = '';
-  private cClockUrgent = false;
-  private cClockWarm = false;
-  private cLimitFill = -1;
   private cDeathFill = -1;
   private cShield = false;
   private cDeathOpen = false;
@@ -540,7 +519,7 @@ export class DeathmatchMode implements ModeInstance {
     this.trackDeath(nowMs);
     this.trackPickups(nowMs);
 
-    this.paintStrip(nowMs);
+    this.paintRail(nowMs);
     this.paintDeath(nowMs);
     this.paintShield(nowMs);
     this.feed.update(nowMs);
@@ -684,9 +663,14 @@ export class DeathmatchMode implements ModeInstance {
   private fillHeader(): void {
     const v = this.view;
     const h = this.header;
+    // The round number came off the rail and landed here, where it is read on
+    // purpose rather than in peripheral vision over the top of a fight.
+    const round = Math.max(1, v.round);
     h.title = v.phase === ModePhase.INTERMISSION
-      ? 'DEATHMATCH · ROUND OVER'
-      : v.phase === ModePhase.WAITING ? 'DEATHMATCH · WARMUP' : 'DEATHMATCH';
+      ? `DEATHMATCH · ROUND ${round} OVER`
+      : v.phase === ModePhase.WAITING
+        ? 'DEATHMATCH · WARMUP'
+        : `DEATHMATCH · ROUND ${round}`;
     h.timeLeftSec = v.phase === ModePhase.WAITING ? 0 : v.timeLeftSec;
     h.leaderScore = v.leaderScore;
     h.scoreLimit = v.scoreLimit;
@@ -867,51 +851,28 @@ export class DeathmatchMode implements ModeInstance {
   }
 
   /* ---------------------------------------------------------------- *
-   * Strip
+   * Match rail
    * ---------------------------------------------------------------- */
 
-  private paintStrip(nowMs: number): void {
+  private paintRail(nowMs: number): void {
     const v = this.view;
     void nowMs;
 
-    this.cRound = setText(this.roundValue, String(Math.max(1, v.round)), this.cRound);
-
     const warm = v.phase === ModePhase.WAITING;
     const over = v.phase === ModePhase.INTERMISSION;
-    const clock = warm ? 'LIVE' : over ? 'OVER' : clockText(v.timeLeftSec);
-    this.cClock = setText(this.clockValue, clock, this.cClock);
-
+    this.rail.set(RAIL_CLOCK, warm ? 'LIVE' : over ? 'OVER' : clockText(v.timeLeftSec));
     const urgent = !warm && !over && v.timeLeftSec <= DM_CLOCK_URGENT_SEC;
-    if (urgent !== this.cClockUrgent) {
-      this.clockCell.classList.toggle('urgent', urgent);
-      this.cClockUrgent = urgent;
-    }
-    if (warm !== this.cClockWarm) {
-      this.clockCell.classList.toggle('warm', warm);
-      this.cClockWarm = warm;
-    }
+    this.rail.flag(RAIL_CLOCK, urgent ? 'urgent' : warm ? 'warm' : '');
 
-    this.cLimit = setText(this.limitValue, `${v.leaderScore} / ${v.scoreLimit}`, this.cLimit);
-    const frac = v.scoreLimit > 0 ? Math.min(1, v.leaderScore / v.scoreLimit) : 0;
-    const q = Math.round(frac * 100);
-    if (q !== this.cLimitFill) {
-      this.limitFill.style.transform = `scaleX(${(q / 100).toFixed(2)})`;
-      this.cLimitFill = q;
-    }
+    // ONE score cell, not three. Your frags against the number that ends the
+    // match is the pair you play against; who is currently ahead is a ranking,
+    // and a ranking is a sorted list, so it is the Tab board's job.
+    this.rail.set(RAIL_YOU, `${v.myScore} / ${v.scoreLimit}`);
 
-    const lead = v.leaderName === '' ? '—' : `${v.leaderName} ${v.leaderScore}`;
-    if (lead !== this.cLead) {
-      this.leadValue.textContent = lead;
-      this.leadSwatch.style.background = scoreColour(v.leaderId & 7);
-      this.cLead = lead;
-    }
-
-    this.cYou = setText(this.youValue, String(v.myScore), this.cYou);
-    this.cBodies = setText(
-      this.bodiesValue,
-      v.humans === v.bodies ? String(v.bodies) : `${v.humans}+${v.bodies - v.humans}`,
-      this.cBodies,
-    );
+    // Roster size in plain digits. The humans-plus-bots split ("1+5") read as
+    // arithmetic nobody does mid-fight; it is a lobby fact and it is spelled
+    // out in words in the Tab board's footer.
+    this.rail.set(RAIL_PLAYERS, String(v.bodies));
   }
 
   /* ---------------------------------------------------------------- *
@@ -1062,40 +1023,10 @@ export class DeathmatchMode implements ModeInstance {
   private buildDom(): void {
     const root = this.hudRoot;
 
-    /* ---- round strip ---- */
-    this.strip = div('dm-strip');
-    this.roundCell = div('cell round', this.strip);
-    span('i', 'Round', this.roundCell);
-    this.roundValue = span('b', '1', this.roundCell);
-
-    this.clockCell = div('cell clock', this.strip);
-    span('i', 'Time', this.clockCell);
-    this.clockValue = span('b', '0:00', this.clockCell);
-
-    this.limitCell = div('cell limit', this.strip);
-    const lr = div('lr', this.limitCell);
-    span('i', 'Frag limit', lr);
-    this.limitValue = span('b', '0 / 0', lr);
-    const bar = div('bar', this.limitCell);
-    const fill = document.createElement('u');
-    bar.appendChild(fill);
-    this.limitFill = fill;
-
-    this.leadCell = div('cell lead', this.strip);
-    this.leadSwatch = div('sw', this.leadCell);
-    span('i', 'Leader', this.leadCell);
-    this.leadValue = span('b', '—', this.leadCell);
-
-    const you = div('cell you', this.strip);
-    span('i', 'You', you);
-    this.youValue = span('b', '0', you);
-
-    const bodiesCell = div('cell bodies', this.strip);
-    span('i', 'In match', bodiesCell);
-    this.bodiesValue = span('b', '0', bodiesCell);
-
-    root.appendChild(this.strip);
-    this.ctx.scope.addElement(this.strip);
+    /* ---- match rail ---- */
+    this.rail = new MatchRail(RAIL_CELLS);
+    root.appendChild(this.rail.root);
+    this.ctx.scope.addElement(this.rail.root);
 
     /* ---- ribbon ---- */
     this.ribbon = div('dm-ribbon');

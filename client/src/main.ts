@@ -68,6 +68,8 @@ import {
   type ModeSelect,
   type ModeSelectLevel,
 } from '@/ui/modeSelect';
+import { avatarButtonLabel, createAvatarEditor, type AvatarEditor } from '@/ui/avatarEditor';
+import { AVATAR_PALETTE, legacySkinFromAvatar, unpackAvatar, writeAvatar } from '@/characters/avatar';
 
 /* ------------------------------------------------------------------------ *
  * Persistence
@@ -153,6 +155,13 @@ const SHELL_CSS = `
 .dc-ghost{padding:9px 18px;background:rgba(12,12,16,.72);border:1px solid rgba(255,255,255,.18);
   color:#cfc9c3;border-radius:2px;font-size:13px}
 .dc-ghost:hover{border-color:rgba(255,255,255,.4)}
+/* The locker is a feature, not a preference: it gets the accent and a swatch of
+   whatever the player is currently wearing. */
+.dc-locker{display:inline-flex;align-items:center;gap:9px;min-height:44px;
+  border-color:rgba(224,60,28,.55);color:#f1e3de;background:rgba(46,14,7,.62)}
+.dc-locker:hover{border-color:#e03c1c;background:rgba(66,18,8,.75)}
+.dc-locker i{width:11px;height:11px;border-radius:50%;flex:0 0 11px;
+  box-shadow:0 0 0 1px rgba(0,0,0,.6),0 0 0 2px rgba(255,255,255,.18)}
 .dc-note{margin-top:16px;font-size:12px;color:#7d7873}
 .dc-note b{color:#b4aea8}
 .dc-stats{display:flex;gap:22px;justify-content:center;margin-top:18px;font-size:12px;color:#8a8078}
@@ -265,8 +274,11 @@ const SHELL_CSS = `
      once the tile is a row. Both are decoration here; the picker is not. */
   #ui .dcm-blurb,#ui .dcm-badge{display:none}
   /* Settings lives in the pause menu and the ad creative carries its own
-     "Remove ads" button, so this row is the last thing worth 40 px. */
-  #ui[data-screen="menu"] .dc-row{display:none}
+     "Remove ads" button, so they are the first things worth 40 px. The locker
+     stays: it is the only way into the avatar editor, and a landscape phone is
+     still a phone that wants a marine of its own. */
+  #ui[data-screen="menu"] .dc-row > :not(.dc-locker){display:none}
+  #ui[data-screen="menu"] .dc-row{margin-top:6px}
 }
 /* The bar puts "Loading Terrain (100.00%)..." 180 px ABOVE its crosshair, on
    the aim line. This is the same fact 120 px BELOW it, matching the HUD's own
@@ -357,11 +369,19 @@ pendingParams.flags = bootParams.flags;
 
 const mode: number = legacyGameMode(bootParams.modeId);
 
+/**
+ * The avatar editor. Declared here, built further down once `#ui` exists, and
+ * nullable only so `setScreen()` — which runs during boot — can safely ask it
+ * to shut without tripping over its own initialisation order.
+ */
+let avatarEditor: AvatarEditor | null = null;
+
 const game = new Game({
   canvas,
   hudRoot,
   settings,
   name: progress.name || 'Marine',
+  avatar: save.profile.avatar >>> 0,
   seed: seedParam !== null ? Number(seedParam) >>> 0 : undefined,
   mode,
   bots: 8,
@@ -460,6 +480,11 @@ statRow.append(statKills, statDeaths, statGames, statLevel);
 menuInner.appendChild(statRow);
 
 const menuRow = el('div', 'dc-row');
+const lockerBtn = button('', 'dc-ghost dc-locker', () => openLocker());
+const lockerDot = el('i');
+const lockerLabel = el('span', undefined, 'Locker');
+lockerBtn.append(lockerDot, lockerLabel);
+menuRow.appendChild(lockerBtn);
 menuRow.appendChild(button('Settings', 'dc-ghost', () => openSettings('menu')));
 const removeAdsBtn = button(`Remove ads — $${IAP_PRICE_USD.toFixed(2)}`, 'dc-ghost', () => purchaseRemoveAds());
 menuRow.appendChild(removeAdsBtn);
@@ -471,6 +496,47 @@ menuInner.appendChild(el(
 ));
 
 uiRoot.appendChild(menu);
+
+/* ------------------------------------------------------------------------ *
+ * The locker — `client/src/ui/avatarEditor.ts`
+ *
+ * Built once and kept, but it owns no GPU resources while closed: its preview
+ * context, scene and animation frame are created by `open()` and destroyed by
+ * `close()`. Every tweak writes straight through to the schema-versioned save
+ * AND to the live connection, so the look survives a hard refresh and the other
+ * players in the room see the change without a reconnect.
+ * ------------------------------------------------------------------------ */
+
+function refreshLockerButton(): void {
+  const cfg = unpackAvatar(save.profile.avatar);
+  lockerLabel.textContent = avatarButtonLabel(save.profile.avatar);
+  // The dot wears the accent — the colour that dresses the torso and arms, and
+  // therefore the one you actually read across an arena.
+  const hex = AVATAR_PALETTE[cfg.accent].hex;
+  lockerDot.style.background = `#${hex.toString(16).padStart(6, '0')}`;
+}
+
+avatarEditor = createAvatarEditor({
+  root: uiRoot,
+  initial: save.profile.avatar,
+  onChange: (packed, cfg) => {
+    writeAvatar(save, cfg);
+    flushSave();
+    game.setAvatar(packed, legacySkinFromAvatar(cfg));
+    refreshLockerButton();
+  },
+  onClose: () => {
+    modeSelect.setSave(save);
+    refreshLockerButton();
+  },
+});
+
+function openLocker(): void {
+  avatarEditor?.setAvatar(save.profile.avatar);
+  avatarEditor?.open();
+}
+
+refreshLockerButton();
 
 
 /* ------------------------------------------------------------------------ *
@@ -752,6 +818,10 @@ async function discoverLevels(): Promise<ModeSelectLevel[]> {
 type Screen = 'boot' | 'menu' | 'playing' | 'paused';
 
 function setScreen(s: Screen): void {
+  // The locker is an overlay above every screen, so nothing else can be trusted
+  // to have taken it down. Leaving it up would keep a second GL context alive
+  // for the whole match.
+  if (s !== 'menu') avatarEditor?.close();
   uiRoot!.dataset.screen = s;
   if (adsRoot !== null) {
     adsRoot.dataset.mode = settings.showAds === false || progress.adsRemoved
@@ -902,11 +972,15 @@ window.addEventListener('resize', () => {
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape') {
-    if (game.playing) { openPause(); e.preventDefault(); }
+    if (avatarEditor?.isOpen === true) { avatarEditor.close(); e.preventDefault(); }
+    else if (game.playing) { openPause(); e.preventDefault(); }
     else if (uiRoot!.dataset.screen === 'paused') { closePause(); e.preventDefault(); }
     return;
   }
   if (!game.ready) return;
+  // Space is "start the match" on the menu, and it must not fire through an
+  // open locker — the player is pressing buttons in a dialog, not queueing up.
+  if (avatarEditor?.isOpen === true) return;
   if (uiRoot!.dataset.screen === 'menu' && (e.code === 'Enter' || e.code === 'Space')) {
     startPlaying();
     e.preventDefault();
@@ -927,6 +1001,7 @@ document.addEventListener('pointerlockchange', () => {
 let unlockedLookMode = false;
 canvas.addEventListener('click', () => {
   if (!game.ready) return;
+  if (avatarEditor?.isOpen === true) return;
   if (uiRoot!.dataset.screen === 'menu') { startPlaying(); return; }
   if (game.playing && document.pointerLockElement === null && !unlockedLookMode) {
     window.setTimeout(() => {
@@ -1162,6 +1237,17 @@ window.addEventListener('pagehide', () => {
   play(): void { startPlaying(); },
   pause(): void { openPause(); },
   menu(): Promise<void> { return backToMenu(); },
+  /** The avatar editor, for tools/capture-ours.mjs and the leak assertion. */
+  openLocker(): void { openLocker(); },
+  closeLocker(): void { avatarEditor?.close(); },
+  get lockerOpen(): boolean { return avatarEditor?.isOpen === true; },
+  get avatar(): number { return save.profile.avatar >>> 0; },
+  setAvatarPacked(v: number): void {
+    avatarEditor?.setAvatar(v >>> 0);
+    save.profile.avatar = v >>> 0;
+    flushSave();
+    refreshLockerButton();
+  },
 
   /* --- the mode layer, for tools/capture-ours.mjs --------------------- */
 
@@ -1256,6 +1342,10 @@ window.addEventListener('pagehide', () => {
       weapon: game.net.local.weapon,
       medianMs: game.renderer.stats.medianMs(),
       onePctLowFps: game.renderer.stats.onePercentLowFps(),
+      charDraws: game.characterStats().draws,
+      charInstances: game.characterStats().instances,
+      charBodies: game.characterStats().bodies,
+      rigReady: game.characterStats().rigReady,
       ready: game.ready,
       playing: game.playing,
     };

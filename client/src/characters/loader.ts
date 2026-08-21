@@ -75,6 +75,8 @@ export const TRS_STRIDE = 10;
 export const FRAME_STRIDE = RIG_NODE_COUNT * TRS_STRIDE;
 /** Bake rate. 30 Hz over clips of 0.17-1.33 s is 134 frames for the whole cast. */
 export const BAKE_HZ = 30;
+/** How far inside the clip the final frame is sampled. See `bakeClips`. */
+const LAST_FRAME_EPS = 1e-4;
 
 export interface BakedClip {
   readonly name: string;
@@ -365,8 +367,11 @@ function writePose(nodes: readonly THREE.Object3D[], out: Float32Array, frame: n
  *
  * three's own AnimationMixer does the sampling, so glTF interpolation semantics
  * are exact rather than reimplemented.
+ *
+ * Exported for `characters.test.ts`, which drives it with a hand-built clip to
+ * hold the LoopRepeat wrap bug below closed. It has no other caller.
  */
-function bakeClips(
+export function bakeClips(
   scene: THREE.Object3D,
   animations: readonly THREE.AnimationClip[],
   nodes: readonly THREE.Object3D[],
@@ -410,8 +415,26 @@ function bakeClips(
 
     const step = count > 1 ? clip.duration / (count - 1) : 0;
     for (let f = 0; f < count; f++) {
+      // BUG THIS FIXES — the reason for the epsilon, which is not cosmetic.
+      //
+      // `AnimationAction` under LoopRepeat wraps `t === duration` back to
+      // `t === 0`, so sampling the last frame at exactly `duration` baked the
+      // FIRST frame into it for every clip in the pack. For a loop that is
+      // harmless (frame[n-1] === frame[0] IS the loop-closing frame). For
+      // `die` it is fatal and it is exactly the thing rig.ts's header promises
+      // cannot happen: the clip's final key is root.rotation
+      // (0.707, 0, 0, -0.707), a 90-degree faceplant, and the wrap replaced it
+      // with the standing rest pose. Every corpse in the game stood back up the
+      // instant it hit the floor, and `Rig` holding its last frame forever held
+      // the wrong one. Verified against the baked buffer, not assumed: before
+      // this, `die`'s first and last baked root quaternion were both identity.
+      //
+      // A tenth of a millisecond inside the clip is past the last keyframe's
+      // neighbourhood for a 30 Hz bake, so a real loop still closes on its own
+      // first pose to within float noise.
+      const t = f === count - 1 ? Math.max(0, clip.duration - LAST_FRAME_EPS) : f * step;
       mixer.setTime(0);
-      mixer.setTime(f * step);
+      mixer.setTime(t);
       writePose(nodes, frames, first + f);
     }
     clips.set(clip.name, { name: clip.name, first, count, duration: clip.duration, mask });

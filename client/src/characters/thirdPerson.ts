@@ -1,27 +1,27 @@
 /**
  * DOOMCRAFT — where your own model is actually seen.
  *
- * WHICH THIRD-PERSON VIEWS EXIST TODAY. This was worth checking rather than
- * assuming, because three of the four the brief lists are not real yet:
+ * WHICH THIRD-PERSON VIEWS EXIST TODAY. Checked in the code, not assumed, and
+ * corrected: two of these four are real, two are not.
  *
- *   1. OTHER PLAYERS IN MULTIPLAYER — REAL, and the only one that costs frame
- *      time. `NetClient.players` carries up to MAX_PLAYERS remote bodies and
- *      `game.ts`'s ActorRenderer draws each as six coloured boxes today. This
- *      module replaces those boxes. Every mode has them: Deathmatch has humans
- *      and bots, Horde and Quest have bot marines, Builder has co-op peers.
- *   2. THE AVATAR PREVIEW — REAL as of this change; `ui/avatarEditor.ts` owns
- *      it. It is the cheap one: the game renderer is idle behind the menu, the
- *      preview is one instance on a 320x420 surface, drawn on demand.
- *   3. THE DEATH CAMERA — DOES NOT EXIST. On death the camera stays in the
- *      first-person rig and `hud.ts` paints a death card over it (see the
- *      comment at hud.ts:291). There is no ragdoll, no orbit, no corpse cam.
- *      What this module adds towards it is the collapse pose: a remote player
- *      at health 0 is no longer culled, it falls on its face and stays there,
- *      which is what a death camera would need to look at.
+ *   1. OTHER PLAYERS IN MULTIPLAYER — REAL, wired, and the only one that costs
+ *      frame time. `NetClient.players` carries up to MAX_PLAYERS remote bodies
+ *      and `game.ts` calls `ThirdPersonRenderer.update()` every frame; the
+ *      boxes are gone. Every mode has them: Deathmatch has humans and bots,
+ *      Horde and Quest have bot marines, Builder has co-op peers.
+ *   2. THE DEATH CAMERA — REAL, and it is `game.ts`'s `updateDeathCamera()`.
+ *      Before it, the camera stayed in the first-person rig and `hud.ts`
+ *      painted a card over whatever the corpse's eyes were pointed at. It now
+ *      orbits the body, and the body is `localBody` below: the local marine
+ *      pushed into this same batch, so seeing your own corpse is zero extra
+ *      draw calls. There is still no ragdoll — the collapse is the rig's.
+ *   3. THE AVATAR PREVIEW — DOES NOT EXIST. `ui/avatarEditor.ts` has never been
+ *      written; an earlier revision of this header claimed it owned the preview
+ *      and that was simply untrue. `CharacterActor` below is the hook it would
+ *      use, and it is exercised by nothing today.
  *   4. A THIRD-PERSON PLAY MODE — DOES NOT EXIST, and nothing here creates one.
- *      `PlayerCamera` is a first-person rig with no boom arm. The hook is
- *      `drawOne()`: point it at the local player's transform and you have the
- *      view; the missing piece is camera work, not character rendering.
+ *      `PlayerCamera` has no boom arm of its own; the death camera drives it
+ *      through `updateFree()`, which is also all a play mode would need.
  *
  * THE DRAW-CALL ARGUMENT, which is the reason this file is shaped the way it is.
  *
@@ -49,10 +49,16 @@
  *
  * WHAT THIS DOES NOT DO. It does not load the GLB. It cannot: the GLB's
  * per-node TRS animation tracks are irrelevant once the parts are baked flat,
- * and the geometry they carry is already in `kenneyRig.ts`. If the enemy
- * system's `characters/loader.ts` wants the same one-draw-call treatment, it
- * should call `sharedCharacterGeometry()` and `sharedCharacterMaterial()` here
- * rather than build a second rig — that is what they are exported for.
+ * and the geometry they carry is already in `kenneyRig.ts`.
+ *
+ * THE DEMONS DO NOT SHARE THIS BATCH, and that is a deliberate second draw
+ * call rather than an oversight. `characters/enemyRenderer.ts` runs the OTHER
+ * rig — the GLB one with the pack's real `walk`/`die`/`holding-right-shoot`
+ * clips and `registry.ts`'s per-node stretch — because a demon has to be
+ * identifiable by silhouette and has to fall over when it dies, and this
+ * module's four-float procedural pose can do neither. Two batches, two
+ * materials, two textures: two draw calls for every body in the game at any
+ * population, against the 8+ that one Object3D per character would cost.
  */
 
 import * as THREE from 'three';
@@ -607,6 +613,18 @@ export class ThirdPersonRenderer {
   private readonly collapse = new Float32Array(MAX_TRACKED);
   private lastTime = 0;
 
+  /**
+   * The LOCAL player's own body, drawn only when something is looking at it —
+   * today that is the death camera in `game.ts` and nothing else, because the
+   * game is otherwise first-person. It rides in the same batch as every remote
+   * body, so seeing your own corpse costs zero extra draw calls; set it to null
+   * and the instance simply is not emitted.
+   */
+  localBody: {
+    x: number; y: number; z: number; yaw: number; pitch: number;
+    avatar: number; dead: number;
+  } | null = null;
+
   constructor(scene: THREE.Scene, opts: CharacterMaterialOptions = {}) {
     this.batch = new CharacterBatch(CHARACTER_CAPACITY, opts);
     scene.add(this.batch.mesh);
@@ -649,6 +667,15 @@ export class ThirdPersonRenderer {
       const avatar = p.avatar ?? 0;
       this.batch.push(p.x, p.y, p.z, p.yaw, avatar, pose, this.collapse[i]);
     }
+
+    const own = this.localBody;
+    if (own !== null) {
+      const pose = computePose({
+        speed: 0, phase: 0, pitch: own.pitch, dead: own.dead, time,
+      });
+      this.batch.push(own.x, own.y, own.z, own.yaw, own.avatar, pose, own.dead);
+    }
+
     this.batch.end();
   }
 

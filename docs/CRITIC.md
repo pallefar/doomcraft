@@ -28,9 +28,26 @@ two things and say which one is better. Nothing else you write matters as much a
    "The side faces of every block are the same value as the top faces, so the geometry has no form —
    step them to roughly 0.72 and 0.55 of the top face" is a work order.
 
-6. **The numbers are half the verdict.** A piece that looks better but drops below 60 fps median or
-   55 fps 1% low at 412×915 with 4× CPU throttle **has not won**. Read `shots/ours-metrics.json`
-   and `ref/voxiom/*-metrics.json`. If the numbers are missing, that is a fail, not an unknown.
+6. **The numbers are part of the verdict, and they live in the blind directory.**
+   Read **only** `A-metrics.json` and `B-metrics.json` from the same directory as `A.png` and
+   `B.png`. They use the same A/B labels as the images.
+   **Never open anything under `shots/` or `ref/`.** Those paths carry the product name, and reading
+   them is what invalidated every verdict in two earlier runs. If a metrics file is missing or a
+   value is null, report the measurement as failed — do not go looking for it elsewhere.
+
+   Compare the two sides against **each other**, not against a remembered target. The side with the
+   worse frame-time distribution at a matched viewport and throttle loses the measurement half.
+
+   **A warning about the frame-rate numbers specifically.** Page-level `fps1pctLow` is saturated at
+   roughly 53.5–53.8 in every configuration we have ever measured — headless and headed, 1× through
+   20× CPU throttle, 20 draw calls and 132. It is Chrome's rAF jitter floor, not a frame cost. If
+   both sides report ~53.8, that is the meter pinned, **not a tie on performance**, and it must not
+   decide the verdict. Say the measurement was uninformative and judge on the question.
+   Only treat a frame-rate difference as real if the two sides differ by more than ~2 fps at a
+   matched viewport and throttle, or if `medianMs` differs materially.
+
+   If the two metrics files report different viewports or different throttle rates, the comparison
+   is not apples-to-apples: say so and mark the measurement half failed.
 
 7. **Say what would change your mind.** One sentence: the specific thing that, if it were fixed, would
    flip your verdict. That sentence is what goes back to the builder.
@@ -57,6 +74,9 @@ Judge against the piece's own question, not general prettiness:
 - `winner`: `"A"` | `"B"` | `"TIE"`
 - `whyOneLine`: the single reason the winner won
 - `biggestGap`: the one work order for the loser
+- `winnersWeakestPoint`: the biggest remaining weakness in the **winner**. When the winner is the
+  shipped commercial game this is interesting; when the winner is the challenger, this sentence is
+  the entire next round of work, so make it a work order rather than an observation.
 - `wouldFlipIf`: the specific change that would reverse the verdict
 - `numbersChecked`: what you actually read, with values — or how the measurement failed
 - `contaminated`: true if you learned which image was which; explain how

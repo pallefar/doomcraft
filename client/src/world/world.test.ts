@@ -19,6 +19,7 @@ import {
 } from './terrain';
 import {
   carveSphere, explode, breakBlock, placeBlock, DigController, applyServerDeltas,
+  blastDebrisCount,
 } from './destruction';
 
 const SEED = 1337;
@@ -47,7 +48,7 @@ describe('terrain', () => {
     generateChunkInto(SEED + 1, 0, 0, b);        // clobber the lattice caches
     generateChunkInto(SEED, 3, -2, b);
     expect(Buffer.compare(Buffer.from(a), Buffer.from(b))).toBe(0);
-    expect(TERRAIN_VERSION).toBe(4);
+    expect(TERRAIN_VERSION).toBe(5);
   });
 
   it('quantises the base height into 3-block terraces', () => {
@@ -428,7 +429,13 @@ describe('destruction', () => {
     const before = w.solidCount;
     const removed = explode(w, 0.5, 16.5, 0.5, WeaponId.ROCKET, 4242);
     expect(removed).toBeGreaterThan(40);
-    expect(w.solidCount).toBe(before - removed);
+    // The blast deletes `removed` voxels and settles a few of them back as
+    // rubble on the crater floor, so the solid count moves by exactly the
+    // difference. Debris is the one thing a blast ADDS; anything else showing
+    // up here would be the carve writing outside its own sphere.
+    const settled = blastDebrisCount();
+    expect(settled).toBeGreaterThan(0);
+    expect(w.solidCount).toBe(before - removed + settled);
     expect(w.blockAt(0, 16, 0)).toBe(BlockId.AIR);
     // Every removed voxel is inside the stated radius.
     for (let y = 10; y <= 22; y++) {
@@ -481,9 +488,9 @@ describe('destruction', () => {
     const before = w.solidCount;
     const removed = explode(w, 0.5, 16.5, 0.5, WeaponId.ROCKET, 4242);
 
-    // Scorching converts, it never deletes: the solid count still only moved by
-    // the number of voxels the blast actually removed.
-    expect(w.solidCount).toBe(before - removed);
+    // Scorching converts, it never deletes: the solid count moved by the
+    // number of voxels the blast removed, less the rubble it settled back.
+    expect(w.solidCount).toBe(before - removed + blastDebrisCount());
 
     let charred = 0;
     for (let y = 10; y <= 22; y++) {
@@ -498,7 +505,9 @@ describe('destruction', () => {
     // upper bound is the wire budget — every mark is a BLOCK_DELTA and
     // MAX_BLOCK_DELTAS_PER_MESSAGE is 512.
     expect(charred).toBeGreaterThanOrEqual(10);
-    expect(charred).toBeLessThanOrEqual(Math.floor(removed / 2));
+    // Plus the debris term: hellstone breaks down into hellstone, so a rubble
+    // block that lands on a freshly charred rim counts in this scan too.
+    expect(charred).toBeLessThanOrEqual(Math.floor(removed / 2) + blastDebrisCount());
   });
 
   it('scorches identically on both sides from the same seed', () => {

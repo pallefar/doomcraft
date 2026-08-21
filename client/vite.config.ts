@@ -47,6 +47,13 @@ export default defineConfig({
         // three is big and never changes between our builds: give it its own
         // long-lived chunk so a game-code deploy does not re-download it.
         manualChunks(id: string) {
+          // three/examples is NOT three. `characters/loader.ts` dynamic-imports
+          // GLTFLoader precisely so the menu never waits for a 100 KB glTF
+          // parser it may never need, and forcing it into the eager `three`
+          // chunk quietly undid that: measured, it put 29.5 KB gzipped of
+          // parser on the critical path. Leaving it unassigned lets rollup keep
+          // the dynamic import in its own lazily-fetched chunk.
+          if (id.includes('/node_modules/three/examples/')) return undefined;
           if (id.includes('/node_modules/three/')) return 'three';
           return undefined;
         },

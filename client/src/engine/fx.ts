@@ -524,17 +524,50 @@ const SPARK_HEAT = 0.42;
  */
 const MUZZLE_LIGHT_MIN_S = 0.075;
 const MUZZLE_LIGHT_HOLD = 0.45;
-const MUZZLE_LIGHT_GAIN = 1.55;
-/** Ceiling on the published flash intensity, so the BFG does not white out. */
-const MUZZLE_LIGHT_MAX = 4.0;
 /**
- * Screen height, in pixels, the world plume's hottest disc may occupy. Sized
- * against the frame rather than the world because the plume is always about a
- * hand's length from the eye, where a metre is most of the screen. 130 px is
- * a fist-sized fireball on the barrel at any resolution; 270 px, which is what
- * the uncapped 0.42 m disc gave at 720p, is a wash over the whole aim point.
+ * ROUND 2: gain 1.55 -> 1.10, radius multiplier 1.15 -> 0.95.
+ *
+ * The dynamic light was the thing that WON round 1 — the world visibly records
+ * the shot, whole-frame luminance 75 -> 145 and a floor corner nowhere near the
+ * barrel going 97 -> 149 — and it is also the thing that lost round 2: roughly
+ * a quarter of the frame over 230 luminance on the flash frame, erasing the
+ * target at the exact moment the decal landed on it. Both are true. The shader
+ * falloff is (1 - d^2/r^2)^2, and a 5.75 m radius at intensity 1.7 does not
+ * distinguish "there is light in this room" from "the wall you are shooting is
+ * now white".
+ *
+ * Both knobs are turned because they cut different parts of the curve, and the
+ * added term on a lit face works out at:
+ *
+ *     distance   1.5 m    3 m     4 m
+ *     before      1.48    0.90    0.45
+ *     after       0.98    0.44    0.10
+ *
+ * Near field down a third, mid field halved, far field mostly gone — which is
+ * the shape wanted. Beyond ~4 m the thing that has to record the shot is the
+ * IMPACT light and the decal at the hit point, not a lamp strapped to the
+ * shooter; the muzzle light's job is the room around the barrel, and it still
+ * does that at two thirds of its old strength.
+ *
+ * The floor of 1.0 on the gain is load-bearing: a flash light dimmer than its
+ * own plume reads as fog on stone rather than as a gunshot.
  */
-const MUZZLE_CORE_MAX_PX = 130;
+const MUZZLE_LIGHT_GAIN = 1.10;
+const MUZZLE_LIGHT_RADIUS_SCALE = 0.95;
+/** Ceiling on the published flash intensity, so the BFG does not white out. */
+const MUZZLE_LIGHT_MAX = 2.7;
+/**
+ * Fraction of the FRAME HEIGHT the world plume's hottest disc may occupy.
+ *
+ * Sized against the frame rather than against the world because the plume is
+ * always about a hand's length from the eye, where a metre is most of the
+ * screen. 0.38, which is what the uncapped 0.42 m disc gave, is a wash over the
+ * aim point; 0.17 was a fist-sized fireball and still stacked three deep into
+ * roughly the 35,000 blown-out pixels round 2 was marked down for. 0.105 is the
+ * same fireball at 42 % of the area, which is the difference between a plume
+ * beside the aim point and a plume over it.
+ */
+const MUZZLE_CORE_MAX_FRAC = 0.105;
 
 /**
  * TRACER defaults, for a hitscan round.
@@ -550,6 +583,17 @@ const MUZZLE_CORE_MAX_PX = 130;
 const TRACER_WIDTH = 0.032;
 const TRACER_SPEED = 640;
 const TRACER_FADE_S = 0.062;
+/**
+ * Longest a streak may keep drawing itself out before the fade starts anyway.
+ *
+ * A shot that hits nothing is reported at `HITSCAN_MAX_DISTANCE`, 220 m, which
+ * at reading speed takes a third of a second to reach — three chaingun rounds'
+ * worth. Without this, missing into open sky leaves four overlapping additive
+ * ropes down the same line while hitting a wall 8 m away leaves one flick, so
+ * the MISS is the louder event. Capping the flight makes every round cost the
+ * same screen time whatever it did or did not hit.
+ */
+const TRACER_MAX_FLIGHT_S = 0.09;
 
 /**
  * Impact point light. Shorter than the muzzle's — a strike is a spark, not a
@@ -649,7 +693,9 @@ export class Fx {
   private readonly trTailLen: Float32Array;
   /** Seconds the finished line holds and fades. 0 = travelling-dash mode. */
   private readonly trFade: Float32Array;
-  /** Seconds since the head reached the far end. */
+  /** Seconds after spawn at which the fade starts. */
+  private readonly trHold: Float32Array;
+  /** Seconds since spawn. */
   private readonly trAge: Float32Array;
   private readonly trWidth: Float32Array;
   private readonly trColor: Float32Array;
@@ -798,6 +844,7 @@ export class Fx {
     this.trHead = new Float32Array(this.tracerCap);
     this.trTailLen = new Float32Array(this.tracerCap);
     this.trFade = new Float32Array(this.tracerCap);
+    this.trHold = new Float32Array(this.tracerCap);
     this.trAge = new Float32Array(this.tracerCap);
     this.trWidth = new Float32Array(this.tracerCap);
     this.trColor = new Float32Array(this.tracerCap * 3);
@@ -1136,17 +1183,21 @@ export class Fx {
   }
 
   /**
-   * `base` metres, but never LARGER on screen than `px` pixels.
+   * `base` metres, but never taller on screen than `frac` of the FRAME.
    *
-   * The mirror of `floorPx`, and it exists for the opposite failure. A sprite
-   * sized in metres and spawned a hand's length from the eye does not read as
-   * a small bright thing close up, it reads as a sheet: the muzzle plume's
-   * 0.42 m core at 0.8 m covers roughly 270 px of a 720 px frame. Additive, on
-   * the crosshair, once per shot. Capping it in pixels is the only sizing rule
-   * that behaves the same on a 412 px phone and a 1440 px desktop.
+   * The mirror of `floorPx`, and deliberately not its mirror image. A floor
+   * belongs in absolute pixels — two pixels is the smallest thing an eye can
+   * find at any resolution. A ceiling does not: 130 px is a fist on a desktop
+   * and a third of a phone screen, so capping a maximum in pixels ships two
+   * different pictures. A fraction of the frame ships one.
+   *
+   * The failure it exists for: a sprite sized in metres and spawned a hand's
+   * length from the eye does not read as a small bright thing close up, it
+   * reads as a sheet. The muzzle plume's 0.42 m core at 0.8 m covered about
+   * 38 % of the frame height — additive, over the aim point, once per shot.
    */
-  private capPx(mpp: number, base: number, px: number): number {
-    const lim = px * mpp;
+  private capFrac(mpp: number, base: number, frac: number): number {
+    const lim = frac * this.viewportHeight * mpp;
     return base > lim ? lim : base;
   }
 
@@ -1349,7 +1400,7 @@ export class Fx {
         x + dx * (0.12 + t), y + dy * (0.12 + t), z + dz * (0.12 + t),
         dx * 3.5, dy * 3.5, dz * 3.5,
         life * (1 - i * 0.18),
-        this.capPx(mpp, 0.42 - i * 0.09, MUZZLE_CORE_MAX_PX - i * 22), 0.10,
+        this.capFrac(mpp, 0.42 - i * 0.09, MUZZLE_CORE_MAX_FRAC - i * 0.03), 0.10,
         r, g, b, 1 - i * 0.2, 0.85, 5, 0,
       );
     }
@@ -1390,7 +1441,7 @@ export class Fx {
     this.addLight(
       x + dx * 0.35, y + dy * 0.35, z + dz * 0.35,
       r * 0.42 + 0.58, g * 0.42 + 0.58, b * 0.42 + 0.58,
-      def.muzzleRadius * 1.15,
+      def.muzzleRadius * MUZZLE_LIGHT_RADIUS_SCALE,
       Math.min(def.muzzleIntensity * MUZZLE_LIGHT_GAIN, MUZZLE_LIGHT_MAX),
       lightSeconds,
       MUZZLE_LIGHT_HOLD,
@@ -1420,6 +1471,11 @@ export class Fx {
    * puts the streak, the flash and the hit in the same frame and leaves the
    * streak on screen long enough (~90 ms) to survive a still capture.
    *
+   * The draw-out is also capped in TIME (`TRACER_MAX_FLIGHT_S`), because a shot
+   * that hit nothing is reported at 220 m and would otherwise stay on screen
+   * three times as long as one that hit a wall — making the miss the louder
+   * event, which is the exact inversion this piece exists to fix.
+   *
    * Pass `fadeS = 0` to get the old travelling-dash behaviour, which is what a
    * slow visible round wants.
    */
@@ -1441,9 +1497,13 @@ export class Fx {
     this.trSpeed[i] = speed;
     this.trHead[i] = 0;
     // With a fade the tail never leaves the barrel, so the beam grows into a
-    // full line instead of flying past as a fixed-length dash.
+    // full line instead of flying past as a fixed-length dash. `trTailLen` is
+    // then unread — the fade branch pins the near end at zero — but it is still
+    // set to something sane so a slot recycled into dash mode cannot inherit a
+    // stale dash length.
     this.trTailLen[i] = fadeS > 0 ? len : Math.min(len, 5 + len * 0.18);
     this.trFade[i] = fadeS > 0 ? fadeS : 0;
+    this.trHold[i] = Math.min(len / Math.max(speed, 1), TRACER_MAX_FLIGHT_S);
     this.trAge[i] = 0;
     this.trWidth[i] = width;
     this.trColor[i * 3] = ((color >>> 16) & 0xff) / 255;
@@ -2397,18 +2457,18 @@ export class Fx {
       let alpha: number;
       let t0: number;
       if (fade > 0) {
-        // Hold the finished line, then bleed it out. The head is still allowed
-        // to grow, so a long shot draws itself out to the target first, and the
-        // tail is PINNED at the barrel — it must not be derived from the head,
-        // because the head runs on past the far end and a tail chasing it walks
-        // the whole beam off into the distance within two frames.
-        if (this.trHead[i] >= this.trLen[i]) this.trAge[i] += dt;
-        if (this.trAge[i] >= fade) {
+        // Draw the line out, hold it, then bleed it out. The tail is PINNED at
+        // the barrel — it must not be derived from the head, because the head
+        // runs on past the far end and a tail chasing it walks the whole beam
+        // off into the distance within two frames.
+        this.trAge[i] += dt;
+        const over = this.trAge[i] - this.trHold[i];
+        if (over >= fade) {
           n--;
           if (i !== n) this.copyTracer(n, i);
           continue;
         }
-        const k = 1 - this.trAge[i] / fade;
+        const k = over <= 0 ? 1 : 1 - over / fade;
         alpha = k * k;
         t0 = 0;
       } else {
@@ -2452,6 +2512,7 @@ export class Fx {
     this.trHead[to] = this.trHead[from];
     this.trTailLen[to] = this.trTailLen[from];
     this.trFade[to] = this.trFade[from];
+    this.trHold[to] = this.trHold[from];
     this.trAge[to] = this.trAge[from];
     this.trWidth[to] = this.trWidth[from];
   }

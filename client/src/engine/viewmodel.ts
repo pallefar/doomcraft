@@ -1452,12 +1452,159 @@ export interface ViewmodelOptions {
 const REST_DIST = 1.395;
 const REST_PITCH = 0.052;
 
-/** Impulse gain converting the shared viewKick* table into spring velocity. */
-const IMPULSE_GAIN = 6.4;
+/**
+ * The gun is yawed in by this much so the camera sees its LEFT FLANK rather
+ * than its back plate — see the block comment at the compose step, which is
+ * where the number is argued.
+ *
+ * It is hoisted to module scope because the RECOIL now needs it too: rearward
+ * travel runs back along the BARREL, and the barrel is what this angle names.
+ */
+const REST_YAW = 0.365;
+const REST_YAW_SIN = Math.sin(REST_YAW);
+const REST_YAW_COS = Math.cos(REST_YAW);
+
+/* ------------------------------------------------------------------------ *
+ * RECOIL — the round-2 rebuild, and the numbers it was rebuilt from
+ *
+ * The critic's measurement: on both sampled frames that caught the muzzle
+ * flash the pistol sat in its exact rest pose — same slide position, same
+ * tilt, same hand placement as the non-firing frames either side. Reproduced
+ * exactly by projecting three points on the model through the viewmodel camera
+ * at 1440x900 and differencing them against rest, frame by frame after a shot:
+ *
+ *     frame            muzzle     grip      slide
+ *     f1  (17 ms)       1.2 px    2.2 px    37.7 px
+ *     f2  (33 ms)       2.0 px    3.6 px    33.9 px
+ *     f4  (67 ms, peak) 2.6 px    4.5 px    22.0 px
+ *
+ * The gun's own solid moved one to four pixels. Three separate causes, all
+ * fixed here:
+ *
+ *  1. THE KICK POINTED WHERE THE CAMERA CANNOT SEE IT. `viewKickZ` is by far
+ *     the biggest column in the shared table (0.075 against 0.010 for Y on the
+ *     pistol) and it was applied along the CAMERA's z — straight into the
+ *     screen. A gun pushed 15 mm down the view axis at 1.4 m does not move on
+ *     the picture plane at all; it gets 1 % bigger. The recoil was real, it
+ *     was integrated, it was clamped, and it was invisible. It now runs back
+ *     along the BARREL, which is yawed 21 degrees out of the view axis, so 36 %
+ *     of every millimetre of it lands on the picture plane where it can be seen.
+ *
+ *  2. THE SPRING PEAKED AFTER THE FLASH HAD GONE. An impulse-driven spring
+ *     peaks a quarter-period late: at the table's recovery of 16 rad/s that is
+ *     73 ms, while the pistol's flash is 45 ms. Every frame bright enough to
+ *     draw the eye showed the gun on its way out, at a third of its travel.
+ *     `KICK_OMEGA_SCALE` moves the peak to ~32 ms — two frames, inside the
+ *     flash — and the impulse gain is multiplied by the same factor so raising
+ *     the frequency costs no travel.
+ *
+ *  3. THE TABLE SPECIFIED A PUSH, AND WHAT THE EYE READS IS A DISTANCE. Peak
+ *     displacement of an impulse-driven spring is v0/omega_d, so handing the
+ *     table straight to the spring makes travel inversely proportional to each
+ *     weapon's recovery rate — and recovery runs 22 (chaingun) to 5 (BFG). The
+ *     pistol's 0.075 became 15 mm and the BFG's 0.5 wanted 325 mm, which the
+ *     safety clamp then pinned flat at 240 for five frames: a weapon that does
+ *     not move and a weapon stuck against a wall, from one honest table. Every
+ *     channel is now specified as the PEAK TRAVEL it should reach and the
+ *     impulse needed to reach it is solved for, which removes recovery from the
+ *     amplitude entirely and leaves it doing only what it names — how long the
+ *     gun takes to come back.
+ *
+ *  4. THE LIGHT END WAS STILL TOO LIGHT. The table's z column spans 6.7x and
+ *     its pitch column 5.8x, authored for CAMERA kick where a pistol should be
+ *     a nudge. A viewmodel has to show mass on every shot or it is a prop, so
+ *     `feltKick` compresses each column toward its heaviest row: near-identity
+ *     where the table is already loud, close to double where it whispers, and
+ *     ordering preserved throughout.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Frequency multiplier on the table's `viewKickRecovery`, so recoil peaks
+ * while the muzzle flash is still lit rather than four frames behind it.
+ * At the pistol's 16 rad/s this moves the peak from 73 ms to 32 ms — two
+ * frames, inside the 45 ms flash.
+ */
+const KICK_OMEGA_SCALE = 2.25;
+
 const KICK_DAMPING = 0.58;
+/** sqrt(1 - z^2): omega_d / omega. */
+const KICK_DAMPED = Math.sqrt(1 - KICK_DAMPING * KICK_DAMPING);
+/**
+ * What fraction of v0/omega_d an impulse-driven spring actually reaches, at
+ * this damping. 0.413. Solving for it is what lets a travel be REQUESTED.
+ */
+const KICK_PEAK_FRAC = (() => {
+  const th = Math.atan2(KICK_DAMPED, KICK_DAMPING);
+  return Math.exp((-KICK_DAMPING * th) / KICK_DAMPED) * Math.sin(th);
+})();
+
+/**
+ * Peak travel per compressed table unit, and the compression each column gets.
+ *
+ * `TRIM_TRAVEL` is set to reproduce the pistol's previous amplitude exactly on
+ * the four channels that were never the problem (lateral, vertical, yaw, roll)
+ * — they are trim, and trim that changes is just noise. The two channels the
+ * critic named get their own, larger figures.
+ *
+ * Peak REARWARD travel requested, in millimetres: chaingun 21, plasma 19,
+ * pistol 26, shotgun 51, rocket 59, BFG 73. What the table used to produce, on
+ * the same weapons: 8, 8, 15, 84, 138, and 324 — that last one clamped flat at
+ * 240 for five frames, which is its own kind of not moving.
+ *
+ * The substepped integrator lands about 15 % under an analytic peak, so read
+ * these as the ask; `viewmodel.test.ts` measures what actually arrives, in
+ * pixels, which is the only unit this piece is judged in.
+ */
+const TRIM_TRAVEL = 0.203;
+const AXIAL_TRAVEL = 0.174;
+const AXIAL_REF = 0.34;
+const AXIAL_COMPRESSION = 0.55;
+/** Peak muzzle rise requested, radians: chaingun 0.021, pistol 0.027, BFG 0.081. */
+const RISE_TRAVEL = 0.31;
+const RISE_REF = 0.26;
+const RISE_COMPRESSION = 0.62;
+
 const MAX_KICK_OFFSET = 0.24;
 const MAX_KICK_ANGLE = 0.30;
 const MAX_PARTS = 3;
+
+/**
+ * Compress a column of the kick table toward its heaviest row.
+ *
+ * Straight multiplication cannot fix a viewmodel that does not move: the gain
+ * that makes a pistol read throws the BFG into the clamp, and the gain that
+ * keeps the BFG sane leaves the pistol at two pixels. A power curve anchored
+ * at `ref` fixes both — it is the identity where the table is already loud and
+ * it is a near-doubling where the table whispers, and being monotonic it can
+ * never reorder the arsenal.
+ */
+function feltKick(v: number, ref: number, exp: number): number {
+  const a = Math.abs(v);
+  if (a <= 1e-6) return 0;
+  return (v < 0 ? -ref : ref) * Math.pow(a / ref, exp);
+}
+
+/**
+ * Slide / bolt travel across the mechanical cycle, 1 = hard against the stop.
+ * `cycle` runs 1 at the shot down to 0.
+ *
+ * The old curve was `cycle^0.55`, a slow linear-ish bleed that put the slide at
+ * 37, 34, 29, 22, 12 px over five frames: never in the same place twice, but
+ * never more than 5 px apart either, which in a sampled contact sheet is
+ * indistinguishable from a slide that never moved. A real slide is a SNAP —
+ * hard back inside a frame, held one, then thrown home. This gives 37, 9, 0 px:
+ * a 27 px change between adjacent frames, which is a cycle you cannot miss and
+ * cannot mistake for a static prop.
+ */
+const SLIDE_BACK_FRAC = 0.17;
+const SLIDE_HOME_FRAC = 0.40;
+function slideTravel(cycle: number): number {
+  const u = 1 - cycle;
+  if (u <= SLIDE_BACK_FRAC) return 1;
+  const r = clamp((u - SLIDE_BACK_FRAC) / SLIDE_HOME_FRAC, 0, 1);
+  // Fast off the stop, decelerating into battery.
+  return (1 - r) * (1 - r);
+}
 
 /** Hit-confirm brightness pop: how much, and how fast it bleeds off (1/s). */
 const HIT_GLOW_GAIN = 0.30;
@@ -1851,16 +1998,28 @@ export class Viewmodel implements OverlayPass {
   fire(weaponId?: number): void {
     const id = weaponId ?? this.weapon;
     const def = getWeapon(id);
-    const g = IMPULSE_GAIN * this.motionScale;
     const s = this.kickSide;
     this.kickSide = -s;
 
-    this.vx += def.viewKickX * g * s;
-    this.vy += def.viewKickY * g;
-    this.vz += def.viewKickZ * g;
-    this.wx += def.viewKickPitch * g;
-    this.wy += def.viewKickYaw * g * s;
-    this.wz += def.viewKickRoll * g * s;
+    /* ASK FOR A TRAVEL, NOT A SHOVE.
+     *
+     * An impulse-driven spring peaks at v0/omega_d * KICK_PEAK_FRAC, so the
+     * velocity that reaches a wanted peak is that expression inverted. Doing it
+     * this way is what stops each weapon's recovery rate from silently setting
+     * its amplitude — the bug that left the pistol at 15 mm of invisible travel
+     * while the BFG sat pinned against the safety clamp. */
+    const omegaD = Math.max(1, def.viewKickRecovery) * KICK_OMEGA_SCALE * KICK_DAMPED;
+    const g = (omegaD / KICK_PEAK_FRAC) * this.motionScale;
+
+    this.vx += def.viewKickX * TRIM_TRAVEL * g * s;
+    this.vy += def.viewKickY * TRIM_TRAVEL * g;
+    // The two channels that carry the read — rearward travel along the barrel
+    // and muzzle rise — get the compressed, weighted treatment. The other four
+    // keep the table's own proportions, because they are trim, not mass.
+    this.vz += feltKick(def.viewKickZ, AXIAL_REF, AXIAL_COMPRESSION) * AXIAL_TRAVEL * g;
+    this.wx += feltKick(def.viewKickPitch, RISE_REF, RISE_COMPRESSION) * RISE_TRAVEL * g;
+    this.wy += def.viewKickYaw * TRIM_TRAVEL * g * s;
+    this.wz += def.viewKickRoll * TRIM_TRAVEL * g * s;
 
     if (def.muzzleMs > 0) {
       this.muzzle = 1;
@@ -1902,7 +2061,11 @@ export class Viewmodel implements OverlayPass {
    */
   hitConfirm(strength = 0.5, killed = false): void {
     if (this.disposed || !this.enabled) return;
-    const s = clamp(strength, 0, 1) * this.motionScale;
+    // KICK_OMEGA_SCALE: the spring runs faster now, and peak displacement is
+    // v0/omega_d, so an impulse that is not scaled with it quietly shrinks by
+    // the same factor. These numbers were tuned by eye against the old spring;
+    // this keeps the jolt the size it was tuned to be.
+    const s = clamp(strength, 0, 1) * this.motionScale * KICK_OMEGA_SCALE;
     if (s <= 0) return;
     const side = this.kickSide * this.handSign;
 
@@ -1951,7 +2114,8 @@ export class Viewmodel implements OverlayPass {
    */
   bite(power = 0.5): void {
     if (this.disposed || !this.enabled) return;
-    const s = clamp(power, 0, 1) * this.motionScale;
+    // Scaled with the spring frequency for the reason given in `hitConfirm`.
+    const s = clamp(power, 0, 1) * this.motionScale * KICK_OMEGA_SCALE;
     if (s <= 0) return;
     const side = this.kickSide * this.handSign;
     this.kickSide = -this.kickSide;
@@ -2329,7 +2493,7 @@ export class Viewmodel implements OverlayPass {
 
     /* --- part transforms ------------------------------------------------ */
     const scale = scaleOf(shape);
-    const fireCycle = Math.pow(this.cycle, 0.55);
+    const fireCycle = slideTravel(this.cycle);
     for (let i = 0; i < this.activeParts.length && i < MAX_PARTS; i++) {
       const part = this.activeParts[i];
       const pivot = this.partPivots[i];
@@ -2399,7 +2563,15 @@ export class Viewmodel implements OverlayPass {
       // Front-loaded: the first frame of a shot should be uncomfortable and the
       // third should be gone. A linear ramp gives a flash that lingers as a
       // pale beige star, which is the worst of both.
-      this.flashMat.uniforms.uGain.value = 0.18 + 2.10 * this.muzzle * this.muzzle;
+      //
+      // Pulled down from a 2.28 peak in round 2. The measurement that forced
+      // it: 34,946 pixels over 230 luminance on the flash frame, additive, and
+      // the thing being erased was the target the decal was landing on. The
+      // flash was doing the recoil's job as well as its own, badly — and now
+      // that the model itself moves 12 px and cycles its slide, it does not
+      // have to shout. A flash you can look through is worth more than a flash
+      // that proves a shot happened by deleting the evidence.
+      this.flashMat.uniforms.uGain.value = 0.14 + 1.48 * this.muzzle * this.muzzle;
       this.flashMat.uniformsNeedUpdate = true;
     } else {
       this.flashMesh.visible = false;
@@ -2443,11 +2615,27 @@ export class Viewmodel implements OverlayPass {
     // capture showed. At 21 degrees it is 138 mm — a third longer for two
     // degrees of cant nobody reads as wrong, because perspective from the
     // camera's own sideways offset is already supplying about eight of them.
-    const restYaw = 0.365;
+    const restYaw = REST_YAW;
+
+    /* RECOIL TRAVELS BACK ALONG THE BARREL.
+     *
+     * This is the round-2 fix, and it is one line of trigonometry against the
+     * single measurement the piece lost on. `this.pz` is the rearward spring —
+     * the biggest column in the kick table — and it used to be added straight
+     * to the camera-space z, which is the one direction a camera cannot see.
+     * At 1.4 m a 20 mm push down the view axis moves nothing on the picture
+     * plane; it makes the gun 1.4 % bigger and that is all. The gun recoils
+     * into the shooter's hand, and the hand is holding the gun at `restYaw`,
+     * so the travel decomposes: sin(21 deg) = 0.357 of it on the picture plane
+     * and cos(21 deg) = 0.934 of it into depth. The depth half is what it
+     * always was. The other half is the pixels. */
+    const axialX = this.pz * REST_YAW_SIN * this.handSign;
+    const axialZ = this.pz * REST_YAW_COS;
 
     const revShake = this.rev * 0.0045;
     const px = restX
       + (this.swayX + bobX + this.px) * this.handSign
+      + axialX
       + 0.062 * this.sprintT * this.handSign
       - 0.048 * pose.hold * this.handSign
       + Math.sin(this.chainPhase * TAU * 3.1) * revShake;
@@ -2459,7 +2647,7 @@ export class Viewmodel implements OverlayPass {
       + 0.030 * pose.push
       - 0.62 * lowered
       + Math.cos(this.chainPhase * TAU * 4.3) * revShake;
-    const pz = restZ + this.pz
+    const pz = restZ + axialZ
       + 0.034 * this.sprintT
       + 0.030 * pose.hold
       + 0.16 * lowered;
@@ -2490,7 +2678,7 @@ export class Viewmodel implements OverlayPass {
    * BFG's recovery term explode.
    */
   private integrateSpring(omega: number, dt: number): void {
-    const w = Math.max(1, omega);
+    const w = Math.max(1, omega) * KICK_OMEGA_SCALE;
     const steps = Math.min(8, Math.max(1, Math.ceil((w * dt) / 0.2)));
     const h = dt / steps;
     const z = KICK_DAMPING;

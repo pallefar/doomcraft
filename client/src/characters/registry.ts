@@ -128,12 +128,32 @@ export interface CharacterLook {
   readonly cadence: number;
 }
 
+/**
+ * Build a stretch table.
+ *
+ * BUG THIS FIXES. The table is documented as RIG-NODE indexed and is read that
+ * way (`NODE_ROOT`, `nodeOfPart()`, 21 numbers for 7 nodes), but every look
+ * below used to key it with the PART_* constants, which are off by one from the
+ * node indices: `[PART_TORSO]` is 2 and node 2 is leg-right. The whole table
+ * was therefore applied one node to the left. The Baron's 1.55x chest widened
+ * its right shin, the Cacodemon's "fat cube torso" landed on its arms and its
+ * torso got the arms' 0.62 SQUASH instead — so the one archetype whose entire
+ * silhouette is "a floating ball" rendered as a shrunken box, and the outline
+ * `registry.ts`'s own header promises did not exist.
+ *
+ * The keys are now written through `nodeOfPart()`, which is what the doc said
+ * all along, and passing a raw part index is no longer possible to do by
+ * accident because the parameter is typed as a node index.
+ */
 function stretch(nodes: Partial<Record<number, readonly [number, number, number]>>): number[] {
   const s = new Array<number>(RIG_NODES * 3).fill(1);
   for (const key of Object.keys(nodes)) {
     const i = Number(key);
     const v = nodes[i];
     if (v === undefined) continue;
+    if (!Number.isInteger(i) || i < 0 || i >= RIG_NODES) {
+      throw new RangeError(`stretch(): ${i} is not a rig node; use nodeOfPart()`);
+    }
     s[i * 3] = v[0]; s[i * 3 + 1] = v[1]; s[i * 3 + 2] = v[2];
   }
   return s;
@@ -153,10 +173,10 @@ export const LOOK_IMP = look({
   height: 1.75,
   parts: PARTS_ALL,
   stretch: stretch({
-    [PART_ARM_LEFT]: [0.92, 1.22, 0.92],
-    [PART_ARM_RIGHT]: [0.92, 1.22, 0.92],
-    [PART_TORSO]: [0.94, 0.94, 0.94],
-    [PART_HEAD]: [1.05, 1.0, 1.05],
+    [nodeOfPart(PART_ARM_LEFT)]: [0.92, 1.22, 0.92],
+    [nodeOfPart(PART_ARM_RIGHT)]: [0.92, 1.22, 0.92],
+    [nodeOfPart(PART_TORSO)]: [0.94, 0.94, 0.94],
+    [nodeOfPart(PART_HEAD)]: [1.05, 1.0, 1.05],
   }),
   lean: 0.20,
   armed: false,
@@ -199,12 +219,12 @@ export const LOOK_BARON = look({
   height: 2.40,
   parts: PARTS_ALL,
   stretch: stretch({
-    [PART_TORSO]: [1.55, 1.02, 1.45],
-    [PART_ARM_LEFT]: [1.55, 1.06, 1.55],
-    [PART_ARM_RIGHT]: [1.55, 1.06, 1.55],
-    [PART_LEG_LEFT]: [1.35, 0.94, 1.35],
-    [PART_LEG_RIGHT]: [1.35, 0.94, 1.35],
-    [PART_HEAD]: [1.16, 1.0, 1.16],
+    [nodeOfPart(PART_TORSO)]: [1.55, 1.02, 1.45],
+    [nodeOfPart(PART_ARM_LEFT)]: [1.55, 1.06, 1.55],
+    [nodeOfPart(PART_ARM_RIGHT)]: [1.55, 1.06, 1.55],
+    [nodeOfPart(PART_LEG_LEFT)]: [1.35, 0.94, 1.35],
+    [nodeOfPart(PART_LEG_RIGHT)]: [1.35, 0.94, 1.35],
+    [nodeOfPart(PART_HEAD)]: [1.16, 1.0, 1.16],
   }),
   lean: 0.07,
   armed: true,
@@ -227,10 +247,10 @@ export const LOOK_CACODEMON = look({
   height: 1.70,
   parts: PARTS_NO_LEGS,
   stretch: stretch({
-    [PART_TORSO]: [1.95, 1.42, 1.95],
-    [PART_ARM_LEFT]: [0.80, 0.62, 0.80],
-    [PART_ARM_RIGHT]: [0.80, 0.62, 0.80],
-    [PART_HEAD]: [1.42, 1.30, 1.42],
+    [nodeOfPart(PART_TORSO)]: [1.95, 1.42, 1.95],
+    [nodeOfPart(PART_ARM_LEFT)]: [0.80, 0.62, 0.80],
+    [nodeOfPart(PART_ARM_RIGHT)]: [0.80, 0.62, 0.80],
+    [nodeOfPart(PART_HEAD)]: [1.42, 1.30, 1.42],
   }),
   lean: 0.0,
   armed: false,
@@ -251,7 +271,7 @@ export const LOOK_LOST_SOUL = look({
   tint: [1.55, 1.30, 0.80],
   height: 0.70,
   parts: PARTS_HEAD_ONLY,
-  stretch: stretch({ [PART_HEAD]: [1.0, 1.0, 1.0] }),
+  stretch: stretch({ [nodeOfPart(PART_HEAD)]: [1.0, 1.0, 1.0] }),
   lean: 0.0,
   armed: false,
   melee: true,

@@ -27,6 +27,8 @@ import {
   TC_PAUSE, TC_AUTOFIRE, TC_AIMASSIST, TC_SWAP, TC_NONE,
   contrastRatio, edgeContrast, lightStrokeContrast, worstEdgeContrast, TOUCH_EDGE,
   TouchRouter, readoutRect, FIRE_SLIDE_GAIN, READOUT_MARGIN, READOUT_CLEARANCE,
+  thumbArcMix, FIRE_ZONE_MIN, THUMB_ARC_INNER, THUMB_ARC_OUTER,
+  HUD_CORNER_W, HUD_CORNER_H,
   type TouchGeom, type Disc, type Rect,
   type TouchSink, type TouchAimSource, type TouchAimTarget,
 } from './touch';
@@ -556,6 +558,196 @@ describe('solveTouchLayout', () => {
 });
 
 /* ------------------------------------------------------------------------ *
+ * The sweep arc — the whole of round 2
+ *
+ * A trigger thumb sweeps an arc; it does not press points. The band r 80–220
+ * from the trigger corner is everything it reaches without regripping, and
+ * round 1 lost on exactly this: 38.7 % of that arc was a tap target (FIRE
+ * Ø120, JUMP/DUCK Ø55, WEP/BLD/RLD Ø48), so below y=283 the only button-free
+ * horizontal run in the right half was 199 px wide and sat in the middle of
+ * the picture. Every look-swipe therefore started by lifting off the trigger.
+ *
+ * The fix is one rule: the arc belongs to one gesture. `fireZone` is a
+ * contiguous slab anchored in the corner where a press fires and the same
+ * drag keeps panning, every button is outside it, and `thumbArcMix` reports
+ * what a thumb actually finds there. These are the assertions that stop the
+ * arc ever being paved again.
+ * ------------------------------------------------------------------------ */
+
+/** Overlap depth of a disc and a rect, px. Positive means they intersect. */
+function discRectHit(d: Disc, r: Rect): number {
+  const cx = Math.max(r.x0, Math.min(d.x, r.x1));
+  const cy = Math.max(r.y0, Math.min(d.y, r.y1));
+  return d.r - Math.hypot(d.x - cx, d.y - cy);
+}
+
+describe('the trigger thumb\'s sweep arc', () => {
+  const g = createTouchGeom();
+
+  it('gives the whole arc to one gesture: 0 % button, ~100 % pan', () => {
+    for (const [vw, vh, label] of VIEWPORTS) {
+      for (const scale of [0.7, 1, 1.4]) {
+        for (const southpaw of [false, true]) {
+          solveTouchLayout(vw, vh, { scale, southpaw }, g);
+          const mix = thumbArcMix(g);
+          const where = `${label} @${scale}${southpaw ? ' southpaw' : ''}`;
+          expect(mix.samples, where).toBeGreaterThan(2000);
+          // Not one pixel of the sweep arc stops the camera. This is the
+          // number round 1 lost on, and 0 is the only passing value.
+          expect(mix.button,
+            `${where}: ${(mix.button * 100).toFixed(1)}% of the arc is a button`).toBe(0);
+          expect(mix.pan, where).toBeGreaterThanOrEqual(0.99);
+          // …and nearly all of it fires WHILE panning.
+          expect(mix.fire, where).toBeGreaterThanOrEqual(0.98);
+        }
+      }
+    }
+  });
+
+  it('is 100 % fire-and-look on both phone viewports, portrait and landscape', () => {
+    for (const [vw, vh] of [[915, 412], [412, 915]] as const) {
+      solveTouchLayout(vw, vh, {}, g);
+      const mix = thumbArcMix(g);
+      expect(mix.fire, `${vw}x${vh}`).toBe(1);
+      expect(mix.button, `${vw}x${vh}`).toBe(0);
+      expect(mix.stick, `${vw}x${vh}`).toBe(0);
+    }
+  });
+
+  it('is a contiguous slab of at least 260x260, anchored in the corner', () => {
+    // The size the work order named. It is not decoration: a 260 px square in
+    // the corner contains the entire r<=220 annulus, which is why the mix
+    // above comes out at 100 %.
+    for (const [vw, vh] of [[915, 412], [412, 915]] as const) {
+      for (const southpaw of [false, true]) {
+        solveTouchLayout(vw, vh, { southpaw }, g);
+        const z = g.fireZone;
+        const where = `${vw}x${vh}${southpaw ? ' southpaw' : ''}`;
+        expect(z.x1 - z.x0, where).toBeGreaterThanOrEqual(FIRE_ZONE_MIN);
+        expect(z.y1 - z.y0, where).toBeGreaterThanOrEqual(FIRE_ZONE_MIN);
+        // Anchored: it touches both edges of the trigger corner, with no
+        // margin for a gripping thumb to fall into.
+        expect(z.y1, where).toBe(vh);
+        expect(southpaw ? z.x0 : z.x1, where).toBe(southpaw ? 0 : vw);
+        // A press at each of its four corners is the trigger, not something
+        // else — that is what "contiguous" has to mean to a finger.
+        const e = 0.5;
+        for (const [x, y] of [
+          [z.x0 + e, z.y0 + e], [z.x1 - e, z.y0 + e],
+          [z.x0 + e, z.y1 - e], [z.x1 - e, z.y1 - e],
+        ]) {
+          expect(hitTest(g, x, y, 0), `${where} at ${x.toFixed(0)},${y.toFixed(0)}`).toBe(TC_FIRE);
+        }
+      }
+    }
+    expect(THUMB_ARC_OUTER).toBeLessThan(FIRE_ZONE_MIN);
+    expect(THUMB_ARC_INNER).toBeLessThan(THUMB_ARC_OUTER);
+  });
+
+  it('lets no drawn control touch the slab, at any viewport or size', () => {
+    // A button inside the slab is a hole in the arc, which is precisely the
+    // shape of the round-1 failure. The trigger disc is the one exception: it
+    // is the slab's own affordance and it answers with the same control id.
+    for (const [vw, vh, label] of VIEWPORTS) {
+      for (const scale of [0.7, 1, 1.4]) {
+        for (const southpaw of [false, true]) {
+          solveTouchLayout(vw, vh, { scale, southpaw }, g);
+          for (const d of touchDiscs(g)) {
+            if (d === g.fire) continue;
+            const over = discRectHit(d, g.fireZone);
+            expect(over, `${label} @${scale}${southpaw ? ' southpaw' : ''}: a control at `
+              + `(${d.x.toFixed(0)},${d.y.toFixed(0)}) sits ${over.toFixed(1)}px `
+              + `inside the fire zone`).toBeLessThanOrEqual(0);
+          }
+          // …and the trigger disc is inside it, so the drawn button and the
+          // region around it can never disagree about a press.
+          expect(discRectHit(g.fire, g.fireZone)).toBeGreaterThan(0);
+          expect(g.fire.x).toBeGreaterThanOrEqual(g.fireZone.x0);
+          expect(g.fire.x).toBeLessThanOrEqual(g.fireZone.x1);
+          expect(g.fire.y).toBeGreaterThanOrEqual(g.fireZone.y0);
+        }
+      }
+    }
+  });
+
+  it('keeps every control out of the HUD block in the other top corner', () => {
+    // Not a control-vs-control failure, so no amount of disc testing finds it:
+    // the minimap, the match chips and the status corner own the movement
+    // hand's top corner while the pad is up, and the first landscape frame of
+    // this layout drew RLD/BLD/WEP straight underneath the match clock. The
+    // solver knows the block is there and routes around it.
+    for (const [vw, vh, label] of VIEWPORTS) {
+      for (const scale of [0.7, 1, 1.4]) {
+        for (const southpaw of [false, true]) {
+          solveTouchLayout(vw, vh, { scale, southpaw }, g);
+          const hud: Rect = southpaw
+            ? { x0: vw - HUD_CORNER_W, y0: 0, x1: vw, y1: HUD_CORNER_H }
+            : { x0: 0, y0: 0, x1: HUD_CORNER_W, y1: HUD_CORNER_H };
+          for (const d of touchDiscs(g)) {
+            const over = discRectHit(d, hud);
+            expect(over, `${label} @${scale}${southpaw ? ' southpaw' : ''}: a control at `
+              + `(${d.x.toFixed(0)},${d.y.toFixed(0)}) is ${over.toFixed(1)}px under the `
+              + `minimap block`).toBeLessThanOrEqual(0);
+          }
+        }
+      }
+    }
+  });
+
+  it('measures the bar: its own attack glyph is not even in the arc', () => {
+    // ref/voxiom/mobileland-08-combat.png. The bar's only attack affordance is
+    // the dig glyph at (712, 262) on a 915x412 screen; the trigger corner is
+    // (915, 412). That is 252 px away — outside the r<=220 sweep entirely — so
+    // 0 % of the bar's arc fires, and the part of it that DOES respond is a
+    // tap-or-drag look surface where a shot and a turn are the same gesture
+    // and therefore cancel. Ours is 100 % fire-and-look.
+    const barDig = Math.hypot(915 - 712, 412 - 262);
+    expect(barDig).toBeGreaterThan(THUMB_ARC_OUTER);
+    solveTouchLayout(915, 412, {}, g);
+    expect(thumbArcMix(g).fire).toBe(1);
+  });
+
+  it('fires and keeps panning from a press anywhere in the slab', () => {
+    // The gesture the critic asked for, replayed from the slab's far inboard
+    // corner rather than from the middle of the trigger disc — the point of a
+    // region is that it does not matter where in it your thumb landed.
+    const sink = new FakeSink();
+    const r = new TouchRouter(sink);
+    const g2 = r.resize(915, 412, {});
+    const x = g2.fireZone.x0 + 6;
+    const y = g2.fireZone.y0 + 6;
+    // Well away from the drawn disc: this is region behaviour, not slop.
+    expect(Math.hypot(x - g2.fire.x, y - g2.fire.y)).toBeGreaterThan(g2.fire.r * 2);
+
+    expect(r.down(1, x, y, 0)).toBe(TC_FIRE);
+    expect(sink.down.has(InputAction.Fire)).toBe(true);
+    sink.clearLook();
+    r.move(1, x + 30, y + 4);      // past the slide threshold, swallowed
+    r.move(1, x + 120, y + 20);
+    expect(sink.down.has(InputAction.Fire),
+      'the trigger let go the moment the thumb moved').toBe(true);
+    expect(Math.abs(sink.lookDx), 'the drag did not pan the camera').toBeGreaterThan(60);
+    expect(sink.lookDy).not.toBe(0);
+    // …and the left thumb is untouched throughout.
+    expect(sink.moveX).toBe(0);
+  });
+
+  it('keeps a look-only surface for the turns that must not fire', () => {
+    // The slab is the corner, not the screen. Everything outside it still
+    // separates aim from fire, which is the half of weakness #9 the bar also
+    // fails: there, a tap anywhere in the right half shoots.
+    solveTouchLayout(915, 412, {}, g);
+    expect(hitTest(g, g.fireZone.x0 - 20, g.fireZone.y0 - 20)).toBe(TC_LOOK);
+    expect(hitTest(g, 915 * 0.5, 412 * 0.3)).toBe(TC_LOOK);
+    const mix = thumbArcMix(g);
+    expect(mix.fire).toBe(1);
+    // The look surface is still the majority of the screen.
+    const slab = (g.fireZone.x1 - g.fireZone.x0) * (g.fireZone.y1 - g.fireZone.y0);
+    expect(slab / (915 * 412)).toBeLessThan(0.2);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
  * The corner read-outs — weakness #11, and the version of it we committed
  * ourselves
  *
@@ -621,17 +813,27 @@ describe('corner read-outs', () => {
   }
 
   it('lifts the ammo plate off the floor without floating it up the screen', () => {
-    // The number the fix exists for. 915x412 is the bar's own mobile viewport.
+    // 915x412 is the bar's own mobile viewport. The band the plate is pinned
+    // to clears the trigger disc and nothing else, because after round 2 there
+    // IS nothing else in that corner — the slab around the disc is a gesture
+    // region, not a control, so the plate may sit inside it, and JUMP/DUCK
+    // were placed above the reserve the plate needs.
     solveTouchLayout(915, 412, {}, g);
-    expect(g.padBottomRight).toBeGreaterThan(190);      // the full cluster is tall
-    expect(g.padEdgeRight).toBeLessThan(g.padBottomRight - 50);
-    // …and the plate now sits in the bottom third, which is what "corner
-    // read-out" has to mean on a 412 px-tall screen.
+    expect(g.padEdgeRight).toBeCloseTo(412 - (g.fire.y - g.fire.r), 6);
+    // …and the plate sits in the bottom third, which is what "corner read-out"
+    // has to mean on a 412 px-tall screen.
     expect(g.padEdgeRight + READOUT_CLEARANCE).toBeLessThan(412 * 0.4);
-    // The band still clears the trigger and the primary glyph column.
-    for (const d of [g.fire, g.jump, g.crouch]) {
-      expect(412 - (d.y - d.r)).toBeLessThanOrEqual(g.padEdgeRight + 1e-6);
+    // Whatever else is on the trigger side is clear of the plate's rectangle,
+    // which is the assertion that actually matters and is swept in full above.
+    const box: Rect = { x0: 0, y0: 0, x1: 0, y1: 0 };
+    readoutRect(g, 1, 80, box);
+    for (const d of [g.fire, g.jump, g.crouch, g.reload, g.build, g.swap]) {
+      expect(discRectOverlap(d, box)).toBeLessThanOrEqual(0);
     }
+    // And on a portrait phone the two bands genuinely differ: the movement
+    // glyphs are half way up the screen there and the plate ignores them.
+    solveTouchLayout(412, 915, {}, g);
+    expect(g.padBottomRight).toBeGreaterThan(g.padEdgeRight + 300);
   });
 
   it('mirrors the bands and the widths with the hand', () => {

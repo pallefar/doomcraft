@@ -80,6 +80,25 @@ function instanceColors(fx: Fx, materialName: string): Float32Array {
   throw new Error(`no fx pool named ${materialName}`);
 }
 
+/**
+ * One end of the first live tracer, in world space, as the shader will see it.
+ *
+ * `a` is the near end (the barrel) and `b` the far end (the impact). Read from
+ * the instanced buffers rather than from Fx's private state, because the buffer
+ * is what is actually drawn — the whole point of the regression below is that
+ * the private state was right and the buffer was not.
+ */
+function beamEnd(fx: Fx, which: 'a' | 'b'): [number, number, number] {
+  for (const child of fx.group.children) {
+    const mesh = child as THREE.Mesh;
+    if ((mesh.material as THREE.Material).name !== 'fx-tracers') continue;
+    const attr = mesh.geometry.getAttribute(which === 'a' ? 'iA' : 'iB') as THREE.BufferAttribute;
+    const v = attr.array as Float32Array;
+    return [v[0], v[1], v[2]];
+  }
+  throw new Error('no tracer pool');
+}
+
 /** Mean colour of the first `n` live instances of a pool. */
 function meanColor(buf: Float32Array, n: number): [number, number, number] {
   let r = 0, g = 0, b = 0;
@@ -157,6 +176,34 @@ describe('point lights', () => {
     // Light is dragged toward white, so its weakest channel beats the plume's.
     expect(l.r).toBeGreaterThan(plumeR);
     expect(l.intensity).toBeGreaterThan(def.muzzleIntensity);
+  });
+
+  it('the flash lights the room without erasing what it is lighting', () => {
+    /* ROUND 2, and it is a retune of the thing that WON round 1, so both halves
+     * are asserted. The blind critic's finding was that the flash blows out
+     * about a quarter of the frame and erases the target on the exact frame the
+     * decal lands. The shader's added term is (1 - d^2/r^2)^2 * intensity, so
+     * the whole of that behaviour is computable from the published light and
+     * can be pinned here rather than left to a screenshot. */
+    const { fx, camera } = makeFx();
+    const rec = lightSink();
+    fx.setLightSink(rec.sink);
+    fx.muzzleFlash(0.2, 1.5, -0.75, 0, 0, -1, WeaponId.PISTOL);
+    fx.update(FRAME, camera);
+    const l = rec.frames[0][0];
+
+    // The pistol's table radius is 5.0 m. Cut, but still a room light.
+    expect(l.radius).toBeLessThan(5.0);
+    expect(l.radius).toBeGreaterThan(3.5);
+
+    const at = (d: number): number =>
+      Math.pow(Math.max(0, 1 - (d * d) / (l.radius * l.radius)), 2) * l.intensity;
+    // Round 1 shipped 1.48 / 0.90 at these two distances, on surfaces already
+    // at their own lit value. That is what a quarter of a blown-out frame is.
+    expect(at(1.5)).toBeLessThan(1.10);
+    expect(at(3.0)).toBeLessThan(0.55);
+    // But the room still lights, or this is just the bar's dead flash again.
+    expect(at(2.0)).toBeGreaterThan(0.35);
   });
 
   it('never publishes more than the shader has slots for', () => {
@@ -245,6 +292,94 @@ describe('impact inherits the surface', () => {
 });
 
 /* ------------------------------------------------------------------------ *
+ * Which shot hit something
+ * ------------------------------------------------------------------------ */
+
+describe('a connect reads louder than a miss', () => {
+  /** Brightest light published on the frame after `spawn`. */
+  function litBy(spawn: (fx: Fx) => void): number {
+    const { fx, camera } = makeFx();
+    const rec = lightSink();
+    fx.setLightSink(rec.sink);
+    fx.update(FRAME, camera);
+    spawn(fx);
+    fx.update(FRAME, camera);
+    let best = 0;
+    for (const l of rec.frames[1] ?? []) best = Math.max(best, l.intensity);
+    return best;
+  }
+
+  it('a body hit lights the room, the way a wall hit already did', () => {
+    // Until this landed, shooting a WALL published a point light and shooting a
+    // DEMON published none unless it died — so the strongest environmental cue
+    // in the game fired for the shot that missed the target and stayed dark for
+    // the shot that hit it. That is exactly backwards for this piece.
+    const body = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 40, false, false));
+    expect(body).toBeGreaterThan(0);
+  });
+
+  it('a kill is louder than a hit, and a hit louder than a graze', () => {
+    const graze = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 6, false, false));
+    const hit = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 70, false, false));
+    const kill = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 70, false, true));
+    expect(hit).toBeGreaterThan(graze);
+    expect(kill).toBeGreaterThan(hit);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The muzzle plume must not cover the thing being shot at
+ * ------------------------------------------------------------------------ */
+
+describe('muzzle plume', () => {
+  /** Largest sprite in the pool, as a fraction of the frame height. */
+  function biggestSpriteFrac(fx: Fx, distance: number): number {
+    for (const child of fx.group.children) {
+      const mesh = child as THREE.Mesh;
+      if ((mesh.material as THREE.Material).name !== 'fx-sparks') continue;
+      const par = (mesh.geometry.getAttribute('iParams') as THREE.BufferAttribute)
+        .array as Float32Array;
+      let big = 0;
+      for (let i = 0; i < fx.stats.sparks; i++) big = Math.max(big, par[i * 4]);
+      // Half-height of the frame at `distance`, for a 68 degree vertical FOV.
+      const halfWorld = Math.tan((68 * Math.PI) / 360) * distance;
+      return big / (2 * halfWorld);
+    }
+    throw new Error('no spark pool');
+  }
+
+  it('is a fireball on the barrel, not a wash over the aim point', () => {
+    const { fx, camera } = makeFx();
+    fx.update(FRAME, camera);
+    // A barrel is about this far from the eye, which is where a sprite sized in
+    // metres stops being a sprite: uncapped, the 0.42 m core covered about 38 %
+    // of the frame height, additive, once per shot.
+    fx.muzzleFlash(0.2, 1.5, -0.75, 0, 0, -1, WeaponId.PISTOL);
+    fx.update(FRAME, camera);
+    const frac = biggestSpriteFrac(fx, 0.8);
+    expect(frac).toBeGreaterThan(0.04);
+    /* ROUND 2. 0.20 was the ceiling while the cap was 0.17, and three discs
+     * stacked at 0.17 of a 900 px frame is a 153 px blowout repeated three
+     * times — most of the ~35,000 pixels over 230 luminance the blind critic
+     * measured on the flash frame, sitting on top of the thing being shot at.
+     * The cap is 0.105 now and the ceiling moves with it. */
+    expect(frac).toBeLessThan(0.13);
+  });
+
+  it('scales with the frame, so a phone gets the same picture as a desktop', () => {
+    const grab = (h: number): number => {
+      const { fx, camera } = makeFx();
+      fx.setViewportHeight(h);
+      fx.update(FRAME, camera);
+      fx.muzzleFlash(0.2, 1.5, -0.75, 0, 0, -1, WeaponId.PISTOL);
+      fx.update(FRAME, camera);
+      return biggestSpriteFrac(fx, 0.8);
+    };
+    expect(grab(412)).toBeCloseTo(grab(1440), 3);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
  * Tracers
  * ------------------------------------------------------------------------ */
 
@@ -263,6 +398,50 @@ describe('tracers', () => {
     fx.tracer(1, 1, 1, 1, 1, 1, 0xffffff);
     fx.update(FRAME, camera);
     expect(fx.stats.tracers).toBe(0);
+  });
+
+  /* The bug this guards was invisible in every screenshot and fatal to the
+   * feature. In fade mode the tail is pinned at the barrel, but it was being
+   * derived from the head — and the head keeps accelerating past the far end.
+   * Two frames after a shot the "tail" was 120 m down the ray, so the quad the
+   * shader drew lay entirely BEHIND the target and off the side of the frame.
+   * The pool said one tracer was alive, the buffers held sane-looking numbers,
+   * and the screen showed nothing. Assert the geometry, not the count. */
+  it('the streak stays anchored at the barrel while it fades', () => {
+    const { fx, camera } = makeFx();
+    const ax = 0.2, ay = 1.4, az = -0.9;
+    fx.tracer(ax, ay, az, 0, 1.6, -20, 0xffe0a0);
+    // Long enough that the head has overrun the far end several times over.
+    for (let i = 0; i < 4; i++) fx.update(FRAME, camera);
+    expect(fx.stats.tracers).toBe(1);
+    const a = beamEnd(fx, 'a');
+    const b = beamEnd(fx, 'b');
+    expect(a[0]).toBeCloseTo(ax, 4);
+    expect(a[1]).toBeCloseTo(ay, 4);
+    expect(a[2]).toBeCloseTo(az, 4);
+    // ...and the head has stopped at the impact rather than flying past it.
+    expect(Math.hypot(b[0] - 0, b[1] - 1.6, b[2] + 20)).toBeLessThan(1e-3);
+  });
+
+  it('a hitscan streak survives long enough to be caught in one frame', () => {
+    const { fx, camera } = makeFx();
+    fx.tracer(0.2, 1.4, -0.9, 0, 1.6, -20, 0xffe0a0);
+    // A pistol cycles every 143 ms. Anything under about a third of that is a
+    // streak a still capture almost never contains — and a critic reads stills.
+    let frames = 0;
+    do { fx.update(FRAME, camera); frames++; } while (fx.stats.tracers > 0 && frames < 600);
+    expect(frames * FRAME).toBeGreaterThan(0.05);
+    expect(frames * FRAME).toBeLessThan(0.16);
+  });
+
+  it('the travelling-dash mode is still available for a slow round', () => {
+    const { fx, camera } = makeFx();
+    fx.tracer(0, 1.6, 0, 0, 1.6, -40, 0xffe0a0, 0.035, 260, 0);
+    fx.update(FRAME, camera);
+    const first = beamEnd(fx, 'a')[2];
+    for (let i = 0; i < 10; i++) fx.update(FRAME, camera);
+    // With no fade the tail chases the head, so the near end walks down the ray.
+    expect(beamEnd(fx, 'a')[2]).toBeLessThan(first - 1);
   });
 });
 
@@ -573,5 +752,26 @@ describe('debris is the wall coming apart', () => {
     expect(fx.stats.sparks).toBeGreaterThan(0);
     expect(rec.frames[1].length).toBe(1);
     expect(rec.frames[1][0].z).toBeGreaterThan(-5);
+  });
+});
+
+/* A miss must not out-shout a hit. `HITSCAN_MAX_DISTANCE` is 220 m, so a shot
+ * into open sky was drawing itself out for a third of a second — three chaingun
+ * rounds' worth of overlapping additive rope — while a wall 8 m away got one
+ * short flick. The flight is capped so the screen time of a round does not
+ * depend on whether it found anything. */
+describe('a streak costs the same screen time whatever it hit', () => {
+  function lifeSeconds(len: number): number {
+    const { fx, camera } = makeFx();
+    fx.tracer(0.2, 1.4, -0.9, 0.2, 1.4, -0.9 - len, 0xffe0a0);
+    let frames = 0;
+    do { fx.update(FRAME, camera); frames++; } while (fx.stats.tracers > 0 && frames < 600);
+    return frames * FRAME;
+  }
+  it('a 220 m miss does not outlive a 10 m wall hit by much', () => {
+    const near = lifeSeconds(10);
+    const far = lifeSeconds(220);
+    expect(far).toBeLessThan(near * 2.5);
+    expect(far).toBeLessThan(0.2);
   });
 });

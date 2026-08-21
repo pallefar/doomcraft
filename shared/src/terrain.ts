@@ -58,7 +58,7 @@ import {
   TREE_DENSITY, VENT_DENSITY,
   WORLD_MIN_BLOCK_X, WORLD_MAX_BLOCK_X, WORLD_MIN_BLOCK_Z, WORLD_MAX_BLOCK_Z,
 } from './constants.ts';
-import { BlockId } from './blocks.ts';
+import { BlockId, BLOCK_COUNT, BLOCK_HARDNESS } from './blocks.ts';
 import {
   TAU, clampf, smootherstep, seedChannel, hash2i, hash3f,
   warpedFbm2, ridged2, fbm2,
@@ -73,8 +73,11 @@ import {
  * 24-block lattice over the whole dry plane and not only inside the arenas.
  * v4 — crags. A second, denser occluder lattice at 12 blocks that fills the
  * plane between the bastions, so no eye-height sightline runs to the skyline.
+ * v5 — battle damage. Every arena ships already fought over: blast craters cut
+ * by the same arithmetic `carveSphere` runs at runtime, charred rims and rubble
+ * settled on the first surface under each hole. See `applyBattleDamage`.
  */
-export const TERRAIN_VERSION = 4;
+export const TERRAIN_VERSION = 5;
 
 /* ------------------------------------------------------------------------ *
  * Tunables — the shape of the level
@@ -668,6 +671,13 @@ const MF_SITE = 1 << 0;      // inside an arena or corridor
 const MF_ARENA = 1 << 1;     // inside an arena specifically
 const MF_PIT = 1 << 2;       // inside a lava pit
 const MF_BUILT = 1 << 3;     // a bastion owns this column (or is one block off it)
+/**
+ * A keep owns this column. Set so the battle-damage pass can leave the one
+ * authored interior in the world alone: its doorway, its clerestory slit, its
+ * crates and its roof deck are all load-bearing for the fight, and a stray
+ * crater through any of them turns a room back into rubble geometry.
+ */
+const MF_KEEP = 1 << 4;
 
 function mapIndex(lx: number, lz: number): number {
   return (lx + MAP_PAD) + (lz + MAP_PAD) * MAP_SIZE;
@@ -1047,6 +1057,7 @@ function buildColumnMaps(seed: number, cx: number, cz: number): void {
           inKeep = stampKeep(x, z, ax, az, floorY, keepHalf, cacheA[arena + 11], theme);
           ownedByKeep = inKeep;
           if (inKeep) {
+            flags |= MF_KEEP;
             if (kGround >= 0) h = kGround;
             structTop = kStructMat !== 0 ? kStructTop : h;
             structMat = kStructMat;
@@ -1369,6 +1380,451 @@ function applyTrees(seed: number, cx: number, cz: number, out: Uint8Array): void
   }
 }
 
+
+/* --- pass 4: battle damage ----------------------------------------------- *
+ *
+ * WHY THE GENERATOR CUTS CRATERS AND NOT ONLY THE ROCKET LAUNCHER.
+ *
+ * Every wall the passes above stamp used to come out of the ground factory
+ * fresh: six flat faces, twelve perfect ninety-degree edges, not a chip on any
+ * of them. That is an honest picture of a level nobody has fought in yet, and
+ * it is exactly the wrong picture, because the claim this piece is judged on is
+ * that the terrain comes apart. A player looking at an unmarked wall has no
+ * reason to believe it is anything but scenery, and the first frame anyone ever
+ * sees is a frame in which nothing has been shot yet.
+ *
+ * So the arenas ship ALREADY FOUGHT OVER. This pass is not a decal generator
+ * and not a second, parallel description of damage: it runs the same arithmetic
+ * `destruction.ts` runs at runtime — the same `power * (1 - (d/r)^2)` against
+ * the same `hardness^1.5` blast resistance, the same hardness jitter band that
+ * gives a rim its spall, the same `BLAST_CHAR` table for the surviving skin —
+ * at a lattice of impact points. A pre-baked crater and the crater your next
+ * rocket cuts beside it are the same object made by the same code, which is
+ * the only way the pre-baked ones are allowed to count as evidence.
+ *
+ * Five rules keep it a scar and not a demolition:
+ *
+ *  - Nothing is cut below the plane the impact went off over (`floorPlane`).
+ *    On flat ground that dishes a floor by one course and no more: no pit to
+ *    fall into, no spawn made unstandable, no corridor opened to the bedrock.
+ *    On a terrace riser or a cliff face — most of the standing surface in a
+ *    world whose heights are quantised into three-block steps — the same rule
+ *    lets the blast eat sideways into the face and leave an alcove.
+ *  - A KEEP burns but does not break (`scarCharOnly`). Its doorway, clerestory,
+ *    crates and roof deck are authored and stay bit-identical; only their
+ *    colour changes. Deathmatch often spawns a player inside one, and the first
+ *    frame they see must not be the one frame in the world with no damage.
+ *  - Nothing at all happens to a lava pit or to a column carrying the second
+ *    solid span (`mRoofMat`) — keep roofs and bastion arch lintels. An arch is a
+ *    sightline somebody has to be able to run through.
+ *  - Debris never seals a way through (`plugsAWay`), and it only settles in
+ *    columns the blast actually bit (`sBitten`), so the mouth of an arch two
+ *    metres from a crater stays swept.
+ *  - Obsidian resists 27 against a scar's 11-21, exactly as it resists a rocket,
+ *    so the skeleton of every arena survives this pass unmarked. What gets
+ *    chewed is what was authored to be chewable: panels, crag flanks, cover.
+ *
+ * Seam safety. The removal and char tests read nothing but the voxel itself,
+ * the voxel directly over it and the site; the rubble test reads nothing but
+ * its own column. No voxel's fate depends on a neighbour that might live in
+ * another chunk, which is what lets chunk (7, -3) come out identical whether or
+ * not (8, -3) has ever been generated.
+ */
+
+/**
+ * Char target per source id; 0 means "this material does not char".
+ *
+ * Exported and imported by `client/src/world/destruction.ts`, which used to
+ * carry its own copy. One table, so a wall scorched by the generator and a wall
+ * scorched by a rocket are the same colour.
+ */
+export const BLAST_CHAR = new Uint8Array(BLOCK_COUNT);
+for (const id of [
+  BlockId.GRASS, BlockId.DIRT, BlockId.SAND, BlockId.SNOW, BlockId.STONE,
+  BlockId.COBBLESTONE, BlockId.BRICK, BlockId.PLANKS,
+  BlockId.WOOD, BlockId.BONE,
+]) BLAST_CHAR[id] = BlockId.HELLSTONE;
+/**
+ * The tech theme burns RED, not rust.
+ *
+ * Rust was the first answer and it was the wrong one for a measurable reason:
+ * `cragMaterial(TECH)` is RUSTED_METAL and the tech surface stratum is 22%
+ * rusted metal already, so a rusted scar on a metal wall did not read as
+ * damage — it read as the next wall material along. Hellstone is in nothing a
+ * tech zone is built from, it is the strongest value AND hue break available
+ * against tech panel's blue-grey 0x4e5966, and it emits light 5, so a burn in a
+ * dark tech corridor is still faintly hot. It also resists 3.26 against tech
+ * panel's 4.19: scarring a wall makes it SOFTER, never armoured.
+ */
+BLAST_CHAR[BlockId.METAL] = BlockId.HELLSTONE;
+BLAST_CHAR[BlockId.TECH_PANEL] = BlockId.HELLSTONE;
+BLAST_CHAR[BlockId.RUSTED_METAL] = BlockId.HELLSTONE;
+/**
+ * Hellstone burns to ASH, and this entry is what stops the hell theme from
+ * being the one place in the world where damage is invisible. Everything hell
+ * is built out of is hellstone or obsidian; obsidian is blast-proof on purpose,
+ * and charring hellstone to a darker rock is impossible — at luminance 59 it is
+ * already the second darkest thing in the palette, and the two below it are
+ * obsidian and bedrock, both of which would ARMOUR the scar.
+ *
+ * So it burns upward in value, to gravel. Bone was tried first and lost: at
+ * 0xeae4d0 it is near white, and a hell arena with a bone rim on every crater
+ * photographed as a red-and-white chequerboard rather than as scorched rock.
+ * Gravel's 0x8f8b83 is the ash reading, it holds a clear value step over
+ * hellstone, and at resist 0.46 a scarred wall is the softest thing on the map
+ * — the opposite of armour, which is the property that matters most.
+ */
+BLAST_CHAR[BlockId.HELLSTONE] = BlockId.GRAVEL;
+
+/** Impact lattice pitch. Coprime with the 5, 9, 12, 24 and 64 lattices above. */
+export const SCAR_CELL = 12;
+/** Share of lattice nodes that carry an impact. */
+const SCAR_CHANCE = 0.72;
+/** Sub-cell displacement of an impact from its node, so no grid is visible. */
+const SCAR_JITTER = 6;
+const SCAR_MIN_RADIUS = 3.0;
+const SCAR_RADIUS_SPAN = 2.6;
+/**
+ * Blast strength per block of radius. The same number as
+ * `TERRAIN_POWER_PER_BLOCK` in destruction.ts, and it has to be: at 3.7 a scar
+ * of radius 3.0-5.6 carries 11.1-20.7 at its centre, which puts it between one
+ * rocket (9.6) and two, and leaves obsidian's 27 untouched at every radius.
+ */
+const SCAR_POWER_PER_BLOCK = 3.7;
+/** Impact height over the natural surface, in blocks: knee to over the head. */
+const SCAR_LIFT_MIN = 1;
+const SCAR_LIFT_SPAN = 3;
+/** Hardness jitter band. Matches destruction.ts, so rims spall the same way. */
+const SCAR_JITTER_MIN = 0.74;
+const SCAR_JITTER_SPAN = 0.54;
+/** The same band on the one course of floor a blast may dish. See the call site. */
+const SCAR_FLOOR_JITTER_MIN = 0.94;
+const SCAR_FLOOR_JITTER_SPAN = 0.16;
+/**
+ * The char reach, as a multiple of the crater radius.
+ *
+ * It is a separate radius and not a band inside the blast for a measured
+ * reason. Blast strength falls off as `1 - (d/r)^2` while a wall's resistance
+ * is a constant, so with a rocket's ten units of power against stone's 1.84 the
+ * removal boundary already sits at 0.91r: the set of voxels that "nearly
+ * survived" is a shell 0.13 blocks thick, which is a shell nobody can see. The
+ * burn a blast leaves is wider than the hole it cuts, so it is measured from
+ * the centre in its own right.
+ */
+const SCAR_CHAR_REACH = 1.24;
+/** Char density at the crater lip; it thins to nothing at the char reach. */
+const SCAR_CHAR_CHANCE = 0.9;
+/**
+ * The lip shell, in blocks past the crater edge, inside which a surviving voxel
+ * chars whether or not it has open sky over it. Past that only voxels with air
+ * directly above them take the burn, which is what puts scorch on the floor
+ * around a crater and on the top of the wall it bit into without blackening
+ * rock nobody will ever excavate.
+ */
+const SCAR_LIP = 1.0;
+/** How far past the crater lip debris is thrown. */
+const RUBBLE_MARGIN = 1.6;
+/** Share of columns under a crater that catch a block of settled debris. */
+const RUBBLE_CHANCE = 0.85;
+/** Longest solid run a fresh hole may leave hanging over it before it falls. */
+const SPALL_MAX_RUN = 2;
+
+/**
+ * Blast resistance. Duplicated from `destruction.ts` deliberately — `shared`
+ * cannot import from `client` — and pinned by a test that fires a real rocket
+ * into a scar and requires it to widen it.
+ */
+function scarResist(hardness: number): number {
+  return hardness * Math.sqrt(hardness);
+}
+
+/** Debris a theme leaves behind, given a per-column hash. */
+function rubbleBlock(theme: Theme, r: number): number {
+  if (theme === Theme.TECH) return r < 0.55 ? BlockId.RUSTED_METAL : BlockId.GRAVEL;
+  // Never hellstone on hellstone: a pile you cannot see is not a pile. Mostly
+  // ash, with a little bone through it — hell's own crag caps are bone, so a
+  // few pale shards read as masonry that came off something, not as snow.
+  if (theme === Theme.HELL) return r < 0.9 ? BlockId.GRAVEL : BlockId.BONE;
+  return r < 0.62 ? BlockId.GRAVEL : BlockId.COBBLESTONE;
+}
+
+/**
+ * Columns nothing may happen to at all: a lava pit, and any column carrying the
+ * second solid span — keep roofs and bastion arch lintels. An arch is a
+ * sightline somebody has to be able to run through; a hole in it is not a scar,
+ * it is a broken level.
+ */
+function scarProtected(mi: number): boolean {
+  return (mFlags[mi] & MF_PIT) !== 0 || mRoofMat[mi] !== 0;
+}
+
+/**
+ * Columns the blast may BURN but not break.
+ *
+ * The keep is the one authored interior in the world — its doorway, clerestory
+ * slit, crates and roof deck are all load-bearing for the fight it exists to
+ * host, and a generator crater through any of them turns a room back into
+ * rubble geometry. But leaving it untouched had a worse failure: a deathmatch
+ * spawn often puts the player INSIDE it, and the frame they see first was then
+ * the one frame in the whole world with no damage in it anywhere.
+ *
+ * So a keep chars and does not break. Every solid stays solid and every void
+ * stays void — the geometry is bit-identical to the authored keep — but its
+ * panels, its floor and its crates come out of the ground already blackened,
+ * and the rocket the player is holding still opens a real hole in them, because
+ * runtime destruction does not consult this.
+ */
+function scarCharOnly(mi: number): boolean {
+  return (mFlags[mi] & MF_KEEP) !== 0;
+}
+
+/**
+ * Drop the stranded cap over the lowest fresh hole in one column.
+ *
+ * Walks up from the floor of the crater box to the first air-under-solid step,
+ * measures the solid run above it, and deletes the run when it is thin enough
+ * to be rubble rather than structure. Bounded to the crater's own y span, so a
+ * scar can never reach up a tower and take its top off.
+ */
+function collapseSpall(
+  out: Uint8Array, lx: number, lz: number, y0: number, y1: number, maxY: number,
+): void {
+  for (let y = y0; y <= y1; y++) {
+    if (out[voxelIndex(lx, y, lz)] !== BlockId.AIR) continue;
+    const base = y + 1;
+    if (base > maxY || out[voxelIndex(lx, base, lz)] === BlockId.AIR) continue;
+    let top = base;
+    while (top <= maxY && out[voxelIndex(lx, top, lz)] !== BlockId.AIR) top++;
+    const run = top - base;
+    if (run <= SPALL_MAX_RUN && top <= y1 + SPALL_MAX_RUN) {
+      for (let k = base; k < top; k++) {
+        if (BLOCK_HARDNESS[out[voxelIndex(lx, k, lz)]] < 0) return;   // bedrock: nothing falls
+      }
+      for (let k = base; k < top; k++) out[voxelIndex(lx, k, lz)] = BlockId.AIR;
+    }
+    return;
+  }
+}
+
+/**
+ * True when a block dropped on the surface at `y` would plug a route.
+ *
+ * The profile it refuses is exact and it is the only one that matters: two
+ * blocks of clear (a standing player is 1.8 m) closed off by a solid lintel
+ * above them, which is a doorway, a keep clerestory or a bastion arch. Debris
+ * is allowed to gather inside a crater bowl, where the clear above it is deeper
+ * than a doorway or open to the sky; it is never allowed to seal a way through.
+ */
+function plugsAWay(out: Uint8Array, lx: number, y: number, lz: number, maxY: number): boolean {
+  if (y + 3 > maxY) return false;
+  return out[voxelIndex(lx, y + 2, lz)] === BlockId.AIR
+      && out[voxelIndex(lx, y + 3, lz)] !== BlockId.AIR;
+}
+
+/**
+ * Columns the current impact actually bit — removed or charred at least one
+ * voxel in. Debris is only allowed to settle in these, which is what keeps a
+ * scar from sprinkling gravel across untouched ground: the mouth of a bastion
+ * arch two metres from a crater must stay swept, or the tunnel stops reading
+ * as a route you can run. Module scope, cleared per impact.
+ */
+const sBitten = new Uint8Array(MAP_AREA);
+
+function applyBattleDamage(seed: number, cx: number, cz: number, out: Uint8Array): void {
+  const baseX = cx * CHUNK_SIZE_X;
+  const baseZ = cz * CHUNK_SIZE_Z;
+  const scarSeed = seedChannel(seed, 11);
+  const charSeed = seedChannel(seed, 12);
+  const rubbleSeed = seedChannel(seed, 13);
+  const maxY = CHUNK_HEIGHT - 2;
+
+  // A site can reach into this chunk from `radius + rubble margin + jitter`
+  // blocks outside it, and the lattice is walked over that widened box so both
+  // sides of every chunk border see the identical set of impacts.
+  const reach = Math.ceil(SCAR_MIN_RADIUS + SCAR_RADIUS_SPAN + RUBBLE_MARGIN + SCAR_JITTER) + 1;
+  const n0x = Math.ceil((baseX - reach) / SCAR_CELL) * SCAR_CELL;
+  const n0z = Math.ceil((baseZ - reach) / SCAR_CELL) * SCAR_CELL;
+  const n1x = baseX + CHUNK_SIZE_X - 1 + reach;
+  const n1z = baseZ + CHUNK_SIZE_Z - 1 + reach;
+
+  for (let nz = n0z; nz <= n1z; nz += SCAR_CELL) {
+    for (let nx = n0x; nx <= n1x; nx += SCAR_CELL) {
+      const h = hash2i(nx, nz, scarSeed);
+      if ((h & 1023) >= SCAR_CHANCE * 1024) continue;
+
+      const sx = nx + 0.5 + (((h >>> 10) & 7) - 3.5) * (SCAR_JITTER / 4);
+      const sz = nz + 0.5 + (((h >>> 13) & 7) - 3.5) * (SCAR_JITTER / 4);
+      const radius = SCAR_MIN_RADIUS + SCAR_RADIUS_SPAN * (((h >>> 16) & 255) / 256);
+      const lift = SCAR_LIFT_MIN + ((h >>> 24) % SCAR_LIFT_SPAN);
+      const ground = surfaceHeightAt(seed, Math.round(sx - 0.5), Math.round(sz - 0.5));
+      const sy = ground + lift + 0.5;
+      const power = radius * SCAR_POWER_PER_BLOCK;
+      const jseed = scarSeed ^ Math.imul(h, 0x9e3779b1);
+      /**
+       * THE FLOOR OF THE BLAST — the one rule that decides whether this pass
+       * scars a level or ruins it.
+       *
+       * Nothing is cut below the plane the impact went off over. On flat ground
+       * that is one course under the surface, so an arena floor can be dished
+       * and scorched but never pitted: there is no hole to fall into, no spawn
+       * left unstandable, no corridor floor opened into the bedrock.
+       *
+       * On a TERRACE RISER or a CLIFF FACE — which is most of the standing
+       * surface in this world, because the height field is quantised into
+       * three-block steps — the column's own ground is metres above the impact,
+       * so the same rule lets the blast eat sideways into the face and leave an
+       * alcove with the shelf still over it. That is the difference between a
+       * generator that scars its buildings and one that scars everything you
+       * can shoot, and it is the reason the guard is measured from the impact
+       * rather than from each column.
+       */
+      const floorPlane = ground;
+
+      const r2 = radius * radius;
+      const inv = 1 / r2;
+      const charR = radius * SCAR_CHAR_REACH;
+      const charR2 = charR * charR;
+      const lip = radius + SCAR_LIP;
+      const lip2 = lip * lip;
+      sBitten.fill(0);
+
+      /* --- the hole and the burn around it ------------------------------ */
+      const lx0 = Math.max(0, Math.floor(sx - charR) - baseX);
+      const lx1 = Math.min(CHUNK_SIZE_X - 1, Math.ceil(sx + charR) - baseX);
+      const lz0 = Math.max(0, Math.floor(sz - charR) - baseZ);
+      const lz1 = Math.min(CHUNK_SIZE_Z - 1, Math.ceil(sz + charR) - baseZ);
+      const y0 = Math.max(1, Math.floor(sy - charR));
+      const y1 = Math.min(maxY, Math.ceil(sy + charR));
+
+      for (let lz = lz0; lz <= lz1; lz++) {
+        const z = baseZ + lz;
+        const dz = z + 0.5 - sz;
+        const dz2 = dz * dz;
+        if (dz2 > charR2) continue;
+        for (let lx = lx0; lx <= lx1; lx++) {
+          const x = baseX + lx;
+          const dx = x + 0.5 - sx;
+          const dxz2 = dx * dx + dz2;
+          if (dxz2 > charR2) continue;
+          const mi = mapIndex(lx, lz);
+          if (scarProtected(mi)) continue;
+          const burnOnly = scarCharOnly(mi);
+          let cut = false;
+
+          // Downward, so a voxel sees the hole above it before it decides
+          // whether it is exposed: that is what puts the burn on a crater floor
+          // and not only on its lip.
+          for (let y = y1; y >= y0; y--) {
+            if (y < floorPlane) break;
+            const dy = y + 0.5 - sy;
+            const d2 = dxz2 + dy * dy;
+            if (d2 > charR2) continue;
+            const i = voxelIndex(lx, y, lz);
+            const id = out[i];
+            if (id === BlockId.AIR) continue;
+            const hardness = BLOCK_HARDNESS[id];
+            if (hardness < 0) continue;                 // bedrock, water, lava
+            // Never undercut standing liquid; a drained lava basin reads as a
+            // generator bug, not as damage.
+            const above = out[voxelIndex(lx, y + 1, lz)];
+            if (above === BlockId.WATER || above === BlockId.LAVA) continue;
+
+            if (d2 <= r2 && !burnOnly) {
+              // Ragged everywhere except on the floor plane. A wall wants the
+              // full jitter band — that is what spalls its rim. A FLOOR cannot
+              // be cut deeper than one course, so the same jitter there does
+              // not read as a ragged edge, it reads as a chequerboard of
+              // alternating pits, and a chequerboard is a pattern rather than a
+              // crater. On that one course the edge is nearly clean, so the
+              // dish comes out round.
+              const jitter = y === floorPlane
+                ? SCAR_FLOOR_JITTER_MIN + SCAR_FLOOR_JITTER_SPAN * hash3f(x, y, z, jseed)
+                : SCAR_JITTER_MIN + SCAR_JITTER_SPAN * hash3f(x, y, z, jseed);
+              if (power * (1 - d2 * inv) > scarResist(hardness) * jitter) {
+                out[i] = BlockId.AIR;
+                cut = true;
+                sBitten[mi] = 1;
+                continue;
+              }
+            }
+
+            const to = BLAST_CHAR[id];
+            if (to === 0) continue;
+            if (d2 > lip2 && above !== BlockId.AIR) continue;
+            // Linear in distance, so the ash is densest at the lip and gone
+            // at the reach. A squared falloff was tried to tighten the halo
+            // further and cut the burn by a factor of twenty — at this reach
+            // the ring is already most of the term, and squaring it deleted
+            // the thing it was supposed to sharpen.
+            const near = 1 - Math.sqrt(d2) / charR;
+            if (hash3f(x, y, z, charSeed) >= SCAR_CHAR_CHANCE * near) continue;
+            out[i] = to;
+            sBitten[mi] = 1;
+          }
+
+          // SPALL. A blast that eats the bottom out of a wall leaves whatever
+          // was resting on it hanging in the air, and one or two courses of
+          // masonry with nothing under them do not hang — they come down. So
+          // any run of one or two solid voxels left stranded over a fresh hole
+          // is dropped with it. Without this the generator produces exactly the
+          // thing the arch test is built to catch: a two-block lintel over two
+          // blocks of clear that nobody built and nobody can walk through.
+          if (cut) collapseSpall(out, lx, lz, Math.max(y0, floorPlane), y1, maxY);
+        }
+      }
+
+      /* --- the debris -------------------------------------------------- *
+       * Settled, not sprayed: the scan starts one block UNDER the detonation
+       * and walks down, so rubble can only ever come to rest below the height
+       * the blast went off at. That is what a pile of spall looks like, and it
+       * also means no crater can drop a block into the sightline it just cut.
+       */
+      const rr = radius + RUBBLE_MARGIN;
+      const rr2 = rr * rr;
+      const bx0 = Math.max(0, Math.floor(sx - rr) - baseX);
+      const bx1 = Math.min(CHUNK_SIZE_X - 1, Math.ceil(sx + rr) - baseX);
+      const bz0 = Math.max(0, Math.floor(sz - rr) - baseZ);
+      const bz1 = Math.min(CHUNK_SIZE_Z - 1, Math.ceil(sz + rr) - baseZ);
+      const scanTop = Math.min(maxY - 1, Math.floor(sy) - 1);
+      const scanBottom = Math.max(1, Math.floor(sy - radius) - 1);
+
+      for (let lz = bz0; lz <= bz1; lz++) {
+        const z = baseZ + lz;
+        const dz = z + 0.5 - sz;
+        const dz2 = dz * dz;
+        if (dz2 > rr2) continue;
+        for (let lx = bx0; lx <= bx1; lx++) {
+          const x = baseX + lx;
+          const dx = x + 0.5 - sx;
+          const d2 = dx * dx + dz2;
+          if (d2 > rr2) continue;
+          const mi = mapIndex(lx, lz);
+          if (scarProtected(mi) || scarCharOnly(mi) || sBitten[mi] === 0) continue;
+          // Thickest under the hole, thinning outward — but never to nothing
+          // inside the throw limit, or the pile stops reading as a pile.
+          const fall = 1 - 0.62 * (Math.sqrt(d2) / rr);
+          if (hash3f(x, 0, z, rubbleSeed) >= RUBBLE_CHANCE * fall) continue;
+
+          // Down to the ground at the latest: spall off a wall lands at the
+          // foot of the wall, which is the pile you actually see from eye level.
+          const colBottom = Math.max(1, Math.min(scanBottom, mHeight[mi] - 2));
+          for (let y = scanTop; y >= colBottom; y--) {
+            const below = out[voxelIndex(lx, y, lz)];
+            if (below === BlockId.AIR) continue;
+            if (below === BlockId.WATER || below === BlockId.LAVA) break;
+            if (below === BlockId.LEAVES) break;
+            const ti = voxelIndex(lx, y + 1, lz);
+            if (out[ti] === BlockId.AIR && !plugsAWay(out, lx, y, lz, maxY)) {
+              out[ti] = rubbleBlock(mTheme[mi] as Theme, hash3f(x, y, z, rubbleSeed ^ 0x51ed27));
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
 /* ------------------------------------------------------------------------ *
  * Chunk generation
  * ------------------------------------------------------------------------ */
@@ -1436,6 +1892,7 @@ export function generateChunkInto(seed: number, cx: number, cz: number, out: Uin
   }
 
   applyTrees(seed, cx, cz, out);
+  applyBattleDamage(seed, cx, cz, out);
 }
 
 /** Convenience wrapper that allocates. Do not call this per frame. */

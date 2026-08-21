@@ -26,6 +26,8 @@ import {
   statusInk, statusPlacement, statusCornerText, SIGHTLINE_INK_BUDGET,
   STATUS_OFF, STATUS_SIGHTLINE, STATUS_CORNER, STATUS_DEATH,
   weaponGlyph, WEAPON_GLYPH_FALLBACK, foveaHealthFrac,
+  RAIL_MAX_CELLS, railSpecs, railStringCount, type RailCellSpec,
+  HUD_CSS,
 } from './hud';
 import {
   AMMO_TYPE_COUNT, WEAPON_COUNT, WEAPON_MAG_SIZE, WeaponId, ammoTypeOf,
@@ -531,6 +533,116 @@ describe('the dying read at the point of gaze', () => {
       const crit = healthTier(hp) === HEALTH_TIER_CRIT && hp > 0;
       expect(foveaHealthFrac(hp, false) > 0).toBe(crit);
     }
+  });
+});
+
+describe('the chassis', () => {
+  /** Flatten the stylesheet into `{selector, body}` pairs, comments stripped. */
+  function rules(css: string): Array<{ sel: string; body: string }> {
+    const out: Array<{ sel: string; body: string }> = [];
+    const bare = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const re = /([^{}]+)\{([^{}]*)\}/g;
+    for (let m = re.exec(bare); m !== null; m = re.exec(bare)) {
+      out.push({ sel: m[1]!.trim(), body: m[2]!.replace(/\s+/g, '') });
+    }
+    return out;
+  }
+
+  /** The base rule for each plate — the one that declares its own background. */
+  const PLATES = [
+    '.dc-map canvas', '.dc-chip', '.dc-rail', '.dc-bar', '.dc-ammo',
+    '.dc-slot', '.dc-status', '.dc-scorner', '.dc-board', '.dc-feed .ln',
+  ];
+
+  it('declares the token set exactly once, on #hud, so mode overlays inherit '
+    + 'it instead of inventing their own', () => {
+    const roots = rules(HUD_CSS).filter((r) => r.body.includes('--dc-r:'));
+    expect(roots.length).toBe(1);
+    expect(roots[0]!.sel).toBe('#hud');
+    for (const token of ['--dc-line:', '--dc-plate:', '--dc-plate-solid:', '--dc-lift:']) {
+      expect(roots[0]!.body, `${token} missing from the chassis`).toContain(token);
+    }
+  });
+
+  it('gives every plate the SAME radius, keyline and elevation — round 1 shipped '
+    + 'five different container treatments and the critic counted them', () => {
+    const all = rules(HUD_CSS);
+    for (const sel of PLATES) {
+      const rule = all.find((r) => r.sel === `#hud ${sel}`);
+      expect(rule, `no base rule for ${sel}`).toBeTruthy();
+      expect(rule!.body, `${sel} does not use the shared radius`)
+        .toContain('border-radius:var(--dc-r)');
+    }
+  });
+
+  it('leaves no hard-coded radius or plate keyline anywhere on the HUD, which '
+    + 'is the only way "one token set" survives the next change', () => {
+    for (const rule of rules(HUD_CSS)) {
+      // Circles are an affordance, not a plate: the stick, the knob and the
+      // thumb buttons are round because they are round things.
+      if (rule.body.includes('border-radius:50%')) continue;
+      const radius = /border-radius:([^;]+)/.exec(rule.body);
+      if (radius !== null) {
+        expect(radius[1], `${rule.sel} hard-codes a radius`).toContain('var(--dc-r)');
+      }
+      // A 1 px white-ish keyline is the plate border; it must come from the token.
+      const keyline = /border:1pxsolidrgba\(255,255,255/.exec(rule.body);
+      expect(keyline, `${rule.sel} hard-codes the plate keyline`).toBeNull();
+    }
+  });
+});
+
+describe('the match rail', () => {
+  /** The exact strip round 1 shipped above the sightline. */
+  const ROUND_ONE: RailCellSpec[] = [
+    { label: 'Round', kind: 'round' },
+    { label: 'Time', kind: 'clock' },
+    { label: 'Frag limit', kind: 'limit' },
+    { label: 'Leader', kind: 'lead' },
+    { label: 'You', kind: 'you' },
+    { label: 'In match', kind: 'bodies' },
+  ];
+
+  it('caps the cell count in code, not in a comment', () => {
+    expect(RAIL_MAX_CELLS).toBe(3);
+    expect(railSpecs(ROUND_ONE).length).toBe(RAIL_MAX_CELLS);
+  });
+
+  it('keeps the FIRST cells, so the cap truncates the tail a caller added '
+    + 'rather than silently reordering what it asked for', () => {
+    const kept = railSpecs(ROUND_ONE);
+    expect(kept.map((c) => c.kind)).toEqual(['round', 'clock', 'limit']);
+  });
+
+  it('leaves a rail that is already inside the budget alone', () => {
+    const three = ROUND_ONE.slice(0, 3);
+    expect(railSpecs(three)).toEqual(three);
+    expect(railSpecs([])).toEqual([]);
+  });
+
+  it('returns a copy, so a caller cannot mutate the shipped spec list through '
+    + 'the value it got back', () => {
+    const src: RailCellSpec[] = [{ label: 'You', kind: 'you' }];
+    const out = railSpecs(src);
+    out.push({ label: 'Leader', kind: 'lead' });
+    expect(src.length).toBe(1);
+  });
+
+  it('counts the strings that land above the sightline, which is the number '
+    + 'the last round lost on: twelve, now five', () => {
+    expect(railStringCount(ROUND_ONE)).toBe(6);          // ...and truncated to 3 cells
+    expect(railStringCount(ROUND_ONE.slice(0, 3))).toBe(6);
+    // The shipping rail: an unlabelled clock plus two labelled cells.
+    const shipping: RailCellSpec[] = [
+      { label: '', kind: 'clock' },
+      { label: 'You', kind: 'you' },
+      { label: 'Players', kind: '' },
+    ];
+    expect(railStringCount(shipping)).toBe(5);
+    // The six-pill strip, had the cap not existed, was twelve.
+    let uncapped = 0;
+    for (const c of ROUND_ONE) uncapped += c.label === '' ? 1 : 2;
+    expect(uncapped).toBe(12);
   });
 });
 

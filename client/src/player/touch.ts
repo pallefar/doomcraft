@@ -12,8 +12,10 @@
  *   #9  the bar has **no fire button**: a tap on the right half both looks and
  *       shoots, so aiming and firing fight each other. Here the two gestures are
  *       separated (`DragTracker` tells a tap from a drag) and then deliberately
- *       *re-*combined by `FirePad`'s slide-off, which keeps the trigger held
- *       while the same thumb keeps aiming.
+ *       *re-*combined over a whole corner of the screen: `TouchGeom.fireZone`
+ *       is a ≥260×260 slab under the trigger thumb where a press fires and the
+ *       same unbroken drag keeps panning (`FirePad`'s slide-off). Aim and fire
+ *       are separable everywhere else and simultaneous where the thumb lives.
  *   #9  no aim assist and no auto-fire at all. `aimAssist()` is a modest cone —
  *       friction plus a bounded pull that can never overshoot the target — and
  *       `AutoFire` holds the trigger only while a target is genuinely locked.
@@ -116,7 +118,11 @@ export function resolveStick(dx: number, dy: number, cfg: StickConfig, out: Stic
   out.x = ux * m;
   out.z = -uy * m;
   out.live = t > 0;
-  out.sprint = out.travel >= cfg.detent && m > 0;
+  // The epsilon is not slop, it is arithmetic: the pad draws the detent at
+  // `travel * detent` and the test presses exactly there, so a ring whose
+  // radius divided by the travel comes back as 0.8999999999999999 would be a
+  // drawn threshold the maths refuses to honour.
+  out.sprint = out.travel >= cfg.detent - 1e-9 && m > 0;
   return out;
 }
 
@@ -500,12 +506,17 @@ export const DEFAULT_FIRE_PAD: Readonly<FirePadConfig> = Object.freeze({
  * The dedicated trigger the bar does not have (ref/BAR.md weakness #9), with
  * the one refinement that makes a separate trigger playable: **slide-off**.
  *
- * Press the pad and the trigger holds. Keep sliding and the same thumb starts
- * feeding look deltas without ever letting go, so a player can open fire and
- * track a strafing target with one thumb. The bar forces that combination by
- * making them the same gesture and so cannot offer either one cleanly; here
- * you get the tap, the hold and the tracked burst, and aiming never fires by
- * accident.
+ * Press and the trigger holds. Keep sliding and the same thumb starts feeding
+ * look deltas without ever letting go, so a player can open fire and track a
+ * strafing target with one thumb. The bar forces that combination by making
+ * them the same gesture and so cannot offer either one cleanly; here you get
+ * the tap, the hold and the tracked burst, and aiming never fires by accident.
+ *
+ * "The pad" is a whole corner, not a disc: `hitTest` hands this class every
+ * press inside `TouchGeom.fireZone`, so where the thumb landed inside the
+ * trigger's region never changes what the gesture means. That is what makes
+ * the slab worth having — a fire+look region whose behaviour depended on
+ * hitting the drawn circle would just be a button with a generous hit box.
  */
 export class FirePad {
   pointerId = -1;
@@ -602,6 +613,28 @@ export class FirePad {
  * controls overlap, that nothing leaves the screen, that every target clears
  * the 44 px minimum, and that the read-out band the HUD is given is genuinely
  * free of thumbs.
+ *
+ * THE SWEEP ARC — the rule the whole right-hand side now obeys.
+ *
+ * A trigger thumb does not press points, it sweeps an arc: pivoting around a
+ * knuckle just inboard of the bottom corner, the band from r 80 to r 220 is
+ * everything it can reach without regripping the phone. Round 1 put the
+ * trigger IN that arc and then paved the rest of it with buttons — JUMP/DUCK
+ * in one column, RLD/BLD/WEP in another — so 38.7 % of the arc was a tap
+ * target and the only button-free horizontal run left in the right half was
+ * 199 px wide, up in the middle of the picture. Every look-swipe therefore
+ * began by lifting the thumb off the trigger and reaching inward, which is the
+ * bar's own failure (aiming and firing fighting each other) rebuilt out of
+ * better parts.
+ *
+ * So the arc belongs to exactly one thing now. `fireZone` is a contiguous
+ * square anchored at the trigger corner, at least `FIRE_ZONE_MIN` on a side,
+ * that is SIMULTANEOUSLY fire and look: a press inside it pulls the trigger,
+ * and the same unbroken drag pans the camera (`FirePad`'s slide-off). Not one
+ * button is allowed to touch it — JUMP/DUCK move up the trigger edge above the
+ * slab, RLD/BLD/WEP move off the hand entirely — and `thumbArcMix` measures
+ * that as a number rather than asserting it in a comment: at 915x412 and
+ * 412x915, 100 % of the arc pans the camera and 0 % of it is a button.
  * ------------------------------------------------------------------------ */
 
 /** Control ids returned by `hitTest`. */
@@ -665,6 +698,24 @@ export interface TouchGeom {
    * solved layout instead of an opinion about it.
    */
   thumbPivot: Pt;
+
+  /**
+   * The combat slab: one contiguous rectangle anchored at the trigger hand's
+   * bottom corner where a press fires AND the same drag keeps looking.
+   *
+   * This is the fix for the round-1 loss. It is not "the fire button's hit
+   * box grown a bit" — it is the whole of the thumb's sweep arc, handed to the
+   * one gesture that has to work while a fight is happening. The drawn trigger
+   * disc still sits in the corner as the affordance you aim your thumb at, but
+   * anywhere in this box behaves identically, so a thumb that has drifted 100
+   * px off the disc chasing a target is still holding the trigger.
+   *
+   * `solveTouchLayout` guarantees three things about it, and `touch.test.ts`
+   * checks all three: it is at least `FIRE_ZONE_MIN` on a side at the two
+   * phone viewports, it contains the trigger disc, and no drawn control
+   * intersects it — a button inside would be a hole in the arc.
+   */
+  fireZone: Rect;
 
   fire: Disc;
   jump: Disc;
@@ -781,6 +832,40 @@ export const THUMB_PIVOT_INSET_X = 60;
 export const THUMB_PIVOT_INSET_Y = 12;
 
 /**
+ * The comfortable thumb annulus, measured from the trigger hand's corner, px.
+ *
+ * Inside `THUMB_ARC_INNER` the thumb is folded under itself; past
+ * `THUMB_ARC_OUTER` the hand has to regrip. Everything between is what a
+ * trigger thumb can sweep, and it is the region `thumbArcMix` measures.
+ */
+export const THUMB_ARC_INNER = 80;
+export const THUMB_ARC_OUTER = 220;
+
+/**
+ * Smallest side of the fire-and-look slab, px — the number the round-2 work
+ * order named, and it is not arbitrary: a square this size anchored at the
+ * corner contains the whole of the r≤220 sweep arc, so there is no reachable
+ * spot where a thumb can press and *not* be firing and aiming at once.
+ */
+export const FIRE_ZONE_MIN = 260;
+
+/**
+ * Largest side of the slab, px. On a tablet, 62 % of the short edge would run
+ * to 476 px and hand half the screen to the trigger; the thumb's arc does not
+ * grow with the screen, so neither does this.
+ */
+export const FIRE_ZONE_MAX = 320;
+
+/**
+ * Base radius the movement stick is guaranteed before the slab may take any
+ * more width, px. Portrait is the case that binds: 412 px of screen minus a
+ * 260 px slab leaves 152, which is exactly a 16 px margin, a Ø124 stick and a
+ * 12 px gap. The stick loses 10 % of its diameter in portrait and the trigger
+ * arc gains its 260th pixel; that is the trade, made explicitly.
+ */
+export const MIN_STICK_BASE_R = 62;
+
+/**
  * Hard ceiling on how far the trigger's centre may sit from the thumb pivot,
  * px. Under this and the pad is a control you press; over it and it is a
  * control you *reach for*, which in a firefight is a control you do not press.
@@ -789,6 +874,20 @@ export const MAX_ATTACK_REACH = 90;
 
 /** Gap kept between neighbouring controls, px. */
 const GAP = 10;
+
+/**
+ * The block the HUD keeps in the movement hand's top corner while the pad is
+ * mounted: the 92 px minimap, the three match chips under it and the status
+ * corner under those. Measured off the running build at 915x412 — the chips
+ * end at y 140 — and shared with `MOBILE_CSS`, which is what draws them.
+ *
+ * The solver has to know it exists. A control placed there is not *overlapping
+ * a control*, so no amount of disc-vs-disc testing catches it; it is simply
+ * illegible, which is how the utility row spent its first landscape frame
+ * underneath the match clock.
+ */
+export const HUD_CORNER_W = 106;
+export const HUD_CORNER_H = 146;
 
 /**
  * Screen-edge margin for the trigger specifically, px. Tighter than the 16/14
@@ -814,6 +913,17 @@ export const READOUT_CLEARANCE = 8;
  */
 const READOUT_MAX_W = 208;
 
+/**
+ * Vertical space the trigger corner keeps free for the ammo plate, px — the
+ * plate's own 80 px plus its clearance.
+ *
+ * The solver has to know this number because the plate is the one HUD element
+ * that lives *inside* the slab (it is inert, so it may) while JUMP/DUCK live
+ * just above it (they are not). Without the reserve the two collide on a short
+ * screen, and the read-out is what loses.
+ */
+const READOUT_RESERVE_H = 88;
+
 function disc(): Disc { return { x: 0, y: 0, r: 0 }; }
 function rect(): Rect { return { x0: 0, y0: 0, x1: 0, y1: 0 }; }
 
@@ -822,7 +932,7 @@ export function createTouchGeom(): TouchGeom {
     vw: 0, vh: 0, portrait: false, southpaw: false,
     stickHome: disc(), stickTravel: 0, knobR: 0, deadR: 0, detentR: 0,
     stickZone: rect(), stickBounds: rect(),
-    thumbPivot: { x: 0, y: 0 },
+    thumbPivot: { x: 0, y: 0 }, fireZone: rect(),
     fire: disc(), jump: disc(), crouch: disc(), reload: disc(),
     build: disc(), swap: disc(), autoFire: disc(), aimAssist: disc(), pause: disc(),
     padBottomLeft: 0, padBottomRight: 0,
@@ -852,11 +962,12 @@ export function attackReach(g: TouchGeom): number {
 export function readoutRect(g: TouchGeom, side: 0 | 1, height: number, out: Rect): Rect {
   const band = side === 0 ? g.padEdgeLeft : g.padEdgeRight;
   const width = side === 0 ? g.readoutWidthLeft : g.readoutWidthRight;
-  // The option chips hang off the pause glyph in the TRIGGER hand's top corner
-  // and mirror with it, so the reserve they need belongs to whichever screen
-  // side that hand is on — not to the right-hand side by habit.
-  const triggerSide = g.southpaw ? 0 : 1;
-  const inset = side === triggerSide ? g.readoutInset : READOUT_MARGIN;
+  // Both plates now sit at the plain margin. The option chips used to run down
+  // the trigger edge from the top corner and the ammo plate had to be inset
+  // past them; they are a top-edge row now (see `readoutInset`, which is still
+  // the reserve the kill feed needs up there), so the bottom corner is clear
+  // and the plate can tuck all the way into it.
+  const inset = READOUT_MARGIN;
   out.x0 = side === 0 ? inset : g.vw - inset - width;
   out.x1 = out.x0 + width;
   out.y1 = g.vh - band - READOUT_CLEARANCE;
@@ -912,17 +1023,21 @@ export function solveTouchLayout(
   const mt = 12 + Math.max(0, o.safeTop);
   const mb = 14 + Math.max(0, o.safeBottom);
 
-  /* --- right-hand combat cluster --------------------------------------
-     Exactly TWO buttons stack beside the trigger. Every extra button in that
-     column pushes the ammo read-out further up the screen, and the bar's own
-     mistake was letting the chrome eat the viewport (weakness #11).
+  /* --- the trigger, and the slab around it -----------------------------
+     The trigger disc is placed against the corner with its own tighter
+     margin, and the thumb pivot is recorded so `attackReach` is a measurement
+     rather than an opinion. At 915x412 that lands the disc's centre 58.9 px
+     from the pivot with a 59.9 px radius — the resting thumb is already
+     *inside* the pad. The bar's equivalent reach is 199 px.
 
-     The trigger itself is placed against the corner using its own tighter
-     margin, and then the thumb pivot is recorded so `attackReach` can be
-     asserted rather than eyeballed. At 915x412 that lands the pad's centre
-     58.9 px from the pivot with a 59.9 px radius — i.e. the resting thumb is
-     already *inside* the attack pad, which is the strongest form of "you can
-     shoot without looking". The bar's equivalent reach is 199 px. */
+     Then the slab. Its side is the thumb's arc, not the screen's size, so it
+     is clamped to [FIRE_ZONE_MIN, FIRE_ZONE_MAX] and only ever shrinks when
+     the viewport genuinely cannot hold it beside a usable stick (width) or
+     under the two movement glyphs (height). It is anchored hard into the
+     corner — no margin, no safe-area inset — because a slab that stops 16 px
+     short of the bezel has a 16 px strip along the edge where the thumb's
+     press is not a shot, and the edge is exactly where a gripping thumb
+     lands. */
   const trigMR = TRIGGER_EDGE + Math.max(0, o.safeRight);
   const trigMB = TRIGGER_EDGE + Math.max(0, o.safeBottom);
   const fx = w - trigMR - fireR;
@@ -930,19 +1045,98 @@ export function solveTouchLayout(
   out.fire.x = fx; out.fire.y = fy; out.fire.r = fireR;
   out.thumbPivot.x = w - Math.max(0, o.safeRight) - THUMB_PIVOT_INSET_X;
   out.thumbPivot.y = h - Math.max(0, o.safeBottom) - THUMB_PIVOT_INSET_Y;
+  const fireTop = fy - fireR;
 
-  const colX = fx - fireR - GAP - btnR;
-  const crouchY = h - mb - btnR;
-  const jumpY = crouchY - btnR - GAP - btnR;
+  const pauseR = clampf(smallR * 0.9, MIN_TOUCH_TARGET / 2, 24);
+  /* The slab may never be smaller than the disc it contains, or the corner
+     would hold a control the surrounding region disagrees with. */
+  const slabFloor = 2 * fireR + TRIGGER_EDGE + 4;
+  const slabWant = clampf(short * 0.62, FIRE_ZONE_MIN, FIRE_ZONE_MAX);
+  const stickBand = ml + 2 * MIN_STICK_BASE_R + 12;
+  const topBand = mt + 2 * chipR + GAP + 2 * btnR + GAP;
+  const slabW = clampf(slabWant, slabFloor, Math.max(slabFloor, w - stickBand));
+  const slabH = clampf(slabWant, slabFloor, Math.max(slabFloor, h - topBand));
+  const slabX0 = w - slabW;
+  const slabY0 = h - slabH;
+  out.fireZone.x0 = slabX0;
+  out.fireZone.y0 = slabY0;
+  out.fireZone.x1 = w;
+  out.fireZone.y1 = h;
 
-  out.crouch.x = colX; out.crouch.y = crouchY; out.crouch.r = btnR;
-  out.jump.x = colX;   out.jump.y = jumpY;     out.jump.r = btnR;
+  /* --- option chips ----------------------------------------------------
+     Auto-fire, aim-assist and pause are pressed between fights and never
+     during one, so they live in the far top corner, as far from the sweep arc
+     as the screen allows. They stack under the pause glyph where the corner is
+     tall enough and run inboard along the top edge where it is not — on a
+     412 px-tall landscape phone a vertical column would reach down into the
+     band JUMP/DUCK now need. */
+  out.pause.x = w - mr - pauseR;
+  out.pause.y = mt + pauseR;
+  out.pause.r = pauseR;
+  out.autoFire.r = chipR;
+  out.aimAssist.r = chipR;
+  const chipColumn = (slabY0 - mt) >= (2 * pauseR + 4 * chipR + 4 * btnR + 40);
+  if (chipColumn) {
+    out.autoFire.x = out.pause.x;
+    out.autoFire.y = out.pause.y + pauseR + 8 + chipR;
+    out.aimAssist.x = out.pause.x;
+    out.aimAssist.y = out.autoFire.y + chipR * 2 + 6;
+  } else {
+    out.autoFire.y = mt + chipR;
+    out.aimAssist.y = mt + chipR;
+    out.autoFire.x = out.pause.x - pauseR - 8 - chipR;
+    out.aimAssist.x = out.autoFire.x - chipR * 2 - 6;
+  }
+  const optionsBottom = Math.max(out.pause.y + pauseR, out.aimAssist.y + chipR);
+  const optionsLeft = Math.min(out.pause.x - pauseR, out.aimAssist.x - chipR);
 
-  /* --- left-hand stick ------------------------------------------------
-     The stick may never reach the button column. On a narrow portrait phone
-     with the control-size slider pushed up, the honest answer is a smaller
-     stick, not two controls under one thumb. */
-  const maxBase = (colX - btnR - 12 - ml) * 0.5;
+  /* --- JUMP and DUCK ---------------------------------------------------
+     Out of the arc, and no further out than they have to be: they hug the
+     same screen edge the thumb is already resting against, immediately above
+     the slab, so the gesture is "slide up the bezel" rather than "reach into
+     the middle of the picture". Their lowest edge is bounded twice — by the
+     slab (which they may not touch, or the arc has a hole in it) and by the
+     corner read-out's reserve (which they may not sit on, or the ammo plate
+     goes back to floating up the screen).
+
+     Three placements, in order of preference: stacked up the edge, side by
+     side above the slab, and — only when the trigger edge is genuinely too
+     short for either, which takes a 360x640 phone with the size slider at
+     1.4x — inboard along the bottom, still 270 px clear of the pivot. */
+  const plateTop = fireTop - READOUT_CLEARANCE - READOUT_RESERVE_H;
+  const pairFloor = optionsBottom + GAP;
+  const pairBottom = Math.min(slabY0 - GAP, plateTop - READOUT_CLEARANCE);
+  const edgeX = w - mr - btnR;
+  let pairInboard = false;
+  out.jump.r = btnR;
+  out.crouch.r = btnR;
+  if (pairBottom - 4 * btnR - GAP >= pairFloor) {
+    out.crouch.x = edgeX;
+    out.crouch.y = pairBottom - btnR;
+    out.jump.x = edgeX;
+    out.jump.y = out.crouch.y - 2 * btnR - GAP;
+  } else if (pairBottom - 2 * btnR >= pairFloor) {
+    const y = pairBottom - btnR;
+    out.crouch.x = edgeX;
+    out.crouch.y = y;
+    out.jump.x = edgeX - 2 * btnR - GAP;
+    out.jump.y = y;
+  } else {
+    pairInboard = true;
+    const y = h - mb - btnR;
+    out.crouch.x = slabX0 - GAP - btnR;
+    out.crouch.y = y;
+    out.jump.x = out.crouch.x - 2 * btnR - GAP;
+    out.jump.y = y;
+  }
+  const pairTop = Math.min(out.jump.y, out.crouch.y) - btnR;
+
+  /* --- left-hand stick -------------------------------------------------
+     The stick may never reach the slab. On a narrow portrait phone with the
+     control-size slider pushed up, the honest answer is a smaller stick, not a
+     thumb that starts a shot every time it reaches for a strafe. */
+  const rightWall = pairInboard ? out.jump.x - btnR : slabX0;
+  const maxBase = (rightWall - 12 - ml) * 0.5;
   if (baseR > maxBase) {
     baseR = Math.max(MIN_TOUCH_TARGET, maxBase);
     travel = Math.max(30, baseR - rim);
@@ -951,75 +1145,92 @@ export function solveTouchLayout(
   const sx = ml + baseR;
   const sy = h - mb - baseR;
   const stickTop = sy - baseR;
+  const stickRight = sx + baseR;
   out.stickHome.x = sx; out.stickHome.y = sy; out.stickHome.r = baseR;
   out.stickTravel = travel;
   out.knobR = knobR;
   out.deadR = travel * clampf(o.deadZone, 0, 0.9);
   out.detentR = travel * clampf(o.detent, 0.5, 1);
 
-  /* Reload, build and weapon-swap are utility, not combat. On a wide screen
-     they take a second column inboard of jump/crouch; on a 412 px-wide portrait
-     phone there is no room for that, so they move to a row above the stick
-     where the idle left thumb reaches them. Either way the trigger column stays
-     two buttons tall. */
-  const stickRight = sx + baseR;
-  const col2X = colX - btnR - GAP - smallR;
-  const twoColumns = (col2X - smallR) >= stickRight + 14;
-  let utilTop: number;
-  if (twoColumns) {
-    out.reload.x = col2X; out.reload.y = crouchY; out.reload.r = smallR;
-    out.build.x = col2X;  out.build.y = jumpY;    out.build.r = smallR;
-    out.swap.x = col2X;   out.swap.y = jumpY - smallR - GAP - smallR; out.swap.r = smallR;
-    utilTop = out.swap.y - smallR;
+  /* --- RLD, BLD, WEP ---------------------------------------------------
+     Utility, not combat, and they used to be the second column inboard of
+     JUMP/DUCK — i.e. the other half of what paved the arc. They are off the
+     trigger thumb's sweep entirely now: a row above the stick where the
+     movement hand can reach them between fights, and where that row will not
+     fit before the slab (a 412 px-wide portrait phone), a row high up the
+     trigger edge above JUMP/DUCK, which is still 400 px from the pivot. The
+     column up the movement edge is the last resort for a small screen at a
+     large control size. */
+  const rowW = smallR * 6 + GAP * 2;
+  /* The movement corner is stacked exactly like the trigger corner: control,
+     then the read-out's reserve, then whatever else. The vitals plate hangs
+     off the top of the stick, so the utility row starts above the plate — a
+     row parked directly on the stick would be sat on by the plate at large
+     control sizes, which is how a read-out ends up printed over a button. */
+  const leftPlateTop = stickTop - READOUT_CLEARANCE - READOUT_RESERVE_H;
+  const utilY = Math.max(mt + smallR, leftPlateTop - READOUT_CLEARANCE - smallR);
+  const topRowY = mt + smallR;
+  const topRowFirst = optionsLeft - GAP - smallR;
+  let utilLeft = true;
+  let topRowLeft = optionsLeft;
+  if (ml + rowW + 12 <= rightWall && utilY - smallR >= HUD_CORNER_H) {
+    /* 1. Above the stick, where the movement hand reaches it between fights.
+          Needs the width AND clear air below the HUD's corner block: on a
+          412 px-tall landscape phone the minimap and the match chips already
+          own everything above the vitals plate. */
+    out.reload.x = ml + smallR;
+    out.build.x = ml + smallR * 3 + GAP;
+    out.swap.x = ml + smallR * 5 + GAP * 2;
+    out.reload.y = utilY; out.build.y = utilY; out.swap.y = utilY;
+  } else if (!chipColumn && topRowFirst - smallR * 5 - GAP * 2 - smallR >= HUD_CORNER_W + 12) {
+    /* 2. The short-screen answer: continue the top-edge option row inboard.
+          Furthest of all from the sweep arc (400 px and more), on the one
+          strip of a landscape phone that neither the HUD nor a thumb wants. */
+    utilLeft = false;
+    out.reload.x = topRowFirst;
+    out.build.x = out.reload.x - 2 * smallR - GAP;
+    out.swap.x = out.build.x - 2 * smallR - GAP;
+    out.reload.y = topRowY; out.build.y = topRowY; out.swap.y = topRowY;
+    topRowLeft = out.swap.x - smallR;
+  } else if (pairTop - GAP - 2 * smallR >= optionsBottom + GAP
+    && edgeX - smallR * 5 - GAP * 2 - smallR >= ml + 12) {
+    /* 3. Portrait: a row up the trigger edge above JUMP/DUCK. The corner is
+          tall there and the arc still ends 400 px below it. */
+    utilLeft = false;
+    const uy = pairTop - GAP - smallR;
+    out.reload.x = w - mr - smallR;
+    out.build.x = out.reload.x - 2 * smallR - GAP;
+    out.swap.x = out.build.x - 2 * smallR - GAP;
+    out.reload.y = uy; out.build.y = uy; out.swap.y = uy;
   } else {
-    /* The row clears the STICK by construction — it is placed above it. It does
-       not automatically clear the trigger column, and on a short phone with the
-       size slider up (360x640 at 1.2x is the case that finds it) the rightmost
-       chip runs straight into JUMP: one thumb, two controls, which is the whole
-       failure this solver exists to prevent. When the row is wide enough to
-       reach the column, lift it clear of the column too. */
-    const rowRight = ml + smallR * 6 + GAP * 2;
-    const clearsColumn = rowRight <= colX - btnR - GAP;
-    let uy = stickTop - 8 - smallR;
-    if (!clearsColumn) uy = Math.min(uy, jumpY - btnR - GAP - smallR);
-    uy = Math.max(uy, mt + smallR);
-    out.reload.x = ml + smallR;                        out.reload.y = uy; out.reload.r = smallR;
-    out.build.x = ml + smallR * 3 + GAP;               out.build.y = uy;  out.build.r = smallR;
-    out.swap.x = ml + smallR * 5 + GAP * 2;            out.swap.y = uy;   out.swap.r = smallR;
-    utilTop = uy - smallR;
+    /* 4. Last resort — a column up the movement edge. Only a small phone at a
+          large control size gets here. */
+    const x = ml + smallR;
+    out.reload.x = x; out.reload.y = utilY;
+    out.build.x = x; out.build.y = utilY - 2 * smallR - GAP;
+    out.swap.x = x; out.swap.y = out.build.y - 2 * smallR - GAP;
   }
-
-  /* --- option chips ----------------------------------------------------
-     Auto-fire and aim-assist are comfort toggles, pressed between fights and
-     never during one, so they hang off the pause button in the far corner
-     rather than crowding the thumb. Keeping them ON SCREEN and labelled is
-     still the point: the bar ships neither feature and no way to ask for it. */
-  const pauseR = clampf(smallR * 0.9, MIN_TOUCH_TARGET / 2, 24);
-  out.pause.x = w - mr - pauseR;
-  out.pause.y = mt + pauseR;
-  out.pause.r = pauseR;
-
-  out.autoFire.x = out.pause.x;
-  out.autoFire.y = out.pause.y + pauseR + 8 + chipR;
-  out.autoFire.r = chipR;
-  out.aimAssist.x = out.pause.x;
-  out.aimAssist.y = out.autoFire.y + chipR * 2 + 6;
-  out.aimAssist.r = chipR;
+  out.reload.r = smallR;
+  out.build.r = smallR;
+  out.swap.r = smallR;
 
   /* --- zones ----------------------------------------------------------
      The grab zone is deliberately much bigger than the drawn stick, because a
-     floating stick that only floats where the stick already is has not floated.
-     It used to be cut off just under the utility row on a portrait phone, which
-     left 2 px of headroom above the drawn base at 412x915: the thumb had to
-     land inside a 158 px band or the press became a look-drag, and a look-drag
-     that was meant to be a step backwards is a death. That clamp is gone.
-     Nothing is lost by removing it because `hitTest` resolves the buttons
-     FIRST — RLD/BLD/WEP each answer inside their own radius plus 6 px of slop,
-     and neighbouring chips are 60 px apart with 62 px of combined slop, so
-     there is no gap between them for the stick to steal. Only the space around
-     the row falls through to the stick, which is what we want. */
-  const zoneRight = Math.min(w * 0.5, colX - btnR - GAP);
-  const zoneHeight = Math.min(h * 0.62, baseR * 2 + 96);
+     floating stick that only floats where the stick already is has not
+     floated. It stops short of the slab: the two may not overlap, or a thumb
+     reaching for a strafe would open fire. Nothing is lost by letting it run
+     under the utility row, because `hitTest` resolves the buttons FIRST —
+     RLD/BLD/WEP each answer inside their own radius plus 6 px of slop, and
+     neighbouring chips are 60 px apart with 62 px of combined slop, so there
+     is no seam between them for the stick to steal. */
+  const zoneRight = Math.min(w * 0.5, rightWall - 6, slabX0 - 6);
+  let zoneHeight = Math.min(h * 0.62, baseR * 2 + 96);
+  /* …and it always keeps real headroom ABOVE the drawn base, or a thumb that
+     lands a centimetre high becomes a look-drag — i.e. the player looks at the
+     sky instead of backing out of a fight. On a 360 px-tall phone with the
+     size slider up, `h * 0.62` alone does not leave any. */
+  const minZone = baseR * 2.5 + mb + 6;
+  if (zoneHeight < minZone) zoneHeight = Math.min(h, minZone);
   const zoneTop = Math.max(0, h - zoneHeight);
   out.stickZone.x0 = 0;
   out.stickZone.y0 = zoneTop;
@@ -1031,50 +1242,70 @@ export function solveTouchLayout(
   out.stickBounds.x1 = Math.max(out.stickBounds.x0, zoneRight - baseR * 0.7);
   out.stickBounds.y1 = Math.max(out.stickBounds.y0, h - mb - baseR * 0.7);
 
-  /* --- the band the HUD may draw read-outs in ------------------------- */
-  const leftBottomBand = h - Math.min(stickTop, twoColumns ? stickTop : utilTop);
-  const rightBottomBand = h - Math.min(fy - fireR, jumpY - btnR,
-    twoColumns ? utilTop : Infinity);
-  const leftClusterRight = twoColumns
-    ? stickRight
-    : Math.max(stickRight, out.swap.x + smallR);
-  const rightClusterLeft = twoColumns ? col2X - smallR : colX - btnR;
+  /* --- the bands the HUD may draw read-outs in -------------------------
+     Only a control whose CENTRE is in the bottom half of the screen can hide a
+     corner read-out, and that is the same filter `mobile.test.ts` sweeps with,
+     so the promise and the check are the same rule. JUMP/DUCK up the trigger
+     edge are above that line on a landscape phone and below it on a portrait
+     one, and the band follows them either way. */
+  let leftTop = h;
+  leftTop = lowestTop(h, out.stickHome, leftTop);
+  if (utilLeft) {
+    leftTop = lowestTop(h, out.reload, leftTop);
+    leftTop = lowestTop(h, out.build, leftTop);
+    leftTop = lowestTop(h, out.swap, leftTop);
+  }
+  let rightTop = h;
+  rightTop = lowestTop(h, out.fire, rightTop);
+  rightTop = lowestTop(h, out.jump, rightTop);
+  rightTop = lowestTop(h, out.crouch, rightTop);
+  if (!utilLeft) {
+    rightTop = lowestTop(h, out.reload, rightTop);
+    rightTop = lowestTop(h, out.build, rightTop);
+    rightTop = lowestTop(h, out.swap, rightTop);
+  }
+  const leftBottomBand = h - leftTop;
+  const rightBottomBand = h - rightTop;
+
+  const leftClusterRight = utilLeft
+    ? Math.max(stickRight, out.swap.x + smallR)
+    : stickRight;
+  const rightClusterLeft = pairInboard ? out.jump.x - btnR : slabX0;
 
   /* --- and the tighter band the CORNER read-outs get -------------------
-     Only the outermost column of each cluster is under a corner plate, so only
-     that column may push it up. The width is then whatever is left before the
-     column the band ignored, which is what makes the pairing safe: the box
-     `readoutRect` builds out of the two is asserted disjoint from every disc,
-     at every viewport, both hands and the whole control-size slider.
-
-     Left: the stick, plus the utility row when the row is on that side.
-     Right: the trigger and JUMP/DUCK — never the inboard utility column, which
-     on a 915x412 screen was costing the ammo plate 65 px of altitude for no
-     reason. */
-  const leftEdgeBand = leftBottomBand;
-  const rightEdgeBand = h - Math.min(fy - fireR, jumpY - btnR);
-  const leftEdgeLimit = rightClusterLeft;
-  const rightEdgeLimit = twoColumns
-    ? Math.max(col2X + smallR, leftClusterRight)
-    : leftClusterRight;
-  const chipReserve = Math.max(0, w - (out.pause.x - out.pause.r)) + 8;
+     The corner plate only has to clear what is actually in the corner. On the
+     trigger side that is now the trigger disc alone: JUMP/DUCK were placed
+     above `plateTop` by construction, and the slab itself is a gesture region
+     rather than a drawn control, so the plate is allowed to sit inside it —
+     which is how the ammo ends up tucked against the trigger instead of
+     floating 205 px up a 412 px-tall screen. When the pair had to go inboard
+     the width cap below is what keeps the plate off them. */
+  const leftEdgeBand = h - stickTop;
+  const rightEdgeBand = h - Math.min(fireTop, pairInboard ? pairTop : fireTop);
+  const rightEdgeLimit = Math.max(
+    leftClusterRight,
+    pairInboard ? out.crouch.x + btnR : 0,
+  );
   const rightEdgeW = clampf(
-    (w - chipReserve) - rightEdgeLimit - READOUT_CLEARANCE,
+    w - READOUT_MARGIN - rightEdgeLimit - READOUT_CLEARANCE,
     MIN_TOUCH_TARGET, READOUT_MAX_W,
   );
   /* The two plates share one row of screen on a short phone, so the second one
-     is also bounded by what the first one left: 10 + 195 + 8 + 148 + 69 is
-     430 px of promises on a 412 px-wide portrait phone, and a promise that
-     wide is how two read-outs end up printed on top of each other. */
+     is also bounded by what the first one left: two 208 px promises on a
+     412 px-wide portrait phone is how two read-outs end up printed on top of
+     each other. */
   const leftEdgeW = clampf(
     Math.min(
-      leftEdgeLimit - READOUT_MARGIN - READOUT_CLEARANCE,
-      w - chipReserve - rightEdgeW - READOUT_CLEARANCE - READOUT_MARGIN,
+      rightClusterLeft - READOUT_MARGIN - READOUT_CLEARANCE,
+      w - READOUT_MARGIN * 2 - rightEdgeW - READOUT_CLEARANCE,
     ),
     MIN_TOUCH_TARGET, READOUT_MAX_W,
   );
 
-  out.readoutInset = chipReserve;
+  /* The kill feed runs along the top and must stop before the option row, so
+     the reserve is measured off whatever is furthest inboard up there —
+     including the utility glyphs when they joined that row. */
+  out.readoutInset = Math.max(0, w - topRowLeft) + 8;
 
   if (o.southpaw) {
     mirrorDisc(out.fire, w);
@@ -1089,6 +1320,9 @@ export function solveTouchLayout(
     mirrorDisc(out.pause, w);
     // The pivot is a property of the hand, so it mirrors with the hand.
     out.thumbPivot.x = w - out.thumbPivot.x;
+    const fx0 = w - out.fireZone.x1;
+    out.fireZone.x1 = w - out.fireZone.x0;
+    out.fireZone.x0 = fx0;
     const zx0 = w - out.stickZone.x1;
     out.stickZone.x0 = zx0;
     out.stickZone.x1 = w;
@@ -1125,6 +1359,17 @@ export function solveTouchLayout(
   return out;
 }
 
+/**
+ * The top edge of `d`, but only when its centre is in the bottom half of the
+ * screen; otherwise `cur` unchanged. Folded over a cluster this gives the
+ * height of the band that cluster's bottom-anchored controls occupy.
+ */
+function lowestTop(h: number, d: Disc, cur: number): number {
+  if (d.y <= h * 0.5) return cur;
+  const t = d.y - d.r;
+  return t < cur ? t : cur;
+}
+
 function mirrorDisc(d: Disc, w: number): void { d.x = w - d.x; }
 
 function inDisc(d: Disc, x: number, y: number, slop: number): boolean {
@@ -1146,6 +1391,13 @@ function inRect(r: Rect, x: number, y: number): boolean {
  * hit area past the drawn circle — a 60 px glyph that only answers inside its
  * own 60 px is a glyph you miss in a firefight, and the bar's 40 px ones are
  * exactly that.
+ *
+ * The trigger is TWO tests, and the second one is the point of round 2: the
+ * drawn disc, and then the whole `fireZone` slab around it. Inside the slab a
+ * press is a shot and the drag that follows still pans the camera, so the
+ * thumb's entire sweep arc is one gesture instead of an obstacle course.
+ * `solveTouchLayout` keeps every button out of the slab, so nothing above this
+ * line can steal a press from it.
  */
 export function hitTest(g: TouchGeom, x: number, y: number, slop: number = 6): number {
   if (inDisc(g.pause, x, y, slop)) return TC_PAUSE;
@@ -1157,6 +1409,7 @@ export function hitTest(g: TouchGeom, x: number, y: number, slop: number = 6): n
   if (inDisc(g.build, x, y, slop)) return TC_BUILD;
   if (inDisc(g.swap, x, y, slop)) return TC_SWAP;
   if (inDisc(g.fire, x, y, slop)) return TC_FIRE;
+  if (inRect(g.fireZone, x, y)) return TC_FIRE;
   if (inRect(g.stickZone, x, y)) return TC_STICK;
   return TC_LOOK;
 }
@@ -1167,6 +1420,66 @@ export function touchDiscs(g: TouchGeom): Disc[] {
     g.pause, g.autoFire, g.aimAssist, g.jump, g.crouch,
     g.reload, g.build, g.swap, g.fire, g.stickHome,
   ];
+}
+
+/* ------------------------------------------------------------------------ *
+ * The sweep arc, as a measurement
+ * ------------------------------------------------------------------------ */
+
+/** What a trigger thumb finds when it sweeps its arc. Fractions, summing to 1. */
+export interface ThumbArcMix {
+  /** Presses that pan the camera — look surface plus the fire-and-look slab. */
+  pan: number;
+  /** Presses that fire AND pan: the slab. A subset of `pan`. */
+  fire: number;
+  /** Presses that are a discrete button, and therefore cannot pan. */
+  button: number;
+  /** Presses the movement stick claims. */
+  stick: number;
+  /** Points sampled, for a caller that wants to know the resolution. */
+  samples: number;
+}
+
+/**
+ * Classify the trigger thumb's comfortable arc, from its own corner.
+ *
+ * This is the round-1 loss expressed as a number so it cannot come back: of
+ * the annulus r 80–220 swept from the trigger corner, how much can the thumb
+ * press *without stopping the camera*. Round 1 scored 38.7 % button; the bar
+ * scores 10.4 %; a layout that keeps its promise scores 0 %, with `pan` at
+ * 1.0 because every reachable pixel either looks or fires-and-looks.
+ *
+ * Test-only — it walks a grid — but it lives here beside `hitTest` because it
+ * is only meaningful if it asks the same function a real finger asks.
+ */
+export function thumbArcMix(g: TouchGeom, step: number = 2): ThumbArcMix {
+  const cx = g.southpaw ? 0 : g.vw;
+  const cy = g.vh;
+  const r0 = THUMB_ARC_INNER * THUMB_ARC_INNER;
+  const r1 = THUMB_ARC_OUTER * THUMB_ARC_OUTER;
+  const x0 = Math.max(0, cx - THUMB_ARC_OUTER);
+  const x1 = Math.min(g.vw, cx + THUMB_ARC_OUTER);
+  const y0 = Math.max(0, cy - THUMB_ARC_OUTER);
+  const y1 = Math.min(g.vh, cy + THUMB_ARC_OUTER);
+  let n = 0;
+  let pan = 0;
+  let fire = 0;
+  let button = 0;
+  let stick = 0;
+  for (let y = y0; y <= y1; y += step) {
+    for (let x = x0; x <= x1; x += step) {
+      const d = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+      if (d < r0 || d > r1) continue;
+      n++;
+      const c = hitTest(g, x, y);
+      if (c === TC_FIRE) { fire++; pan++; }
+      else if (c === TC_LOOK) pan++;
+      else if (c === TC_STICK) stick++;
+      else button++;
+    }
+  }
+  const k = n > 0 ? 1 / n : 0;
+  return { pan: pan * k, fire: fire * k, button: button * k, stick: stick * k, samples: n };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -1332,12 +1645,15 @@ export function worstEdgeContrast(pal: EdgePalette = TOUCH_EDGE, step: number = 
  * gesture has to mean *both* look and shoot, and the two cancel out. Here the
  * right thumb has three separable gestures on one surface —
  *
- *   tap the look area            one shot, no view movement
- *   drag the look area           aim, and never fire by accident
- *   press the pad, keep sliding  trigger held AND aiming, same thumb
+ *   tap the look area              one shot, no view movement
+ *   drag the look area             aim, and never fire by accident
+ *   press the corner, keep sliding trigger held AND aiming, same thumb
  *
  * — while the left thumb keeps the stick, and neither thumb has to leave the
- * glass. It is deliberately DOM-free: `hud/mobile.ts` feeds it plain numbers,
+ * glass. The third one is the gesture round 1 could not really offer: the
+ * corner it starts in is now a 260 px slab covering the thumb's whole sweep,
+ * so it is the DEFAULT thing that happens when a resting thumb moves, not a
+ * trick that needs the disc hit first. It is deliberately DOM-free: `hud/mobile.ts` feeds it plain numbers,
  * so `touch.test.ts` can replay a two-thumb firefight in node.
  * ------------------------------------------------------------------------ */
 
@@ -1394,12 +1710,14 @@ const BUTTON_SLIDE_OFF = 1.9;
  *
  * The two aiming gestures do not have the same room to work in and pretending
  * they do makes the better one useless. The look surface at 915x412 is 457 px
- * wide and 412 tall — a full flick in any direction. The trigger's centre sits
- * 70 px from the right edge and 70 px from the bottom, so a thumb that presses
- * the pad and then tracks a target to the RIGHT has 70 px of glass before it
- * runs out of phone. At 1:1 that is a few degrees, i.e. the one gesture that
- * lets you fire and aim with a single thumb — the whole answer to the bar's
- * weakness #9 — dies against the bezel.
+ * wide and 412 tall — a full flick in any direction. A trigger press, by
+ * contrast, starts wherever the thumb was resting, and a thumb resting on the
+ * trigger is 70 px from the right edge and 70 px from the bottom: track a
+ * target to the RIGHT from there and you have 70 px of glass before you run
+ * out of phone. At 1:1 that is a few degrees, i.e. the one gesture that lets
+ * you fire and aim with a single thumb — the whole answer to the bar's
+ * weakness #9 — dies against the bezel. The slab widened where that gesture
+ * may BEGIN; it did not widen the bezel.
  *
  * 1.45x is chosen to be modest rather than clever: it is smaller than the
  * 3.2x the travel budget alone would justify, and it is partly cancelled again

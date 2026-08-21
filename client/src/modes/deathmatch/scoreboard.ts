@@ -126,7 +126,7 @@ const STYLE_ID = 'dm-scoreboard-css';
 const CSS = `
 #hud .dm-sb{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
   width:min(660px,92vw);max-height:86vh;display:none;flex-direction:column;
-  background:rgba(9,9,12,.95);border:1px solid rgba(255,255,255,.16);border-radius:5px;
+  background:rgba(9,9,12,.95);border:1px solid var(--dc-line);border-radius:var(--dc-r);
   box-shadow:0 28px 70px rgba(0,0,0,.72),0 0 0 1px rgba(0,0,0,.5);
   font:13px/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e8e6e3;
   pointer-events:none;contain:layout style}

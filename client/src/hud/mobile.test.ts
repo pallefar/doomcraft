@@ -26,7 +26,7 @@ import {
   DEFAULT_MOBILE_PREFS, MOBILE_PREFS_KEY, MOBILE_CSS, CONTROL_LABELS,
   padLayerState, padClearsPausePanel, PAD_PAUSED_Z, SHELL_UI_Z,
   PAUSE_PANEL_MAX_W, PAUSE_PANEL_VW,
-  STICK_LAYERS, DETENT_LABEL, COACH_LINES, COACH_MS, REANCHORED_HUD,
+  STICK_LAYERS, DETENT_LABEL, ZONE_LABEL, COACH_LINES, COACH_MS, REANCHORED_HUD,
   type PrefStore,
 } from './mobile';
 
@@ -98,17 +98,25 @@ describe('hudBandsFrom — the read-outs are placed around the thumbs', () => {
     }
   }
 
-  it('412x915 keeps a playable amount of screen: the HUD owns under a third', () => {
+  it('412x915 keeps a playable amount of screen: the HUD owns under a fifth', () => {
+    // Measured on the bands the read-outs are actually positioned from — the
+    // EDGE bands. `bottomLeft/bottomRight` cover every control in the bottom
+    // half of the screen, and since JUMP/DUCK were lifted out of the trigger
+    // thumb's sweep arc and up the screen's edge, the right-hand one now
+    // reaches half way up a portrait phone without a single read-out being
+    // moved by it. Asserting the number nothing consumes would be theatre.
     solveTouchLayout(412, 915, {}, g);
     const b = hudBandsFrom(g, bands);
-    expect(Math.max(b.bottomLeft, b.bottomRight) / 915).toBeLessThan(0.33);
+    expect(Math.max(b.edgeLeft, b.edgeRight) / 915).toBeLessThan(0.2);
   });
 
   it('gives the corner read-outs a tighter band than the whole cluster', () => {
     // The version of weakness #11 we committed ourselves: pinning the ammo
-    // plate above the FULL right-hand cluster cleared an inboard glyph column
-    // that is nowhere near the corner, and floated the plate half way up a
-    // 412 px-tall screen. The edge band clears the outer column only.
+    // plate above the FULL cluster cleared controls that are nowhere near the
+    // corner, and floated the plate half way up a 412 px-tall screen. The edge
+    // band clears the corner control only — the trigger disc on one side, the
+    // stick on the other — and everything else in the cluster is placed above
+    // the reserve that leaves.
     for (const [vw, vh] of VIEWPORTS) {
       for (const southpaw of [false, true]) {
         solveTouchLayout(vw, vh, { southpaw }, g);
@@ -122,10 +130,14 @@ describe('hudBandsFrom — the read-outs are placed around the thumbs', () => {
         expect(b.inset).toBeGreaterThan(0);
       }
     }
-    // And on the bar's own mobile viewport it is a real, large difference.
-    solveTouchLayout(915, 412, {}, g);
+    // On the portrait phone it is a large difference — 330 px of it — because
+    // the movement glyphs sit above the slab there. The plate ignores them and
+    // stays in the bottom sixth of the screen where a thumb-held phone wants
+    // it.
+    solveTouchLayout(412, 915, {}, g);
     const b = hudBandsFrom(g, bands);
-    expect(b.bottomRight - b.edgeRight).toBeGreaterThan(50);
+    expect(b.bottomRight - b.edgeRight).toBeGreaterThan(300);
+    expect(b.edgeRight).toBeLessThan(915 / 6);
   });
 
   it('mirrors the bands with the layout', () => {
@@ -392,6 +404,23 @@ describe('MOBILE_CSS', () => {
       expect(r.body, `${r.sel} is positioned without a width promise`)
         .toMatch(/(max-)?width:var\(--mc-w[lr]\)/);
     }
+  });
+
+  it('keeps anything that looks pressable out of the fire-and-look slab', () => {
+    // The slab is a region where a press is a gunshot, so a hotbar slot drawn
+    // inside it answers "switch weapon" with a shot. A read-out may live there
+    // — the ammo plate does, and that is why it can tuck into the corner — but
+    // the hotbar has to clear the slab's height, which the pad publishes as
+    // --mc-zh for exactly this rule.
+    const stacked = rules(MOBILE_CSS).filter((r) => r.sel.includes('.dc-hotbar')
+      && r.sel.includes('[data-stack="1"]'));
+    expect(stacked.length).toBeGreaterThanOrEqual(2);
+    for (const r of stacked) {
+      expect(r.body, `${r.sel} does not clear the slab`).toContain('var(--mc-zh)');
+    }
+    // …and the slab is drawn, or the player has no way to know it is there.
+    expect(MOBILE_CSS).toContain('.mc-zone{');
+    expect(ZONE_LABEL.length).toBeGreaterThan(0);
   });
 
   it('clears the transform on everything it re-anchors', () => {

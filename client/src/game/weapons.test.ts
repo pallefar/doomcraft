@@ -512,3 +512,75 @@ describe('the shot path reuses its buffers', () => {
     expect(typeof h.distance).toBe('number');
   });
 });
+
+/* ------------------------------------------------------------------------ *
+ * A kill is the PEAK of the burst it ends
+ *
+ * The file's own rule, stated at the top of `emitFeedback`, is that trauma is
+ * banked before the camera is driven — otherwise the shot that raised the
+ * trauma is not the shot that feels it, and the first round of a burst reads
+ * as the loudest. That rule was being applied to the shot and then broken for
+ * the kill, which was banked one line AFTER the camera call. On an automatic
+ * weapon that cost the kill one round of lag; on a single-shot weapon, where
+ * there is no next round, the kill's own trauma never reached the camera at
+ * all. These two tests are that ordering, measured.
+ * ------------------------------------------------------------------------ */
+
+describe('a kill is louder than the burst that produced it', () => {
+  function killShot(weapon: number): { shakes: number[]; trauma: number } {
+    const cam = recordingCamera();
+    const w = new WeaponRuntime(recordingFx(), cam);
+    if (weapon !== WeaponId.PISTOL) { w.grant(weapon); w.switchTo(weapon); run(w, 1.2, false); }
+    const t = createHitTargets();
+    // 1 hp: any connecting shot is fatal, so the kill path is deterministic.
+    pushPlayerTarget(t, 42, 0, 0, -2, true, 7, 1);
+    const c = ctxAt(0, true);
+    c.targets = t;
+    cam.shakes.length = 0;
+    w.fireOnce(c);
+    return { shakes: cam.shakes.slice(), trauma: w.traumaLevel };
+  }
+
+  function plainShot(weapon: number): { shakes: number[]; trauma: number } {
+    const cam = recordingCamera();
+    const w = new WeaponRuntime(recordingFx(), cam);
+    if (weapon !== WeaponId.PISTOL) { w.grant(weapon); w.switchTo(weapon); run(w, 1.2, false); }
+    const c = ctxAt(0, true);
+    cam.shakes.length = 0;
+    w.fireOnce(c);
+    return { shakes: cam.shakes.slice(), trauma: w.traumaLevel };
+  }
+
+  it('the kill shake is scaled by the trauma the kill itself banked', () => {
+    // One shot, one weapon, the only difference being whether it connected.
+    const kill = killShot(WeaponId.PISTOL);
+    const miss = plainShot(WeaponId.PISTOL);
+
+    // The weapon's own shake is the first entry in both cases. It has to be
+    // BIGGER on the killing shot, which only happens if the kill's trauma was
+    // banked before the camera was driven.
+    expect(kill.shakes[0]).toBeGreaterThan(miss.shakes[0]);
+    expect(kill.trauma).toBeGreaterThan(miss.trauma);
+  });
+
+  it('a kill sends a second, separate jolt that a plain shot does not', () => {
+    const kill = killShot(WeaponId.SHOTGUN);
+    const miss = plainShot(WeaponId.SHOTGUN);
+    expect(kill.shakes.length).toBe(miss.shakes.length + 1);
+    expect(kill.shakes[kill.shakes.length - 1]).toBeGreaterThan(0);
+  });
+
+  it('bare hits still do not shake — only kills do', () => {
+    const cam = recordingCamera();
+    const w = new WeaponRuntime(recordingFx(), cam);
+    const t = createHitTargets();
+    pushPlayerTarget(t, 42, 0, 0, -2, true, 7, 400);   // will not die
+    const c = ctxAt(0, true);
+    c.targets = t;
+    cam.shakes.length = 0;
+    w.fireOnce(c);
+    // Exactly one shake: the weapon's. A connecting chaingun burst must not
+    // become one continuous rumble with no room left for the kill.
+    expect(cam.shakes.length).toBe(1);
+  });
+});

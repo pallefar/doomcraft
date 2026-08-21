@@ -124,6 +124,7 @@ import {
   RemoveReason,
   Rng,
 } from '@doomcraft/shared';
+import { LEGACY_AVATAR_BY_SKIN } from '@doomcraft/shared/saves';
 import type { InputCommand, SolidAt, VoxelHit } from '@doomcraft/shared';
 import type { ServerWorld } from './world.js';
 
@@ -740,7 +741,15 @@ export class Simulation {
     p.skin = skin;
     // Pooled bodies are reused; a recycled one must not wear the last
     // occupant's outfit until its owner's HELLO lands.
-    p.avatar = 0;
+    //
+    // A BOT has no HELLO and never will, so leaving it at 0 dressed the entire
+    // bot fill as one identical marine — six copies of the same body in a
+    // deathmatch, which is the readability failure the outfit system exists to
+    // prevent. The room already hands each bot a distinct legacy skin byte;
+    // `LEGACY_AVATAR_BY_SKIN` is the shared table that turns one into a full
+    // packed avatar, so this costs no wire bytes (the u32 is sent either way)
+    // and no new concept.
+    p.avatar = isBot ? LEGACY_AVATAR_BY_SKIN[skin % LEGACY_AVATAR_BY_SKIN.length] : 0;
     p.isBot = isBot;
     p.active = true;
     p.kills = 0; p.deaths = 0; p.streak = 0; p.bestStreak = 0;

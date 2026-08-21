@@ -69,6 +69,7 @@ import {
 
 import { NetClient, type NetStatus } from '@/net/client';
 import { ThirdPersonRenderer, loadCharacterAtlas } from '@/characters/thirdPerson';
+import type { EnemyRenderer } from '@/characters/enemyRenderer';
 import { createLocalServer, type LocalServer } from '@/net/localServer';
 
 import {
@@ -111,6 +112,24 @@ const _muzzle = new THREE.Vector3();
  * stop, not a colour filter. Sustained fire saturates at that value instead of
  * at a red sheet.
  * ------------------------------------------------------------------------- */
+/* ---- death camera ------------------------------------------------------- */
+/** Metres the boom pulls back off the corpse. */
+const DEATH_BOOM = 3.8;
+/** Rise, as a fraction of the boom, before normalisation. */
+const DEATH_BOOM_RISE = 0.55;
+/** Time constant of the pull-out, seconds. */
+const DEATH_BOOM_TAU = 0.42;
+/** Radians per second the camera drifts around the body. */
+const DEATH_ORBIT_RATE = 0.20;
+/** Metres above the corpse's feet the boom pivots about. */
+const DEATH_PIVOT_Y = 1.0;
+/** Metres above the corpse's feet the camera aims at. */
+const DEATH_LOOK_Y = 0.70;
+/** Metres of clearance kept off a wall the boom would otherwise enter. */
+const DEATH_WALL_PAD = 0.45;
+/** Seconds the body takes to fold onto the floor. */
+const DEATH_COLLAPSE = 0.45;
+
 const HURT_MAX = 0.85;
 const HURT_FADE_PER_SEC = 4.2;
 /** Per-channel gain at hurtFlash == 1, as a delta from neutral. */
@@ -231,6 +250,17 @@ export class Game {
    * Two draw calls total for everything that moves.
    */
   readonly characters: ThirdPersonRenderer;
+  /**
+   * The demons, as rigged bodies. One draw call for the whole cast.
+   *
+   * Null until `checkReady()` pulls it in. The whole subsystem — the renderer,
+   * the animation state machine, the archetype registry and the glTF parser
+   * behind them — is a dynamic import, because none of it is needed to reach
+   * the menu and ref/BAR.md's 0.3 s time-to-interactive is the one thing this
+   * feature is not allowed to spend. Measured, keeping it out of the entry
+   * chunk is 16.8 KB gzipped; the GLTFLoader behind it is another 29.5 KB.
+   */
+  private demons: EnemyRenderer | null = null;
 
   /* ---- projectile watch ------------------------------------------------ *
    * The server owns projectiles, so the client learns a rocket detonated by
@@ -263,6 +293,25 @@ export class Game {
   private slotMismatchMs = 0;
   private wasDead = false;
   private disposed = false;
+
+  /* ---- death camera ---------------------------------------------------- *
+   * `characters/thirdPerson.ts` states plainly that this did not exist: on
+   * death the camera stayed in the first-person rig and `hud.ts` painted a card
+   * over whatever the corpse's eyes happened to be pointing at, which after a
+   * rocket is usually a wall or the sky. It exists now, and it is the only
+   * third-person view in the game — there is still no third-person PLAY mode
+   * and nothing here makes one.
+   *
+   * It costs nothing when alive: the boom is `PlayerCamera.updateFree`, which
+   * the boot drift already used, and the body rides in the character batch that
+   * is already being drawn, so `characters.localBody` is zero extra draw calls.
+   * ---------------------------------------------------------------------- */
+  private deathCam = false;
+  private deathTime = 0;
+  private readonly deathAt = new Float64Array(3);
+  private deathYaw = 0;
+  /** The packed avatar the local player is wearing, for their own corpse. */
+  private localAvatar = 0;
 
   /* streaming */
   private meshedSpawn = false;
@@ -391,6 +440,7 @@ export class Game {
     // characters with no sync code, so they can never grade a frame behind the
     // wall behind them.
     this.characters = new ThirdPersonRenderer(this.renderer.scene, { grade: this.materials });
+    // `demons` is built in checkReady(), off the critical path.
 
     /* ---- net --------------------------------------------------------- */
     this.server = createLocalServer({
@@ -402,6 +452,7 @@ export class Game {
       onError: (m) => { this.events.onStatus?.('error', m); },
     });
 
+    this.localAvatar = (opts.avatar ?? 0) >>> 0;
     this.net = new NetClient({
       name: opts.name ?? 'Marine',
       avatar: opts.avatar ?? 0,
@@ -414,6 +465,9 @@ export class Game {
         onDamage: (e) => this.onDamage(e),
         onKill: (e) => this.onKill(e),
         onChat: (m) => this.onChat(m),
+        // A monster is killed and removed in the same server tick, so the only
+        // notice the client ever gets that one died is this reason byte.
+        onEntityGone: (v, reason) => this.demons?.entityGone(v, reason),
       },
     });
   }
@@ -471,6 +525,7 @@ export class Game {
     this.hud.dispose();
     this.actors.dispose();
     this.characters.dispose();
+    this.demons?.dispose();
     this.chunks.dispose();
     this.fx.dispose();
     this.viewmodel.dispose();
@@ -675,8 +730,11 @@ export class Game {
         const len = Math.hypot(dx, dy, dz);
         if (len < 1e-4) return;
         dx /= len; dy /= len; dz /= len;
+        // Point blank: a barrel further out than the wall would give a beam
+        // that runs BACKWARDS from the muzzle. Halve into the gap instead.
+        const stand = len < TRACER_STANDOFF * 2 ? len * 0.5 : TRACER_STANDOFF;
         const m = this.viewmodel.muzzleWorld(
-          x0, y0, z0, dx, dy, dz, TRACER_STANDOFF, _muzzle, this.renderer.camera.fov,
+          x0, y0, z0, dx, dy, dz, stand, _muzzle, this.renderer.camera.fov,
         );
         this.fx.tracer(m.x, m.y, m.z, x1, y1, z1, color);
       },
@@ -1020,7 +1078,18 @@ export class Game {
     d.landImpactSpeed = net.predicted.landImpact;
     this.wasOnGround = d.onGround;
 
-    if (this.ready) {
+    if (this.ready && this.playing && net.local.dead) {
+      this.updateDeathCamera(dt, net);
+    } else if (this.ready) {
+      if (this.deathCam) {
+        this.deathCam = false;
+        this.characters.localBody = null;
+        // Hand the look back where the player was facing when they died, not
+        // wherever the orbit happened to stop, or every respawn starts with the
+        // camera pointing somewhere the player never chose.
+        this.camera.setAngles(this.deathYaw, 0);
+        this.camera.resetTransients();
+      }
       this.camera.update(dt, d);
     } else {
       // Boot / menu: a slow drift over the arena so the first frame is alive.
@@ -1065,7 +1134,12 @@ export class Game {
 
     /* --- world + actors -------------------------------------------------- */
     this.chunks.update(gr.camera);
-    this.actors.update(net, this.timeSeconds);
+    // While the rig is still in flight (or if it 404s) `demons.ready` is false
+    // and ActorRenderer keeps drawing monsters as boxes, so a slow fetch
+    // degrades to exactly the game that shipped before, not to an empty arena.
+    const rigged = this.demons !== null && this.demons.ready;
+    this.actors.update(net, this.timeSeconds, !rigged);
+    this.demons?.update(net, gr.camera, dt, this.timeSeconds);
     this.characters.update(net, this.timeSeconds);
 
     gr.render(dt);
@@ -1261,6 +1335,19 @@ export class Game {
     // allowed to spend. Until it lands, characters draw in flat palette colour
     // with the same silhouette and the same one draw call.
     void loadCharacterAtlas().catch(() => { /* flat colours are a fine fallback */ });
+    // The demon rig, on the same trigger and for the same reason. Until it
+    // lands, `ActorRenderer` keeps drawing monsters as boxes — the game that
+    // shipped before — so nothing is missing from the arena at any point.
+    void import('@/characters/enemyRenderer').then(({ EnemyRenderer }) => {
+      if (this.disposed || this.demons !== null) return;
+      // Sharing the world material's uniform OBJECTS, not their values: fog
+      // range and colour reach the demons with no sync code, so an Imp at 70 m
+      // sits in the same haze as the wall behind it rather than pasted on it.
+      this.demons = new EnemyRenderer(this.renderer.scene, {
+        worldUniforms: this.materials.uniforms,
+        groundBelow: (x, y, z) => this.groundBelow(x, y, z),
+      });
+    }).catch(() => { /* boxes are a complete game */ });
   }
 
   /**
@@ -1269,12 +1356,108 @@ export class Game {
    * calls this on every click.
    */
   setAvatar(packedAvatar: number, legacySkin: number): void {
+    this.localAvatar = packedAvatar >>> 0;
     this.net.setAvatar(packedAvatar, legacySkin);
   }
 
   /* -------------------------------------------------------------------- *
    * Introspection — used by the capture harness and by the touch aim assist
    * -------------------------------------------------------------------- */
+
+  /* -------------------------------------------------------------------- *
+   * Death camera
+   * -------------------------------------------------------------------- */
+
+  /**
+   * Pull back off your own corpse and drift around it.
+   *
+   * Three constraints decide the shape of this:
+   *   - The boom must not go through a wall, or dying with your back to one
+   *     puts the camera inside the rock and the card floats on grey. It is
+   *     raycast against the same voxel world the weapons use and clamped short.
+   *   - The body has to be THERE to look at. `characters.localBody` puts the
+   *     local marine into the batch that already draws every remote player, so
+   *     this whole feature adds zero draw calls.
+   *   - Respawn has to be instant. Nothing here holds the input: `game.tick`
+   *     still watches for fire/jump and calls `requestRespawn`.
+   */
+  private updateDeathCamera(dt: number, net: NetClient): void {
+    if (!this.deathCam) {
+      this.deathCam = true;
+      this.deathTime = 0;
+      this.deathAt[0] = net.renderPos[0];
+      this.deathAt[1] = net.renderPos[1];
+      this.deathAt[2] = net.renderPos[2];
+      this.deathYaw = this.camera.yaw;
+    }
+    this.deathTime += dt;
+
+    const t = this.deathTime;
+    const bx = this.deathAt[0];
+    const by = this.deathAt[1];
+    const bz = this.deathAt[2];
+
+    // The body: collapses over the same 0.45 s the boom takes to pull out, so
+    // the fall and the reveal are one movement rather than two.
+    this.characters.localBody = {
+      x: bx, y: by, z: bz,
+      yaw: this.deathYaw, pitch: 0,
+      avatar: this.localAvatar,
+      dead: clampf(t / DEATH_COLLAPSE, 0, 1),
+    };
+
+    // Ease out, so it drifts to a stop instead of arriving and sitting still.
+    const ease = 1 - Math.exp(-t / DEATH_BOOM_TAU);
+    const orbit = this.deathYaw + DEATH_ORBIT_RATE * t;
+    const want = DEATH_BOOM * ease;
+    const pivotY = by + DEATH_PIVOT_Y;
+
+    // Backwards along the orbit yaw, and up. Engine forward is
+    // (-sin yaw, ., -cos yaw), so "behind" is (+sin yaw, ., +cos yaw).
+    const dx = Math.sin(orbit);
+    const dz = Math.cos(orbit);
+    const dy = DEATH_BOOM_RISE;
+    const len = Math.hypot(dx, dy, dz);
+    let reach = want;
+    if (raycastVoxels(bx, pivotY, bz, dx / len, dy / len, dz / len,
+      want + DEATH_WALL_PAD, this.sampleBlock, blockingSolid, this.hit)) {
+      reach = Math.max(0.35, this.hit.distance - DEATH_WALL_PAD);
+    }
+    const cx = bx + (dx / len) * reach;
+    const cy = pivotY + (dy / len) * reach;
+    const cz = bz + (dz / len) * reach;
+
+    // Look back down at the body.
+    const lx = bx - cx, ly = (by + DEATH_LOOK_Y) - cy, lz = bz - cz;
+    this.camera.setAngles(Math.atan2(-lx, -lz), Math.atan2(ly, Math.hypot(lx, lz)));
+    this.camera.updateFree(dt, cx, cy, cz);
+  }
+
+  /**
+   * What the character systems actually cost this frame. `draws` is the honest
+   * headline: one call for every demon on screen plus one for every remote
+   * player, never one per body.
+   */
+  characterStats(): { draws: number; instances: number; bodies: number; rigReady: boolean } {
+    const d = this.demons;
+    return {
+      draws: (d?.drawCalls ?? 0) + this.characters.drawCalls,
+      instances: d?.instanceCount ?? 0,
+      bodies: d?.bodyCount ?? 0,
+      rigReady: d?.ready ?? false,
+    };
+  }
+
+  /**
+   * World Y of the first solid surface below a point. Used once per dead
+   * Cacodemon, so it can fall out of the sky instead of hanging there.
+   */
+  private groundBelow(x: number, y: number, z: number): number {
+    const ok = raycastVoxels(
+      x, y, z, 0, -1, 0, 48, this.sampleBlock, blockingSolid, this.hit,
+    );
+    return ok ? y - this.hit.distance : -Infinity;
+  }
 
   /** Distance to the first solid voxel straight ahead, in metres. */
   viewClearance(): number {
@@ -1409,7 +1592,12 @@ class ActorRenderer {
     scene.add(this.mesh);
   }
 
-  update(net: NetClient, time: number): void {
+  /**
+   * @param boxMonsters draw demons as the old box stack. False once
+   *   `EnemyRenderer` has its rig, which is the normal case; true only while
+   *   the 47 KB is in flight or if it failed to arrive.
+   */
+  update(net: NetClient, time: number, boxMonsters: boolean): void {
     this.count = 0;
 
     for (let i = 0; i < net.players.length; i++) {
@@ -1426,7 +1614,7 @@ class ActorRenderer {
       if (!e.active) continue;
       if (e.type >= EntityType.PICKUP_HEALTH) {
         this.drawPickup(e.x, e.y, e.z, e.type, time);
-      } else if ((e.state & ES_DEAD) === 0) {
+      } else if (boxMonsters && (e.state & ES_DEAD) === 0) {
         this.drawMonster(e.x, e.y, e.z, e.yaw, e.type, e.state, time);
       }
     }

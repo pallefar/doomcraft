@@ -366,6 +366,13 @@ export interface RemoteEntityView {
   health: number;
   x: number; y: number; z: number;
   yaw: number;
+  /**
+   * Interpolated velocity, m/s. Already on the wire as `EF_VEL` and already
+   * carried through `EntityTrack.sample()` — it was simply never copied out.
+   * The character rig chooses idle / walk / sprint from it, so exposing the
+   * three floats the snapshot already paid for costs zero extra bytes.
+   */
+  vx: number; vy: number; vz: number;
 }
 
 export interface RemoteProjectileView {
@@ -405,6 +412,19 @@ export interface NetClientEvents {
   onBlocks?(count: number, x: Int16Array, y: Uint8Array, z: Int16Array, id: Uint8Array): void;
   onDamage?(e: DamageEvent): void;
   onKill?(e: KillEvent): void;
+  /**
+   * An entity left the snapshot. `reason` is `RemoveReason` — the byte the
+   * server already sends with `EF_REMOVED` and that this client used to throw
+   * away. The view is about to be recycled: read it now, do not keep it.
+   *
+   * This is what lets a monster leave a corpse. The simulation kills and
+   * removes in the same tick (`sim.damageEntity`), so a dead monster is never
+   * transmitted as dead — it simply stops being transmitted. Without the
+   * reason byte the client cannot tell "killed in front of you" from
+   * "despawned 200 m away", and would either drop every body instantly or
+   * litter the arena with corpses of things that walked out of range.
+   */
+  onEntityGone?(view: RemoteEntityView, reason: number): void;
   onChat?(m: ChatMessage): void;
   onSnapshot?(s: SnapshotBuffer): void;
   /** Fired when reconciliation had to move the local player. */
@@ -725,7 +745,7 @@ export class NetClient {
       this.tracks.push(new InterpTrack());
     }
     for (let i = 0; i < MAX_ENTITIES; i++) {
-      this.entities.push({ id: 0, active: false, type: 0, variant: 0, state: 0, health: 0, x: 0, y: 0, z: 0, yaw: 0 });
+      this.entities.push({ id: 0, active: false, type: 0, variant: 0, state: 0, health: 0, x: 0, y: 0, z: 0, yaw: 0, vx: 0, vy: 0, vz: 0 });
       this.entityTracks.push(new InterpTrack());
     }
     for (let i = 0; i < MAX_PROJECTILES; i++) {
@@ -1288,7 +1308,12 @@ export class NetClient {
     for (let i = 0; i < s.entityCount; i++) {
       const mask = s.entityMask[i];
       const id = s.entityId[i];
-      if ((mask & EF_REMOVED) !== 0) { this.releaseEntity(id); continue; }
+      if ((mask & EF_REMOVED) !== 0) {
+        const gone = this.entitySlotById.get(id);
+        if (gone !== undefined) this.events.onEntityGone?.(this.entities[gone], s.entityReason[i]);
+        this.releaseEntity(id);
+        continue;
+      }
 
       const slot = this.slotForEntity(id);
       if (slot < 0) continue;
@@ -1611,6 +1636,7 @@ export class NetClient {
       if (!this.entityTracks[i].sample(renderTime, out)) continue;
       view.x = out[0]; view.y = out[1]; view.z = out[2];
       view.yaw = out[3];
+      view.vx = out[5]; view.vy = out[6]; view.vz = out[7];
     }
 
     // Projectiles are dead-reckoned from the last snapshot: they are fast, and

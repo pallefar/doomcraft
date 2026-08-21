@@ -82,10 +82,41 @@
  *      is hidden while dead — you cannot shoot — so the death card may own the
  *      middle, and it is a plated card rather than loose display type.
  *
+ *   7. THE TOP-CENTRE RAIL IS THREE CELLS, AND THAT IS A NUMBER IN THE CODE.
+ *      The band above the crosshair is the only HUD surface that is not in a
+ *      corner, so it is the only one that has to justify itself cell by cell,
+ *      and it is where the last version of this HUD lost outright: six pills
+ *      and twelve strings across ~650 px — ROUND 1 / TIME 7:43 / FRAG LIMIT
+ *      0/30 / LEADER Marine 0 / YOU 0 / IN MATCH 1+5 — of which three said the
+ *      same thing about the score from three angles and one ("1+5") could not
+ *      be decoded at all. `RAIL_MAX_CELLS` is three, `railSpecs()` truncates to
+ *      it and `MatchRail` builds from the truncated list, so a caller that adds
+ *      a fourth cell gets three; the rail cannot grow back into a banner for
+ *      the same reason the status line cannot, which is that the budget is
+ *      enforced rather than requested. What survives is what only the
+ *      top-centre can carry — the clock, your frags against the limit, the
+ *      roster size — and it is ONE plate with hairline dividers, ~250 px wide,
+ *      five strings. Leader and round are a RANKING, and a ranking is a sorted
+ *      list, so they went to the Tab board, which already sorts by frags.
+ *   8. ONE CONTAINER TREATMENT, DECLARED ONCE. Round 1 shipped five — a 6 px
+ *      white-bordered minimap, 11 px dark pills, square 30%-white bars, a
+ *      hard-edged 30%-white ammo box and an amber hotbar, each with its own
+ *      background alpha — which read as five unrelated widgets sharing a
+ *      screen and cost the eye a fixation deciding whether boxes that look
+ *      different mean different things. Radius, keyline, plate fill and
+ *      elevation are now four tokens on `#hud`, inherited by every plate here
+ *      AND by every mode overlay, since they all scope under `#hud`. The one
+ *      deliberate split is legibility, not style: `--dc-plate-solid` is opaque
+ *      for the two read-outs the critical vignette paints under, `--dc-plate`
+ *      is not for everything else. `hud.test.ts` walks the stylesheet and
+ *      fails on any plate that hard-codes a radius or a keyline, because a
+ *      token set that lives only in a comment has already drifted.
+ *
  * And the centre stays clean: everything above lives in the corners, at the
- * frame edge, inside the 96 px crosshair canvas, or on one small plate below
- * the keep-out. The keep-out radius is published on `#hud` as `--dc-keepout`
- * so mode overlays can anchor to it instead of guessing an offset.
+ * frame edge, inside the 96 px crosshair canvas, on one small plate below the
+ * keep-out, or on the three-cell rail. The keep-out radius is published on
+ * `#hud` as `--dc-keepout` so mode overlays can anchor to it instead of
+ * guessing an offset.
  *
  * COST. The HUD must not cost frames, so nothing here re-renders on a whim:
  *
@@ -569,6 +600,118 @@ export function formatClock(secs: number): string {
   return `${m}:${String(v - m * 60).padStart(2, '0')}`;
 }
 
+/* ---- the match rail ------------------------------------------------------
+ * The top-centre strip of match state. It is the one HUD surface that sits
+ * above the sightline, so it is the one surface that has to be argued for
+ * cell by cell, and the last round did not: it grew to six pills and twelve
+ * strings across ~650 px (ROUND / TIME / FRAG LIMIT / LEADER / YOU / IN MATCH),
+ * three of which encoded the same score state and one of which — "1+5" — was
+ * not decodable at all.
+ *
+ * A comment asking the next change to be tasteful does not hold a budget, so
+ * this is the same shape as `SIGHTLINE_INK_BUDGET`: a hard cap in code.
+ * `RAIL_MAX_CELLS` is three, `railSpecs()` truncates to it, and `MatchRail`
+ * builds from the truncated list — a caller that asks for a fourth cell gets
+ * three, not four. Whatever the fourth thing is, it belongs to a corner or to
+ * the Tab board, both of which are read on purpose rather than in peripheral
+ * vision over the top of a fight.
+ * ------------------------------------------------------------------------ */
+
+/** Cells the top-centre rail will ever draw. Three, and it is enforced. */
+export const RAIL_MAX_CELLS = 3;
+
+export interface RailCellSpec {
+  /**
+   * Caps label above the value, or `''` for a value-only cell. Only the clock
+   * earns a blank label: `7:43` in a match HUD does not need the word "time",
+   * and every label is a string the eye has to skip past.
+   */
+  label: string;
+  /** Extra class on the cell — `clock` and `you` are styled in CSS. */
+  kind: string;
+}
+
+/**
+ * The rail's cells, truncated to the budget. Pure so the cap is testable
+ * without a DOM: `railSpecs(sixCells).length === RAIL_MAX_CELLS`.
+ */
+export function railSpecs(all: readonly RailCellSpec[]): RailCellSpec[] {
+  return all.slice(0, RAIL_MAX_CELLS);
+}
+
+/**
+ * Strings a rail built from `specs` puts above the sightline: one per non-empty
+ * label plus one per value. This is the number the last round lost on — twelve
+ * — and three labelled cells minus the clock's label is five.
+ */
+export function railStringCount(specs: readonly RailCellSpec[]): number {
+  let n = 0;
+  for (const s of railSpecs(specs)) n += s.label === '' ? 1 : 2;
+  return n;
+}
+
+/**
+ * The top-centre rail's DOM. One plate, hairline dividers, at most
+ * `RAIL_MAX_CELLS` cells, every write guarded by a `!==` so a steady frame
+ * costs nothing. Modes own the numbers; the HUD owns the shape, so a mode
+ * cannot quietly reintroduce a six-pill strip by styling its own.
+ */
+export class MatchRail {
+  readonly root: HTMLElement;
+  private readonly cells: HTMLElement[] = [];
+  private readonly values: HTMLElement[] = [];
+  private readonly cached: string[] = [];
+  private readonly flags: string[] = [];
+
+  constructor(specs: readonly RailCellSpec[]) {
+    const root = document.createElement('div');
+    root.className = 'dc-rail';
+    for (const spec of railSpecs(specs)) {
+      const cell = document.createElement('div');
+      cell.className = spec.kind === '' ? 'cell' : `cell ${spec.kind}`;
+      if (spec.label !== '') {
+        const i = document.createElement('i');
+        i.textContent = spec.label;
+        cell.appendChild(i);
+      }
+      const b = document.createElement('b');
+      b.textContent = '';
+      cell.appendChild(b);
+      root.appendChild(cell);
+      this.cells.push(cell);
+      this.values.push(b);
+      this.cached.push('');
+      this.flags.push('');
+    }
+    this.root = root;
+  }
+
+  /** Cells actually built — never more than `RAIL_MAX_CELLS`. */
+  get length(): number { return this.cells.length; }
+
+  /** Write a cell's value. No-op when it already says that. */
+  set(i: number, text: string): void {
+    if (i < 0 || i >= this.values.length) return;
+    if (this.cached[i] === text) return;
+    this.values[i]!.textContent = text;
+    this.cached[i] = text;
+  }
+
+  /**
+   * Set a cell's state class (`'urgent'`, `'warm'` or `''`). One class at a
+   * time on purpose: a cell has one state, and two competing highlights on the
+   * one thing above the sightline is how a rail turns back into clutter.
+   */
+  flag(i: number, cls: string): void {
+    if (i < 0 || i >= this.cells.length) return;
+    if (this.flags[i] === cls) return;
+    const cell = this.cells[i]!;
+    if (this.flags[i] !== '') cell.classList.remove(this.flags[i]!);
+    if (cls !== '') cell.classList.add(cls);
+    this.flags[i] = cls;
+  }
+}
+
 /* ---- directional damage --------------------------------------------------
  * The bar has nothing here at all, so the only way to lose this is to build
  * the naive version: one sprite per hit, frozen at the screen angle it had
@@ -651,8 +794,44 @@ export class DamageRing {
  * Styles — injected once, scoped by the #hud id
  * ------------------------------------------------------------------------ */
 
-const CSS = `
-#hud{font:13px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e8e6e3;
+/**
+ * The HUD's stylesheet, exported so `hud.test.ts` can hold the chassis to its
+ * own promise: every plate on the HUD uses ONE radius, ONE keyline and ONE
+ * fill, taken from the tokens on `#hud`. A design system that lives only in a
+ * comment is a design system that has already drifted.
+ */
+export const HUD_CSS = `
+/* ---- the chassis ----------------------------------------------------------
+   ONE container treatment for the whole HUD, declared once on #hud so that
+   mode overlays — which all scope their CSS under #hud — inherit it instead of
+   inventing their own. The previous round shipped five: a 6 px-radius
+   white-bordered minimap, 11 px dark pills, square 30%-white bars, a
+   hard-edged 30%-white ammo box and an amber hotbar, each with its own
+   background alpha. Five container treatments read as five unrelated widgets
+   that happen to share a screen, and the eye spends its first fixation asking
+   whether two boxes that look different mean different things. One radius, one
+   keyline, one plate fill, one elevation: the HUD becomes a single object and
+   the only thing left varying between corners is the READ-OUT, which is the
+   only thing that should vary.
+
+   --dc-plate is translucent and --dc-plate-solid is not. That is the one
+   deliberate split, and it is a legibility rule rather than a style: the
+   critical-health vignette paints UNDER the HUD, so the two read-outs it would
+   wash through (health/armour and the ammo numerals) sit on their own black.
+   Everything else may let the world through. */
+#hud{--dc-r:3px;
+  --dc-line:rgba(255,255,255,.22);
+  --dc-line-soft:rgba(255,255,255,.11);
+  --dc-line-hot:#ff6b42;
+  --dc-plate:rgba(9,9,12,.86);
+  --dc-plate-solid:#08080b;
+  --dc-lift:0 2px 10px rgba(0,0,0,.55);
+  --dc-ink:#e8e6e3;
+  --dc-ink-dim:#8a847e;
+  --dc-label:#6f6a66;
+  --dc-track:.16em;
+  --dc-accent:#f0a020;
+  font:13px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--dc-ink);
   -webkit-user-select:none;user-select:none}
 #hud .dc-hide{display:none!important}
 /* Every read-out carries its own dark halo. The bar survives a bright beach by
@@ -664,14 +843,71 @@ const CSS = `
   text-shadow:0 1px 2px rgba(0,0,0,.95),0 0 8px rgba(0,0,0,.6)}
 
 #hud .dc-map{top:12px;left:12px;width:168px}
-#hud .dc-map canvas{display:block;width:168px;height:168px;border:1px solid rgba(255,255,255,.24);
-  border-radius:6px;background:#0c0b0e;box-shadow:0 6px 18px rgba(0,0,0,.6)}
+#hud .dc-map canvas{display:block;width:168px;height:168px;border:1px solid var(--dc-line);
+  border-radius:var(--dc-r);background:var(--dc-plate-solid);box-shadow:var(--dc-lift)}
 #hud .dc-chips{display:flex;gap:6px;margin-top:7px}
-#hud .dc-chip{display:flex;align-items:center;gap:5px;padding:3px 8px;border-radius:11px;
-  background:rgba(8,8,11,.84);border:1px solid rgba(255,255,255,.18);font-size:12px;
+#hud .dc-chip{display:flex;align-items:center;gap:5px;padding:3px 8px;border-radius:var(--dc-r);
+  background:var(--dc-plate);border:1px solid var(--dc-line);font-size:12px;
   font-variant-numeric:tabular-nums}
 #hud .dc-chip i{font-style:normal;opacity:.72;font-size:11px}
 #hud .dc-chip b{display:none;font-weight:400;opacity:.72;font-size:10px}
+
+/* ---- the match rail: three cells, one plate, and a cap in code -------------
+   This is the surface the last round lost on. It shipped as SIX floating pills
+   — ROUND 1 / TIME 7:43 / FRAG LIMIT 0/30 / LEADER Marine 0 / YOU 0 / IN MATCH
+   1+5 — twelve strings across ~650 px, sitting directly above the sightline.
+   Three of the six encoded the same score state from three angles and one of
+   them ("1+5") was not decodable at all. Measured against this piece's own
+   question — which tells you your state in a single glance — it was the single
+   worst thing on the HUD: the most ink, the most strings, the least state.
+
+   The rail now carries exactly what only the top-centre can carry, and nothing
+   a corner or the Tab board carries better:
+
+     - the clock, because time-left has no other home and is the one match fact
+       you check on a rhythm rather than on an event;
+     - YOU n/limit, ONE score cell that fuses the three overlapping ones: your
+       frags and the number that ends the match, which is the pair you actually
+       play against. Who is leading is a ranking question, and a ranking is a
+       list, so it belongs to the Tab board — which already sorts by frags and
+       puts the leader on row one;
+     - PLAYERS n, the roster size, spelled out. "1+5" was a humans-plus-bots
+       split nobody can decode mid-fight; the split is a lobby fact and it is
+       already in the Tab board's footer, in words.
+
+   Three cells is not a convention here, it is RAIL_MAX_CELLS and MatchRail
+   will not build a fourth — the same way the sightline has SIGHTLINE_INK_BUDGET
+   rather than a comment asking future changes to be tasteful. And it is ONE
+   plate with hairline dividers rather than three plates with three gaps: one
+   object the eye parses once, ~250 px wide instead of ~650, five strings
+   instead of twelve, on the same radius/keyline/fill as every other plate on
+   the HUD. */
+#hud .dc-rail{position:absolute;left:50%;top:10px;transform:translateX(-50%);
+  display:flex;align-items:stretch;pointer-events:none;white-space:nowrap;
+  background:var(--dc-plate);border:1px solid var(--dc-line);border-radius:var(--dc-r);
+  box-shadow:var(--dc-lift);text-shadow:0 1px 2px rgba(0,0,0,.9);overflow:hidden;
+  font:12px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;contain:layout style}
+#hud .dc-rail .cell{display:flex;align-items:baseline;gap:7px;padding:6px 11px}
+/* Hairlines, not gaps. A divider says "same object, next field"; a gap says
+   "different object", which is the read the six pills gave by accident. */
+#hud .dc-rail .cell+.cell{border-left:1px solid var(--dc-line-soft)}
+#hud .dc-rail i{font-style:normal;font-size:9px;letter-spacing:var(--dc-track);
+  color:var(--dc-label);text-transform:uppercase}
+#hud .dc-rail b{font-weight:800;color:var(--dc-ink);font-variant-numeric:tabular-nums;
+  font-size:13px}
+/* The clock is the only cell without a label — a mm:ss in a match HUD needs no
+   word — and it carries the weight, so the rail has a shape before it has text. */
+#hud .dc-rail .clock{align-items:center}
+#hud .dc-rail .clock b{font:800 19px/1 "Arial Black",Impact,system-ui,sans-serif;
+  font-variant-numeric:tabular-nums;letter-spacing:.02em}
+#hud .dc-rail .you b{color:var(--dc-accent)}
+/* Urgency lands on the cell, never on the whole plate: a flashing 250 px slab
+   above the sightline is the clutter this rail exists to have removed. */
+#hud .dc-rail .clock.urgent b{color:#ff6a48}
+#hud .dc-rail .clock.urgent{background:rgba(48,10,6,.55);
+  animation:dcurge 1s steps(2,end) infinite}
+@keyframes dcurge{50%{background:rgba(48,10,6,0)}}
+#hud .dc-rail .clock.warm b{color:#8fe08a}
 
 #hud .dc-perf{top:12px;right:12px;text-align:right;font-size:12px;color:#b6b0aa;
   font-variant-numeric:tabular-nums;line-height:1.45}
@@ -679,7 +915,7 @@ const CSS = `
 
 #hud .dc-feed{left:12px;bottom:118px;width:340px;display:flex;flex-direction:column;
   justify-content:flex-end;gap:3px}
-#hud .dc-feed .ln{padding:3px 8px;border-radius:3px;background:rgba(8,8,11,.82);
+#hud .dc-feed .ln{padding:3px 8px;border-radius:var(--dc-r);background:var(--dc-plate);
   border-left:2px solid #4a4a55;font-size:12px;opacity:1;transition:opacity .35s linear;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #hud .dc-feed .ln.k{border-left-color:#e03c1c}
@@ -691,7 +927,7 @@ const CSS = `
 #hud .dc-hint{left:12px;bottom:96px;font-size:11px;color:#a49e98;letter-spacing:.02em;
   opacity:1;transition:opacity .9s linear}
 #hud .dc-hint b{color:#e0dad4;font-weight:700;background:rgba(0,0,0,.55);
-  padding:0 4px;border-radius:2px}
+  padding:0 4px;border-radius:var(--dc-r)}
 
 /* ---- vitals ---------------------------------------------------------------
    Deliberately unequal: health is twice the height of armour, so which bar is
@@ -703,8 +939,8 @@ const CSS = `
    UNDER this cluster, so a 74%-alpha plate let the red wash straight through
    the health bar at exactly the moment the health bar is the only thing on
    screen that matters. It now sits on its own black. */
-#hud .dc-bar{position:relative;border:1px solid rgba(255,255,255,.30);
-  background:#08080b;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.55)}
+#hud .dc-bar{position:relative;border:1px solid var(--dc-line);border-radius:var(--dc-r);
+  background:var(--dc-plate-solid);overflow:hidden;box-shadow:var(--dc-lift)}
 #hud .dc-bar .ghost,#hud .dc-bar .fill{position:absolute;inset:0;width:100%;
   transform-origin:left center}
 #hud .dc-bar .fill{transition:transform .1s linear}
@@ -730,7 +966,7 @@ const CSS = `
    reads as an empty container — a bar whose value has not loaded yet — rather
    than as a fact about the player. Ours goes hatched and drops the numeral, so
    there is no empty trough left to misread and the words carry the state. */
-#hud .dc-ap[data-z="1"]{border-color:rgba(255,255,255,.15);
+#hud .dc-ap[data-z="1"]{border-color:var(--dc-line-soft);
   background:repeating-linear-gradient(135deg,#0a0a0e 0 5px,#14141a 5px 10px)}
 #hud .dc-ap[data-z="1"] .fill{display:none}
 #hud .dc-ap[data-z="1"] .ticks{display:none}
@@ -751,7 +987,7 @@ const CSS = `
 #hud .dc-hp .lbl i{font-size:10px}
 #hud .dc-hp[data-t="1"] .fill{background:linear-gradient(180deg,#ffbe37,#c9820f)}
 #hud .dc-hp[data-t="2"] .fill{background:linear-gradient(180deg,#ff5a2e,#c81f08)}
-#hud .dc-hp[data-t="2"]{border-color:#ff6b42;
+#hud .dc-hp[data-t="2"]{border-color:var(--dc-line-hot);
   animation:dcpulse .62s steps(2,end) infinite}
 #hud .dc-hp[data-t="2"] .lbl{color:#fff1ea}
 #hud .dc-hp[data-t="2"] .lbl i{color:#ff9c7d;opacity:1}
@@ -770,8 +1006,8 @@ const CSS = `
    the same mistake the bar makes with its own 13 px bar values: a number you
    have to hunt for is a number you do not read mid-fight. */
 #hud .dc-ammo{--dc-mag:52px;right:12px;bottom:64px;text-align:right;
-  padding:6px 11px 8px;border:1px solid rgba(255,255,255,.30);background:#08080b;
-  box-shadow:0 2px 10px rgba(0,0,0,.55)}
+  padding:6px 11px 8px;border:1px solid var(--dc-line);border-radius:var(--dc-r);
+  background:var(--dc-plate-solid);box-shadow:var(--dc-lift)}
 /* Rows are blocks and their contents are INLINE, so every row is placed by the
    cluster's own text-align. That is what lets the right-handed, left-handed
    and centred thumb-pad layouts each move one property and get a correct
@@ -792,15 +1028,17 @@ const CSS = `
    countable exactly where the bar's own maps are brightest. */
 #hud .dc-ammo .rounds{display:block;height:8px;margin-top:7px;font-size:0}
 #hud .dc-ammo .pips{display:inline-flex;vertical-align:top;gap:2px}
-#hud .dc-ammo .pips i{display:block;width:7px;height:8px;border-radius:1px;
+/* Square, like everything else. A 1 px radius on a 7 px pip was a sixth
+   container treatment nobody asked for, and it read as a smudge. */
+#hud .dc-ammo .pips i{display:block;width:7px;height:8px;
   background:rgba(6,6,9,.72);box-shadow:inset 0 0 0 1px rgba(255,255,255,.26)}
 #hud .dc-ammo .pips i.on{background:#f2efec;box-shadow:inset 0 0 0 1px rgba(0,0,0,.55)}
 #hud .dc-ammo .strip{display:inline-block;vertical-align:top;position:relative;width:118px;
-  height:8px;border-radius:1px;overflow:hidden;
+  height:8px;overflow:hidden;
   background:rgba(6,6,9,.72);box-shadow:inset 0 0 0 1px rgba(255,255,255,.26)}
 #hud .dc-ammo .strip s{position:absolute;inset:0;text-decoration:none;background:#f2efec;
   transform-origin:left center}
-#hud .dc-ammo .wep{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#ded8d2;
+#hud .dc-ammo .wep{font-size:11px;letter-spacing:var(--dc-track);text-transform:uppercase;color:#ded8d2;
   margin-top:5px;white-space:nowrap}
 #hud .dc-ammo.low .mag{color:#ffbe37}
 #hud .dc-ammo.low .pips i.on,#hud .dc-ammo.low .strip s{background:#ffbe37}
@@ -809,9 +1047,9 @@ const CSS = `
    HUD pulses, so the two of them cannot be confused with decoration. */
 #hud .dc-ammo.empty .mag{color:#ff5a2e}
 #hud .dc-ammo.empty .pips i.on,#hud .dc-ammo.empty .strip s{background:#ff5a2e}
-#hud .dc-ammo.empty{border-color:#ff6b42;animation:dcpulse .62s steps(2,end) infinite}
+#hud .dc-ammo.empty{border-color:var(--dc-line-hot);animation:dcpulse .62s steps(2,end) infinite}
 #hud .dc-ammo.rld .mag{color:#8b8681}
-#hud .dc-ammo.rld .wep{color:#f0a020}
+#hud .dc-ammo.rld .wep{color:var(--dc-accent)}
 #hud .dc-ammo.rld .pips i.on,#hud .dc-ammo.rld .strip s{background:#f0a020}
 
 /* ---- hotbar ---------------------------------------------------------------
@@ -822,9 +1060,9 @@ const CSS = `
    the selected slot's inversion takes the silhouette with it and no second rule
    has to be kept in sync. */
 #hud .dc-hotbar{right:12px;bottom:12px;display:flex;gap:5px}
-#hud .dc-slot{width:44px;height:44px;border:1px solid rgba(255,255,255,.20);
-  background:rgba(8,8,11,.86);position:relative;display:grid;place-items:center;
-  font-size:10px;letter-spacing:.06em;color:#cec8c2}
+#hud .dc-slot{width:44px;height:44px;border:1px solid var(--dc-line);
+  border-radius:var(--dc-r);background:var(--dc-plate);position:relative;
+  display:grid;place-items:center;font-size:10px;letter-spacing:.06em;color:#cec8c2}
 /* No drop-shadow filter here on purpose: the tile is already an opaque dark
    plate, so the shadow bought nothing and cost seven rasterised filter layers
    on a HUD whose whole cost story is that it does not repaint. */
@@ -855,7 +1093,7 @@ const CSS = `
    black keyline — is a VALUE contrast rather than a hue contrast, so it
    survives every terrain in shared/src/blocks.ts including the one hue it is
    closest to, lava. The keyline is what lava does not have. */
-#hud .dc-slot.on{border-color:#ffd071;background:#f0a020;color:#180d01;font-weight:700;
+#hud .dc-slot.on{border-color:#ffd071;background:var(--dc-accent);color:#180d01;font-weight:700;
   box-shadow:0 0 0 2px rgba(0,0,0,.62),0 0 16px rgba(240,160,32,.42);opacity:1}
 #hud .dc-slot.on .n{color:#3d2703;font-weight:700}
 #hud .dc-slot.on .ct{color:#3a2402;text-shadow:none;font-weight:700}
@@ -881,8 +1119,8 @@ const CSS = `
    statusPlacement() sends it to .dc-scorner in the top-left instead. */
 #hud .dc-status{left:50%;top:50%;transform:translateX(-50%);
   margin-top:var(--dc-drop,120px);text-align:center;max-width:min(300px,58vw);
-  padding:4px 11px 5px;border-radius:2px;background:#08080b;
-  border:1px solid rgba(255,255,255,.22);box-shadow:0 2px 10px rgba(0,0,0,.55)}
+  padding:4px 11px 5px;border-radius:var(--dc-r);background:var(--dc-plate-solid);
+  border:1px solid var(--dc-line);box-shadow:var(--dc-lift)}
 #hud .dc-status .t{font:700 11px/1.1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   letter-spacing:.22em;text-transform:uppercase;color:#cfc9c3;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -895,7 +1133,7 @@ const CSS = `
    own the middle. It is still a CARD — an opaque plate with a hot edge — not
    26 px of Arial Black floating loose on the sky. */
 #hud .dc-status[data-d="1"]{transform:translate(-50%,-50%);margin-top:0;
-  max-width:min(420px,76vw);padding:13px 24px 14px;border-color:#ff6b42;
+  max-width:min(420px,76vw);padding:13px 24px 14px;border-color:var(--dc-line-hot);
   box-shadow:0 0 0 1px rgba(0,0,0,.8),0 18px 46px rgba(0,0,0,.62)}
 #hud .dc-status[data-d="1"] .t{font:800 30px/1 "Arial Black",Impact,system-ui,sans-serif;
   letter-spacing:.10em;color:#ff5a2e;text-shadow:0 2px 0 #4a1005,0 6px 20px rgba(0,0,0,.8)}
@@ -903,20 +1141,20 @@ const CSS = `
 /* The demoted form: same words, no sightline cost, sitting under the match
    clock where a player already looks for match state. */
 #hud .dc-scorner{display:none;width:max-content;max-width:min(300px,40vw);
-  margin-top:6px;padding:3px 8px;border-radius:3px;background:rgba(8,8,11,.88);
-  border:1px solid rgba(255,255,255,.18);font-size:10px;letter-spacing:.18em;
+  margin-top:6px;padding:3px 8px;border-radius:var(--dc-r);background:var(--dc-plate);
+  border:1px solid var(--dc-line);font-size:10px;letter-spacing:.18em;
   text-transform:uppercase;color:#cfc9c3;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
 #hud .dc-scorner.on{display:block}
 
 #hud .dc-board{left:50%;top:50%;transform:translate(-50%,-50%);width:min(520px,86vw);
-  background:rgba(10,10,14,.93);border:1px solid rgba(255,255,255,.16);border-radius:4px;
+  background:rgba(10,10,14,.94);border:1px solid var(--dc-line);border-radius:var(--dc-r);
   padding:14px 16px;box-shadow:0 20px 50px rgba(0,0,0,.6)}
 #hud .dc-board h3{margin:0 0 10px;font:800 15px/1 "Arial Black",Impact,sans-serif;
-  letter-spacing:.14em;text-transform:uppercase;color:#f0a020}
+  letter-spacing:.14em;text-transform:uppercase;color:var(--dc-accent)}
 #hud .dc-board table{width:100%;border-collapse:collapse;font-size:13px}
-#hud .dc-board th{text-align:left;font-size:10px;letter-spacing:.16em;text-transform:uppercase;
-  color:#6f6a66;font-weight:600;padding-bottom:6px}
+#hud .dc-board th{text-align:left;font-size:10px;letter-spacing:var(--dc-track);
+  text-transform:uppercase;color:var(--dc-label);font-weight:600;padding-bottom:6px}
 #hud .dc-board td{padding:3px 0;font-variant-numeric:tabular-nums;color:#cfc9c3}
 #hud .dc-board td.n{width:52%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #hud .dc-board tr.me td{color:#f6e3c8;font-weight:700}
@@ -964,7 +1202,7 @@ const CSS = `
 #hud .dc-btn{position:absolute;border-radius:50%;pointer-events:auto;display:grid;place-items:center;
   background:rgba(12,12,16,.62);border:2px solid rgba(255,255,255,.34);color:#e8e6e3;
   font-size:11px;font-weight:700;letter-spacing:.04em;touch-action:none}
-#hud .dc-btn.press{background:rgba(224,60,28,.55);border-color:#f0a020}
+#hud .dc-btn.press{background:rgba(224,60,28,.55);border-color:var(--dc-accent)}
 #hud .dc-fire{right:24px;bottom:110px;width:96px;height:96px;
   background:rgba(224,60,28,.34);border-color:rgba(240,160,32,.85);font-size:13px}
 #hud .dc-jump{right:132px;bottom:150px;width:64px;height:64px}
@@ -972,8 +1210,9 @@ const CSS = `
 #hud .dc-sprint{right:32px;bottom:22px;width:64px;height:64px}
 #hud .dc-reload{right:112px;bottom:14px;width:56px;height:56px}
 #hud .dc-build{left:34px;bottom:176px;width:56px;height:56px}
-#hud .dc-pause{position:absolute;right:12px;top:12px;width:38px;height:38px;border-radius:8px;
-  pointer-events:auto;background:rgba(12,12,16,.66);border:1px solid rgba(255,255,255,.22);
+#hud .dc-pause{position:absolute;right:12px;top:12px;width:38px;height:38px;
+  border-radius:var(--dc-r);pointer-events:auto;background:var(--dc-plate);
+  border:1px solid var(--dc-line);
   display:grid;place-items:center;color:#e8e6e3;font-size:14px}
 
 /* ---- short viewports: the bar ships its desktop HUD to a 412px phone ---- */
@@ -986,6 +1225,19 @@ const CSS = `
 #hud[data-compact="1"] .dc-chip{padding:2px 6px;gap:4px;font-size:11px}
 #hud[data-compact="1"] .dc-chip i{display:none}
 #hud[data-compact="1"] .dc-chip b{display:inline}
+/* The rail leaves the centre on a short screen. Measured, not guessed: at
+   915x412 and at 412x915 the chat lane sits at the TOP, .dc-feed{top:8px;
+   left:112..120px}, which is exactly where a centred rail lands — so keeping it
+   centred is how you reproduce the bar's own mobile mistake (BAR.md #11),
+   desktop furniture crammed into a quarter of the screen. It drops into the
+   left gutter under the minimap instead: the map ends at y=112, the thumb stick
+   starts at y=286, and the base HUD's own chip lane already reserves that band.
+   It stays a ROW, not a column — a column ate 70 px of the left edge for three
+   numbers, a row costs 22 px and reads in the same glance. */
+#hud[data-compact="1"] .dc-rail{left:8px;top:116px;transform:none;font-size:10px}
+#hud[data-compact="1"] .dc-rail .cell{padding:4px 8px;gap:5px}
+#hud[data-compact="1"] .dc-rail b{font-size:11px}
+#hud[data-compact="1"] .dc-rail .clock b{font-size:15px}
 #hud[data-compact="1"] .dc-feed{bottom:auto;top:8px;left:120px;width:min(46vw,220px)}
 #hud[data-compact="1"] .dc-hint{display:none}
 #hud[data-compact="1"] .dc-vitals{width:min(52vw,214px);bottom:8px;left:8px}
@@ -1072,6 +1324,12 @@ const CSS = `
 #hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-crouch{right:106px;bottom:30px;width:56px;height:56px}
 #hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-sprint{right:20px;bottom:8px;width:52px;height:52px}
 #hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-reload{right:168px;bottom:66px;width:48px;height:48px}
+
+/* The urgent clock is the one thing on the rail that moves. Under reduced
+   motion it keeps the colour and drops the blink — the state still reads. */
+@media (prefers-reduced-motion:reduce){
+  #hud .dc-rail .clock.urgent{animation:none;background:rgba(48,10,6,.55)}
+}
 `;
 
 /* ------------------------------------------------------------------------ *
@@ -1246,7 +1504,7 @@ export class Hud {
     if (document.getElementById('dc-hud-css') === null) {
       const style = document.createElement('style');
       style.id = 'dc-hud-css';
-      style.textContent = CSS;
+      style.textContent = HUD_CSS;
       document.head.appendChild(style);
     }
     const root = this.root;

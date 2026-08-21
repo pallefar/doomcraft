@@ -62,7 +62,7 @@ export { EditResult, EDIT_RESULT_NAMES } from './sim.js';
  * level moved under us and every stamped structure is placed against the wrong
  * floor, so fail loudly at import rather than shipping a broken arena.
  */
-const EXPECTED_TERRAIN_VERSION = 4;
+const EXPECTED_TERRAIN_VERSION = 5;
 
 /** Arena spawn candidates requested from the shared generator, before validation. */
 const SPAWN_CANDIDATES = 96;

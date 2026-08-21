@@ -19,11 +19,12 @@ import {
   CHUNK_HEIGHT, clamp01,
 } from '@shared/constants';
 import {
-  BlockId, BLOCK_COUNT, BLOCK_HARDNESS, BLOCK_SOLID, Face,
+  BlockId, BLOCK_COUNT, BLOCK_HARDNESS, BLOCK_SOLID, BLOCK_OPAQUE, Face,
   isReplaceable, isPlaceable, isBreakable, blockBreakMs, blockFaceColor,
 } from '@shared/blocks';
 import { WEAPONS } from '@shared/weapons';
 import { hash3f, type VoxelHit } from '@shared/math';
+import { BLAST_CHAR } from '@shared/terrain';
 import type { VoxelWorld } from './voxelWorld';
 
 /* ------------------------------------------------------------------------ *
@@ -312,18 +313,20 @@ const MAX_DEBRIS_BURSTS = 40;
  * centre) so sustained fire on one wall keeps widening the hole.
  * ------------------------------------------------------------------------ */
 
-/** Target id per source id; 0 means "this material does not scorch". */
-const SCORCHED = new Uint8Array(BLOCK_COUNT);
-for (const id of [
-  BlockId.GRASS, BlockId.DIRT, BlockId.SAND, BlockId.SNOW, BlockId.STONE,
-  BlockId.COBBLESTONE, BlockId.GRAVEL, BlockId.BRICK, BlockId.PLANKS,
-  BlockId.WOOD, BlockId.BONE,
-]) SCORCHED[id] = BlockId.HELLSTONE;
-SCORCHED[BlockId.METAL] = BlockId.RUSTED_METAL;
-SCORCHED[BlockId.TECH_PANEL] = BlockId.RUSTED_METAL;
-// Hellstone, obsidian, bedrock, glass, ice, leaves, slime, neon and the liquids
-// all stay as they are: already slag, blast-proof, or not a surface anybody
-// reads a crater off.
+/**
+ * Target id per source id; 0 means "this material does not scorch".
+ *
+ * `BLAST_CHAR` lives in `shared/terrain.ts` because the generator chars the
+ * pre-baked craters it ships with the identical table (see `applyBattleDamage`).
+ * Two copies of this list is two answers to "what colour is a burnt wall", and
+ * the whole point of shipping fought-over terrain is that a crater the level
+ * came with and a crater you just cut are indistinguishable.
+ *
+ * Hellstone, obsidian, bedrock, glass, ice, leaves, slime, neon and the liquids
+ * are all absent from it on purpose: already slag, blast-proof, or not a
+ * surface anybody reads a crater off.
+ */
+const SCORCHED = BLAST_CHAR;
 
 /** Fraction of eligible rim voxels that actually char. Ragged beats uniform. */
 const SCORCH_CHANCE = 0.55;
@@ -349,6 +352,128 @@ const SCORCH_MAX = 72;
  * still caps a BFG, whose own removal count is what eats the budget.
  */
 const SCORCH_PER_REMOVED = 2;
+
+
+/* ------------------------------------------------------------------------ *
+ * Settled debris
+ *
+ * A crater with nothing lying in it is a hole somebody BUILT. The difference
+ * between a doorway and a breach, read from ten metres in a single frame, is
+ * almost entirely the pile at the bottom: broken material that came off the
+ * wall and stopped where gravity left it. Particles cannot do this job — they
+ * live for a second and then the level is tidy again — so a blast also converts
+ * a scatter of the air it just opened into voxels of rubble.
+ *
+ * Three rules, and each one is load-bearing:
+ *
+ *  - Debris settles BELOW the detonation. The column scan starts one block
+ *    under the blast centre, so rubble can never come to rest in the sightline
+ *    the same rocket just cut. "A rocket opens a new sightline" is the piece's
+ *    claim; a system that filled the hole back in would be arguing with it.
+ *  - Debris never plugs a way through. A block that would sit in the two-block
+ *    clear under a lintel is refused: that profile is a doorway, a keep
+ *    clerestory or a bastion arch, and generated rubble across a route is a bug
+ *    however good it looks.
+ *  - Debris is budgeted like scorch, off the removal count and hard-capped, so
+ *    a BFG cannot overflow `MAX_BLOCK_DELTAS_PER_MESSAGE`.
+ * ------------------------------------------------------------------------ */
+
+/** What each material breaks down into. 0 means "leaves nothing behind". */
+const DEBRIS_OF = new Uint8Array(BLOCK_COUNT);
+for (const id of [
+  BlockId.STONE, BlockId.COBBLESTONE, BlockId.BRICK, BlockId.GRAVEL,
+  BlockId.DIRT, BlockId.GRASS, BlockId.SAND, BlockId.SNOW, BlockId.OBSIDIAN,
+]) DEBRIS_OF[id] = BlockId.GRAVEL;
+DEBRIS_OF[BlockId.METAL] = BlockId.RUSTED_METAL;
+DEBRIS_OF[BlockId.RUSTED_METAL] = BlockId.RUSTED_METAL;
+DEBRIS_OF[BlockId.TECH_PANEL] = BlockId.RUSTED_METAL;
+DEBRIS_OF[BlockId.HELLSTONE] = BlockId.HELLSTONE;
+DEBRIS_OF[BlockId.BONE] = BlockId.BONE;
+DEBRIS_OF[BlockId.WOOD] = BlockId.PLANKS;
+DEBRIS_OF[BlockId.PLANKS] = BlockId.PLANKS;
+
+/** Hard ceiling on rubble voxels per blast. */
+const DEBRIS_MAX = 30;
+/** One rubble voxel per this many removed. A rocket leaves a dozen or so. */
+const DEBRIS_PER_REMOVED = 3;
+/** How far past the crater lip debris is thrown. */
+const DEBRIS_MARGIN = 1.2;
+/** Share of eligible columns that catch a block, before the distance falloff. */
+const DEBRIS_CHANCE = 0.72;
+
+let lastDebris = 0;
+/**
+ * Rubble voxels the last `carveSphere` settled. The solid count after a blast
+ * is `before - removed + blastDebrisCount()`, which is what the world tests
+ * assert; nothing on the hot path reads it.
+ */
+export function blastDebrisCount(): number { return lastDebris; }
+
+/**
+ * True when a block dropped on the surface at `y` would seal a route: two
+ * blocks of clear closed off by something solid above them.
+ */
+function plugsAWay(world: VoxelWorld, x: number, y: number, z: number): boolean {
+  if (y + 3 >= CHUNK_HEIGHT) return false;
+  return world.rawBlock(x, y + 2, z) === BlockId.AIR
+    && BLOCK_OPAQUE[world.rawBlock(x, y + 3, z)] === 1;
+}
+
+/**
+ * Drop rubble into and around a fresh crater. Returns how many voxels it set.
+ *
+ * Deterministic in (centre, radius, seed) and in the post-carve world, and it
+ * reads the world through the same accessors the carve did, so the client's
+ * predicted pile and the server's authoritative one are the same blocks.
+ */
+function settleDebris(
+  world: VoxelWorld,
+  cx: number, cy: number, cz: number,
+  radius: number, removed: number, seed: number,
+  sink?: BlockChangeSink,
+): number {
+  const budget = Math.min(DEBRIS_MAX, Math.floor(removed / DEBRIS_PER_REMOVED));
+  if (budget <= 0) return 0;
+
+  const rr = radius + DEBRIS_MARGIN;
+  const rr2 = rr * rr;
+  const x0 = Math.floor(cx - rr), x1 = Math.floor(cx + rr);
+  const z0 = Math.floor(cz - rr), z1 = Math.floor(cz + rr);
+  // One block under the detonation, down to one under the crater floor.
+  const top = Math.min(CHUNK_HEIGHT - 2, Math.floor(cy) - 1);
+  const bottom = Math.max(1, Math.floor(cy - radius) - 1);
+  const dseed = seed ^ 0x2b13ad;
+
+  let n = 0;
+  for (let z = z0; z <= z1; z++) {
+    const dz = z + 0.5 - cz;
+    const dz2 = dz * dz;
+    if (dz2 > rr2) continue;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx;
+      const d2 = dx * dx + dz2;
+      if (d2 > rr2) continue;
+      // Thickest under the hole, thinning to nothing at the throw limit.
+      const fall = 1 - Math.sqrt(d2) / rr;
+      if (hash3f(x, 0, z, dseed) >= DEBRIS_CHANCE * fall) continue;
+
+      for (let y = top; y >= bottom; y--) {
+        const below = world.rawBlock(x, y, z);
+        if (below === BlockId.AIR) continue;
+        const kind = DEBRIS_OF[below];
+        if (kind === 0) break;                       // liquid, glass, leaves, bedrock
+        if (world.rawBlock(x, y + 1, z) !== BlockId.AIR) break;
+        if (plugsAWay(world, x, y, z)) break;
+        if (!world.setBlock(x, y + 1, z, kind)) break;
+        n++;
+        if (sink !== undefined && !sink.push(x, y + 1, z, kind)) return n;
+        break;
+      }
+      if (n >= budget) return n;
+    }
+  }
+  return n;
+}
 
 /**
  * Delete a sphere of voxels.
@@ -415,7 +540,11 @@ export function carveSphere(
       }
     }
   }
-  if (removed > 0) scorchCrater(world, cx, cy, cz, radius, removed, seed, sink);
+  lastDebris = 0;
+  if (removed > 0) {
+    scorchCrater(world, cx, cy, cz, radius, removed, seed, sink);
+    lastDebris = settleDebris(world, cx, cy, cz, radius, removed, seed, sink);
+  }
   world.endBatch();
   return removed;
 }

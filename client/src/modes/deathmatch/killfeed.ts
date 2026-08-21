@@ -116,8 +116,8 @@ const CSS = `
   font:12px/1.1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;pointer-events:none;
   contain:layout style}
 #hud .dm-kf .row{display:flex;align-items:center;gap:7px;max-width:100%;
-  padding:4px 8px 4px 9px;border-radius:3px;
-  background:rgba(8,8,11,.86);border:1px solid rgba(255,255,255,.10);
+  padding:4px 8px 4px 9px;border-radius:var(--dc-r);
+  background:var(--dc-plate);border:1px solid var(--dc-line);
   border-right:3px solid #4a4a55;
   box-shadow:0 2px 10px rgba(0,0,0,.55);
   text-shadow:0 1px 2px rgba(0,0,0,.95);
@@ -152,7 +152,7 @@ const CSS = `
   font:700 13px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 #hud .dm-conf .chip{position:absolute;left:0;top:-96px;transform:translate(-50%,0);
   display:flex;align-items:center;gap:6px;white-space:nowrap;
-  padding:4px 10px;border-radius:2px;
+  padding:4px 10px;border-radius:var(--dc-r);
   background:rgba(14,6,4,.9);border:1px solid rgba(240,160,32,.55);
   color:#ffd98a;text-shadow:0 1px 3px rgba(0,0,0,.9);
   box-shadow:0 0 18px rgba(224,60,28,.28);
