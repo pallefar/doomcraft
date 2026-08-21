@@ -98,53 +98,25 @@ import {
 import type { ChatMessage, DamageEvent, KillEvent, SolidAt, WelcomeMessage } from '@shared';
 import { createMoveState, eyeHeightOf, moveStep } from '@doomcraft/server/src/sim.js';
 import type { CollisionWorld, MoveState } from '@doomcraft/server/src/sim.js';
+import { defaultServerUrl, webSocketTransport } from './transport.js';
+import type { ClientTransport } from './transport.js';
 
 /* ------------------------------------------------------------------------ *
  * Transport
  * ------------------------------------------------------------------------ */
 
-export const enum TransportState { CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3 }
-
-/** Everything NetClient needs from a pipe. A WebSocket and a Worker both fit. */
-export interface ClientTransport {
-  readonly readyState: number;
-  send(data: Uint8Array): void;
-  close(code?: number, reason?: string): void;
-  onopen: (() => void) | null;
-  onmessage: ((data: ArrayBuffer | Uint8Array) => void) | null;
-  onclose: ((code: number, reason: string) => void) | null;
-  onerror: ((err: unknown) => void) | null;
-}
-
-/** Wrap a browser WebSocket as a ClientTransport. */
-export function webSocketTransport(url: string): ClientTransport {
-  const ws = new WebSocket(url);
-  ws.binaryType = 'arraybuffer';
-  const t: ClientTransport = {
-    get readyState(): number { return ws.readyState; },
-    send(data: Uint8Array): void {
-      if (ws.readyState === 1) ws.send(data);
-    },
-    close(code?: number, reason?: string): void {
-      try { ws.close(code, reason); } catch { /* already closed */ }
-    },
-    onopen: null,
-    onmessage: null,
-    onclose: null,
-    onerror: null,
-  };
-  ws.onopen = (): void => { t.onopen?.(); };
-  ws.onmessage = (ev: MessageEvent): void => { t.onmessage?.(ev.data as ArrayBuffer); };
-  ws.onclose = (ev: CloseEvent): void => { t.onclose?.(ev.code, ev.reason); };
-  ws.onerror = (ev: Event): void => { t.onerror?.(ev); };
-  return t;
-}
-
-/** The URL the game server lives at, in dev and in production. */
-export function defaultServerUrl(): string {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://${location.host}/ws`;
-}
+/**
+ * The transport seam moved to `./transport.ts` so the WebSocket path, the
+ * Worker path and the WebRTC path can share one definition — and so the
+ * reliability routing table has exactly one home. Re-exported here because
+ * `ClientTransport` has always been part of this module's public surface.
+ */
+export {
+  TransportState,
+  webSocketTransport,
+  defaultServerUrl,
+} from './transport.js';
+export type { ClientTransport, ServerTransport, TransportKind } from './transport.js';
 
 /* ------------------------------------------------------------------------ *
  * Keepalive — the pump that does NOT live in requestAnimationFrame

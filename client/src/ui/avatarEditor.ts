@@ -732,10 +732,15 @@ export class AvatarEditor {
     ));
     const note = el('p', 'dca-lab');
     note.style.cssText = 'margin-top:14px;line-height:1.6;letter-spacing:.05em;text-transform:none';
+    // Do not promise visibility here. A tint MULTIPLIES the outfit texel, so it can only ever
+    // darken it; the palette floor bounds how much the tint darkens, but it puts no floor under
+    // the pixel that actually reaches the screen — the texel and the scene lighting both reduce it
+    // further. Enforcing "you cannot hide in a corridor" needs a check on the rendered result,
+    // not on the swatch.
     note.textContent =
-      'Colours multiply the outfit rather than replace it, and none of them is '
-      + 'dark enough to hide in: the palette floor is more than twice the brightness '
-      + 'of the far-wall fog, so a marine can never sink into a corridor.';
+      'Colours multiply the outfit rather than replace it, so a swatch can darken '
+      + 'your kit but never brighten it. Darker choices read less clearly at distance '
+      + 'in unlit corridors.';
     this.scrollEl.appendChild(note);
   }
 
