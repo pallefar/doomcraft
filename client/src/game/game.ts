@@ -93,6 +93,14 @@ const EDIT_INTERVAL_MS = 140;
 
 /** Metres in front of the eye where the world-space muzzle plume is spawned. */
 const MUZZLE_STANDOFF = 0.7;
+/**
+ * Metres in front of the eye where a tracer starts. Further out than the plume
+ * so the near end of the beam clears the gun instead of starting inside it, and
+ * so the streak's own screen-space width floor has some depth to work with.
+ */
+const TRACER_STANDOFF = 0.95;
+/** Scratch for the barrel position. Fx spawning must not allocate. */
+const _muzzle = new THREE.Vector3();
 
 /* ---- damage feedback ---------------------------------------------------- *
  * The full-screen part of "I am being hit" belongs to hud.hurt() — a radial
@@ -649,24 +657,28 @@ export class Game {
         this.viewmodel.fire(weaponId);
       },
       muzzleFlash: (weaponId, x, y, z, dx, dy, dz): void => {
-        // Spawn the plume at the muzzle, not at the eye: at the eye it sits
-        // inside the 6 cm near plane and the player sees nothing at all.
-        const d = MUZZLE_STANDOFF;
-        this.fx.muzzleFlash(x + dx * d, y + dy * d, z + dz * d, dx, dy, dz, weaponId);
+        // Out of the BARREL, not out of the crosshair. `muzzleWorld` returns the
+        // world point that lands on the same pixel as the drawn gun, which is
+        // both where a flash belongs and — since it is no longer on the aim
+        // axis — no longer a wash over the thing being shot at. See the block
+        // comment on Viewmodel.muzzleWorld.
+        const m = this.viewmodel.muzzleWorld(
+          x, y, z, dx, dy, dz, MUZZLE_STANDOFF, _muzzle, this.renderer.camera.fov,
+        );
+        this.fx.muzzleFlash(m.x, m.y, m.z, dx, dy, dz, weaponId);
       },
       tracer: (_weaponId, x0, y0, z0, x1, y1, z1, color): void => {
-        // Start the streak at the barrel. Fired from the eye it begins behind
-        // the near plane, and a screen-space minimum width then paints a
-        // 30-pixel searchlight across the frame instead of a tracer.
+        // Same barrel, and for the same reason twice over: a streak fired from
+        // the eye along the view axis projects to a POINT at the crosshair and
+        // cannot be seen by the person who fired it.
         let dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
         const len = Math.hypot(dx, dy, dz);
-        if (len > MUZZLE_STANDOFF * 2) {
-          dx /= len; dy /= len; dz /= len;
-          const d = MUZZLE_STANDOFF;
-          this.fx.tracer(x0 + dx * d, y0 + dy * d, z0 + dz * d, x1, y1, z1, color);
-        } else {
-          this.fx.tracer(x0, y0, z0, x1, y1, z1, color);
-        }
+        if (len < 1e-4) return;
+        dx /= len; dy /= len; dz /= len;
+        const m = this.viewmodel.muzzleWorld(
+          x0, y0, z0, dx, dy, dz, TRACER_STANDOFF, _muzzle, this.renderer.camera.fov,
+        );
+        this.fx.tracer(m.x, m.y, m.z, x1, y1, z1, color);
       },
       impact: (x, y, z, nx, ny, nz, blockId): void => {
         // The blockId goes through as well as the colour: Fx uses it to bite a

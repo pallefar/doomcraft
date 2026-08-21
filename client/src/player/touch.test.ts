@@ -26,8 +26,9 @@ import {
   TC_STICK, TC_FIRE, TC_JUMP, TC_CROUCH, TC_RELOAD, TC_BUILD, TC_LOOK,
   TC_PAUSE, TC_AUTOFIRE, TC_AIMASSIST, TC_SWAP, TC_NONE,
   contrastRatio, edgeContrast, lightStrokeContrast, worstEdgeContrast, TOUCH_EDGE,
-  TouchRouter,
-  type TouchGeom, type Disc, type TouchSink, type TouchAimSource, type TouchAimTarget,
+  TouchRouter, readoutRect, FIRE_SLIDE_GAIN, READOUT_MARGIN, READOUT_CLEARANCE,
+  type TouchGeom, type Disc, type Rect,
+  type TouchSink, type TouchAimSource, type TouchAimTarget,
 } from './touch';
 import { InputAction } from '@shared/constants';
 
@@ -551,6 +552,243 @@ describe('solveTouchLayout', () => {
     expect(g2.stickHome.x - g2.stickHome.r).toBeGreaterThanOrEqual(44);
     expect(g2.fire.x + g2.fire.r).toBeLessThanOrEqual(915 - 44);
     expect(g2.fire.y + g2.fire.r).toBeLessThanOrEqual(412 - 21);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The corner read-outs — weakness #11, and the version of it we committed
+ * ourselves
+ *
+ * The bar ships its desktop HUD to a 412 px-tall screen. We re-laid ours out
+ * around the thumbs and then made the same mistake by a different route: the
+ * ammo plate was pinned above the FULL height of the trigger cluster, which
+ * includes an inboard glyph column that is nowhere near the corner the plate
+ * sits in. On the bar's own 915x412 viewport that floated the plate 205 px up
+ * — half the screen — with nothing underneath it.
+ *
+ * `padEdge*` is the band measured against the outer column only, and
+ * `readoutWidth*` is the width that band is honest for. The pair is only worth
+ * anything if it is actually disjoint from the controls, so that is what gets
+ * asserted, across every viewport, both hands and the whole size slider.
+ * ------------------------------------------------------------------------ */
+
+/** Overlap depth of a disc and an axis-aligned box, px. Positive means a hit. */
+function discRectOverlap(d: Disc, r: Rect): number {
+  const cx = Math.max(r.x0, Math.min(d.x, r.x1));
+  const cy = Math.max(r.y0, Math.min(d.y, r.y1));
+  return d.r - Math.hypot(d.x - cx, d.y - cy);
+}
+
+describe('corner read-outs', () => {
+  const g = createTouchGeom();
+  const box: Rect = { x0: 0, y0: 0, x1: 0, y1: 0 };
+
+  /** A phone ammo plate: 26px numeral, round strip, weapon line, padding. */
+  const PLATE_H = 80;
+
+  for (const [vw, vh, label] of VIEWPORTS) {
+    for (const southpaw of [false, true]) {
+      for (const scale of [0.7, 1, 1.4]) {
+        const hand = southpaw ? 'southpaw' : 'right-handed';
+        it(`${vw}x${vh} ${hand} @${scale}x: neither plate lands on a control`, () => {
+          solveTouchLayout(vw, vh, { southpaw, scale }, g);
+          for (const side of [0, 1] as Array<0 | 1>) {
+            readoutRect(g, side, PLATE_H, box);
+            expect(box.x0, 'a read-out starts off the left edge').toBeGreaterThanOrEqual(0);
+            expect(box.x1, 'a read-out runs off the right edge').toBeLessThanOrEqual(vw);
+            expect(box.y0, 'a read-out is pushed off the top').toBeGreaterThanOrEqual(0);
+            for (const d of touchDiscs(g)) {
+              const over = discRectOverlap(d, box);
+              expect(over, `${vw}x${vh} ${hand} @${scale}x: side ${side} plate sits `
+                + `${over.toFixed(1)}px into the control at `
+                + `(${d.x.toFixed(0)},${d.y.toFixed(0)})`).toBeLessThanOrEqual(0);
+            }
+          }
+        });
+
+        it(`${vw}x${vh} ${hand} @${scale}x: the two plates never meet`, () => {
+          solveTouchLayout(vw, vh, { southpaw, scale }, g);
+          const a: Rect = { x0: 0, y0: 0, x1: 0, y1: 0 };
+          const b: Rect = { x0: 0, y0: 0, x1: 0, y1: 0 };
+          readoutRect(g, 0, PLATE_H, a);
+          readoutRect(g, 1, PLATE_H, b);
+          const apart = a.x1 <= b.x0 || a.y1 <= b.y0 || b.y1 <= a.y0;
+          expect(apart, `${vw}x${vh} ${hand} @${scale}x: the vitals and the ammo `
+            + `plate are printed on top of each other`).toBe(true);
+        });
+      }
+    }
+  }
+
+  it('lifts the ammo plate off the floor without floating it up the screen', () => {
+    // The number the fix exists for. 915x412 is the bar's own mobile viewport.
+    solveTouchLayout(915, 412, {}, g);
+    expect(g.padBottomRight).toBeGreaterThan(190);      // the full cluster is tall
+    expect(g.padEdgeRight).toBeLessThan(g.padBottomRight - 50);
+    // …and the plate now sits in the bottom third, which is what "corner
+    // read-out" has to mean on a 412 px-tall screen.
+    expect(g.padEdgeRight + READOUT_CLEARANCE).toBeLessThan(412 * 0.4);
+    // The band still clears the trigger and the primary glyph column.
+    for (const d of [g.fire, g.jump, g.crouch]) {
+      expect(412 - (d.y - d.r)).toBeLessThanOrEqual(g.padEdgeRight + 1e-6);
+    }
+  });
+
+  it('mirrors the bands and the widths with the hand', () => {
+    const r = createTouchGeom();
+    const l = createTouchGeom();
+    solveTouchLayout(915, 412, { southpaw: false }, r);
+    solveTouchLayout(915, 412, { southpaw: true }, l);
+    expect(l.padEdgeLeft).toBeCloseTo(r.padEdgeRight, 6);
+    expect(l.padEdgeRight).toBeCloseTo(r.padEdgeLeft, 6);
+    expect(l.readoutWidthLeft).toBeCloseTo(r.readoutWidthRight, 6);
+    expect(l.readoutWidthRight).toBeCloseTo(r.readoutWidthLeft, 6);
+  });
+
+  it('always leaves a read-out at least one touch target wide', () => {
+    for (const [vw, vh] of VIEWPORTS) {
+      solveTouchLayout(vw, vh, {}, g);
+      expect(g.readoutWidthLeft).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET);
+      expect(g.readoutWidthRight).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET);
+      expect(READOUT_MARGIN).toBeGreaterThan(0);
+    }
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The sprint detent, drawn
+ * ------------------------------------------------------------------------ */
+
+describe('the sprint detent is a control, not a secret', () => {
+  const g = createTouchGeom();
+
+  it('publishes the exact radius the maths latches on', () => {
+    for (const [vw, vh] of VIEWPORTS) {
+      solveTouchLayout(vw, vh, {}, g);
+      const cfg = { ...DEFAULT_STICK, radius: g.stickTravel };
+      const s = createStickSample();
+      // One pixel inside the drawn ring: walking. On it: running. If the ring
+      // and the latch could drift apart, the drawn threshold would be a lie.
+      resolveStick(g.detentR - 1, 0, cfg, s);
+      expect(s.sprint, `${vw}x${vh} sprints before the drawn ring`).toBe(false);
+      resolveStick(g.detentR, 0, cfg, s);
+      expect(s.sprint, `${vw}x${vh} does not sprint at the drawn ring`).toBe(true);
+    }
+  });
+
+  it('draws the ring inside the base and outside the dead zone', () => {
+    for (const [vw, vh] of VIEWPORTS) {
+      solveTouchLayout(vw, vh, {}, g);
+      expect(g.detentR).toBeGreaterThan(g.deadR);
+      expect(g.detentR).toBeLessThanOrEqual(g.stickTravel);
+      expect(g.detentR).toBeLessThan(g.stickHome.r);
+    }
+  });
+
+  it('follows the dead-zone slider without ever crossing it', () => {
+    solveTouchLayout(412, 915, { deadZone: 0.4 }, g);
+    expect(g.deadR).toBeCloseTo(g.stickTravel * 0.4, 6);
+    expect(g.detentR).toBeGreaterThan(g.deadR);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The floating stick actually floats
+ * ------------------------------------------------------------------------ */
+
+describe('the stick grab zone', () => {
+  const g = createTouchGeom();
+
+  it('gives a thumb that lands short of the stick real headroom', () => {
+    // The point of a floating origin is that you do not have to find the puck.
+    // The zone used to be cut off just under the utility row on a portrait
+    // phone — 2px of headroom above the drawn base at 412x915 — so a thumb that
+    // landed a centimetre high became a look-drag, i.e. the player looked at
+    // the sky instead of backing out of a fight.
+    for (const [vw, vh, label] of VIEWPORTS) {
+      solveTouchLayout(vw, vh, {}, g);
+      const stickTop = g.stickHome.y - g.stickHome.r;
+      const headroom = stickTop - g.stickZone.y0;
+      expect(headroom, `${label}: only ${headroom.toFixed(1)}px above the stick`)
+        .toBeGreaterThanOrEqual(g.stickHome.r * 0.45);
+    }
+  });
+
+  it('still hands a press on a utility glyph to the glyph, not the stick', () => {
+    // Which is why the headroom is safe: `hitTest` resolves buttons first, so
+    // the zone is allowed to run underneath the utility row.
+    solveTouchLayout(412, 915, {}, g);
+    for (const d of [g.reload, g.build, g.swap]) {
+      expect(hitTest(g, d.x, d.y)).not.toBe(TC_STICK);
+    }
+    // And the gaps between those glyphs are covered by their own slop rather
+    // than leaking to the stick: neighbouring chips are 2r+10 apart with r+6
+    // of reach each, so 12 > 10 and there is no seam.
+    const midpoint = (g.reload.x + g.build.x) * 0.5;
+    expect(hitTest(g, midpoint, g.reload.y)).not.toBe(TC_STICK);
+  });
+
+  it('floats the origin to a thumb that lands above the drawn base', () => {
+    const sink = new FakeSink();
+    const r = new TouchRouter(sink);
+    const g2 = r.resize(412, 915, {});
+    // Four pixels inside the top of the zone — 78 px above the drawn base, and
+    // outboard of the utility row, which owns its own presses.
+    const y = g2.stickZone.y0 + 4;
+    expect(y).toBeLessThan(g2.stickHome.y - g2.stickHome.r - 40);
+    expect(hitTest(g2, 30, y)).toBe(TC_STICK);
+    expect(r.down(1, 30, y, 0)).toBe(TC_STICK);
+    // A press is zero deflection wherever it lands — it must not lurch.
+    expect(sink.moveX).toBe(0);
+    expect(sink.moveZ).toBe(0);
+    r.move(1, 30, y - g2.stickTravel);
+    expect(sink.moveZ).toBeGreaterThan(0.8);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Slide-off gain
+ * ------------------------------------------------------------------------ */
+
+describe('slide-off aiming has the travel it needs', () => {
+  it('turns further per pixel from the trigger than from the look surface', () => {
+    const sink = new FakeSink();
+    const r = landscapeRouter(sink);
+    const g = r.geom;
+
+    // The measurement the gain exists for: the trigger's centre is a fraction
+    // of the look surface's width from the edge it has to drag towards.
+    const rightRoom = 915 - g.fire.x;
+    expect(rightRoom).toBeLessThan(g.stickZone.x1 * 0.25);
+
+    expect(hitTest(g, 400, 100)).toBe(TC_LOOK);
+    r.down(1, 400, 100, 0);            // look surface
+    sink.clearLook();
+    r.move(1, 460, 100);
+    const lookDx = sink.lookDx;
+
+    r.up(1, 500);
+    r.down(2, g.fire.x, g.fire.y, 600);
+    r.move(2, g.fire.x - 20, g.fire.y);   // past the slide threshold, swallowed
+    sink.clearLook();
+    r.move(2, g.fire.x - 80, g.fire.y);
+    const slideDx = Math.abs(sink.lookDx);
+
+    expect(lookDx).toBeCloseTo(60, 6);
+    expect(slideDx).toBeCloseTo(60 * FIRE_SLIDE_GAIN, 6);
+    // Modest: it is a nudge, not a second sensitivity setting.
+    expect(FIRE_SLIDE_GAIN).toBeGreaterThan(1);
+    expect(FIRE_SLIDE_GAIN).toBeLessThan(2);
+  });
+
+  it('still fires while it does it', () => {
+    const sink = new FakeSink();
+    const r = landscapeRouter(sink);
+    const g = r.geom;
+    r.down(1, g.fire.x, g.fire.y, 0);
+    r.move(1, g.fire.x - 90, g.fire.y - 30);
+    expect(sink.down.has(InputAction.Fire)).toBe(true);
+    expect(r.firePad.aiming).toBe(true);
   });
 });
 

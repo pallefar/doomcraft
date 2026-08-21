@@ -66,9 +66,18 @@
  *    unshaded `BLOCK_FACE_COLOR` — a unique key per block-face. One
  *    `texelFetch` in the VERTEX stage turns it into {tile, detail, seam} and
  *    flats it down, so the fragment stage pays one atlas fetch and no lookup.
- *  - **The seam** is a `fract()` edge-distance darken in pixel space, which is
- *    what gives three adjacent stone blocks their grid back without splitting a
- *    single quad. It fades out below ~9 px per block so distance never moires.
+ *  - **The bevel** is the block grid itself: a signed chamfer keyed off the same
+ *    `fract()` cell, dark on the -u/-v edge of every block and bright on the
+ *    +u/+v edge, so forty greedy-merged blocks read as a stack of lit cubes
+ *    instead of one painted slab. See BEVEL_WIDTH for why a symmetric groove
+ *    could not do that job and what the measured failure looked like.
+ *  - **The seam** is a `fract()` edge-distance darken in pixel space sitting
+ *    inside the chamfer — the shadow in the joint. Both fade out below ~8 px per
+ *    block so distance never moires.
+ *  - **Contact AO.** The mesher's per-vertex term is put through a convex curve
+ *    in the fragment stage that fixes 1.0, so open ground is untouched and the
+ *    occlusion bunches against the surface that caused it instead of smearing
+ *    across a metre of merged quad. See AO_CONTACT.
  *
  * The atlas never replaces the palette: the baked face shade in the vertex
  * colour, AO, fog and the dynamic lights all still apply on top.
@@ -176,6 +185,86 @@ const AO_FALLOFF = [1.45, 0.95, 0.45, 0];
 /** Nothing goes fully black on AO alone; the darkest corner keeps this much. */
 const AO_FLOOR = 0.06;
 
+/**
+ * AO CONTACT CURVE — why the AO above was in the maths and still not on screen.
+ *
+ * Measured, not argued. `client/src/world/world.test.ts` histograms the shipped
+ * generator through the shipped mesher: 43.6% of all emitted vertices carry an
+ * occluded AO term, 41.6% of top-face ones. So the geometry was never the
+ * problem. The problem is what a per-vertex term does after rasterisation.
+ *
+ * Greedy meshing merges the whole row of floor blocks along a wall into ONE
+ * quad, one block deep, with the wall-side pair of corners dark and the far
+ * pair clear. The hardware then interpolates that LINEARLY across a full metre.
+ * At the range you fight at, one metre of floor is 40-80 px, so a 40% dip
+ * spread over 80 px is not read as a corner at all — it is read as uneven
+ * lighting, which is exactly what shots/ours-r2desktop-05-weapon2.png shows: a
+ * wall meeting a floor with no seam and no contact shadow anywhere in frame.
+ *
+ * The fix is one lerp in the fragment stage:
+ *
+ *     ao' = ao * mix(1.0, ao, AO_CONTACT)
+ *
+ * It is chosen over `pow(ao, g)` for one property that matters: **it fixes
+ * ao = 1**. Unoccluded ground — most of the world — comes out bit-identical, so
+ * this costs the open field nothing and spends all of its contrast in the
+ * corners. At the shipped strength the four levels land at
+ *
+ *     level 0 (inside corner)     0.391 -> 0.260
+ *     level 1 (two sides)         0.601 -> 0.469
+ *     level 2 (one wall)          0.811 -> 0.727
+ *     level 3 (open)              1.000 -> 1.000
+ *
+ * and, because the curve is convex, the interpolated midpoint of that merged
+ * floor quad falls from 0.80 to 0.72 — the darkening bunches up against the
+ * wall instead of smearing across the block. Two ALU ops, no pow, no branch.
+ */
+const AO_CONTACT = 0.55;
+
+/* ------------------------------------------------------------------------ *
+ * Per-block bevel — the block grid
+ *
+ * THE GAP THIS CLOSES. ref/BAR.md: "blocks **are textured**, not flat-coloured
+ * ... stone shows a clear running-bond brick pattern, grass a fine speckle".
+ * The thing that sentence is really describing is that **you can count the bar's
+ * blocks**. Every cube on its beach has a visible boundary, so the ground reads
+ * as a surface made of units and the eye gets scale, distance and a grid to
+ * read cover against.
+ *
+ * Ours did not. The atlas below this file paints real tiles, but the two
+ * materials that floor and wall the HELL biome — hellstone and obsidian — both
+ * draw `Tile.VEIN`, an organic crack pattern with no block-scale structure in
+ * it, and the only thing that was drawing a boundary was a 12%-strength,
+ * 1.6 px-wide symmetric groove that faded out below 9 px per block. Net result
+ * on the shipped captures: forty blocks of wall reading as one painted slab,
+ * which is the bar's "one mass" failure with a darker palette.
+ *
+ * A groove alone cannot fix that, because a groove is what a TILED FLOOR has.
+ * What a stack of cubes has is a CHAMFER: the face of each cube catches the
+ * light on the two edges turned toward it and loses it on the two turned away.
+ * So the term here is signed and directional — darken toward -u/-v, brighten
+ * toward +u/+v — and because the uv comes off world position, every block on a
+ * face agrees on which way that is. The wall reads as a stack of lit cubes
+ * rather than as a lattice scratched onto a slab, and the pair of adjacent
+ * light and dark lines at every joint is far more legible than either alone.
+ *
+ * Three numbers keep it honest at range:
+ *  - the width is in BLOCK units, floored at ~1.3 px so it never thins to
+ *    nothing on a distant wall;
+ *  - the whole term fades out under 8 px per block, so the horizon dissolves
+ *    into flat colour instead of into a moire lattice;
+ *  - liquids, glass and neon opt out through the surface LUT's `seam` field,
+ *    because a chamfer grid on a lava pool reads as a bug.
+ * ------------------------------------------------------------------------ */
+
+/** Chamfer width as a fraction of one block. 1/16 is one texel of a 16px tile. */
+const BEVEL_WIDTH = 0.0625;
+/** How dark the shadowed (-u/-v) edge of a block goes. */
+const BEVEL_DARK = 0.30;
+/** How bright the lit (+u/+v) edge goes. Lower than the dark side; a highlight
+ *  that matches its own shadow reads as a wireframe, not as a chamfer. */
+const BEVEL_LIGHT = 0.17;
+
 /* ------------------------------------------------------------------------ *
  * Interior light
  *
@@ -185,12 +274,22 @@ const AO_FLOOR = 0.06;
  * The sun is nearly gone indoors because there is no sun indoors; the ambient
  * is only trimmed because a voxel room with no ambient is a black rectangle and
  * Doom's rooms were never unlit — they were a different, flatter key with their
- * own light sources in them. Net effect on a top face: ~36% darker inside than
- * out. On a side wall: ~20%. That asymmetry is deliberate — it is what makes an
- * interior read as flat and enclosed rather than merely dim.
+ * own light sources in them.
+ *
+ * WHY THESE MOVED. The old pair was 0.80 / 0.35: a timid split, and it had to
+ * be, because the sky channel that drives it was a binary "is anything directly
+ * overhead" test that put 35% of every frame's quads on the interior side. Any
+ * real darkness bought there was paid for by the open ground under every crag
+ * lip going dark with it, which is precisely the murk the shipped captures
+ * show. With the mesher's bleed in place that number is 0.5% and the interior
+ * key applies only to actual interiors, so it can finally be worth something:
+ * a keep floor now sits at roughly a THIRD of the arena floor outside its door,
+ * and the sun term is gone entirely rather than merely reduced. Walking through
+ * a doorway is now a change of exposure, which is the whole point of building
+ * an inside at all.
  * ------------------------------------------------------------------------ */
-const INTERIOR_AMBIENT = 0.80;
-const INTERIOR_SUN = 0.35;
+const INTERIOR_AMBIENT = 0.58;
+const INTERIOR_SUN = 0.10;
 
 /* ------------------------------------------------------------------------ *
  * Block-light colours, indexed by the mesher's hue class.
@@ -338,6 +437,9 @@ in vec4 aColor;     // rgb normalized, a = sky exposure normalized
 
 out vec3  vColor;
 out float vLightBase;
+// AO travels on its own varying instead of pre-multiplied into vLightBase, so
+// the fragment stage can put a curve on it. See AO_CONTACT.
+out float vAo;
 flat out vec3 vEmissive;
 out float vAlpha;
 out float vFogDepth;
@@ -387,8 +489,8 @@ void main() {
   float sky = aColor.a;
   float ambientMix = mix(uInterior.x, 1.0, sky);
   float sunMix = mix(uInterior.y, 1.0, sky);
-  vLightBase = (uFaceAmbient[face] * ambientMix + uFaceSun[face] * sunMix)
-             * uAoLevels[int(aData.x + 0.5)];
+  vLightBase = uFaceAmbient[face] * ambientMix + uFaceSun[face] * sunMix;
+  vAo = uAoLevels[int(aData.x + 0.5)];
 
   // aData.y packs the block-light level in bits 0..3 and its hue class in
   // bits 4..5, so one byte carries both and the vertex format did not grow.
@@ -439,12 +541,16 @@ uniform float uExposure;
 // must carry the same precision in both or the program fails to validate.
 uniform highp float uTime;
 uniform float uRipple;
+/** Convexity of the AO contact curve, 0 = the old linear ramp. See AO_CONTACT. */
+uniform float uAoContact;
 #ifdef USE_TEXTURE
 uniform sampler2D uSurfaceAtlas;
 uniform float uDetail;    // global scale on the RELATIVE (percentage) detail term
 uniform float uDetailAbs; // global scale on the ABSOLUTE (albedo-offset) detail term
 uniform vec2  uBlockJitter; // per-block value jitter: x relative, y absolute
 uniform float uSeam;      // how dark the per-block groove goes, 0 .. 1
+/** x = chamfer width in blocks, y = shadow strength, z = highlight strength. */
+uniform vec3  uBevel;
 #endif
 #if MAX_LIGHTS > 0
 uniform int   uLightCount;
@@ -455,6 +561,7 @@ uniform float uLightRadius[MAX_LIGHTS];
 
 in vec3  vColor;
 in float vLightBase;
+in float vAo;
 flat in vec3 vEmissive;
 in float vAlpha;
 in float vFogDepth;
@@ -470,7 +577,13 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
   vec3 base = vColor * uTint;
-  float lit = vLightBase;
+
+  // Contact AO. mix(1, vAo, k) fixes vAo == 1 exactly, so open ground is
+  // untouched and every bit of the extra contrast is spent where a surface
+  // actually meets another surface. See AO_CONTACT for the measured reason a
+  // straight interpolated term was invisible.
+  float ao = vAo * mix(1.0, vAo, uAoContact);
+  float lit = vLightBase * ao;
 
 #ifdef USE_TEXTURE
   // ---- surface detail -----------------------------------------------------
@@ -487,7 +600,13 @@ void main() {
   else                 { uv = vWorldPos.xy; dux = ddx.xy; duy = ddy.xy; }
 
   // One block == one tile, whatever size the greedy quad ended up.
+  //
+  // cell is the block-local coordinate and STAYS UNMIRRORED - the bevel below
+  // is signed, so flipping it per block would randomise which edge of each
+  // block is the lit one and the wall would read as noise. The atlas fetch gets
+  // its own mirrored copy.
   highp vec2 cell = fract(uv);
+  highp vec2 tcell = cell;
   vec2 tileSize = vec2(${TILE_U}, ${TILE_V});
 
   float amp = vSurf.z * uDetail;
@@ -499,11 +618,11 @@ void main() {
     // rock and dirt do not tile visibly across a big face. Bonded and panelled
     // materials opt out (vVary == 0) because their lines must line up.
     highp float h = fract(sin(dot(floor(uv), vec2(127.1, 311.7))) * 43758.5453);
-    cell = mix(cell, 1.0 - cell, step(0.5, vec2(h, fract(h * 97.13))) * vVary);
+    tcell = mix(cell, 1.0 - cell, step(0.5, vec2(h, fract(h * 97.13))) * vVary);
     // Explicit gradients: the atlas is addressed by hand, so the hardware must
     // be told the real footprint or every tile edge picks the wrong mip.
     float d = textureGrad(
-      uSurfaceAtlas, vSurf.xy + cell * tileSize, dux * tileSize, duy * tileSize).r;
+      uSurfaceAtlas, vSurf.xy + tcell * tileSize, dux * tileSize, duy * tileSize).r;
 
     // The tile's signed deviation from neutral, -1 .. 1.
     float m = (d - 0.5) * 2.0;
@@ -541,19 +660,27 @@ void main() {
     base = max(base, vec3(0.0));
   }
 
-  // ---- per-block seam -----------------------------------------------------
-  // Edge distance measured in PIXELS, so the groove is the same weight at one
-  // metre and at thirty, then faded out once a block is too small to hold it.
-  //
-  // Deliberately quieter than it was. When the tiles were invisible this groove
-  // was the only thing breaking up a wall, so it had to be strong enough to do
-  // that job alone — and a lattice drawn over flat colour is what it looked
-  // like. With the tiles carrying the surface and the hash carrying the
-  // block-to-block step, the seam goes back to being the shadow in a joint: it
-  // finishes the grid instead of being the grid.
+  // ---- per-block bevel ----------------------------------------------------
+  // The block grid. A cube catches light on the two edges turned toward the
+  // light and loses it on the two turned away, so this term is SIGNED: -u/-v
+  // dark, +u/+v bright. uv comes off world position, so every block on the face
+  // agrees on which way that is and forty merged blocks read as a stack of
+  // cubes instead of one painted slab. See BEVEL_WIDTH.
   highp vec2 w = max(abs(dux) + abs(duy), vec2(1e-6));
-  highp vec2 edge = min(cell, 1.0 - cell) / w;
   highp float pxPerBlock = 1.0 / max(max(w.x, w.y), 1e-6);
+  // Width in block units, floored so the chamfer never thins below ~1.3 px on a
+  // distant wall, and the whole grid faded out once a block cannot hold one.
+  float bw = max(uBevel.x, 1.3 / pxPerBlock);
+  float grid = vSurf.w * smoothstep(2.5, 8.0, pxPerBlock);
+  vec2 loE = smoothstep(vec2(bw), vec2(0.0), cell);
+  vec2 hiE = smoothstep(vec2(1.0 - bw), vec2(1.0), cell);
+  float shadowEdge = max(loE.x, loE.y);
+  float lightEdge = max(hiE.x, hiE.y);
+  base *= 1.0 - grid * (shadowEdge * uBevel.y - lightEdge * uBevel.z);
+
+  // The joint itself: a thin symmetric groove sitting inside the chamfer, which
+  // is the shadow in the gap between two cubes rather than the edge of either.
+  highp vec2 edge = min(cell, 1.0 - cell) / w;
   float groove = 1.0 - smoothstep(0.0, 1.6, min(edge.x, edge.y));
   base *= 1.0 - groove * groove * vSurf.w * uSeam * smoothstep(3.0, 9.0, pxPerBlock);
 #endif
@@ -570,7 +697,18 @@ void main() {
   // The damping term keeps an already-sunlit face from blowing out: a torch
   // outdoors is worth almost nothing, indoors it is worth everything, which is
   // both physically right and the reason interiors are worth building.
-  vec3 c = base * (vec3(lit) + vEmissive * (1.0 - min(lit, 1.0) * ${EMISSIVE_DAMP.toFixed(2)}));
+  //
+  // Two details that are the difference between AO you can see and AO you
+  // cannot, on the HELL biome specifically — where the FLOOR is hellstone and
+  // hellstone emits, so this term is live over half the map:
+  //
+  //  * the emissive rides vAo. A corner is dark for bounced light too, and a
+  //    glow that ignores occlusion fills in exactly the corners AO just carved.
+  //  * the damp reads vLightBase, the AO-FREE light. Damping against the
+  //    occluded value made the emissive term grow wherever AO shrank the sun
+  //    term, which is a negative feedback loop straight back to flat.
+  vec3 c = base * (vec3(lit)
+    + vEmissive * vAo * (1.0 - min(vLightBase, 1.0) * ${EMISSIVE_DAMP.toFixed(2)}));
 
 #if MAX_LIGHTS > 0
   vec3 add = vec3(0.0);
@@ -667,6 +805,16 @@ export class VoxelMaterials {
   private lightCount = 0;
 
   private aoStrength: number;
+  /**
+   * The strength `setAoEnabled(true)` restores.
+   *
+   * BUG THIS FIXES: `game.ts` calls `setAoStrength(0.36)` at construction and
+   * then `applySettings()` calls `setAoEnabled(true)`, which used to hard-code
+   * AO_STRENGTH — so an explicit tuning value survived exactly until the first
+   * settings apply, which happens on every boot. The toggle now restores what
+   * was last asked for instead of overwriting it.
+   */
+  private aoStrengthWanted: number;
   private sunX = -SUN_DIR_X;
   private sunY = -SUN_DIR_Y;
   private sunZ = -SUN_DIR_Z;
@@ -689,6 +837,7 @@ export class VoxelMaterials {
   constructor(opts: VoxelMaterialOptions = {}) {
     this.quality = opts.quality ?? 'high';
     this.aoStrength = opts.ao === false ? 0 : AO_STRENGTH;
+    this.aoStrengthWanted = AO_STRENGTH;
     this.fogEnabled = opts.fog !== false;
     this.ditherEnabled = opts.dither !== false;
     this.textureEnabled = opts.texture !== false;
@@ -729,6 +878,8 @@ export class VoxelMaterials {
       uDetailAbs: { value: DETAIL_ABS },
       uBlockJitter: { value: new THREE.Vector2(BLOCK_JITTER_REL, BLOCK_JITTER_ABS) },
       uSeam: { value: SEAM_STRENGTH },
+      uBevel: { value: new THREE.Vector3(BEVEL_WIDTH, BEVEL_DARK, BEVEL_LIGHT) },
+      uAoContact: { value: AO_CONTACT },
       uLightCount: { value: 0 },
       uLightPos: { value: this.lightPos },
       uLightColor: { value: this.lightColor },
@@ -845,11 +996,39 @@ export class VoxelMaterials {
 
   setAoStrength(strength: number): void {
     this.aoStrength = strength < 0 ? 0 : strength > 1 ? 1 : strength;
+    if (this.aoStrength > 0) this.aoStrengthWanted = this.aoStrength;
     this.rebuildAo();
   }
 
+  /** Toggle AO without losing the strength `setAoStrength` was last given. */
   setAoEnabled(on: boolean): void {
-    this.setAoStrength(on ? AO_STRENGTH : 0);
+    this.setAoStrength(on ? this.aoStrengthWanted : 0);
+  }
+
+  /** Current AO slider value, 0 when AO is off. Read by tests and the HUD. */
+  get ambientOcclusion(): number {
+    return this.aoStrength;
+  }
+
+  /**
+   * Convexity of the AO contact curve. 0 restores the old linear ramp, which is
+   * the setting that made AO invisible; see AO_CONTACT.
+   */
+  setAoContact(k: number): void {
+    this.uniforms.uAoContact.value = clamp(k, 0, 1);
+    this.flagUniforms();
+  }
+
+  /**
+   * Per-block chamfer. `width` is a fraction of one block, `dark` and `light`
+   * are the shadow and highlight strengths on the two edge pairs. All zero is a
+   * gridless world — which is what the bar's distant terrain looks like and
+   * what ours used to look like everywhere.
+   */
+  setBevel(width: number, dark: number, light: number): void {
+    (this.uniforms.uBevel.value as THREE.Vector3)
+      .set(clamp(width, 0, 0.4), clamp(dark, 0, 1), clamp(light, 0, 1));
+    this.flagUniforms();
   }
 
   /* -- interior light ----------------------------------------------------- */

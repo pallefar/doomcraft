@@ -642,6 +642,17 @@ export interface TouchGeom {
   knobR: number;
   /** Drawn dead-zone radius, px. */
   deadR: number;
+  /**
+   * Drawn sprint-detent radius, px — the deflection at which `resolveStick`
+   * latches `sprint`.
+   *
+   * Published because an undrawn gesture is not a feature. The bar spends a
+   * whole 40 px glyph on sprint (ref/BAR.md: the runner icon, top of its
+   * right-hand column) and we spend none, which is only an improvement if the
+   * player can *see* where the detent is. Until this existed the stick sprinted
+   * at 90 % travel and nothing on the screen said so.
+   */
+  detentR: number;
   /** A press inside this rect grabs (or floats) the stick. */
   stickZone: Rect;
   /** Box the floating stick origin is clamped into. */
@@ -668,6 +679,34 @@ export interface TouchGeom {
   /** Height of the bottom band each thumb cluster owns, px. */
   padBottomLeft: number;
   padBottomRight: number;
+  /**
+   * Height of the bottom band the *outer* column of each cluster owns, px.
+   *
+   * This is the number a corner read-out should be inset by, and it is not the
+   * same as `padBottom*`. On a 915x412 landscape phone the right-hand cluster
+   * is two columns deep: the trigger and JUMP/DUCK against the edge, and the
+   * three utility glyphs inboard of them. `padBottomRight` clears all five and
+   * comes out at 209 px — more than half a 412 px-tall screen — so the ammo
+   * plate pinned to it floated in the middle of the play area with nothing
+   * under it, which is precisely the bar's weakness #11 re-committed by a
+   * different route. The inboard column is nowhere near the corner, so the
+   * read-out only has to clear the outer one: 144 px, and the plate tucks in
+   * against the trigger where a thumb-held phone expects it.
+   *
+   * `readoutWidth*` is the other half of that promise — the widest a plate may
+   * be before it reaches the column this band deliberately ignored.
+   */
+  padEdgeLeft: number;
+  padEdgeRight: number;
+  /** Widest a corner read-out may be on each side without hitting a control, px. */
+  readoutWidthLeft: number;
+  readoutWidthRight: number;
+  /**
+   * Inset from the screen edge that keeps a read-out clear of the option-chip
+   * column in the top corner, px. Same value both sides — the chips mirror with
+   * the hand, so the reserve does too.
+   */
+  readoutInset: number;
   /** Horizontal band at the bottom that no thumb covers. */
   centreX0: number;
   centreX1: number;
@@ -684,6 +723,8 @@ export interface TouchLayoutOptions {
   scale: number;
   /** Dead zone as a fraction of travel, mirrored from `StickConfig`. */
   deadZone: number;
+  /** Sprint detent as a fraction of travel, mirrored from `StickConfig`. */
+  detent: number;
 }
 
 export const DEFAULT_TOUCH_LAYOUT: Readonly<TouchLayoutOptions> = Object.freeze({
@@ -691,6 +732,7 @@ export const DEFAULT_TOUCH_LAYOUT: Readonly<TouchLayoutOptions> = Object.freeze(
   southpaw: false,
   scale: 1,
   deadZone: DEFAULT_STICK.deadZone,
+  detent: DEFAULT_STICK.detent,
 });
 
 /** Apple/Google both put the minimum comfortable target at 44 CSS px across. */
@@ -755,18 +797,38 @@ const GAP = 10;
  */
 const TRIGGER_EDGE = 10;
 
+/**
+ * Margin from the screen edge to a bottom-corner read-out, px. Shared with the
+ * stylesheet in `hud/mobile.ts` so the box the solver promises and the box the
+ * browser paints are the same box.
+ */
+export const READOUT_MARGIN = 10;
+
+/** Clear space kept between a read-out and the nearest control, px. */
+export const READOUT_CLEARANCE = 8;
+
+/**
+ * Ceiling on a corner read-out's width, px. Nothing on a phone HUD needs to be
+ * wider than this, and without a cap the portrait layout hands the ammo plate
+ * the entire gap between the thumbs, which the HUD would then fill with type.
+ */
+const READOUT_MAX_W = 208;
+
 function disc(): Disc { return { x: 0, y: 0, r: 0 }; }
 function rect(): Rect { return { x0: 0, y0: 0, x1: 0, y1: 0 }; }
 
 export function createTouchGeom(): TouchGeom {
   return {
     vw: 0, vh: 0, portrait: false, southpaw: false,
-    stickHome: disc(), stickTravel: 0, knobR: 0, deadR: 0,
+    stickHome: disc(), stickTravel: 0, knobR: 0, deadR: 0, detentR: 0,
     stickZone: rect(), stickBounds: rect(),
     thumbPivot: { x: 0, y: 0 },
     fire: disc(), jump: disc(), crouch: disc(), reload: disc(),
     build: disc(), swap: disc(), autoFire: disc(), aimAssist: disc(), pause: disc(),
-    padBottomLeft: 0, padBottomRight: 0, centreX0: 0, centreX1: 0,
+    padBottomLeft: 0, padBottomRight: 0,
+    padEdgeLeft: 0, padEdgeRight: 0,
+    readoutWidthLeft: 0, readoutWidthRight: 0, readoutInset: 0,
+    centreX0: 0, centreX1: 0,
   };
 }
 
@@ -776,6 +838,30 @@ export function createTouchGeom(): TouchGeom {
  */
 export function attackReach(g: TouchGeom): number {
   return Math.hypot(g.fire.x - g.thumbPivot.x, g.fire.y - g.thumbPivot.y);
+}
+
+/**
+ * The rectangle a corner read-out is promised, in client coordinates.
+ *
+ * `side` is the SCREEN side, not the hand: 0 = left, 1 = right. `height` is
+ * however tall the HUD's plate turns out to be; the caller passes its own
+ * number so the assertion in `touch.test.ts` — that this rectangle touches no
+ * control at any viewport, hand or control size — is an assertion about the
+ * real plate rather than about a convenient one.
+ */
+export function readoutRect(g: TouchGeom, side: 0 | 1, height: number, out: Rect): Rect {
+  const band = side === 0 ? g.padEdgeLeft : g.padEdgeRight;
+  const width = side === 0 ? g.readoutWidthLeft : g.readoutWidthRight;
+  // The option chips hang off the pause glyph in the TRIGGER hand's top corner
+  // and mirror with it, so the reserve they need belongs to whichever screen
+  // side that hand is on — not to the right-hand side by habit.
+  const triggerSide = g.southpaw ? 0 : 1;
+  const inset = side === triggerSide ? g.readoutInset : READOUT_MARGIN;
+  out.x0 = side === 0 ? inset : g.vw - inset - width;
+  out.x1 = out.x0 + width;
+  out.y1 = g.vh - band - READOUT_CLEARANCE;
+  out.y0 = out.y1 - Math.max(0, height);
+  return out;
 }
 
 /**
@@ -869,6 +955,7 @@ export function solveTouchLayout(
   out.stickTravel = travel;
   out.knobR = knobR;
   out.deadR = travel * clampf(o.deadZone, 0, 0.9);
+  out.detentR = travel * clampf(o.detent, 0.5, 1);
 
   /* Reload, build and weapon-swap are utility, not combat. On a wide screen
      they take a second column inboard of jump/crouch; on a 412 px-wide portrait
@@ -919,10 +1006,21 @@ export function solveTouchLayout(
   out.aimAssist.y = out.autoFire.y + chipR * 2 + 6;
   out.aimAssist.r = chipR;
 
-  /* --- zones ---------------------------------------------------------- */
+  /* --- zones ----------------------------------------------------------
+     The grab zone is deliberately much bigger than the drawn stick, because a
+     floating stick that only floats where the stick already is has not floated.
+     It used to be cut off just under the utility row on a portrait phone, which
+     left 2 px of headroom above the drawn base at 412x915: the thumb had to
+     land inside a 158 px band or the press became a look-drag, and a look-drag
+     that was meant to be a step backwards is a death. That clamp is gone.
+     Nothing is lost by removing it because `hitTest` resolves the buttons
+     FIRST — RLD/BLD/WEP each answer inside their own radius plus 6 px of slop,
+     and neighbouring chips are 60 px apart with 62 px of combined slop, so
+     there is no gap between them for the stick to steal. Only the space around
+     the row falls through to the stick, which is what we want. */
   const zoneRight = Math.min(w * 0.5, colX - btnR - GAP);
-  const zoneHeight = Math.min(h * 0.62, baseR * 2 + 76);
-  const zoneTop = Math.max(h - zoneHeight, twoColumns ? 0 : utilTop + smallR * 2 + 6);
+  const zoneHeight = Math.min(h * 0.62, baseR * 2 + 96);
+  const zoneTop = Math.max(0, h - zoneHeight);
   out.stickZone.x0 = 0;
   out.stickZone.y0 = zoneTop;
   out.stickZone.x1 = zoneRight;
@@ -941,6 +1039,42 @@ export function solveTouchLayout(
     ? stickRight
     : Math.max(stickRight, out.swap.x + smallR);
   const rightClusterLeft = twoColumns ? col2X - smallR : colX - btnR;
+
+  /* --- and the tighter band the CORNER read-outs get -------------------
+     Only the outermost column of each cluster is under a corner plate, so only
+     that column may push it up. The width is then whatever is left before the
+     column the band ignored, which is what makes the pairing safe: the box
+     `readoutRect` builds out of the two is asserted disjoint from every disc,
+     at every viewport, both hands and the whole control-size slider.
+
+     Left: the stick, plus the utility row when the row is on that side.
+     Right: the trigger and JUMP/DUCK — never the inboard utility column, which
+     on a 915x412 screen was costing the ammo plate 65 px of altitude for no
+     reason. */
+  const leftEdgeBand = leftBottomBand;
+  const rightEdgeBand = h - Math.min(fy - fireR, jumpY - btnR);
+  const leftEdgeLimit = rightClusterLeft;
+  const rightEdgeLimit = twoColumns
+    ? Math.max(col2X + smallR, leftClusterRight)
+    : leftClusterRight;
+  const chipReserve = Math.max(0, w - (out.pause.x - out.pause.r)) + 8;
+  const rightEdgeW = clampf(
+    (w - chipReserve) - rightEdgeLimit - READOUT_CLEARANCE,
+    MIN_TOUCH_TARGET, READOUT_MAX_W,
+  );
+  /* The two plates share one row of screen on a short phone, so the second one
+     is also bounded by what the first one left: 10 + 195 + 8 + 148 + 69 is
+     430 px of promises on a 412 px-wide portrait phone, and a promise that
+     wide is how two read-outs end up printed on top of each other. */
+  const leftEdgeW = clampf(
+    Math.min(
+      leftEdgeLimit - READOUT_MARGIN - READOUT_CLEARANCE,
+      w - chipReserve - rightEdgeW - READOUT_CLEARANCE - READOUT_MARGIN,
+    ),
+    MIN_TOUCH_TARGET, READOUT_MAX_W,
+  );
+
+  out.readoutInset = chipReserve;
 
   if (o.southpaw) {
     mirrorDisc(out.fire, w);
@@ -964,11 +1098,19 @@ export function solveTouchLayout(
     out.stickBounds.x1 = bx1;
     out.padBottomLeft = rightBottomBand;
     out.padBottomRight = leftBottomBand;
+    out.padEdgeLeft = rightEdgeBand;
+    out.padEdgeRight = leftEdgeBand;
+    out.readoutWidthLeft = rightEdgeW;
+    out.readoutWidthRight = leftEdgeW;
     out.centreX0 = w - rightClusterLeft + 10;
     out.centreX1 = w - leftClusterRight - 10;
   } else {
     out.padBottomLeft = leftBottomBand;
     out.padBottomRight = rightBottomBand;
+    out.padEdgeLeft = leftEdgeBand;
+    out.padEdgeRight = rightEdgeBand;
+    out.readoutWidthLeft = leftEdgeW;
+    out.readoutWidthRight = rightEdgeW;
     out.centreX0 = leftClusterRight + 10;
     out.centreX1 = rightClusterLeft - 10;
   }
@@ -1247,6 +1389,25 @@ const MAX_POINTERS = 10;
 /** A held button that slides more than this off its centre is let go. */
 const BUTTON_SLIDE_OFF = 1.9;
 
+/**
+ * Extra look gain applied to a slide-off drag, on top of `lookScale`.
+ *
+ * The two aiming gestures do not have the same room to work in and pretending
+ * they do makes the better one useless. The look surface at 915x412 is 457 px
+ * wide and 412 tall — a full flick in any direction. The trigger's centre sits
+ * 70 px from the right edge and 70 px from the bottom, so a thumb that presses
+ * the pad and then tracks a target to the RIGHT has 70 px of glass before it
+ * runs out of phone. At 1:1 that is a few degrees, i.e. the one gesture that
+ * lets you fire and aim with a single thumb — the whole answer to the bar's
+ * weakness #9 — dies against the bezel.
+ *
+ * 1.45x is chosen to be modest rather than clever: it is smaller than the
+ * 3.2x the travel budget alone would justify, and it is partly cancelled again
+ * by aim-assist friction (down to 0.55) exactly when a target is centred, so
+ * the fast half of the gesture is the half with nothing to hit.
+ */
+export const FIRE_SLIDE_GAIN = 1.45;
+
 function actionForControl(control: number): InputAction | null {
   switch (control) {
     case TC_JUMP: return InputAction.Jump;
@@ -1324,6 +1485,9 @@ export class TouchRouter {
     const g = solveTouchLayout(vw, vh, opts, this.geom);
     this.stick.config.radius = g.stickTravel;
     this.stick.config.deadZone = opts.deadZone ?? DEFAULT_STICK.deadZone;
+    // The detent the maths latches on and the ring the pad draws are the same
+    // number by construction, so a drawn sprint threshold can never lie.
+    this.stick.config.detent = opts.detent ?? DEFAULT_STICK.detent;
     this.stick.setHome(
       g.stickHome.x, g.stickHome.y,
       g.stickBounds.x0, g.stickBounds.y0, g.stickBounds.x1, g.stickBounds.y1,
@@ -1416,7 +1580,7 @@ export class TouchRouter {
       case TC_FIRE:
         if (this.firePad.move(x, y)) {
           this.dragPx += Math.hypot(this.firePad.dx, this.firePad.dy);
-          this.pushLook(this.firePad.dx, this.firePad.dy);
+          this.pushLook(this.firePad.dx * FIRE_SLIDE_GAIN, this.firePad.dy * FIRE_SLIDE_GAIN);
         }
         break;
       case TC_LOOK:

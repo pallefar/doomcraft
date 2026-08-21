@@ -11,6 +11,7 @@
 
 import {
   BEDROCK_LEVEL,
+  BLOCK_COUNT,
   BLOCK_HARDNESS,
   BLOCK_SOLID,
   BlockId,
@@ -61,7 +62,7 @@ export { EditResult, EDIT_RESULT_NAMES } from './sim.js';
  * level moved under us and every stamped structure is placed against the wrong
  * floor, so fail loudly at import rather than shipping a broken arena.
  */
-const EXPECTED_TERRAIN_VERSION = 3;
+const EXPECTED_TERRAIN_VERSION = 4;
 
 /** Arena spawn candidates requested from the shared generator, before validation. */
 const SPAWN_CANDIDATES = 96;
@@ -76,6 +77,52 @@ if (TERRAIN_VERSION !== EXPECTED_TERRAIN_VERSION) {
 
 /** Blocks an explosion is allowed to remove. Obsidian and bedrock survive. */
 const TERRAIN_CARVE_MAX_HARDNESS = 7.5;
+
+/* ------------------------------------------------------------------------ *
+ * Crater scorching
+ *
+ * SHARED-FILE CHANGE, made deliberately by the terrain/destruction piece and
+ * kept as small as it can be. The rule and the numbers are
+ * `scorchCrater` in `client/src/world/destruction.ts`; that module is the
+ * design authority for what a blast does to a surface. This is the copy that
+ * actually runs, because every explosion in the shipped game is carved here and
+ * mirrored to clients as BLOCK_DELTA — `explode()` on the client side is only
+ * ever reached by tests.
+ *
+ * WHY IT MATTERS. Removing voxels leaves a hole whose rim is the same colour as
+ * the wall it came out of, so from twenty metres a breached wall still reads as
+ * an intact wall and the player never learns that shooting it was worth doing.
+ * Converting the surviving skin to HELLSTONE fixes both halves at once: it is
+ * the darkest breakable rock in the palette (luminance 59 against stone's 141)
+ * AND it emits light level 5, so a fresh crater is a dark scar with a hot edge.
+ * Metals go to rusted metal instead — the same trick in the other direction, a
+ * blue-grey wall going orange-brown where it was hit.
+ *
+ * Nothing maps to air, so the removal count the carve returns is still exactly
+ * the number of voxels it deleted.
+ * ------------------------------------------------------------------------ */
+
+/** Target id per source id; 0 means "this material does not scorch". */
+const SCORCHED = new Uint8Array(BLOCK_COUNT);
+for (const id of [
+  BlockId.GRASS, BlockId.DIRT, BlockId.SAND, BlockId.SNOW, BlockId.STONE,
+  BlockId.COBBLESTONE, BlockId.GRAVEL, BlockId.BRICK, BlockId.PLANKS,
+  BlockId.WOOD, BlockId.BONE,
+]) SCORCHED[id] = BlockId.HELLSTONE;
+SCORCHED[BlockId.METAL] = BlockId.RUSTED_METAL;
+SCORCHED[BlockId.TECH_PANEL] = BlockId.RUSTED_METAL;
+
+/** Fraction of eligible rim voxels that char. Ragged beats uniform. */
+const SCORCH_CHANCE = 0.55;
+/**
+ * Ceiling on scorch marks per blast, and a share of the removal count so a
+ * small blast leaves a small mark.
+ *
+ * Both are wire budgets, not looks: a BFG already spends most of a delta batch
+ * on its own hole. A rocket removes ~90 voxels here and gets 30 marks.
+ */
+const SCORCH_MAX = 48;
+const SCORCH_PER_REMOVED = 3;
 
 /* ------------------------------------------------------------------------ *
  * Block change journal
@@ -587,7 +634,63 @@ export class ServerWorld {
         }
       }
     }
+    if (removed > 0) this.scorchCrater(cxf, cyf, czf, radius, removed, by);
     return removed;
+  }
+
+  /**
+   * Char the surviving skin of a crater so the hole reads as a hole.
+   *
+   * "Skin" is any scorchable voxel inside `radius + 1` with at least one air
+   * neighbour, which after a carve is the crater wall plus the ring of ground
+   * the blast washed over. See the SCORCHED table above for why the targets are
+   * what they are. Iteration order is fixed and the gate is a position hash, so
+   * the marks are the same voxels every time this crater is recomputed.
+   */
+  private scorchCrater(
+    cxf: number, cyf: number, czf: number, radius: number, removed: number, by: number,
+  ): number {
+    const budget = Math.min(SCORCH_MAX, Math.floor(removed / SCORCH_PER_REMOVED));
+    if (budget <= 0) return 0;
+    const rr = radius + 1;
+    const r2 = rr * rr;
+    const x0 = Math.floor(cxf - rr), x1 = Math.floor(cxf + rr);
+    const y0 = Math.floor(cyf - rr), y1 = Math.floor(cyf + rr);
+    const z0 = Math.floor(czf - rr), z1 = Math.floor(czf + rr);
+    const hseed = (this.editSerial ^ 0x5c0acb) | 0;
+
+    let n = 0;
+    for (let y = y0; y <= y1; y++) {
+      if (y < 1 || y >= CHUNK_HEIGHT) continue;
+      const dy = y + 0.5 - cyf;
+      const dy2 = dy * dy;
+      for (let z = z0; z <= z1; z++) {
+        const dz = z + 0.5 - czf;
+        const dz2 = dz * dz;
+        if (dy2 + dz2 > r2) continue;
+        for (let x = x0; x <= x1; x++) {
+          const dx = x + 0.5 - cxf;
+          if (dx * dx + dy2 + dz2 > r2) continue;
+          const to = SCORCHED[this.getBlock(x, y, z)];
+          if (to === 0) continue;
+          if ((hash2i(x * 31 + y, z * 17 + y, hseed) & 255) >= SCORCH_CHANCE * 256) continue;
+          if (!this.exposedToAir(x, y, z)) continue;
+          if (!this.setBlock(x, y, z, to, by)) continue;
+          if (++n >= budget) return n;
+        }
+      }
+    }
+    return n;
+  }
+
+  /** True when any of the six neighbours is air — i.e. the voxel is on a surface. */
+  private exposedToAir(x: number, y: number, z: number): boolean {
+    return this.getBlock(x + 1, y, z) === BlockId.AIR
+      || this.getBlock(x - 1, y, z) === BlockId.AIR
+      || this.getBlock(x, y, z + 1) === BlockId.AIR
+      || this.getBlock(x, y, z - 1) === BlockId.AIR
+      || this.getBlock(x, y + 1, z) === BlockId.AIR
+      || this.getBlock(x, y - 1, z) === BlockId.AIR;
   }
 
   /* -------------------------------------------------------------- *

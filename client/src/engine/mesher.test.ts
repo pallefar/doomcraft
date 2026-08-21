@@ -65,6 +65,22 @@ function meshOne(chunk: Uint8Array) {
   return meshChunk(pad);
 }
 
+/**
+ * Mesh a single chunk the way the game does — on bedrock.
+ *
+ * `meshOne` floats the chunk over open air, which no real chunk ever is, and
+ * that matters now that the sky channel bleeds sideways: the underside of a
+ * floating slab picks up a real light ramp in from its rim, which is correct
+ * and which shatters the one big merged bottom quad the old count-based
+ * assertions were written against. Anything asserting an exact merge count
+ * should use this instead, because this is the path that ships.
+ */
+function meshShipped(chunk: Uint8Array) {
+  const pad = createPadded();
+  buildPadded(pad, 0, 0, only(chunk));
+  return meshChunk(pad);
+}
+
 function faceCounts(bytes: Uint8Array, vertexCount: number): number[] {
   const counts = [0, 0, 0, 0, 0, 0];
   for (let i = 0; i < vertexCount; i += VERTS_PER_QUAD) counts[readVertexFace(bytes, i)]++;
@@ -81,29 +97,56 @@ function minAO(bytes: Uint8Array, vertexCount: number): number {
 }
 
 describe('mesher / face culling', () => {
-  it('a solid 32^3 chunk produces exactly its six outer faces', () => {
+  it('a solid 32^3 chunk on bedrock produces exactly its five visible faces', () => {
     const chunk = emptyChunk();
     fill(chunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 32, CHUNK_SIZE_Z);
 
-    const res = meshOne(chunk);
+    const res = meshShipped(chunk);
     const opaque = res.layers[RenderLayer.OPAQUE];
 
-    expect(res.totalQuads).toBe(6);
-    expect(opaque.quadCount).toBe(6);
+    // Nine, and every one of them is accounted for. On bedrock the downward
+    // skin under the world floor is culled, which is the whole reason the
+    // shipping floor block is opaque — so five faces, not six. Four of those
+    // five then split in two, because the bedrock plane at y = -1 occludes the
+    // bottom course of each wall: that lowest row carries a contact AO term the
+    // rest of the wall does not, and AO is part of the merge key. A wall that
+    // merged straight through its own footing would be a wall with no contact
+    // shadow, which is the bar's failure.
+    expect(res.totalQuads).toBe(9);
+    expect(opaque.quadCount).toBe(9);
     expect(res.layers[RenderLayer.CUTOUT].quadCount).toBe(0);
     expect(res.layers[RenderLayer.TRANSPARENT].quadCount).toBe(0);
 
-    // Greedy merging: every side is one quad, not 1024.
-    expect(opaque.vertexCount).toBe(6 * VERTS_PER_QUAD);
-    expect(opaque.indexCount).toBe(6 * INDICES_PER_QUAD);
+    // Greedy merging: 9 quads, not 1024.
+    expect(opaque.vertexCount).toBe(9 * VERTS_PER_QUAD);
+    expect(opaque.indexCount).toBe(9 * INDICES_PER_QUAD);
 
-    // One quad per face direction.
-    expect(faceCounts(opaque.vertexBytes, opaque.vertexCount)).toEqual([1, 1, 1, 1, 1, 1]);
+    // Top merges whole, nothing points down, each wall is footing + body.
+    expect(faceCounts(opaque.vertexBytes, opaque.vertexCount)).toEqual([2, 2, 1, 0, 2, 2]);
+    expect(minAO(opaque.vertexBytes, opaque.vertexCount)).toBeLessThan(3);
 
     // The solid block spans y 0..31, so the mesh spans y 0..32.
     expect(res.minY).toBe(0);
     expect(res.maxY).toBe(32);
     expect(res.empty).toBe(false);
+  });
+
+  it('exposes the sixth face when the floor under the chunk is air', () => {
+    const chunk = emptyChunk();
+    fill(chunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 32, CHUNK_SIZE_Z);
+    const counts = (() => {
+      const res = meshOne(chunk);
+      const op = res.layers[RenderLayer.OPAQUE];
+      return faceCounts(op.vertexBytes, op.vertexCount);
+    })();
+    // The five lit-uniformly faces still merge whole; the underside picks up the
+    // sky ramp bleeding in from its rim and is allowed to split.
+    expect(counts[Face.PX]).toBe(1);
+    expect(counts[Face.NX]).toBe(1);
+    expect(counts[Face.PY]).toBe(1);
+    expect(counts[Face.PZ]).toBe(1);
+    expect(counts[Face.NZ]).toBe(1);
+    expect(counts[Face.NY]).toBeGreaterThan(0);
   });
 
   it('an empty chunk produces zero geometry in every layer', () => {
@@ -120,11 +163,22 @@ describe('mesher / face culling', () => {
 
   it('interior voxels of a solid volume emit nothing', () => {
     // A free-floating 6^3 cube: nothing occludes any of its faces, so AO is a
-    // flat 3 and each side collapses to one quad. 216 voxels, 6 quads.
+    // flat 3 and each of the five faces the sky reaches evenly collapses to one
+    // quad. The underside is in its own shadow and takes the sky ramp bleeding
+    // under the cube from all four sides, so it is allowed to split — what must
+    // never happen is a face between two solid voxels.
     const chunk = emptyChunk();
     fill(chunk, BlockId.STONE, 4, 4, 4, 10, 10, 10);
     const solid = meshOne(chunk);
-    expect(solid.layers[RenderLayer.OPAQUE].quadCount).toBe(6);
+    const solidCounts = faceCounts(
+      solid.layers[RenderLayer.OPAQUE].vertexBytes,
+      solid.layers[RenderLayer.OPAQUE].vertexCount,
+    );
+    expect([solidCounts[Face.PX], solidCounts[Face.NX], solidCounts[Face.PY],
+      solidCounts[Face.PZ], solidCounts[Face.NZ]]).toEqual([1, 1, 1, 1, 1]);
+    // 6x6 of underside, so a fully shattered one would be 36.
+    expect(solidCounts[Face.NY]).toBeGreaterThan(0);
+    expect(solidCounts[Face.NY]).toBeLessThanOrEqual(36);
     expect(solid.minY).toBe(4);
     expect(solid.maxY).toBe(10);
 
@@ -134,9 +188,10 @@ describe('mesher / face culling', () => {
     fill(chunk, BlockId.AIR, 5, 5, 5, 9, 9, 9);
     const hollow = meshOne(chunk);
     const hollowQuads = hollow.layers[RenderLayer.OPAQUE].quadCount;
-    expect(hollowQuads).toBeGreaterThan(6);
-    // 6 outer + 6 inner walls of 4x4, each split at most into a 3x3 AO pattern.
-    expect(hollowQuads).toBeLessThanOrEqual(6 + 6 * 9);
+    const solidQuads = 5 + solidCounts[Face.NY];
+    expect(hollowQuads).toBeGreaterThan(solidQuads);
+    // Outer skin + 6 inner walls of 4x4, each split at most into a 3x3 AO pattern.
+    expect(hollowQuads).toBeLessThanOrEqual(solidQuads + 6 * 9);
   });
 
   it('buckets water into the transparent layer, away from the opaque one', () => {
@@ -169,7 +224,9 @@ describe('mesher / ambient occlusion', () => {
     chunk[voxelIndex(10, 1, 11)] = BlockId.STONE;
     chunk[voxelIndex(11, 1, 11)] = BlockId.STONE;
 
-    const res = meshOne(chunk);
+    // On bedrock, so the baseline below is the merge count of a flat slab and
+    // not of a flat slab plus whatever its floating underside does.
+    const res = meshShipped(chunk);
     const op = res.layers[RenderLayer.OPAQUE];
 
     // Both sides of the corner are solid, so that vertex is fully occluded.
@@ -181,8 +238,8 @@ describe('mesher / ambient occlusion', () => {
     // And the AO breaks the merge: the flat floor alone is 6 quads, this is not.
     const flatChunk = emptyChunk();
     fill(flatChunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
-    const flat = meshOne(flatChunk).layers[RenderLayer.OPAQUE].quadCount;
-    expect(flat).toBe(6);
+    const flat = meshShipped(flatChunk).layers[RenderLayer.OPAQUE].quadCount;
+    expect(flat).toBe(5);
     expect(corneredQuads).toBeGreaterThan(flat);
   });
 
@@ -212,14 +269,16 @@ describe('mesher / chunk seams', () => {
     };
 
     const pad = createPadded();
-    buildPadded(pad, 0, 0, fetch, BlockId.AIR);
+    buildPadded(pad, 0, 0, fetch);
     const res = meshChunk(pad);
     const op = res.layers[RenderLayer.OPAQUE];
 
-    // +X is now interior: five faces, not six.
-    expect(res.totalQuads).toBe(5);
+    // +X is now interior and on bedrock -Y is culled, leaving three walls and a
+    // top; each wall splits into its footing course and its body (see the face
+    // culling suite for why), so 3 * 2 + 1.
+    expect(res.totalQuads).toBe(7);
     expect(faceCounts(op.vertexBytes, op.vertexCount)[Face.PX]).toBe(0);
-    expect(faceCounts(op.vertexBytes, op.vertexCount)[Face.NX]).toBe(1);
+    expect(faceCounts(op.vertexBytes, op.vertexCount)[Face.NX]).toBe(2);
 
     // Nothing at all sits on the shared plane x = 32.
     for (let i = 0; i < op.vertexCount; i++) {
@@ -228,9 +287,14 @@ describe('mesher / chunk seams', () => {
       }
     }
 
-    // Without the neighbour the same chunk is back to six.
-    buildPadded(pad, 0, 0, only(a), BlockId.AIR);
-    expect(meshChunk(pad).totalQuads).toBe(6);
+    // Without the neighbour the +X wall comes back.
+    buildPadded(pad, 0, 0, only(a));
+    const alone = meshChunk(pad);
+    expect(alone.totalQuads).toBe(9);
+    expect(faceCounts(
+      alone.layers[RenderLayer.OPAQUE].vertexBytes,
+      alone.layers[RenderLayer.OPAQUE].vertexCount,
+    )[Face.PX]).toBe(2);
   });
 
   it('takes the neighbour skirt from all four sides', () => {
@@ -299,31 +363,76 @@ describe('mesher / scratch reuse', () => {
 /* ------------------------------------------------------------------------ */
 
 describe('mesher / sky exposure', () => {
-  it('gives open ground full sky and roofed ground none', () => {
+  it('ramps from full sky in the open down to none deep under a roof', () => {
     const chunk = emptyChunk();
     fill(chunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
-    // A floating slab: no walls, so the ONLY thing that can darken the floor
-    // under it is the sky channel.
-    fill(chunk, BlockId.STONE, 8, 5, 8, 16, 6, 16);
+    // A floating slab 16 wide: no walls, so the ONLY thing that can darken the
+    // floor under it is the sky channel. Wide enough that its centre is out of
+    // reach of the bleed from every rim.
+    fill(chunk, BlockId.STONE, 8, 5, 8, 24, 6, 24);
 
     const res = meshOne(chunk);
     const op = res.layers[RenderLayer.OPAQUE];
     const b = op.vertexBytes;
 
     const floorSky = new Set<number>();
-    let roofUnderside = 0;
+    const roofSky = new Set<number>();
     for (let i = 0; i < op.vertexCount; i += VERTS_PER_QUAD) {
       const face = readVertexFace(b, i);
       const y = readVertexY(b, i);
       if (face === Face.PY && y === 1) floorSky.add(readVertexSky(b, i));
-      if (face === Face.NY && y === 5) {
-        roofUnderside++;
-        expect(readVertexSky(b, i)).toBe(0);
-      }
+      if (face === Face.NY && y === 5) roofSky.add(readVertexSky(b, i));
     }
-    expect(roofUnderside).toBeGreaterThan(0);
+    expect(roofSky.size).toBeGreaterThan(0);
+    expect(Math.min(...roofSky)).toBe(0);         // the middle of the roof
+
     expect(floorSky.has(LIGHT_MAX)).toBe(true);   // out in the open
-    expect(floorSky.has(0)).toBe(true);           // under the slab
+    expect(floorSky.has(0)).toBe(true);           // under the middle of the slab
+    // And the point of the bleed: it is a RAMP, not a switch. There is at least
+    // one intermediate step between the two, so a doorway has a threshold
+    // instead of a hard sector edge.
+    const mids = [...floorSky].filter((v) => v > 0 && v < LIGHT_MAX);
+    expect(mids.length).toBeGreaterThan(0);
+    // Nothing may exceed full sky, whatever the sweep did.
+    expect(Math.max(...floorSky)).toBe(LIGHT_MAX);
+  });
+
+  it('keeps the sky field seam-exact across a chunk boundary', () => {
+    // The bleed reaches five blocks, so a face one block outside the chunk must
+    // still come out the same whichever of the two chunks meshed it. Build the
+    // same overhang straddling x = 32 and read the shared plane from both sides.
+    const build = (): Uint8Array => {
+      const c = emptyChunk();
+      fill(c, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
+      fill(c, BlockId.STONE, 0, 5, 8, CHUNK_SIZE_X, 6, 24);
+      return c;
+    };
+    const a = build();
+    const b2 = build();
+    const fetch: ChunkFetch = (cx, cz) => (cz === 0 && (cx === 0 || cx === 1) ? (cx === 0 ? a : b2) : null);
+
+    const read = (cx: number): Map<string, number> => {
+      const pad = createPadded();
+      buildPadded(pad, cx, 0, fetch);
+      const res = meshChunk(pad);
+      const out = new Map<string, number>();
+      for (const layer of res.layers) {
+        for (let i = 0; i < layer.vertexCount; i += VERTS_PER_QUAD) {
+          if (readVertexFace(layer.vertexBytes, i) !== Face.PY) continue;
+          if (readVertexY(layer.vertexBytes, i) !== 1) continue;
+          const x = readVertexX(layer.vertexBytes, i) + cx * CHUNK_SIZE_X;
+          out.set(`${x}`, readVertexSky(layer.vertexBytes, i));
+        }
+      }
+      return out;
+    };
+    const left = read(0);
+    const right = read(1);
+    // The two chunks are identical, so the floor sky profile they each report
+    // must be the same set of values — a sweep that ran off the end of its box
+    // would give the boundary column a different answer on each side.
+    expect([...new Set(left.values())].sort((p, q) => p - q))
+      .toEqual([...new Set(right.values())].sort((p, q) => p - q));
   });
 
   it('does not let sky through water', () => {
@@ -334,7 +443,9 @@ describe('mesher / sky exposure', () => {
     const op = res.layers[RenderLayer.OPAQUE];
     for (let i = 0; i < op.vertexCount; i += VERTS_PER_QUAD) {
       if (readVertexFace(op.vertexBytes, i) === Face.PY && readVertexY(op.vertexBytes, i) === 1) {
-        expect(readVertexSky(op.vertexBytes, i)).toBe(0);   // the seabed is dark
+        // The seabed is never at full sky. It is not pitch black either: light
+        // ramps down through the water column exactly as it does under a roof.
+        expect(readVertexSky(op.vertexBytes, i)).toBeLessThan(LIGHT_MAX);
       }
     }
   });
@@ -398,7 +509,10 @@ describe('mesher / block light', () => {
     chunk[voxelIndex(7, 7, 7)] = BlockId.NEON;
     const res = meshOne(chunk);
     const op = res.layers[RenderLayer.OPAQUE];
-    expect(op.quadCount).toBe(6);
+    const counts = faceCounts(op.vertexBytes, op.vertexCount);
+    expect([counts[Face.PX], counts[Face.NX], counts[Face.PY],
+      counts[Face.PZ], counts[Face.NZ]]).toEqual([1, 1, 1, 1, 1]);
+    expect(counts[Face.NY]).toBeGreaterThan(0);
     for (let i = 0; i < op.vertexCount; i++) {
       expect(readVertexLight(op.vertexBytes, i)).toBe(0);
     }

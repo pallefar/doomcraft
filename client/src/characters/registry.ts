@@ -163,6 +163,7 @@ export const LOOK_IMP = look({
   melee: true,
   hovers: false,
   bob: 0,
+  lift: 0,
   cadence: 1.25,
 });
 
@@ -182,6 +183,7 @@ export const LOOK_TROOPER = look({
   melee: false,
   hovers: false,
   bob: 0,
+  lift: 0,
   cadence: 1.0,
 });
 
@@ -209,6 +211,7 @@ export const LOOK_BARON = look({
   melee: true,
   hovers: false,
   bob: 0,
+  lift: 0,
   cadence: 0.62,
 });
 
@@ -234,6 +237,7 @@ export const LOOK_CACODEMON = look({
   melee: false,
   hovers: true,
   bob: 0.22,
+  lift: 0,
   cadence: 1.0,
 });
 
@@ -253,6 +257,7 @@ export const LOOK_LOST_SOUL = look({
   melee: true,
   hovers: true,
   bob: 0.14,
+  lift: 0,
   cadence: 1.0,
 });
 
@@ -269,6 +274,7 @@ export const LOOK_MARINE = look({
   melee: false,
   hovers: false,
   bob: 0,
+  lift: 0,
   cadence: 1.0,
 });
 

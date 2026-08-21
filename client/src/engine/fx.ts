@@ -527,6 +527,29 @@ const MUZZLE_LIGHT_HOLD = 0.45;
 const MUZZLE_LIGHT_GAIN = 1.55;
 /** Ceiling on the published flash intensity, so the BFG does not white out. */
 const MUZZLE_LIGHT_MAX = 4.0;
+/**
+ * Screen height, in pixels, the world plume's hottest disc may occupy. Sized
+ * against the frame rather than the world because the plume is always about a
+ * hand's length from the eye, where a metre is most of the screen. 130 px is
+ * a fist-sized fireball on the barrel at any resolution; 270 px, which is what
+ * the uncapped 0.42 m disc gave at 720p, is a wash over the whole aim point.
+ */
+const MUZZLE_CORE_MAX_PX = 130;
+
+/**
+ * TRACER defaults, for a hitscan round.
+ *
+ * `TRACER_SPEED` is not a bullet's speed, it is a READING speed: 640 m/s puts
+ * the head on a wall 20 m away in 31 ms, two frames, so the streak is at full
+ * length while the muzzle flash and the impact are both still on screen.
+ * `TRACER_FADE_S` then holds the whole line and bleeds it out, which is what
+ * makes the shot legible in a single captured frame — the pistol's own cycle
+ * is 143 ms, so without a hold a still has a one-in-eight chance of catching
+ * anything at all.
+ */
+const TRACER_WIDTH = 0.032;
+const TRACER_SPEED = 640;
+const TRACER_FADE_S = 0.062;
 
 /**
  * Impact point light. Shorter than the muzzle's — a strike is a spark, not a
@@ -624,6 +647,10 @@ export class Fx {
   private readonly trSpeed: Float32Array;
   private readonly trHead: Float32Array;
   private readonly trTailLen: Float32Array;
+  /** Seconds the finished line holds and fades. 0 = travelling-dash mode. */
+  private readonly trFade: Float32Array;
+  /** Seconds since the head reached the far end. */
+  private readonly trAge: Float32Array;
   private readonly trWidth: Float32Array;
   private readonly trColor: Float32Array;
   private readonly tracerSet: InstanceSet;
@@ -770,6 +797,8 @@ export class Fx {
     this.trSpeed = new Float32Array(this.tracerCap);
     this.trHead = new Float32Array(this.tracerCap);
     this.trTailLen = new Float32Array(this.tracerCap);
+    this.trFade = new Float32Array(this.tracerCap);
+    this.trAge = new Float32Array(this.tracerCap);
     this.trWidth = new Float32Array(this.tracerCap);
     this.trColor = new Float32Array(this.tracerCap * 3);
 
@@ -1106,6 +1135,21 @@ export class Fx {
     return v > lim ? lim : v;
   }
 
+  /**
+   * `base` metres, but never LARGER on screen than `px` pixels.
+   *
+   * The mirror of `floorPx`, and it exists for the opposite failure. A sprite
+   * sized in metres and spawned a hand's length from the eye does not read as
+   * a small bright thing close up, it reads as a sheet: the muzzle plume's
+   * 0.42 m core at 0.8 m covers roughly 270 px of a 720 px frame. Additive, on
+   * the crosshair, once per shot. Capping it in pixels is the only sizing rule
+   * that behaves the same on a 412 px phone and a 1440 px desktop.
+   */
+  private capPx(mpp: number, base: number, px: number): number {
+    const lim = px * mpp;
+    return base > lim ? lim : base;
+  }
+
   /* -- decals ------------------------------------------------------------ */
 
   /**
@@ -1286,15 +1330,26 @@ export class Fx {
     const g = ((col >>> 8) & 0xff) / 255;
     const b = (col & 0xff) / 255;
     const life = def.muzzleMs / 1000;
+    const mpp = this.metresPerPixel(x, y, z);
 
-    // Core plume, stretched a little along the barrel.
+    /* Core plume, stretched a little along the barrel.
+     *
+     * Capped in PIXELS, not metres. Uncapped this is the single most damaging
+     * thing in the whole effects file: 0.42 m of soft additive sprite spawned
+     * a hand's length from the eye is ~270 px of white haze, it is spawned once
+     * per shot, and until the barrel offset landed it was spawned on the
+     * crosshair. The weapon's OWN flash is drawn by the viewmodel overlay and
+     * is the flash you actually read; this layer's job is the part the overlay
+     * cannot do — burn into the world, at the right depth, in front of the
+     * wall — so it wants to be a bright kernel, not a lens flare.
+     */
     for (let i = 0; i < 3; i++) {
       const t = i * 0.16;
       this.spawnSpark(
         x + dx * (0.12 + t), y + dy * (0.12 + t), z + dz * (0.12 + t),
         dx * 3.5, dy * 3.5, dz * 3.5,
         life * (1 - i * 0.18),
-        0.42 - i * 0.09, 0.10,
+        this.capPx(mpp, 0.42 - i * 0.09, MUZZLE_CORE_MAX_PX - i * 22), 0.10,
         r, g, b, 1 - i * 0.2, 0.85, 5, 0,
       );
     }
@@ -1343,13 +1398,36 @@ export class Fx {
   }
 
   /**
-   * A bullet streak from muzzle to impact. It travels rather than appearing all
-   * at once, which is what makes fast weapons read as a stream.
+   * A bullet streak from the BARREL to the impact.
+   *
+   * Two things about this are load-bearing and neither is obvious.
+   *
+   * WHERE IT STARTS. The origin has to be the barrel you can see, not the eye
+   * and not a point on the aim axis. A beam that leaves the eye along the view
+   * direction has no component on the picture plane at all: it projects to a
+   * single point at the crosshair and the shooter — the only person it is drawn
+   * for — sees nothing. Started at the barrel it runs from the bottom corner of
+   * the frame up to the aim point, which is a diagonal across a quarter of the
+   * screen and is the whole "my shot went THERE" read. `Viewmodel.muzzleWorld`
+   * supplies that origin.
+   *
+   * WHEN IT IS THERE. A hitscan shot resolves on the frame the trigger goes
+   * down: the damage, the spark and the mark are all already at the far end.
+   * A streak that crawls out at 260 m/s arrives 77 ms — five frames — after the
+   * impact it belongs to, so the two never appear in the same frame and the
+   * shot reads as two unrelated events. So the default is fast enough to cross
+   * a room inside two frames and then the whole line HOLDS and fades, which
+   * puts the streak, the flash and the hit in the same frame and leaves the
+   * streak on screen long enough (~90 ms) to survive a still capture.
+   *
+   * Pass `fadeS = 0` to get the old travelling-dash behaviour, which is what a
+   * slow visible round wants.
    */
   tracer(
     x0: number, y0: number, z0: number,
     x1: number, y1: number, z1: number,
-    color: number, width = 0.035, speed = 260,
+    color: number, width = TRACER_WIDTH, speed = TRACER_SPEED,
+    fadeS = TRACER_FADE_S,
   ): void {
     if (this.tracerCount >= this.tracerCap) return;
     const i = this.tracerCount++;
@@ -1362,7 +1440,11 @@ export class Fx {
     this.trLen[i] = len;
     this.trSpeed[i] = speed;
     this.trHead[i] = 0;
-    this.trTailLen[i] = Math.min(len, 5 + len * 0.18);
+    // With a fade the tail never leaves the barrel, so the beam grows into a
+    // full line instead of flying past as a fixed-length dash.
+    this.trTailLen[i] = fadeS > 0 ? len : Math.min(len, 5 + len * 0.18);
+    this.trFade[i] = fadeS > 0 ? fadeS : 0;
+    this.trAge[i] = 0;
     this.trWidth[i] = width;
     this.trColor[i * 3] = ((color >>> 16) & 0xff) / 255;
     this.trColor[i * 3 + 1] = ((color >>> 8) & 0xff) / 255;
@@ -1833,6 +1915,25 @@ export class Fx {
     );
 
     if (!killed) {
+      /* THE CONNECT LIGHT.
+       *
+       * A round into a WALL lit the room — `impact()` has published a point
+       * light since the file was written — and a round into a DEMON did not,
+       * because only a kill lit anything. So the strongest environmental cue in
+       * the game was firing for the shot that missed the target and staying
+       * dark for the shot that hit it, which is precisely backwards for the one
+       * question this piece is judged on.
+       *
+       * It is short and small: a body is not a muzzle and this must not turn a
+       * chaingun burst into a strobe. At 11.6 rounds a second and 80 ms of life
+       * roughly one is alive at a time, and the twelve-slot ranking drops it
+       * first when a rocket needs the room.
+       */
+      this.addLight(
+        x + nx * 0.15, y + ny * 0.15 + 0.15, z + nz * 0.15,
+        cr * 0.45 + 0.55, cg * 0.45 + 0.55, cb * 0.45 + 0.55,
+        2.2 + 1.4 * s, 0.55 + 0.75 * s, 0.08, 0.35,
+      );
       // A solid hit throws a couple of extra hot flecks; a graze does not.
       const n = s > 0.5 ? 3 : 1;
       for (let i = 0; i < n; i++) {
@@ -2292,18 +2393,39 @@ export class Fx {
       this.trHead[i] += this.trSpeed[i] * dt;
       const head = Math.min(this.trHead[i], this.trLen[i]);
       const tail = this.trHead[i] - this.trTailLen[i];
-      if (tail >= this.trLen[i]) {
-        n--;
-        if (i !== n) this.copyTracer(n, i);
-        continue;
+      const fade = this.trFade[i];
+      let alpha: number;
+      let t0: number;
+      if (fade > 0) {
+        // Hold the finished line, then bleed it out. The head is still allowed
+        // to grow, so a long shot draws itself out to the target first, and the
+        // tail is PINNED at the barrel — it must not be derived from the head,
+        // because the head runs on past the far end and a tail chasing it walks
+        // the whole beam off into the distance within two frames.
+        if (this.trHead[i] >= this.trLen[i]) this.trAge[i] += dt;
+        if (this.trAge[i] >= fade) {
+          n--;
+          if (i !== n) this.copyTracer(n, i);
+          continue;
+        }
+        const k = 1 - this.trAge[i] / fade;
+        alpha = k * k;
+        t0 = 0;
+      } else {
+        if (tail >= this.trLen[i]) {
+          n--;
+          if (i !== n) this.copyTracer(n, i);
+          continue;
+        }
+        alpha = clamp(1 - Math.max(0, tail) / Math.max(this.trLen[i], 1e-3), 0.15, 1);
+        t0 = Math.max(0, tail);
       }
-      const t0 = Math.max(0, tail);
       const ox = this.trOx[i * 3], oy = this.trOx[i * 3 + 1], oz = this.trOx[i * 3 + 2];
       const dx = this.trDir[i * 3], dy = this.trDir[i * 3 + 1], dz = this.trDir[i * 3 + 2];
       A[i * 3] = ox + dx * t0; A[i * 3 + 1] = oy + dy * t0; A[i * 3 + 2] = oz + dz * t0;
       B[i * 3] = ox + dx * head; B[i * 3 + 1] = oy + dy * head; B[i * 3 + 2] = oz + dz * head;
       P[i * 4] = this.trWidth[i];
-      P[i * 4 + 1] = clamp(1 - Math.max(0, tail) / Math.max(this.trLen[i], 1e-3), 0.15, 1);
+      P[i * 4 + 1] = alpha;
       C[i * 3] = this.trColor[i * 3];
       C[i * 3 + 1] = this.trColor[i * 3 + 1];
       C[i * 3 + 2] = this.trColor[i * 3 + 2];
@@ -2329,6 +2451,8 @@ export class Fx {
     this.trSpeed[to] = this.trSpeed[from];
     this.trHead[to] = this.trHead[from];
     this.trTailLen[to] = this.trTailLen[from];
+    this.trFade[to] = this.trFade[from];
+    this.trAge[to] = this.trAge[from];
     this.trWidth[to] = this.trWidth[from];
   }
 

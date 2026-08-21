@@ -25,6 +25,7 @@ import {
   statusDrop, STATUS_DROP_MIN, STATUS_DROP_MAX,
   statusInk, statusPlacement, statusCornerText, SIGHTLINE_INK_BUDGET,
   STATUS_OFF, STATUS_SIGHTLINE, STATUS_CORNER, STATUS_DEATH,
+  weaponGlyph, WEAPON_GLYPH_FALLBACK, foveaHealthFrac,
 } from './hud';
 import {
   AMMO_TYPE_COUNT, WEAPON_COUNT, WEAPON_MAG_SIZE, WeaponId, ammoTypeOf,
@@ -460,6 +461,76 @@ describe('status placement', () => {
     expect(statusCornerText('Loading terrain', '')).toBe('LOADING TERRAIN');
     expect(statusCornerText('', 'stand by')).toBe('STAND BY');
     expect(statusCornerText('Round 2', 'starting')).toBe('ROUND 2 · STARTING');
+  });
+});
+
+describe('hotbar glyphs', () => {
+  it('gives every weapon in the arsenal its own silhouette', () => {
+    for (let i = 0; i < WEAPON_COUNT; i++) {
+      const g = weaponGlyph(i);
+      expect(g.length).toBeGreaterThan(20);
+      expect(g).not.toBe(WEAPON_GLYPH_FALLBACK);
+      // Drawable: at least one filled shape, and nothing that would break the
+      // attribute quoting when it is interpolated into the slot's markup.
+      expect(/<(path|circle)\b/.test(g)).toBe(true);
+      expect(g.includes('<script')).toBe(false);
+      expect((g.match(/"/g) ?? []).length % 2).toBe(0);
+    }
+  });
+
+  it('never hands two weapons the same shape — the whole point is telling '
+    + 'them apart without reading', () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < WEAPON_COUNT; i++) seen.add(weaponGlyph(i));
+    expect(seen.size).toBe(WEAPON_COUNT);
+  });
+
+  it('still draws something for an id the arsenal does not define, rather '
+    + 'than leaving an empty tile', () => {
+    expect(weaponGlyph(WEAPON_COUNT)).toBe(WEAPON_GLYPH_FALLBACK);
+    expect(weaponGlyph(-1)).toBe(WEAPON_GLYPH_FALLBACK);
+    expect(weaponGlyph(NaN)).toBe(WEAPON_GLYPH_FALLBACK);
+    expect(WEAPON_GLYPH_FALLBACK.length).toBeGreaterThan(0);
+  });
+});
+
+describe('the dying read at the point of gaze', () => {
+  it('does not exist at all while you are healthy, so the centre stays clean', () => {
+    expect(foveaHealthFrac(100, false)).toBe(0);
+    expect(foveaHealthFrac(HEALTH_CRIT_AT + 1, false)).toBe(0);
+  });
+
+  it('is full at the critical threshold and scales to the critical band, not '
+    + 'to full health — the resolution is spent where it matters', () => {
+    expect(foveaHealthFrac(HEALTH_CRIT_AT, false)).toBe(1);
+    expect(foveaHealthFrac(HEALTH_CRIT_AT / 2, false)).toBeCloseTo(0.5, 6);
+    expect(foveaHealthFrac(3, false)).toBeCloseTo(3 / HEALTH_CRIT_AT, 6);
+  });
+
+  it('is monotonic all the way down and never leaves the unit range', () => {
+    let prev = -1;
+    for (let hp = 0; hp <= HEALTH_CRIT_AT; hp++) {
+      const v = foveaHealthFrac(hp, false);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(1);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+  });
+
+  it('vanishes at zero and while dead — the death card owns that screen', () => {
+    expect(foveaHealthFrac(0, false)).toBe(0);
+    expect(foveaHealthFrac(-5, false)).toBe(0);
+    expect(foveaHealthFrac(1, true)).toBe(0);
+    expect(foveaHealthFrac(HEALTH_CRIT_AT, true)).toBe(0);
+  });
+
+  it('agrees with the tier that turns the corner bar red, so the two health '
+    + 'read-outs can never disagree about whether you are dying', () => {
+    for (let hp = 0; hp <= 100; hp++) {
+      const crit = healthTier(hp) === HEALTH_TIER_CRIT && hp > 0;
+      expect(foveaHealthFrac(hp, false) > 0).toBe(crit);
+    }
   });
 });
 

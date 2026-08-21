@@ -26,6 +26,7 @@ import {
   DEFAULT_MOBILE_PREFS, MOBILE_PREFS_KEY, MOBILE_CSS, CONTROL_LABELS,
   padLayerState, padClearsPausePanel, PAD_PAUSED_Z, SHELL_UI_Z,
   PAUSE_PANEL_MAX_W, PAUSE_PANEL_VW,
+  STICK_LAYERS, DETENT_LABEL, COACH_LINES, COACH_MS, REANCHORED_HUD,
   type PrefStore,
 } from './mobile';
 
@@ -101,6 +102,30 @@ describe('hudBandsFrom — the read-outs are placed around the thumbs', () => {
     solveTouchLayout(412, 915, {}, g);
     const b = hudBandsFrom(g, bands);
     expect(Math.max(b.bottomLeft, b.bottomRight) / 915).toBeLessThan(0.33);
+  });
+
+  it('gives the corner read-outs a tighter band than the whole cluster', () => {
+    // The version of weakness #11 we committed ourselves: pinning the ammo
+    // plate above the FULL right-hand cluster cleared an inboard glyph column
+    // that is nowhere near the corner, and floated the plate half way up a
+    // 412 px-tall screen. The edge band clears the outer column only.
+    for (const [vw, vh] of VIEWPORTS) {
+      for (const southpaw of [false, true]) {
+        solveTouchLayout(vw, vh, { southpaw }, g);
+        const b = hudBandsFrom(g, bands);
+        expect(b.edgeLeft).toBeLessThanOrEqual(b.bottomLeft + 2);
+        expect(b.edgeRight).toBeLessThanOrEqual(b.bottomRight + 2);
+        expect(b.edgeLeft).toBeGreaterThan(0);
+        expect(b.edgeRight).toBeGreaterThan(0);
+        expect(b.widthLeft).toBeGreaterThan(0);
+        expect(b.widthRight).toBeGreaterThan(0);
+        expect(b.inset).toBeGreaterThan(0);
+      }
+    }
+    // And on the bar's own mobile viewport it is a real, large difference.
+    solveTouchLayout(915, 412, {}, g);
+    const b = hudBandsFrom(g, bands);
+    expect(b.bottomRight - b.edgeRight).toBeGreaterThan(50);
   });
 
   it('mirrors the bands with the layout', () => {
@@ -349,6 +374,59 @@ describe('MOBILE_CSS', () => {
     }
   });
 
+  it('positions the corner read-outs from the EDGE bands, not the full cluster', () => {
+    // The regression this guards: `--mc-br` is the whole right-hand cluster,
+    // including a glyph column that is inboard of the corner. Pinning the ammo
+    // plate to it floated the plate 205 px up a 412 px-tall screen. `--mc-er`
+    // is the band that column does not contribute to, and `--mc-wr` is the
+    // width that band is honest for, so the two must be used together.
+    const ammo = rules(MOBILE_CSS).filter((r) => r.sel.includes('.dc-ammo')
+      && r.body.includes('bottom:'));
+    const vitals = rules(MOBILE_CSS).filter((r) => r.sel.includes('.dc-vitals')
+      && r.body.includes('bottom:'));
+    expect(ammo.length).toBeGreaterThanOrEqual(2);
+    expect(vitals.length).toBeGreaterThanOrEqual(2);
+    for (const r of [...ammo, ...vitals]) {
+      expect(r.body, `${r.sel} still uses the full-cluster band`)
+        .toMatch(/bottom:var\(--mc-e[lr]\)/);
+      expect(r.body, `${r.sel} is positioned without a width promise`)
+        .toMatch(/(max-)?width:var\(--mc-w[lr]\)/);
+    }
+  });
+
+  it('clears the transform on everything it re-anchors', () => {
+    // The bug this pins: hud.ts centres the ammo plate and the hotbar with
+    // left:50% + translateX(-50%) in its own landscape-touch layout. Our rules
+    // out-specify its left/right but a transform is a separate property, so
+    // the plate was placed against the trigger corner and then slid 66 px —
+    // half its own width — back on top of the weapon-swap glyph. Overriding a
+    // position without overriding the transform is not overriding a position.
+    const cleared = new Set<string>();
+    for (const r of rules(MOBILE_CSS)) {
+      if (!r.body.includes('transform:none')) continue;
+      for (const one of r.sel.split(',')) {
+        const t = one.trim();
+        if (t.includes('.dc-')) cleared.add(`.dc-${t.split('.dc-').pop() ?? ''}`);
+      }
+    }
+    for (const el of REANCHORED_HUD) {
+      expect(cleared.has(el), `${el} is re-anchored but its transform is never `
+        + `cleared`).toBe(true);
+    }
+    // …and nothing is re-anchored that the list does not know about. `.dc-dmg`
+    // is the deliberate exception: its offset is part of a rotation this module
+    // must not clear.
+    const exempt = new Set(['.dc-dmg span']);
+    for (const r of rules(MOBILE_CSS)) {
+      if (!r.sel.includes('.dc-')) continue;
+      if (!/(^|;)(left|right):/.test(r.body)) continue;
+      const el = `.dc-${r.sel.split('.dc-').pop() ?? ''}`;
+      if (exempt.has(el)) continue;
+      expect(REANCHORED_HUD.includes(el), `${r.sel} moves ${el} but it is not `
+        + `in REANCHORED_HUD, so its transform is never cleared`).toBe(true);
+    }
+  });
+
   it('labels every control with a word, not a pictogram nobody can read', () => {
     for (const [id, label] of Object.entries(CONTROL_LABELS)) {
       expect(label.length, `control ${id} has no label`).toBeGreaterThan(0);
@@ -392,6 +470,86 @@ describe('MOBILE_CSS', () => {
  * frame with no trigger in it cannot answer "which can you aim and shoot with"
  * however good the trigger is a moment earlier. This is that rule, as numbers.
  * ------------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------------ *
+ * The stick's four marks
+ *
+ * "A real left stick with dead-zone and radius feedback" is one of the four
+ * things this piece was asked for, and until now three of the marks were
+ * either invisible or absent: the dead-zone ring was painted UNDER a knob more
+ * than twice its radius, and the sprint detent — the gesture that replaces the
+ * bar's whole sprint button — was not drawn at all.
+ * ------------------------------------------------------------------------ */
+
+describe('the stick draws what it does', () => {
+  it('paints the dead-zone ring on top of the knob, not under it', () => {
+    const knob = STICK_LAYERS.indexOf('mc-knob');
+    const dead = STICK_LAYERS.indexOf('mc-dead');
+    expect(knob).toBeGreaterThanOrEqual(0);
+    expect(dead).toBeGreaterThan(knob);
+  });
+
+  it('paints the detent and the travel ring behind the knob', () => {
+    for (const cls of ['mc-detent', 'mc-ring']) {
+      expect(STICK_LAYERS.indexOf(cls)).toBeLessThan(STICK_LAYERS.indexOf('mc-knob'));
+    }
+    expect(new Set(STICK_LAYERS).size).toBe(STICK_LAYERS.length);
+  });
+
+  it('styles every mark it says it paints', () => {
+    for (const cls of STICK_LAYERS) {
+      expect(MOBILE_CSS.indexOf(`.${cls}{`), `${cls} has no rule`).toBeGreaterThan(0);
+    }
+    // The knob carries a centre pip, which is what the dead-zone ring is read
+    // against — a 53px puck straddling an 18px ring answers nothing.
+    expect(MOBILE_CSS).toContain('.mc-knob::after{');
+  });
+
+  it('writes the sprint verb on the detent rather than leaving it a circle', () => {
+    expect(DETENT_LABEL.length).toBeGreaterThan(0);
+    expect(DETENT_LABEL.length).toBeLessThanOrEqual(4);
+    expect(MOBILE_CSS).toContain('.mc-detent>b{');
+    // …and it changes state when the detent engages, or it is decoration.
+    expect(MOBILE_CSS).toContain('.mc-stick[data-sprint="1"] .mc-detent');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * First-run coach
+ * ------------------------------------------------------------------------ */
+
+describe('the coach card', () => {
+  it('names the gestures that are invisible without it', () => {
+    const all = COACH_LINES.join(' ').toUpperCase();
+    expect(COACH_LINES.length).toBeGreaterThanOrEqual(2);
+    for (const word of ['TAP', 'FIRE', 'AIM', 'RUN']) {
+      expect(all, `the coach never mentions ${word}`).toContain(word);
+    }
+    for (const line of COACH_LINES) {
+      expect(line.length).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('goes away on its own, and quickly', () => {
+    expect(COACH_MS).toBeGreaterThan(1500);
+    expect(COACH_MS).toBeLessThanOrEqual(6000);
+    // It fades rather than blinking out, and it is the one thing on the layer
+    // that is not a control — so it carries no two-tone edge and cannot be
+    // mistaken for something you press.
+    expect(MOBILE_CSS).toContain('.mc-coach{');
+    const rule = MOBILE_CSS.slice(MOBILE_CSS.indexOf('.mc-coach{'),
+      MOBILE_CSS.indexOf('.mc-coach>b{'));
+    expect(rule).toContain('transition:opacity');
+    expect(rule).not.toContain('border:');
+    expect(MOBILE_CSS).toContain('.mc-coach[data-off="1"]{opacity:0}');
+  });
+
+  it('is off by default and remembered once seen', () => {
+    expect(DEFAULT_MOBILE_PREFS.coached).toBe(false);
+    expect(parseMobilePrefs('{"coached":true}').coached).toBe(true);
+    expect(parseMobilePrefs('{"coached":"yes"}').coached).toBe(false);
+  });
+});
 
 describe('padLayerState', () => {
   it('draws the attack pad for as long as a match exists', () => {

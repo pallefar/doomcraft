@@ -337,8 +337,18 @@ const SCORCH_CHANCE = 0.55;
  * delta buffer into a silent desync.
  */
 const SCORCH_MAX = 72;
-/** One scorch mark per this many voxels removed. */
-const SCORCH_PER_REMOVED = 4;
+/**
+ * One scorch mark per this many voxels removed.
+ *
+ * Was 4, which starved the shot that matters. A rocket into a wall removes
+ * roughly 40 voxels and exposes a rim of 50-60, so a quarter-share bought about
+ * ten charred blocks scattered over the whole crater — from across the arena
+ * that is speckle, not a hole. At 2 the same rocket gets ~20 and the rim reads
+ * as a burnt edge. The wire is not the constraint at this size:
+ * `MAX_BLOCK_DELTAS_PER_MESSAGE` is 512 and rocket + scorch is ~60. SCORCH_MAX
+ * still caps a BFG, whose own removal count is what eats the budget.
+ */
+const SCORCH_PER_REMOVED = 2;
 
 /**
  * Delete a sphere of voxels.

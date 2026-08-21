@@ -1421,6 +1421,13 @@ export function createViewmodelInput(): ViewmodelInput {
  * Viewmodel
  * ------------------------------------------------------------------------ */
 
+/**
+ * Anything with three numbers on it. `muzzleWorld` writes into one of these
+ * rather than a `THREE.Vector3` so a caller that only needs a world position
+ * does not have to hold a three.js type to ask for it.
+ */
+export interface Vec3Out { x: number; y: number; z: number }
+
 export interface ViewmodelOptions {
   /** The WORLD field of view. The viewmodel derives its own, narrower one. */
   fov?: number;
@@ -2039,6 +2046,82 @@ export class Viewmodel implements OverlayPass {
     return out;
   }
 
+  /**
+   * THE BARREL, IN THE WORLD — where world-space effects have to come from.
+   *
+   * Measured defect this exists to fix. `Fx.muzzleFlash` and `Fx.tracer` were
+   * being handed `eye + aim * standoff`, i.e. a point on the AIM AXIS, and that
+   * has two consequences that between them cost the piece its own question.
+   *
+   *  1. The plume lands on the CROSSHAIR. Its core disc is 0.42 m across and it
+   *     was being spawned 0.8 m from the eye, so at a 68 degree world FOV it
+   *     covered about 270 px of a 720 px frame — a soft additive wash painted
+   *     over the exact pixels the hit read lives in, on every single shot. The
+   *     shot was the loudest thing in the frame and it was loudest in the one
+   *     place it must not be.
+   *  2. The tracer projects to a POINT. A beam that leaves the eye along the
+   *     view axis has no lateral component on the picture plane, so it collapses
+   *     into the crosshair and is invisible to the only person it is for. That
+   *     is why no frame of the capture contains a streak.
+   *
+   * Both are the same bug: the world layer had no barrel. This gives it one.
+   *
+   * The subtlety is that the gun you can SEE is drawn by the overlay pass, with
+   * its own camera and a much narrower FOV (32 degrees against the world's 68).
+   * A point simply copied out of viewmodel space lands nowhere near the drawn
+   * barrel. So the muzzle is converted to tangent space, rescaled by the ratio
+   * of the two half-FOV tangents — which is what makes it land on the same
+   * PIXEL — and then rebuilt in world space at `dist` metres along the aim.
+   *
+   * `dx, dy, dz` must be unit length. `out` is written and returned.
+   *
+   * `worldFovDeg` is the WORLD camera's live vertical FOV and it has to be the
+   * live one, not the setting: sprint and the shotgun's punch move it by ten
+   * degrees or more, and the whole conversion is a ratio against it. Passing
+   * nothing falls back to the FOV this viewmodel was configured with.
+   */
+  muzzleWorld(
+    ex: number, ey: number, ez: number,
+    dx: number, dy: number, dz: number,
+    dist: number, out: Vec3Out, worldFovDeg = this.worldFov,
+  ): Vec3Out {
+    let tx = 0, ty = 0;
+    if (!this.disposed) {
+      this.getMuzzleLocal(_muzzleVec);
+      // The viewmodel camera looks down -z, so a barrel in front of it has a
+      // negative z. A non-negative one means the model is mid-switch and folded
+      // behind the lens; fall back to the axis rather than mirroring the offset.
+      const depth = -_muzzleVec.z;
+      if (depth > 0.05) {
+        const k = Math.tan((worldFovDeg * Math.PI) / 360)
+          / Math.tan((this.camera.fov * Math.PI) / 360);
+        tx = (_muzzleVec.x / depth) * k;
+        ty = (_muzzleVec.y / depth) * k;
+      }
+    }
+
+    // Camera basis from the aim direction alone, so this needs no matrix and no
+    // frame of lag: the shot and the flash come out of the same tick.
+    // right = normalize(aim x worldUp). Get this backwards and the gun's
+    // effects come out of the player's left hand.
+    let rx = -dz, ry = 0, rz = dx;
+    let rl = Math.hypot(rx, ry, rz);
+    if (rl < 1e-4) {
+      // Straight up or straight down — any horizontal right vector will do.
+      rx = 1; ry = 0; rz = 0; rl = 1;
+    }
+    rx /= rl; rz /= rl;
+    const ux = ry * dz - rz * dy;
+    const uy = rz * dx - rx * dz;
+    const uz = rx * dy - ry * dx;
+
+    const sx = tx * dist, sy = ty * dist;
+    out.x = ex + dx * dist + rx * sx + ux * sy;
+    out.y = ey + dy * dist + ry * sx + uy * sy;
+    out.z = ez + dz * dist + rz * sx + uz * sy;
+    return out;
+  }
+
   /** 0..1, decays over the weapon's muzzleMs. Drive fx and audio from it. */
   get muzzleFlash(): number {
     return this.muzzle;
@@ -2608,3 +2691,4 @@ function buildBrassGeometry(): THREE.BufferGeometry {
 
 const _tmpSize = new THREE.Vector2();
 const _tmpVec = new THREE.Vector3();
+const _muzzleVec = new THREE.Vector3();

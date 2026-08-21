@@ -944,6 +944,18 @@ export class WeaponRuntime {
     // also the shot that feels it. Adding it afterwards costs one whole shot of
     // lag on a ramp and the first round of a burst then reads as the loudest.
     this.addTrauma(TRAUMA_PER_SHOT_BASE + def.shakeAmplitude * TRAUMA_PER_SHOT_AMP);
+    /* And the kill's trauma with it, BEFORE the camera is driven.
+     *
+     * The rule two lines up — bank first, then shake, or the shot that raised
+     * the trauma is not the shot that feels it — was being applied to the shot
+     * and then broken for the kill, which was banked after the camera call. So
+     * a kill rode the burst's existing trauma and its own contribution only
+     * reached the NEXT round, which on a one-shot weapon means it never landed
+     * at all. Banking it here is what actually makes finishing something the
+     * peak of the burst rather than a claim in a comment.
+     */
+    const killed = report.kills > 0;
+    if (killed) this.addTrauma(TRAUMA_PER_KILL);
 
     const cam = this.camera;
     if (cam) {
@@ -956,11 +968,13 @@ export class WeaponRuntime {
       // one continuous rumble and the kill would vanish inside it. The camera's
       // own "a stronger source wins the slot" rule keeps this from stomping the
       // weapon's shake on heavy guns.
-      if (report.kills > 0) cam.addShake(KILL_SHAKE_AMPLITUDE, KILL_SHAKE_MS, KILL_SHAKE_HZ);
+      //
+      // Scaled by the same trauma gain as the weapon's own shake, and it has to
+      // be: a flat amplitude means the kill that ends a long burst is quieter
+      // relative to the rumble around it than the kill that opens one, which
+      // inverts the reading it exists to produce.
+      if (killed) cam.addShake(KILL_SHAKE_AMPLITUDE * gain, KILL_SHAKE_MS, KILL_SHAKE_HZ);
     }
-    // A kill banks trauma too, so finishing something in the middle of a burst
-    // is the peak of that burst rather than an event that vanished inside it.
-    if (report.kills > 0) this.addTrauma(TRAUMA_PER_KILL);
   }
 
   /* --- hitscan --- */

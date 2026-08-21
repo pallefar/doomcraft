@@ -16,14 +16,23 @@
  *  2. A REAL LIGHT FIELD, which is the other half of the same weakness. Two
  *     independent channels are baked per face:
  *
- *       - SKY, 0..15, computed by a single downward scan per column: 15 until
- *         the first sky-blocking voxel, 0 below it. That one number is what
- *         separates a roofed room from open ground, and it is the whole reason
- *         terrain can now build interiors at all — without it a bunker's floor
- *         is lit exactly like the arena outside and the roof is decoration.
- *         Deliberately NOT horizontally bled: a hard sector boundary at a
- *         doorway is what Doom itself did, it costs a BFS we would otherwise
- *         pay on every chunk, and a soft ramp shatters big greedy quads.
+ *       - SKY, 0..15: a downward scan per column (15 until the first
+ *         sky-blocking voxel) followed by a bounded HORIZONTAL BLEED, so the
+ *         number ramps from open ground into a room instead of stepping. That
+ *         one channel is what separates a roofed room from open ground and it is
+ *         the whole reason terrain can build interiors at all — without it a
+ *         bunker's floor is lit exactly like the arena outside and the roof is
+ *         decoration.
+ *
+ *         The bleed replaces a binary field, and the reason is a measurement,
+ *         not taste. Histogrammed over 16 chunks of the shipped generator,
+ *         **40% of all emitted quads came out sky = 0** — not because 40% of the
+ *         world is indoors but because the test was "is anything directly
+ *         overhead", which is true of every square metre under a crag lip, a
+ *         bastion cap or an arch. Those faces were all being rendered at the
+ *         interior key, so the outdoors was as murky as the indoors and there
+ *         was no contrast left to spend on an actual room. See `buildSkyField`
+ *         for the sweep and why it is seam-exact.
  *
  *       - BLOCK, 0..15 plus a 2-bit hue class, flood-filled from every emissive
  *         voxel with `LIGHT_ATTEN` lost per step, so a lava pool lights the room
@@ -427,14 +436,49 @@ const skyField = new Uint8Array(PAD_VOLUME);
 const lightQueue = new Int32Array(PAD_VOLUME);
 
 /**
- * Sky exposure by straight-down occlusion, one pass per column.
+ * Sky exposure: a straight-down occlusion scan per column, then a bounded
+ * horizontal bleed so the field is a RAMP and not a switch.
  *
- * Horizontal bleed is deliberately absent — see the module header. The scan
- * only has to cover the columns a face can look into, which is the chunk plus
- * one voxel, but it runs over SKY_SCAN_PAD so a face at the pad edge sees the
- * same value its neighbour chunk will compute for it.
+ * WHY THE BLEED EXISTS. The column test alone answers "is anything directly
+ * overhead", and in this world that is true far more often than "indoors" is:
+ * the generator puts a crag on a 12-block lattice, a bastion pair on a 24-block
+ * one and an arch through half of those, so a histogram over 16 real chunks put
+ * 40% of all emitted quads at sky 0. Every one of them was drawn at the
+ * interior key. The outdoors was therefore rendered as murky as the indoors,
+ * and the whole "dark room, bright doorway" contrast the interior split exists
+ * to buy was being spent on open ground standing under an overhang.
+ *
+ * THE SWEEP. Two chamfer passes over the scan box, both descending in y so
+ * downward flow composes inside a single pass:
+ *
+ *   forward   y desc, z asc,  x asc   <- takes -x, -z and above
+ *   backward  y desc, z desc, x desc  <- takes +x, +z and above
+ *
+ * Horizontal steps cost SKY_BLEED_ATTEN, a downward step costs
+ * SKY_BLEED_DROP. Two passes resolve every straight and single-turn path, which
+ * is all a doorway or an arch needs; a labyrinth would need more and would look
+ * the same, because at atten 3 the light is gone after five steps anyway.
+ *
+ * WHY IT IS SEAM-EXACT, which is the only hard constraint here. A face reads
+ * `skyField[air]` for `air` inside the chunk plus one voxel. Light dies at
+ * `ceil(LIGHT_MAX / SKY_BLEED_ATTEN)` = 5 steps, so a source further than 5
+ * cells from such a cell contributes exactly nothing. Sweeping the box out to
+ * `SKY_SCAN_PAD` = 6 therefore makes every value a face can read independent of
+ * where the box ends — chunk (7, -3) computes the same number for a shared face
+ * as chunk (8, -3) does, with no cross-chunk state. PAD_R is 8, so the column
+ * scan has real voxels everywhere the sweep reads.
  */
-const SKY_SCAN_PAD = 2;
+const SKY_SCAN_PAD = 6;
+/** Sky lost per horizontal step. 3 puts the reach at 5 blocks. */
+const SKY_BLEED_ATTEN = 3;
+/**
+ * Sky lost per downward step of BLED light. Not zero: without it, light that
+ * gets one block through a doorway falls to the bottom of a shaft undimmed and
+ * a cellar under a lit room is as bright as the room. Straight-down light under
+ * open sky is unaffected — the column pass already wrote 15 there and the sweep
+ * only ever raises a value.
+ */
+const SKY_BLEED_DROP = 1;
 
 function buildSkyField(pad: Uint8Array): void {
   skyField.fill(0);
@@ -442,12 +486,68 @@ function buildSkyField(pad: Uint8Array): void {
   const hi = CHUNK_SIZE_X + SKY_SCAN_PAD;
   const hiZ = CHUNK_SIZE_Z + SKY_SCAN_PAD;
   const top = CHUNK_HEIGHT;                     // the pad's y = 64 plane
+
+  // Pass 1 — the column scan. Also records the y band that actually has an open
+  // but unlit cell in it, because that is the only band the bleed can change and
+  // on an open-sky chunk it is empty and the sweep is skipped outright.
+  let darkLo = top + 1;
+  let darkHi = -2;
   for (let z = lo; z < hiZ; z++) {
     for (let x = lo; x < hi; x++) {
       let i = padIndex(x, top, z);
-      for (let y = top; y >= -1; y--, i -= PAD_STRIDE_Y) {
+      let y = top;
+      for (; y >= -1; y--, i -= PAD_STRIDE_Y) {
         if (SKY_BLOCKS[pad[i]] === 1) break;
         skyField[i] = LIGHT_MAX;
+      }
+      // Everything from here down is sky 0. Find the open cells among it.
+      for (; y >= -1; y--, i -= PAD_STRIDE_Y) {
+        if (LIGHT_PASSES[pad[i]] === 0) continue;
+        if (y > darkHi) darkHi = y;
+        if (y < darkLo) darkLo = y;
+      }
+    }
+  }
+  if (darkHi < darkLo) return;                  // nothing roofed anywhere
+
+  // Pass 2 — the sweep. Bounded to the dark band plus one level above it, which
+  // is where the light it reads comes from.
+  const yTop = darkHi + 1 > top ? top : darkHi + 1;
+  const yBot = darkLo;
+  const A = SKY_BLEED_ATTEN;
+  const D = SKY_BLEED_DROP;
+
+  for (let y = yTop; y >= yBot; y--) {
+    // At the very top plane there is no cell above to read; offset 0 reads self,
+    // which after the -D can never win, so the inner loop stays branchless.
+    const up = y < top ? PAD_STRIDE_Y : 0;
+    for (let z = lo; z < hiZ; z++) {
+      let i = padIndex(lo, y, z);
+      for (let x = lo; x < hi; x++, i += PAD_STRIDE_X) {
+        if (LIGHT_PASSES[pad[i]] === 0) continue;
+        let v = skyField[i];
+        if (v === LIGHT_MAX) continue;
+        const above = skyField[i + up] - D;
+        if (above > v) v = above;
+        if (x > lo) { const a = skyField[i - PAD_STRIDE_X] - A; if (a > v) v = a; }
+        if (z > lo) { const b = skyField[i - PAD_STRIDE_Z] - A; if (b > v) v = b; }
+        skyField[i] = v;
+      }
+    }
+  }
+  for (let y = yTop; y >= yBot; y--) {
+    const up = y < top ? PAD_STRIDE_Y : 0;
+    for (let z = hiZ - 1; z >= lo; z--) {
+      let i = padIndex(hi - 1, y, z);
+      for (let x = hi - 1; x >= lo; x--, i -= PAD_STRIDE_X) {
+        if (LIGHT_PASSES[pad[i]] === 0) continue;
+        let v = skyField[i];
+        if (v === LIGHT_MAX) continue;
+        const above = skyField[i + up] - D;
+        if (above > v) v = above;
+        if (x < hi - 1) { const a = skyField[i + PAD_STRIDE_X] - A; if (a > v) v = a; }
+        if (z < hiZ - 1) { const b = skyField[i + PAD_STRIDE_Z] - A; if (b > v) v = b; }
+        skyField[i] = v;
       }
     }
   }

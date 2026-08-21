@@ -15,7 +15,11 @@
  *      length you never have to read, and below 30 the frame edge throbs. The
  *      plate under all of it is opaque: the critical vignette is red and paints
  *      UNDER this cluster, and a translucent plate let that red wash straight
- *      through the one read-out that mattered.
+ *      through the one read-out that mattered. And because the corner is 700 px
+ *      from where you are actually looking, below 30 a 30 px copy of the health
+ *      bar appears directly under the reticle, scaled to the critical band so
+ *      it is full at 30 and a sliver at 4 (`foveaHealthFrac`). Above 30 it does
+ *      not exist, so the centre is empty in every frame where you are fine.
  *   2. DIRECTIONAL DAMAGE RIDES THE FRAME AND THE FOVEA, NEVER THE MID-FIELD.
  *      Bearings are stored as the *world* yaw the hit came from and
  *      re-projected every frame against the live camera, so the indicator
@@ -32,7 +36,16 @@
  *      slots that go dark red when that gun is dry, and — because the eye is at
  *      the crosshair, not the corner — the crosshair's dot goes amber on the
  *      last quarter of a magazine and the whole crosshair goes red when it is
- *      empty.
+ *      empty. Every slot also carries the reserve behind THAT gun, so "what can
+ *      I switch to" is answered without switching to it; the bar prints a stack
+ *      count in the same corner and that is the one idea of its worth taking.
+ *   3b. THE HOTBAR IS SHAPES, NOT A WORD SEARCH. The bar's slots hold pictures
+ *      of objects. Ours held seven three-letter codes — PST SHT CHG RKT PLS BFG
+ *      SAW — at 10 px, which is unreadable at a glance on a desktop and simply
+ *      unreadable on the 34 px slot a landscape phone gets. Every slot now
+ *      carries a silhouette (`weaponGlyph`) drawn in `currentColor`, chosen to
+ *      differ in outline rather than in detail, because at 23 px the detail is
+ *      gone.
  *   4. THE CROSSHAIR TALKS. It breathes with the live weapon cone (the bar's is
  *      a dead static plus, weakness #3), pops a hit marker scaled by damage,
  *      golds on a headshot, flashes a red ring on a kill, and carries the
@@ -40,7 +53,13 @@
  *   5. IT SURVIVES A BRIGHT MAP. The bar keeps its HUD readable over a sunlit
  *      beach with solid dark plates. Every read-out here carries a two-stop
  *      black halo and the plates are opaque enough to hold, because a HUD that
- *      is only legible in a dark arena is not legible.
+ *      is only legible in a dark arena is not legible. The canvas read-outs get
+ *      the same treatment the hard way: the reticle, the hit marker and the
+ *      reload sweep are all CASED — a black keyline stroked first, the colour
+ *      inside it — because a 2 px drop shadow is a grey smear that sunlit sand
+ *      eats, and a white hit marker over white sand is no hit marker at all.
+ *      The damage blades carry a dark ground under their hot core for the same
+ *      reason: orange on a beach is orange on orange.
  *
  *   6. THE SIGHTLINE HAS A BUDGET, AND IT IS ENFORCED IN CODE. This is where
  *      the bar loses hardest and where a HUD most easily loses it back. voxiom
@@ -463,6 +482,86 @@ export function statusCornerText(text: string, sub: string): string {
   return `${text.toUpperCase()} · ${sub.toUpperCase()}`;
 }
 
+/* ---- the hotbar reads as objects, not as a word search --------------------
+ * The bar's one genuinely good idea in the bottom-right corner is that its
+ * five slots hold **pictures of things** — a shovel, a dirt block, three block
+ * types (ref/voxiom/desktop-08-combat.png) — so "what am I holding and what
+ * else have I got" is a shape read at any size. Ours used to hold `PST SHT
+ * CHG RKT PLS BFG SAW`: seven three-letter codes at 10 px, which is a word
+ * search, and at the 34 px slot a landscape phone gets it is not even legible
+ * as text. Shape beats text at glance distance, so every slot now carries a
+ * silhouette on a 24×24 grid, painted in `currentColor` so the selected slot's
+ * inversion carries the glyph with it for free.
+ *
+ * They are deliberately unlike each other in GESTALT, not in detail — a long
+ * twin tube, a barrel cluster with a drum, a warhead, a big orb, a toothed bar
+ * — because at 23 px the detail is gone and only the outline survives.
+ */
+const WEAPON_GLYPHS: readonly string[] = Object.freeze([
+  /* PISTOL — small L: slide, front sight, grip, trigger guard. */
+  '<path d="M3 7h15v4H3z"/><path d="M15 4.6h2.2v2.4H15z"/>'
+  + '<path d="M6 11h5l-2 8H4.4z"/><path d="M11 11h3.2v2.2H11z"/>',
+  /* SHOTGUN — the only twin-tube silhouette, with a pump under it. The gap
+     between the tubes is the whole read, so it is wider than it looks like it
+     needs to be: at 23 px the two bars merge into one if it is not. */
+  '<path d="M1 7.4h17v2.4H1z"/><path d="M1 11.2h17v2.4H1z"/>'
+  + '<path d="M5.5 14h5.5v2.6H5.5z"/><path d="M18 6.8h3.2v7.6H18z"/>'
+  + '<path d="M21.2 9L23 10.2v3.6l-1.8 1z"/>',
+  /* CHAINGUN — three barrels and a drum. The drum is the tell. */
+  '<path d="M2 6h11.5v2H2z"/><path d="M2 9.6h11.5v2H2z"/><path d="M2 13.2h11.5v2H2z"/>'
+  + '<path d="M13.5 5h4.6v13h-4.6z"/><circle cx="19.6" cy="15.4" r="3.3"/>',
+  /* ROCKET — a fat tube with a cone blast end and a top sight. */
+  '<path d="M4 8h13.5v6H4z"/><path d="M4 6.6L0.8 11 4 15.4z"/>'
+  + '<path d="M7 14h3.2v5.2H7z"/><path d="M9 5.4h5.4V8H9z"/>'
+  + '<path d="M17.5 9.4h5v3.2h-5z"/>',
+  /* PLASMA — the only glyph carrying a bolt. Energy, not a barrel. */
+  '<path d="M2.4 7.6h12.2v7.6H2.4z"/><path d="M14.6 9.2h2.6v4.4h-2.6z"/>'
+  + '<path d="M4.6 15.2h3.4v4.4H4.6z"/>'
+  + '<path d="M19.4 4.4l-3 5.6h2.4l-2 6.6 5.4-7.4h-2.8l1.8-4.8z"/>',
+  /* BFG — the biggest body on the strip, opening into a flare with an orb in
+     it. A plain box plus a circle read as a camera; the flare reads as a gun. */
+  '<path d="M1.4 7h11.2v8.6H1.4z"/><path d="M3.6 15.6h4.2v4.6H3.6z"/>'
+  + '<path d="M3.2 4.4h7.4v2.6H3.2z"/>'
+  + '<path d="M12.6 5.2l4.6 2.6v8l-4.6 2.6z"/><circle cx="19.4" cy="11.8" r="3.4"/>',
+  /* CHAINSAW — the only toothed outline; nothing else can be mistaken for it. */
+  '<path d="M1 6h7.2v9.4H1z"/>'
+  + '<path d="M8.2 8.6h12.4a2.6 2.6 0 010 5.2H8.2z"/>'
+  + '<path d="M9.2 8.6l1.3-2.2 1.3 2.2z"/><path d="M12.9 8.6l1.3-2.2 1.3 2.2z"/>'
+  + '<path d="M16.6 8.6l1.3-2.2 1.3 2.2z"/>',
+]);
+
+/** A neutral box for a weapon id the arsenal does not define. */
+export const WEAPON_GLYPH_FALLBACK = '<path d="M4 8h16v8H4z"/>';
+
+/**
+ * SVG body for a weapon's hotbar silhouette, on a 24×24 viewBox.
+ *
+ * Pure and markup-only so the shape set is testable in node: every weapon the
+ * arsenal defines must have one, and an id it does not define must still
+ * produce a drawable glyph rather than an empty tile.
+ */
+export function weaponGlyph(id: number): string {
+  return WEAPON_GLYPHS[id] ?? WEAPON_GLYPH_FALLBACK;
+}
+
+/**
+ * Length of the tiny health bar drawn just under the reticle, 0..1.
+ *
+ * "Am I about to die" is the one fact you cannot afford to travel 700 px to
+ * the bottom-left corner for, and the critical vignette answers it only as a
+ * MOOD — a red wash tells you things are bad, not that you are on 6. So below
+ * the critical threshold the health bar gets a second, 30 px copy of itself
+ * inside the crosshair canvas, scaled to the critical band rather than to full
+ * health: at 30 hp it is full, at 6 hp it is a fifth, and above 30 it does not
+ * exist at all, so the centre of the screen is empty in every frame where the
+ * player is not dying. The bar shows nothing of the kind — its health fill is
+ * the same green at 100 and at 4, in the corner, at 13 px.
+ */
+export function foveaHealthFrac(hp: number, dead: boolean): number {
+  if (dead || hp <= 0 || hp > HEALTH_CRIT_AT) return 0;
+  return hp / HEALTH_CRIT_AT;
+}
+
 /** `m:ss`, clamped at zero. */
 export function formatClock(secs: number): string {
   const v = Math.max(0, Math.floor(secs));
@@ -638,12 +737,17 @@ const CSS = `
 #hud .dc-ap[data-z="1"] .lbl{color:#8a847e;justify-content:flex-start}
 #hud .dc-ap[data-z="1"] .lbl i{opacity:1;font-size:11px}
 
-/* Health is twice the height of armour AND carries the biggest numeral in the
-   left half of the frame, so the hierarchy answers "how am I doing" before any
-   reading happens at all. */
-#hud .dc-hp{height:34px}
+/* Health is two and a half times the height of armour and carries the biggest
+   numeral in the left half of the frame, so the hierarchy answers "how am I
+   doing" before any reading happens at all. It is also sized against the
+   magazine numeral in the OPPOSITE corner rather than against the armour bar
+   above it: health at 26 px next to a 52 px clip count said, in type, that
+   ammunition is the more important fact — which is backwards, because you can
+   survive an empty magazine. The two numbers that decide a fight now read at
+   comparable weight from opposite ends of the frame. */
+#hud .dc-hp{height:38px}
 #hud .dc-hp .fill{background:linear-gradient(180deg,#4cc46b,#2d8c47)}
-#hud .dc-hp .lbl{font-size:26px}
+#hud .dc-hp .lbl{font-size:31px}
 #hud .dc-hp .lbl i{font-size:10px}
 #hud .dc-hp[data-t="1"] .fill{background:linear-gradient(180deg,#ffbe37,#c9820f)}
 #hud .dc-hp[data-t="2"] .fill{background:linear-gradient(180deg,#ff5a2e,#c81f08)}
@@ -710,17 +814,40 @@ const CSS = `
 #hud .dc-ammo.rld .wep{color:#f0a020}
 #hud .dc-ammo.rld .pips i.on,#hud .dc-ammo.rld .strip s{background:#f0a020}
 
-/* ---- hotbar -------------------------------------------------------------- */
+/* ---- hotbar ---------------------------------------------------------------
+   Slots hold SHAPES, not three-letter codes. The bar's slots hold pictures of
+   objects and ours held PST SHT CHG RKT PLS BFG SAW — seven abbreviations at
+   10 px, which is a word search at a glance and illegible outright on the
+   34 px slot a landscape phone gets. The glyph inherits the slot's colour, so
+   the selected slot's inversion takes the silhouette with it and no second rule
+   has to be kept in sync. */
 #hud .dc-hotbar{right:12px;bottom:12px;display:flex;gap:5px}
 #hud .dc-slot{width:44px;height:44px;border:1px solid rgba(255,255,255,.20);
   background:rgba(8,8,11,.86);position:relative;display:grid;place-items:center;
-  font-size:10px;letter-spacing:.06em;color:#c4beb8}
+  font-size:10px;letter-spacing:.06em;color:#cec8c2}
+/* No drop-shadow filter here on purpose: the tile is already an opaque dark
+   plate, so the shadow bought nothing and cost seven rasterised filter layers
+   on a HUD whose whole cost story is that it does not repaint. */
+#hud .dc-slot svg{display:block;width:27px;height:27px;fill:currentColor}
+/* Lifted off the count so the two never share a pixel. */
+#hud .dc-slot .g{transform:translateY(-3px)}
 #hud .dc-slot .n{position:absolute;left:3px;top:2px;font-size:9px;color:#807a75}
-#hud .dc-slot .am{position:absolute;left:3px;right:3px;bottom:3px;height:2px;border-radius:1px;
-  opacity:.6}
-#hud .dc-slot.dry{opacity:.6}
-#hud .dc-slot.dry .am{background:#e03c1c!important;opacity:.95}
-#hud .dc-slot.dry span{color:#b9695a}
+/* The reserve behind every gun, not just the one in your hands. The bar prints
+   a stack count in the same corner (ref/voxiom/desktop-08-combat.png, tile 2),
+   and it is the one number that answers "which gun can I still switch to"
+   without switching to it and pulling the trigger. */
+#hud .dc-slot .ct{position:absolute;right:3px;bottom:4px;font-size:9px;line-height:1;
+  color:#b6b0aa;font-variant-numeric:tabular-nums;
+  text-shadow:0 1px 2px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.8)}
+#hud .dc-slot .ct:empty{display:none}
+/* The ammo-type stripe is the slot's colour key back to the reserve numeral in
+   the ammo plate. At 2 px and 60% it was decoration; on the bottom edge at
+   full strength it is a read. */
+#hud .dc-slot .am{position:absolute;left:0;right:0;bottom:0;height:3px;opacity:.9}
+#hud .dc-slot.dry{opacity:.62}
+#hud .dc-slot.dry .am{background:#e03c1c!important;opacity:1}
+#hud .dc-slot.dry svg{color:#b9695a}
+#hud .dc-slot.dry .ct{color:#e07a5a}
 /* The selected slot is a FILLED plate with near-black glyphs, not a hairline.
    The bar marks its active slot with a 2 px white outline over a translucent
    tile (ref/voxiom/desktop-08-combat.png, tile 3) and that outline vanishes
@@ -730,10 +857,12 @@ const CSS = `
    closest to, lava. The keyline is what lava does not have. */
 #hud .dc-slot.on{border-color:#ffd071;background:#f0a020;color:#180d01;font-weight:700;
   box-shadow:0 0 0 2px rgba(0,0,0,.62),0 0 16px rgba(240,160,32,.42);opacity:1}
-#hud .dc-slot.on .n{color:#6b4405}
+#hud .dc-slot.on .n{color:#3d2703;font-weight:700}
+#hud .dc-slot.on .ct{color:#3a2402;text-shadow:none;font-weight:700}
 #hud .dc-slot.on .am{opacity:1;box-shadow:0 0 0 1px rgba(0,0,0,.55)}
 #hud .dc-slot.on.dry{opacity:1;background:#e6603c;border-color:#ff9c7d}
-#hud .dc-slot.on.dry span{color:#210802}
+#hud .dc-slot.on.dry svg{color:#210802}
+#hud .dc-slot.on.dry .ct{color:#320c02}
 #hud .dc-slot.no{opacity:.3}
 #hud .dc-slot.no .am{opacity:.2}
 
@@ -809,12 +938,19 @@ const CSS = `
    container clips, so a blade rotated into a corner cannot escape the frame. */
 #hud .dc-dmg{inset:0;overflow:hidden}
 #hud .dc-dmg .hub{position:absolute;left:50%;top:50%;width:0;height:0}
+/* The last layer paints BEHIND the other two: a soft dark halo the hot core
+   sits inside. Orange on a sunlit beach is orange on orange — the blade read
+   fine over dark rock and washed out over exactly the terrain the bar's own
+   maps are made of. A dark ground under it is a value contrast, and unlike a
+   drop-shadow filter it is a plain gradient the compositor already has. */
 #hud .dc-dmg span{position:absolute;left:0;top:0;width:210px;height:46px;margin-left:-105px;
   transform-origin:50% 0;opacity:0;will-change:transform,opacity;
   background:
     radial-gradient(34% 16% at 50% 0%,rgba(255,255,252,.95) 0%,rgba(255,228,198,0) 100%),
     radial-gradient(48% 120% at 50% 0%,rgba(255,246,236,.96) 0%,rgba(255,186,124,.90) 13%,
-      rgba(255,96,40,.68) 33%,rgba(214,34,10,.26) 62%,rgba(180,14,4,0) 100%)}
+      rgba(255,96,40,.68) 33%,rgba(214,34,10,.26) 62%,rgba(180,14,4,0) 100%),
+    radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.52) 0%,rgba(0,0,0,.34) 40%,
+      rgba(0,0,0,.12) 74%,rgba(0,0,0,0) 100%)}
 
 /* ---- touch ---- */
 #hud .dc-touch{inset:0;pointer-events:none}
@@ -855,8 +991,8 @@ const CSS = `
 #hud[data-compact="1"] .dc-vitals{width:min(52vw,214px);bottom:8px;left:8px}
 #hud[data-compact="1"] .dc-ap{height:15px;margin-bottom:4px}
 #hud[data-compact="1"] .dc-ap .lbl{font-size:12px}
-#hud[data-compact="1"] .dc-hp{height:27px}
-#hud[data-compact="1"] .dc-hp .lbl{font-size:19px}
+#hud[data-compact="1"] .dc-hp{height:29px}
+#hud[data-compact="1"] .dc-hp .lbl{font-size:22px}
 /* --dc-mag drives the clip, the separator and the reserve together, so a
    breakpoint scales the numeral pair as a unit and can never leave the reserve
    larger than the clip it belongs to. */
@@ -865,6 +1001,13 @@ const CSS = `
 #hud[data-compact="1"] .dc-ammo .wep{font-size:10px;letter-spacing:.10em}
 #hud[data-compact="1"] .dc-hotbar{right:8px;bottom:8px;gap:3px}
 #hud[data-compact="1"] .dc-slot{width:34px;height:34px;font-size:9px}
+/* A 34 px slot cannot carry a silhouette AND a stack count AND an index. The
+   silhouette is the one that still works at this size, so the count drops and
+   the dry stripe keeps answering "can I switch to it". */
+#hud[data-compact="1"] .dc-slot svg{width:23px;height:23px}
+#hud[data-compact="1"] .dc-slot .g{transform:none}
+#hud[data-compact="1"] .dc-slot .ct{display:none}
+#hud[data-compact="1"] .dc-slot .n{left:2px;top:1px;font-size:8px}
 #hud[data-compact="1"] .dc-dmg span{width:150px;height:42px;margin-left:-75px}
 /* A phone has less sightline to spend, not more: the plate shrinks with the
    keep-out rather than keeping its desktop size on a quarter of the screen. */
@@ -887,6 +1030,7 @@ const CSS = `
 #hud[data-portrait="1"] .dc-ammo .strip{width:80px}
 #hud[data-portrait="1"] .dc-hotbar{bottom:252px;right:8px;gap:2px}
 #hud[data-portrait="1"] .dc-slot{width:32px;height:32px}
+#hud[data-portrait="1"] .dc-slot svg{width:22px;height:22px}
 #hud[data-portrait="1"] .dc-feed{left:116px;width:min(52vw,220px);top:8px}
 /* 412 px of width will not carry map + feed + perf + pause on one row, so in
    portrait the perf read-out drops under the pause glyph instead of printing
@@ -988,6 +1132,7 @@ export class Hud {
   private elRes!: HTMLElement;
   private elWep!: HTMLElement;
   private readonly slots: HTMLElement[] = [];
+  private readonly slotCounts: HTMLElement[] = [];
   private readonly slotAmmo = new Uint8Array(WEAPON_COUNT);
   private elHotbar!: HTMLElement;
   private elCross!: HTMLCanvasElement;
@@ -1023,6 +1168,7 @@ export class Hud {
   private cRld = -1; private cApZero = -1;
   private cBoardOpen = false; private cVig = -1; private cDead = false;
   private cGapQ = -1; private cHmQ = -1; private cRlQ = -2; private cEmptyQ = -1;
+  private cCritQ = -2;
   private cGhost = -1;
 
   /* animation clocks */
@@ -1213,23 +1359,29 @@ export class Hud {
     this.elAmmo.append(nums, rounds, this.elWep);
     root.appendChild(this.elAmmo);
 
-    /* hotbar */
+    /* hotbar: a silhouette, an index digit, the reserve behind that gun, and
+       an ammo-type stripe that colour-keys the slot to the reserve numeral in
+       the plate above it. The glyph markup is written once here and never
+       touched again — only the count text and two class flags move. */
     const bar = div('dc-pad dc-hotbar');
     for (let i = 0; i < WEAPON_COUNT; i++) {
       const s = div('dc-slot');
+      s.title = WEAPON_NAMES[i] ?? WEAPON_SHORT_NAMES[i] ?? '';
       const n = div('n');
       n.textContent = String(i + 1);
-      const t = document.createElement('span');
-      t.textContent = WEAPON_SHORT_NAMES[i] ?? '';
+      const g = div('g');
+      g.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${weaponGlyph(i)}</svg>`;
+      const ct = div('ct');
       const am = div('am');
       const type = ammoTypeOf(i);
       this.slotAmmo[i] = type;
       am.style.background = type === 0
         ? 'rgba(255,255,255,.22)'
         : `#${(AMMO_COLORS[type] ?? 0x888888).toString(16).padStart(6, '0')}`;
-      s.append(n, t, am);
+      s.append(n, g, ct, am);
       bar.appendChild(s);
       this.slots.push(s);
+      this.slotCounts.push(ct);
     }
     this.elHotbar = bar;
     root.appendChild(bar);
@@ -1669,6 +1821,10 @@ export class Hud {
         const loaded = i === s.weapon && s.mag > 0;
         this.slots[i].classList.toggle('no', !owned);
         this.slots[i].classList.toggle('dry', owned && reserve === 0 && !loaded);
+        /* Melee has no reserve and an unfilled table (-1) means "unknown", so
+           both print nothing rather than a zero that would read as "dry". */
+        const ct = owned && type !== 0 && reserve >= 0 ? String(reserve) : '';
+        if (this.slotCounts[i].textContent !== ct) this.slotCounts[i].textContent = ct;
       }
     }
 
@@ -1771,10 +1927,14 @@ export class Hud {
     const gapQ = Math.round(gap * 2);
     const hmQ = this.hitMarkerT > 0 ? Math.ceil(this.hitMarkerT * 60) : 0;
     const rlQ = s.reloading ? Math.round(Math.max(0, Math.min(1, s.reloadFrac)) * 36) : -1;
+    /* The dying bar is driven by the health INTEGER, not by the vignette's
+       clock, so it costs a redraw only when the number itself moves. Standing
+       still on 9 hp still writes nothing. */
+    const critQ = s.dead || hp > HEALTH_CRIT_AT ? -1 : hp;
     if (gapQ !== this.cGapQ || hmQ !== this.cHmQ || rlQ !== this.cRlQ
-      || aim !== this.cEmptyQ || this.dmgSig !== this.cDmgSig) {
+      || aim !== this.cEmptyQ || this.dmgSig !== this.cDmgSig || critQ !== this.cCritQ) {
       this.cGapQ = gapQ; this.cHmQ = hmQ; this.cRlQ = rlQ; this.cEmptyQ = aim;
-      this.cDmgSig = this.dmgSig;
+      this.cDmgSig = this.dmgSig; this.cCritQ = critQ;
       this.drawCrosshair(gapQ / 2, s, aim);
     }
 
@@ -1923,12 +2083,24 @@ export class Hud {
        hit — the bar shows nothing at all in either case. */
     this.drawFoveaDamage(ctx, c, d);
 
+    /* CASED, not shadowed. A 2 px drop shadow is a grey smear that a sunlit
+       sand wall or a bright sky eats outright — which is exactly the terrain
+       the bar's own maps are made of — and a crosshair you cannot see is the
+       one HUD failure that costs you the fight. Every stroke is laid down
+       twice: a hard black keyline first at +2.4 px, then the colour inside it.
+       That is a VALUE contrast, so it holds against white sand, black rock and
+       orange lava alike, and it costs one extra stroke on a redraw that only
+       happens when something actually moved. */
     ctx.lineCap = 'butt';
-    ctx.shadowColor = 'rgba(0,0,0,.85)';
-    ctx.shadowBlur = 2 * d;
-    ctx.globalAlpha = empty ? 0.72 : 1;
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = empty ? 0.78 : 1;
+    const CASE = 'rgba(0,0,0,.82)';
 
     if (this.crosshairStyle === 'dot') {
+      ctx.fillStyle = CASE;
+      ctx.beginPath();
+      ctx.arc(c, c, 2.9 * d, 0, Math.PI * 2);
+      ctx.fill();
       ctx.fillStyle = dotCol;
       ctx.beginPath();
       ctx.arc(c, c, 1.6 * d, 0, Math.PI * 2);
@@ -1937,22 +2109,51 @@ export class Hud {
       const len = (this.crosshairStyle === 'doom' ? 11 : 8) * d;
       const g = gap * d;
       const w = (this.crosshairStyle === 'doom' ? 2.6 : 2.2) * d;
-      ctx.strokeStyle = col;
-      ctx.lineWidth = w;
       ctx.beginPath();
       ctx.moveTo(c, c - g); ctx.lineTo(c, c - g - len);
       ctx.moveTo(c, c + g); ctx.lineTo(c, c + g + len);
       ctx.moveTo(c - g, c); ctx.lineTo(c - g - len, c);
       ctx.moveTo(c + g, c); ctx.lineTo(c + g + len, c);
+      ctx.strokeStyle = CASE;
+      ctx.lineWidth = w + 2.4 * d;
+      ctx.stroke();
+      ctx.strokeStyle = col;
+      ctx.lineWidth = w;
       ctx.stroke();
       /* 'cross' has no dot of its own, but a warning dot appearing inside the
          gap is itself the signal, so every style can carry the low read. */
       if (this.crosshairStyle !== 'cross' || dotCol !== col) {
+        ctx.fillStyle = CASE;
+        ctx.fillRect(c - 2.4 * d, c - 2.4 * d, 4.8 * d, 4.8 * d);
         ctx.fillStyle = dotCol;
         ctx.fillRect(c - 1.2 * d, c - 1.2 * d, 2.4 * d, 2.4 * d);
       }
     }
     ctx.globalAlpha = 1;
+
+    /* --- the dying read, at the point of gaze --------------------------
+       Health lives 700 px away in the bottom-left corner, and the critical
+       vignette only says "bad", not "6". Under the critical threshold a 30 px
+       copy of the health bar appears directly under the reticle, scaled to the
+       critical band so it is FULL at 30 and a sliver at 4 — you watch yourself
+       die without ever leaving the target. Above the threshold it does not
+       exist, so this costs the clean centre nothing in the 90% of frames where
+       the player is fine. It is a rectangle, deliberately: the reload sweep
+       and the damage bearings are arcs, and two different facts must never
+       share a shape. */
+    const crit = foveaHealthFrac(this.cHealth, s.dead);
+    if (crit > 0) {
+      const bw = 30 * d;
+      const bh = 4 * d;
+      const bx = c - bw / 2;
+      const by = c + 26 * d;
+      ctx.fillStyle = CASE;
+      ctx.fillRect(bx - 1.6 * d, by - 1.6 * d, bw + 3.2 * d, bh + 3.2 * d);
+      ctx.fillStyle = 'rgba(60,10,4,.92)';
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.fillStyle = '#ff3b18';
+      ctx.fillRect(bx, by, Math.max(2 * d, bw * crit), bh);
+    }
 
     /* hit marker — scaled by damage, gold on a headshot, red ring on a kill */
     if (this.hitMarkerT > 0) {
@@ -1962,9 +2163,8 @@ export class Hud {
       const r = (6 + heft * 4 + (1 - t) * 7) * d;
       const tick = (4 + heft * 3) * d;
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = this.hitMarkerKill ? '#ff3b18' : this.hitMarkerHead ? '#ffd24a' : '#ffffff';
       ctx.globalAlpha = Math.min(1, t * 1.6);
-      ctx.lineWidth = (this.hitMarkerKill ? 2.8 : 2) * d;
+      const hw = (this.hitMarkerKill ? 2.8 : 2) * d;
       ctx.beginPath();
       for (let i = 0; i < 4; i++) {
         const sx = i & 1 ? 1 : -1;
@@ -1972,6 +2172,14 @@ export class Hud {
         ctx.moveTo(c + sx * r, c + sy * r);
         ctx.lineTo(c + sx * (r + tick), c + sy * (r + tick));
       }
+      /* A white hit marker over white sand is no hit marker at all, and "did
+         that shot land" is the question the whole crosshair exists to answer.
+         Cased like the reticle itself. */
+      ctx.strokeStyle = CASE;
+      ctx.lineWidth = hw + 2.2 * d;
+      ctx.stroke();
+      ctx.strokeStyle = this.hitMarkerKill ? '#ff3b18' : this.hitMarkerHead ? '#ffd24a' : '#ffffff';
+      ctx.lineWidth = hw;
       ctx.stroke();
       if (this.hitMarkerKill) {
         ctx.globalAlpha = Math.min(1, t) * 0.65;
@@ -1983,13 +2191,18 @@ export class Hud {
       ctx.globalAlpha = 1;
     }
 
-    /* reload ring */
+    /* reload ring — cased, for the same reason the reticle is */
     if (s.reloading) {
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = 'rgba(240,160,32,.9)';
-      ctx.lineWidth = 2.5 * d;
+      const a0 = -Math.PI / 2;
+      const a1 = a0 + Math.PI * 2 * Math.min(1, Math.max(0, s.reloadFrac));
       ctx.beginPath();
-      ctx.arc(c, c, 20 * d, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, s.reloadFrac));
+      ctx.arc(c, c, 20 * d, a0, a1);
+      ctx.strokeStyle = CASE;
+      ctx.lineWidth = 4.7 * d;
+      ctx.stroke();
+      ctx.strokeStyle = '#f0a020';
+      ctx.lineWidth = 2.5 * d;
       ctx.stroke();
     }
   }

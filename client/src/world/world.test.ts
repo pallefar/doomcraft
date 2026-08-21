@@ -47,7 +47,7 @@ describe('terrain', () => {
     generateChunkInto(SEED + 1, 0, 0, b);        // clobber the lattice caches
     generateChunkInto(SEED, 3, -2, b);
     expect(Buffer.compare(Buffer.from(a), Buffer.from(b))).toBe(0);
-    expect(TERRAIN_VERSION).toBe(3);
+    expect(TERRAIN_VERSION).toBe(4);
   });
 
   it('quantises the base height into 3-block terraces', () => {
@@ -493,8 +493,12 @@ describe('destruction', () => {
         }
       }
     }
-    expect(charred).toBeGreaterThan(0);
-    expect(charred).toBeLessThanOrEqual(Math.floor(removed / 4));
+    // A real burnt lip, not a dozen scattered specks: SCORCH_PER_REMOVED is 2,
+    // so a rocket-sized hole gets about half its removal count in marks. The
+    // upper bound is the wire budget — every mark is a BLOCK_DELTA and
+    // MAX_BLOCK_DELTAS_PER_MESSAGE is 512.
+    expect(charred).toBeGreaterThanOrEqual(10);
+    expect(charred).toBeLessThanOrEqual(Math.floor(removed / 2));
   });
 
   it('scorches identically on both sides from the same seed', () => {

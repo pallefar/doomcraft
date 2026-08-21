@@ -47,6 +47,7 @@ import {
   TC_AUTOFIRE, TC_AIMASSIST, TC_PAUSE,
   DEFAULT_STICK, TOUCH_EDGE,
   MIN_EDGE_STROKE_PX, EDGE_STROKE_PX, EDGE_HALO_PX, TRIGGER_STROKE_PX,
+  READOUT_MARGIN, READOUT_CLEARANCE,
   type TouchGeom, type TouchSink, type TouchAimSource, type Disc,
 } from '@/player/touch';
 import { clampf } from '@shared/math';
@@ -75,6 +76,17 @@ export interface MobilePrefs {
   lookScale: number;
   /** Buzz the phone on trigger and toggle presses. */
   haptics: boolean;
+  /**
+   * The one-time coach card has been seen and dismissed.
+   *
+   * Three of the four gestures this piece is judged on are invisible until
+   * somebody says them out loud: a tap on the look surface fires, a press on
+   * the trigger that keeps sliding aims *and* keeps firing, and the stick
+   * sprints at its rim. The bar teaches none of its controls either — but the
+   * bar only has one gesture per thumb, so it does not have to. We do, and an
+   * un-taught gesture is a gesture nobody uses.
+   */
+  coached: boolean;
 }
 
 export const DEFAULT_MOBILE_PREFS: Readonly<MobilePrefs> = Object.freeze({
@@ -85,12 +97,20 @@ export const DEFAULT_MOBILE_PREFS: Readonly<MobilePrefs> = Object.freeze({
   aimAssist: true,
   lookScale: 1,
   haptics: true,
+  coached: false,
 });
 
 export const MOBILE_PREFS_KEY = 'doomcraft.mobile.v1';
 
 /** Idle time after which the corner option chips step back, ms. */
 export const CORNER_IDLE_MS = 5000;
+
+/**
+ * How long the first-run coach card stays up, ms. Short on purpose: it is
+ * dismissed by the first touch anyway, so this is only the ceiling for a
+ * player who is reading rather than playing.
+ */
+export const COACH_MS = 4200;
 
 /* ------------------------------------------------------------------------ *
  * Where the pad lives, and when
@@ -209,6 +229,7 @@ export function parseMobilePrefs(raw: string | null): MobilePrefs {
   if (typeof p.autoFire === 'boolean') out.autoFire = p.autoFire;
   if (typeof p.aimAssist === 'boolean') out.aimAssist = p.aimAssist;
   if (typeof p.haptics === 'boolean') out.haptics = p.haptics;
+  if (typeof p.coached === 'boolean') out.coached = p.coached;
   if (typeof p.scale === 'number' && Number.isFinite(p.scale)) {
     out.scale = clampf(p.scale, 0.7, 1.4);
   }
@@ -253,6 +274,20 @@ export interface HudBands {
    */
   bottomLeft: number;
   bottomRight: number;
+  /**
+   * The same two insets measured against the OUTER column of each cluster only
+   * — the band a corner read-out actually needs. See `TouchGeom.padEdgeLeft`:
+   * on the landscape phone this is 65 px lower than `bottomRight`, which is the
+   * difference between an ammo plate tucked against the trigger and one
+   * floating in the middle of the play area with nothing under it.
+   */
+  edgeLeft: number;
+  edgeRight: number;
+  /** Widest a read-out may be on each side before it reaches a control, px. */
+  widthLeft: number;
+  widthRight: number;
+  /** Reserve the option-chip column needs in the trigger hand's corner, px. */
+  inset: number;
   /** Free centre column, client x, px. */
   centreX0: number;
   centreX1: number;
@@ -272,12 +307,29 @@ export interface HudBands {
 /** Never let a read-out sit closer than this to a control, px. */
 export const HUD_BAND_CLEARANCE = 6;
 
+/**
+ * Every HUD element this module re-anchors around the thumbs.
+ *
+ * The list exists because re-anchoring has a second half that is easy to
+ * forget: hud.ts's own landscape-touch layout centres some of these with
+ * `left:50%; transform:translateX(-50%)`, and overriding `left`/`right` does
+ * not touch the transform. The ammo plate shipped 66 px — half its own width —
+ * inboard of where the solver put it, sitting on the weapon-swap glyph.
+ * `MOBILE_CSS` clears the transform for exactly this set and `mobile.test.ts`
+ * checks the two agree.
+ */
+export const REANCHORED_HUD: readonly string[] = Object.freeze([
+  '.dc-vitals', '.dc-ammo', '.dc-hotbar', '.dc-map', '.dc-feed', '.dc-perf',
+]);
+
 /** Below this the centre column is not worth using for the hotbar. */
 export const MIN_CENTRE_COLUMN = 150;
 
 export function createHudBands(): HudBands {
   return {
-    bottomLeft: 0, bottomRight: 0, centreX0: 0, centreX1: 0,
+    bottomLeft: 0, bottomRight: 0, edgeLeft: 0, edgeRight: 0,
+    widthLeft: 0, widthRight: 0, inset: 0,
+    centreX0: 0, centreX1: 0,
     centreWidth: 0, stacked: true, southpaw: false,
   };
 }
@@ -286,6 +338,15 @@ export function hudBandsFrom(g: TouchGeom, out: HudBands): HudBands {
   const width = Math.max(0, g.centreX1 - g.centreX0);
   out.bottomLeft = g.padBottomLeft + HUD_BAND_CLEARANCE;
   out.bottomRight = g.padBottomRight + HUD_BAND_CLEARANCE;
+  // `READOUT_CLEARANCE`, not `HUD_BAND_CLEARANCE`: this pair has to agree with
+  // `readoutRect`, which is the function `touch.test.ts` proves disjoint from
+  // every control. Two clearances that drift apart would make that proof
+  // describe a rectangle the browser never draws.
+  out.edgeLeft = g.padEdgeLeft + READOUT_CLEARANCE;
+  out.edgeRight = g.padEdgeRight + READOUT_CLEARANCE;
+  out.widthLeft = g.readoutWidthLeft;
+  out.widthRight = g.readoutWidthRight;
+  out.inset = g.readoutInset;
   out.centreX0 = g.centreX0;
   out.centreX1 = g.centreX1;
   out.centreWidth = width;
@@ -367,15 +428,34 @@ export const MOBILE_CSS = `
   text-shadow:0 0 2px ${DARK},0 1px 2px ${DARK},0 -1px 2px ${DARK},
               1px 0 2px ${DARK},-1px 0 2px ${DARK}}
 
-/* --- stick -------------------------------------------------------------- */
+/* --- stick --------------------------------------------------------------
+   Four concentric marks, and every one of them answers a question the bar's
+   single translucent puck does not: where does movement START (the dead-zone
+   ring), how far am I pushing (the travel ring), where does SPRINT begin (the
+   detent ring, labelled), and where is my thumb relative to all three (the
+   knob and its centre pip). */
 .mc-stick{background:rgba(10,10,14,.22)}
 .mc-stick>i{position:absolute;left:50%;top:50%;border-radius:50%;box-sizing:border-box;
   transform:translate(-50%,-50%)}
-/* Dead zone, drawn. The bar shows neither this nor the travel limit, so its
-   stick gives no answer to "why did I not move". Opaque dashes over an opaque
-   black backing: it was the one piece of chrome still drawn at 55 % white,
-   which made the dead-zone marker the least legible thing on the screen — the
-   exact failure mode this piece exists to beat. */
+/* Sprint detent, drawn and named. We spend no button on sprint where the bar
+   spends a whole 40px glyph on it — which is only an improvement if the player
+   can see the threshold, so here it is: a dashed ring at exactly the deflection
+   resolveStick latches on, with the verb written on it. Solid orange the
+   moment it engages. Until this existed our sprint was a secret. */
+.mc-detent{border:${MIN_EDGE_STROKE_PX}px dashed ${LIGHT};
+  box-shadow:0 0 0 1.5px ${DARK};
+  display:grid;place-items:start center}
+.mc-detent>b{font-size:8px;letter-spacing:.10em;line-height:1;
+  margin-top:-5px;padding:1px 3px;border-radius:2px;background:${DARK};color:${LIGHT}}
+.mc-stick[data-sprint="1"] .mc-detent{border-style:solid;border-color:rgb(255,84,32)}
+.mc-stick[data-sprint="1"] .mc-detent>b{background:rgb(255,84,32);color:rgb(20,6,0)}
+/* Dead zone, drawn — and drawn ON TOP of the knob, which is the whole point.
+   At the default 16 % of a 58 px travel it is a 9 px radius and the knob is a
+   26 px one, so painting it underneath (as it was) hid the marker behind the
+   very thing it is supposed to be measured against. Above the knob you watch
+   the centre pip leave the dashes, which is a legible answer to "why did I not
+   move". Opaque dashes over an opaque black ring; the bar draws neither this
+   nor a travel limit. */
 .mc-dead{border:${MIN_EDGE_STROKE_PX}px dashed ${LIGHT};
   box-shadow:0 0 0 ${EDGE_HALO_PX}px ${DARK}}
 /* Radius feedback: scales with deflection, so full tilt is visible. */
@@ -387,6 +467,12 @@ export const MOBILE_CSS = `
 .mc-knob{border:${EDGE_STROKE_PX}px solid ${LIGHT};background:rgba(232,230,227,.42);
   box-shadow:0 0 0 ${EDGE_HALO_PX}px ${DARK}, inset 0 0 0 ${EDGE_HALO_PX}px ${DARK};
   will-change:transform}
+/* The pip is the knob's actual position, and it is what the dead-zone ring is
+   read against. A 53px puck straddling a 18px ring tells you nothing; a 6px
+   pip crossing it tells you exactly when you started moving. */
+.mc-knob::after{content:"";position:absolute;left:50%;top:50%;
+  width:6px;height:6px;margin:-3px 0 0 -3px;border-radius:50%;
+  background:${LIGHT};box-shadow:0 0 0 1.5px ${DARK}}
 .mc-stick[data-live="1"] .mc-knob{background:rgba(255,214,140,.55)}
 .mc-stick[data-sprint="1"] .mc-knob{background:rgba(255,110,48,.62)}
 
@@ -413,7 +499,15 @@ export const MOBILE_CSS = `
 /* --- option chips ------------------------------------------------------- */
 .mc-chip{background:rgba(10,10,14,.44);transition:opacity .45s linear}
 .mc-chip>b{font-size:9px;line-height:1.05}
-.mc-chip[data-on="1"]{background:rgba(64,180,120,.52);border-color:${LIGHT}}
+/* ON is opaque, and its label flips to dark ink on the fill.
+   These two chips are the only latched STATE on the layer — whether the assist
+   cone and the hands-free trigger are armed — and state you cannot read is
+   state you do not trust. A 52 %-alpha green over a dark corridor is the bar's
+   own translucent-wash mistake wearing our colours: it was legible on a red
+   wall and invisible on a grey one, i.e. its contrast was decided by the
+   terrain, which is exactly what the rest of this file refuses to allow. */
+.mc-chip[data-on="1"]{background:rgb(46,168,110);border-color:${LIGHT}}
+.mc-chip[data-on="1"]>b{color:rgb(4,22,13);text-shadow:none}
 .mc-pause>b{font-size:12px}
 /* The corner column is between-fights furniture, so it steps back after a few
    idle seconds and comes straight back on the next touch. Hit-testing is
@@ -432,6 +526,38 @@ export const MOBILE_CSS = `
   box-shadow:0 0 0 1.5px ${DARK};opacity:0;
   transform:scale(1.6);will-change:transform,opacity}
 .mc-assist[data-on="1"]{opacity:.9;transform:scale(1)}
+
+/* --- first-run coach ----------------------------------------------------
+   Three of the gestures this piece is judged on are invisible: a tap on the
+   look surface fires, a press on the trigger that keeps sliding aims AND keeps
+   firing, and the stick sprints at its rim. The bar teaches nothing either,
+   but the bar has exactly one gesture per thumb and so has nothing to teach.
+   Shown once, dismissed by the first touch, removed from the DOM afterwards —
+   it costs one timer and never a frame. No border: the two-tone rule is for
+   things you press, and this is the one thing on the layer you cannot. */
+/* 58 %: just BELOW the crosshair. The upper third is where the shell prints
+   its match banner ("MATCH LIVE", "Waiting for players..." — the bar uses the
+   same band for "Loading Terrain"), and a coach card centred at 30 % printed
+   straight through it, which left two unreadable texts instead of one useful
+   one. Below the reticle is clear in both orientations and still above the
+   read-out bands. An explicit width rather than a max-width, because an
+   absolutely positioned box anchored at left:50% otherwise shrink-wraps to the
+   half-screen it has left and re-wraps the lines to three.
+
+   z-index 3 because .mc is positioned with z-index:auto and therefore creates
+   no stacking context: the card can lift over the shell's centre status line
+   (a later sibling inside #hud) without dragging the rest of the pad with it.
+   It has to, because the status band is where "SPAWN PROTECTED" lands and two
+   texts printed through each other are worse than either alone. Near-opaque
+   for the same reason, and gone in four seconds either way. */
+.mc-coach{position:absolute;left:50%;top:58%;transform:translate(-50%,-50%);
+  box-sizing:border-box;width:min(76vw,380px);padding:10px 14px;border-radius:4px;
+  background:rgba(6,6,9,.94);text-align:center;z-index:3;
+  transition:opacity .5s linear;opacity:1}
+.mc-coach[data-off="1"]{opacity:0}
+.mc-coach>b{display:block;font-size:12px;line-height:1.5;letter-spacing:.07em;
+  text-shadow:0 0 2px ${DARK},0 1px 2px ${DARK}}
+.mc-coach>b+b{margin-top:4px;color:rgb(255,196,64)}
 
 /* --- paused --------------------------------------------------------------
    The bar keeps its whole control surface drawn behind its pause panel; ours
@@ -464,20 +590,45 @@ export const MOBILE_CSS = `
 #hud#hud[data-pad="1"] .dc-hint{display:none}
 #hud#hud[data-pad="1"] .dc-perf{top:auto;bottom:2px;right:auto;left:6px;font-size:10px}
 
-/* Vitals hug the movement thumb's side, ammo hugs the trigger's.
-   --mc-corner is the width the option chips reserve in the top corner on the
-   trigger side, and the ammo read-out sits on that same side, so it is inset by
-   the reserve rather than by a guessed margin: on a 412 px-tall landscape phone
-   the ammo band and the chip column end up a few pixels apart, and a guess is
-   wrong on the first phone with a different aspect ratio. */
+/* Re-anchoring is not finished until the old anchor's TRANSFORM is gone.
+   hud.ts has its own landscape-touch layout that centres the ammo plate and
+   the hotbar with left:50% + translateX(-50%). Our rules out-specify its
+   left/right — they carry two ids to its one — but a transform is a separate
+   property and simply survived, so the plate was placed correctly against the
+   trigger corner and then slid 66 px (half its own width) back inboard, on top
+   of the WEP glyph. Every element this module re-anchors therefore gets its
+   transform cleared in one place, and mobile.test.ts holds the list. */
+#hud#hud[data-pad="1"] .dc-vitals,
+#hud#hud[data-pad="1"] .dc-ammo,
+#hud#hud[data-pad="1"] .dc-hotbar,
+#hud#hud[data-pad="1"] .dc-map,
+#hud#hud[data-pad="1"] .dc-feed,
+#hud#hud[data-pad="1"] .dc-perf{transform:none}
+
+/* Vitals hug the movement thumb's side, ammo hugs the trigger's, and both are
+   positioned AND sized from the solver: --mc-el / --mc-er are the bands the
+   outer control column leaves free and --mc-wl / --mc-wr are the widths that
+   band is honest for. That pairing is the fix for a self-inflicted version of
+   weakness #11 — pinning the ammo to the full cluster height (--mc-br)
+   cleared the inboard RLD/BLD/WEP column too, and on a 915x412 screen that
+   floated the plate 205 px up with nothing underneath it. The plate now sits
+   65 px lower, against the trigger, where a hand holding a phone expects it.
+   --mc-corner is the reserve the option chips need in the same corner. */
 #hud#hud[data-pad="1"][data-hand="right"] .dc-vitals{
-  left:10px;right:auto;bottom:var(--mc-bl);width:min(44vw,186px)}
+  left:${READOUT_MARGIN}px;right:auto;bottom:var(--mc-el);width:var(--mc-wl)}
 #hud#hud[data-pad="1"][data-hand="right"] .dc-ammo{
-  right:var(--mc-corner);left:auto;bottom:var(--mc-br);text-align:right}
+  right:var(--mc-corner);left:auto;bottom:var(--mc-er);max-width:var(--mc-wr);
+  text-align:right}
 #hud#hud[data-pad="1"][data-hand="left"] .dc-vitals{
-  right:10px;left:auto;bottom:var(--mc-br);width:min(44vw,186px)}
+  right:${READOUT_MARGIN}px;left:auto;bottom:var(--mc-er);width:var(--mc-wr)}
 #hud#hud[data-pad="1"][data-hand="left"] .dc-ammo{
-  left:var(--mc-corner);right:auto;bottom:var(--mc-bl);text-align:left}
+  left:var(--mc-corner);right:auto;bottom:var(--mc-el);max-width:var(--mc-wl);
+  text-align:left}
+/* The weapon name is the one line in the plate that can outgrow the width the
+   solver promised, and a plate that overflows its promise is a plate back on
+   top of a thumb. Clip it rather than let it push. */
+#hud#hud[data-pad="1"] .dc-ammo .wep{
+  overflow:hidden;text-overflow:ellipsis;letter-spacing:.08em}
 
 #hud#hud[data-pad="1"] .dc-ap{height:12px;margin-bottom:4px}
 #hud#hud[data-pad="1"] .dc-hp{height:22px}
@@ -491,17 +642,15 @@ export const MOBILE_CSS = `
   left:var(--mc-cx0);right:auto;transform:none;bottom:6px;gap:3px;
   width:var(--mc-cw);justify-content:center;flex-wrap:nowrap}
 #hud#hud[data-pad="1"][data-stack="0"] .dc-slot{width:30px;height:30px;font-size:9px}
-/* …and above the ammo when the viewport is too narrow to have a middle. */
+/* …and above the ammo when the viewport is too narrow to have a middle. The
+   84 px is the ammo plate's own height on a phone — 26 px mag + the round
+   strip + the weapon line + padding comes to about 70, plus clearance — so the
+   two stack instead of printing over one another. */
 #hud#hud[data-pad="1"][data-stack="1"] .dc-hotbar{
-  right:8px;left:auto;transform:none;bottom:calc(var(--mc-br) + 62px);gap:2px}
+  right:8px;left:auto;transform:none;bottom:calc(var(--mc-er) + 84px);gap:2px}
 #hud#hud[data-pad="1"][data-stack="1"][data-hand="left"] .dc-hotbar{
-  left:8px;right:auto;bottom:calc(var(--mc-bl) + 62px)}
+  left:8px;right:auto;bottom:calc(var(--mc-el) + 84px)}
 #hud#hud[data-pad="1"][data-stack="1"] .dc-slot{width:28px;height:28px;font-size:8px}
-/* Seven 28 px slots plus their gaps is 208 px of the 412 px the narrow layout
-   has, and the stacked hotbar and the vitals end up at overlapping heights, so
-   the vitals are capped to what is genuinely left rather than to a fraction of
-   the viewport that happens to look right on one phone. */
-#hud#hud[data-pad="1"][data-stack="1"] .dc-vitals{width:min(40vw,164px)}
 
 /* Top strip: the minimap shrinks and the feed is kept clear of the option
    chips in the corner, which is precisely what the bar does not do. */
@@ -533,6 +682,35 @@ export const CONTROL_LABELS: Readonly<Record<number, string>> = Object.freeze({
   [TC_AIMASSIST]: 'AIM',
   [TC_PAUSE]: '❚❚',
 });
+
+/** Word on the sprint detent ring. Kept to three characters so it fits the arc. */
+export const DETENT_LABEL = 'RUN';
+
+/**
+ * Paint order of the stick's concentric marks, back to front. The constructor
+ * builds from this list, so the order is a testable fact rather than a comment
+ * about `append` arguments.
+ *
+ * The load-bearing part is that `mc-dead` comes AFTER `mc-knob`. The dead-zone
+ * ring is 9 px in radius at the default settings and the knob is 26 px, so
+ * painted underneath — which is how it shipped — the one marker that answers
+ * "why did I not move" was hidden behind the very thing it measures. On top,
+ * the knob's centre pip visibly crosses the dashes.
+ */
+export const STICK_LAYERS: readonly string[] = Object.freeze([
+  'mc-detent', 'mc-ring', 'mc-knob', 'mc-dead',
+]);
+
+/**
+ * The two lines of the first-run coach card, in order. Every gesture named
+ * here is one the bar does not have and one that is invisible until said:
+ * line 1 is the answer to weakness #9 (aim and fire are separate, and the
+ * trigger can do both at once), line 2 is the sprint detent.
+ */
+export const COACH_LINES: readonly string[] = Object.freeze([
+  'DRAG TO AIM · TAP TO FIRE · HOLD FIRE AND SLIDE TO DO BOTH',
+  'PUSH THE STICK TO ITS RIM TO RUN',
+]);
 
 /* ------------------------------------------------------------------------ *
  * The layer
@@ -583,10 +761,13 @@ export class MobileControls {
   private readonly surface: HTMLElement;
   private readonly safeProbe: HTMLElement;
   private readonly elStick: HTMLElement;
+  private readonly elDetent: HTMLElement;
   private readonly elDead: HTMLElement;
   private readonly elRing: HTMLElement;
   private readonly elKnob: HTMLElement;
   private readonly elAssist: HTMLElement;
+  private elCoach: HTMLElement | null = null;
+  private coachTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly views: ControlView[] = [];
   private readonly onPause: (() => void) | null;
   private fireView!: ControlView;
@@ -643,15 +824,26 @@ export class MobileControls {
     this.safeProbe.className = 'mc-safe';
     this.layer.appendChild(this.safeProbe);
 
-    /* stick */
+    /* stick — painted back to front. The dead-zone ring goes LAST because it
+       is measured against the knob's centre pip, and a marker painted under
+       the thing it measures is a marker nobody can read. */
     this.elStick = div('mc-e mc-stick');
-    this.elDead = document.createElement('i');
-    this.elDead.className = 'mc-dead';
-    this.elRing = document.createElement('i');
-    this.elRing.className = 'mc-ring';
-    this.elKnob = document.createElement('i');
-    this.elKnob.className = 'mc-knob';
-    this.elStick.append(this.elDead, this.elRing, this.elKnob);
+    const marks = new Map<string, HTMLElement>();
+    for (const cls of STICK_LAYERS) {
+      const mark = document.createElement('i');
+      mark.className = cls;
+      if (cls === 'mc-detent') {
+        const tag = document.createElement('b');
+        tag.textContent = DETENT_LABEL;
+        mark.appendChild(tag);
+      }
+      marks.set(cls, mark);
+      this.elStick.appendChild(mark);
+    }
+    this.elDetent = marks.get('mc-detent')!;
+    this.elRing = marks.get('mc-ring')!;
+    this.elKnob = marks.get('mc-knob')!;
+    this.elDead = marks.get('mc-dead')!;
     this.layer.appendChild(this.elStick);
 
     /* glyphs */
@@ -703,11 +895,58 @@ export class MobileControls {
     if (on) {
       this.lastTouchMs = now();   // the chips are bright when the pad appears
       this.resize();
+      this.showCoach();
     } else {
       this.router.releaseAll();
       this.vHeld = -1;
       this.flushState();
+      this.dismissCoach(false);
     }
+  }
+
+  /* -------------------------------------------------------------------- *
+   * First-run coach
+   *
+   * Mounted at most once per profile and torn down for good. It is deliberately
+   * NOT part of `flushState` — the card has no per-frame state, so it must cost
+   * no per-frame work.
+   * -------------------------------------------------------------------- */
+
+  private showCoach(): void {
+    if (this.disposed || this.prefs.coached || this.elCoach !== null) return;
+    if (typeof document === 'undefined') return;
+    const card = div('mc-coach');
+    for (const line of COACH_LINES) {
+      const b = document.createElement('b');
+      b.textContent = line;
+      card.appendChild(b);
+    }
+    // Before the capture surface, so it can never intercept the first touch —
+    // which is also the touch that dismisses it.
+    this.layer.insertBefore(card, this.surface);
+    this.elCoach = card;
+    this.coachTimer = setTimeout(() => { this.dismissCoach(true); }, COACH_MS);
+  }
+
+  /**
+   * Take the card down. `remember` is false for a teardown that is not the
+   * player having seen it — leaving a match, or unmounting — so a pad that
+   * flashed up for one frame does not burn the one chance to teach.
+   */
+  private dismissCoach(remember: boolean): void {
+    if (this.coachTimer !== null) { clearTimeout(this.coachTimer); this.coachTimer = null; }
+    const card = this.elCoach;
+    if (card === null) return;
+    this.elCoach = null;
+    if (remember && !this.prefs.coached) {
+      this.prefs.coached = true;
+      saveMobilePrefs(this.store, this.prefs);
+    }
+    if (this.disposed) { card.remove(); return; }
+    card.dataset.off = '1';
+    // The fade is CSS; the node goes when it finishes so nothing is left in the
+    // tree for the compositor to consider on every subsequent frame.
+    this.coachTimer = setTimeout(() => { this.coachTimer = null; card.remove(); }, 600);
   }
 
   /**
@@ -732,6 +971,9 @@ export class MobileControls {
       this.router.releaseAll();
       this.vHeld = -1;
       this.lastTouchMs = now();   // the option chips are bright, not faded out
+      // The shell's panel would print straight over the card. A player who got
+      // as far as opening the pause menu has been told enough.
+      this.dismissCoach(true);
     }
     this.applyLayerState();
     if (on) {
@@ -760,6 +1002,7 @@ export class MobileControls {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.dismissCoach(false);
     this.router.releaseAll();
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.onResize);
@@ -801,6 +1044,13 @@ export class MobileControls {
       this.router.lookScale = this.prefs.lookScale;
     }
     if (patch.haptics !== undefined) this.prefs.haptics = patch.haptics;
+    if (patch.coached !== undefined) {
+      this.prefs.coached = patch.coached;
+      // Clearing it is the "show me the hints again" path: bring the card back
+      // now rather than on the next match, so the setting is its own preview.
+      if (!patch.coached && this.visible) this.showCoach();
+      else if (patch.coached) this.dismissCoach(false);
+    }
 
     saveMobilePrefs(this.store, this.prefs);
     this.syncChips();
@@ -857,9 +1107,14 @@ export class MobileControls {
     for (const v of this.views) place(v);
     this.placeStick(g.stickHome.x, g.stickHome.y, g.stickHome.r);
 
-    const dead = Math.max(2, g.deadR);
+    // A dead zone dialled to zero has no threshold to draw, and a 1 px dashed
+    // ring reads as dirt on the screen rather than as information.
+    const dead = g.deadR;
+    this.elDead.style.display = dead >= 3 ? '' : 'none';
     this.elDead.style.width = `${(dead * 2).toFixed(1)}px`;
     this.elDead.style.height = `${(dead * 2).toFixed(1)}px`;
+    this.elDetent.style.width = `${(g.detentR * 2).toFixed(1)}px`;
+    this.elDetent.style.height = `${(g.detentR * 2).toFixed(1)}px`;
     this.elRing.style.width = `${(g.stickTravel * 2).toFixed(1)}px`;
     this.elRing.style.height = `${(g.stickTravel * 2).toFixed(1)}px`;
     this.elKnob.style.width = `${(g.knobR * 2).toFixed(1)}px`;
@@ -878,8 +1133,10 @@ export class MobileControls {
    */
   private applyBands(g: TouchGeom): void {
     const b = hudBandsFrom(g, this.bands);
-    const corner = Math.max(0, g.vw - (g.pause.x - g.pause.r)) + 8;
+    const corner = b.inset;
     const sig = `${b.bottomLeft.toFixed(1)}|${b.bottomRight.toFixed(1)}|`
+      + `${b.edgeLeft.toFixed(1)}|${b.edgeRight.toFixed(1)}|`
+      + `${b.widthLeft.toFixed(1)}|${b.widthRight.toFixed(1)}|`
       + `${b.centreX0.toFixed(1)}|${b.centreWidth.toFixed(1)}|`
       + `${b.stacked ? 1 : 0}|${b.southpaw ? 1 : 0}|${corner.toFixed(1)}`;
     if (sig === this.vBandSig) return;
@@ -889,6 +1146,10 @@ export class MobileControls {
     // Screen-relative, to match the stylesheet's `left:`/`right:` rules.
     s.setProperty('--mc-bl', `${b.bottomLeft.toFixed(1)}px`);
     s.setProperty('--mc-br', `${b.bottomRight.toFixed(1)}px`);
+    s.setProperty('--mc-el', `${b.edgeLeft.toFixed(1)}px`);
+    s.setProperty('--mc-er', `${b.edgeRight.toFixed(1)}px`);
+    s.setProperty('--mc-wl', `${b.widthLeft.toFixed(1)}px`);
+    s.setProperty('--mc-wr', `${b.widthRight.toFixed(1)}px`);
     s.setProperty('--mc-cx0', `${b.centreX0.toFixed(1)}px`);
     s.setProperty('--mc-cx1', `${b.centreX1.toFixed(1)}px`);
     s.setProperty('--mc-cw', `${b.centreWidth.toFixed(1)}px`);
@@ -933,6 +1194,8 @@ export class MobileControls {
     s.addEventListener('pointerdown', (e: PointerEvent) => {
       e.preventDefault();
       this.lastTouchMs = now();
+      // A player who is already playing does not need to be told how.
+      if (this.elCoach !== null) this.dismissCoach(true);
       if (this.router.down(e.pointerId, e.clientX, e.clientY, this.lastTouchMs) !== 0) {
         try { s.setPointerCapture(e.pointerId); } catch { /* already gone */ }
       }
