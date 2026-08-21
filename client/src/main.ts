@@ -52,6 +52,7 @@ import {
 
 import { Game } from '@/game/game';
 import { AudioMixer, mountAudioSettings } from '@/audio/settings';
+import { Feature, isEnabled, setOverride } from '@shared/features';
 import { DEFAULT_PALETTE, MODE_PALETTES, applyModePalette, applyPalette } from '@/engine/palette';
 import {
   ModeRegistry,
@@ -697,6 +698,30 @@ addSelect('Crosshair', ['cross', 'dot', 'doom', 'dynamic'],
   () => settings.crosshair, (v) => { settings.crosshair = v as CrosshairStyle; });
 addToggle('Hit markers', () => settings.hitMarkers, (v) => { settings.hitMarkers = v; });
 
+
+
+/* Admin.
+ *
+ * Online multiplayer is built but not finished, so it ships gated and the mode tiles say
+ * "COMING SOON · 2026" instead of claiming a server that is not there. This switch opens the gate.
+ *
+ * It is a PRODUCT gate, not a security boundary — the override lives in localStorage and anyone
+ * with devtools can flip it. That is acceptable here because the worst case is a player enabling a
+ * mode that then finds no server and falls back to bots. Anything that grants rewards or spends
+ * money is gated server-side instead (server/src/entitlementGuard.ts against shared/src/trust.ts).
+ *
+ * Toggling reloads, because the mode tiles, their taglines and the transport choice are all read
+ * once at construction. A reload from the menu costs ~300 ms and is honest; re-plumbing every one
+ * of those to be live-reactive for a switch used a handful of times would not pay.
+ */
+addSection('Admin');
+addToggle('Online multiplayer',
+  () => isEnabled(Feature.ONLINE_MULTIPLAYER),
+  (on) => {
+    setOverride(Feature.ONLINE_MULTIPLAYER, on);
+    setOverride(Feature.SHARED_WORLDS, on);
+    location.reload();
+  });
 
 
 const resumeBtn = button('Resume', 'dc-primary', () => closePause());

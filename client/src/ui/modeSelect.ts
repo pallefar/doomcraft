@@ -22,6 +22,7 @@
  * injected once.
  */
 
+import { Feature, isEnabled, COMING_SOON_BADGE } from '@shared/features';
 import {
   MODE_MENU_ORDER,
   ModeId,
@@ -140,6 +141,8 @@ const CSS = `
 .dcm-save b{display:block;font-size:13px;color:var(--tile-accent);font-variant-numeric:tabular-nums;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dcm-save span{font-size:10.5px;color:#77726d;letter-spacing:.04em}
+.dcm-badge-soon{background:rgba(232,69,31,.16);border-color:#e8451f;color:#ffb9a4}
+.dcm-gated .dcm-art{opacity:.55}
 .dcm-badge{position:absolute;top:7px;right:7px;padding:2px 6px;border-radius:2px;
   background:rgba(4,4,6,.72);border:1px solid var(--dcm-line);
   font-size:9px;letter-spacing:.13em;color:#a9a39d}
@@ -309,6 +312,25 @@ const STEEL = 0x8b93a0;
 const BLUE = 0x3f7ec8;
 
 /** Per-mode thumbnails. Small scenes; each one says what the mode is. */
+/**
+ * Online multiplayer is built but not finished, and the live site is a static single-player build.
+ * Until the gate opens, a mode that needs a server must not advertise one — the tile said
+ * "Online arena, instant start" on a page with no server behind it, which was simply untrue.
+ * The mode still PLAYS, against bots, locally; only the online claim is withdrawn.
+ */
+function onlineGated(id: number): boolean {
+  if (isEnabled(Feature.ONLINE_MULTIPLAYER)) return false;
+  return id === ModeId.DEATHMATCH || id === ModeId.BUILDER;
+}
+
+/** Tagline that is true today, for a mode whose online half is not open yet. */
+function offlineTagline(id: number, original: string): string {
+  if (!onlineGated(id)) return original;
+  if (id === ModeId.DEATHMATCH) return 'Arena combat against bots';
+  if (id === ModeId.BUILDER) return 'Creative voxel worlds, on this device';
+  return original;
+}
+
 function artFor(mode: ModeId): string {
   const V: Voxel[] = [];
   switch (mode) {
@@ -522,13 +544,18 @@ export class ModeSelect {
     if (def.ribbon.length > 0) {
       tile.appendChild(el('div', 'dcm-ribbon', def.ribbon));
     }
-    if (def.badge.length > 0) {
+    const gated = onlineGated(def.id);
+    if (gated) {
+      const b = el('div', 'dcm-badge dcm-badge-soon', COMING_SOON_BADGE);
+      tile.appendChild(b);
+      tile.classList.add('dcm-gated');
+    } else if (def.badge.length > 0) {
       tile.appendChild(el('div', 'dcm-badge', def.badge));
     }
 
     const body = el('div', 'dcm-body');
     body.appendChild(el('div', 'dcm-name', def.name));
-    body.appendChild(el('div', 'dcm-tag', def.tagline));
+    body.appendChild(el('div', 'dcm-tag', offlineTagline(def.id, def.tagline)));
     const saveBox = el('div', 'dcm-save');
     const value = el('b', undefined, '—');
     const detail = el('span', undefined, '');
