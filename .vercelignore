@@ -1,0 +1,24 @@
+# Only the built client ships. Everything below is development apparatus and was
+# 1.7 GB of upload on the first attempt.
+node_modules
+.git
+dist
+client/dist
+server/dist
+shared/dist
+
+# NOTE: shared/src must NOT be ignored — the client bundle imports it via @shared.
+
+# Measurement apparatus — reference captures, screenshots, recordings
+ref
+shots
+progress/thumbs
+tools/.profile
+vendor
+
+# Server + tooling: not part of the static client
+server/.data
+tools
+docs
+*.md
+!README.md

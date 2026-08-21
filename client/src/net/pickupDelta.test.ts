@@ -1,10 +1,20 @@
 /**
- * INDEPENDENT VERIFICATION (verifier-authored, temporary).
+ * DOOMCRAFT — a pickup taken and respawned must reach EVERY client promptly.
  *
- * Two real NetClients on one real Room. A real player walks onto a real pickup;
- * the sim takes it, the room respawns it 22 s later. Both clients must see both
- * events promptly, and the respawn must NOT be carried only by the 3 s full
- * snapshot.
+ * The end-to-end half of the entity-delta change in `server/src/net.ts`. The
+ * server-side tests in `server/src/net.test.ts` reach into the sim and call
+ * `removeEntity` directly; this one does not touch the sim's entity API at all.
+ * A real player body is walked onto a real pickup, the sim's own overlap test
+ * takes it, and the room's own 22 s timer puts it back — with TWO real
+ * `NetClient`s attached, because a per-connection baseline is exactly the kind
+ * of state that can be right for one client and wrong for another.
+ *
+ * Two things are asserted that a size test would never catch:
+ *   - both clients stop drawing the taken pickup inside 200 ms, not at the next
+ *     3 s full snapshot;
+ *   - the respawn is carried by a DELTA snapshot. If it only ever arrived on
+ *     the periodic full, the delta encoder would be losing spawns and the 3 s
+ *     safety net would be hiding it.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -86,10 +96,6 @@ describe('VERIFY: a pickup taken and respawned reaches every client promptly', (
       }
     }
     expect(slot).toBeGreaterThanOrEqual(0);
-    console.log('status', nets.map((n) => n.status), 'clientEnts',
-      nets.map((n) => n.entities.filter((v) => v.active).length),
-      'simEnts', (() => { let c = 0; for (let e = 0; e < sim.entCapacity; e++) if (sim.entActive[e] === 1) c++; return c; })(),
-      'chunks', nets.map((n) => n.loadProgress));
     const id = sim.entId[slot];
     const px = sim.entX[slot], py = sim.entY[slot], pz = sim.entZ[slot];
 

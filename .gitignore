@@ -8,3 +8,4 @@ shots/
 
 # JsonFileStore writes here
 server/.data/
+.vercel

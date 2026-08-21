@@ -78,6 +78,10 @@ import {
 } from '@/hud/hud';
 import { MobileControls } from '@/hud/mobile';
 
+import { AudioEngine } from '@/audio/engine';
+import { SpatialAudio } from '@/audio/spatial';
+import { Sfx } from '@/audio/sfx';
+
 /* ------------------------------------------------------------------------ *
  * Constants
  * ------------------------------------------------------------------------ */
@@ -129,6 +133,18 @@ const DEATH_LOOK_Y = 0.70;
 const DEATH_WALL_PAD = 0.45;
 /** Seconds the body takes to fold onto the floor. */
 const DEATH_COLLAPSE = 0.45;
+
+/**
+ * Metres of travel between footsteps.
+ *
+ * A stride, not a period. Sprinting covers ground faster and therefore steps
+ * more often without a second timer, and the sprint stride is slightly LONGER
+ * because a running gait genuinely reaches further per step — using the same
+ * stride at a higher speed produces a machine-gun patter that reads as comic.
+ */
+const STEP_STRIDE_M = 2.1;
+const STEP_STRIDE_SPRINT_M = 2.45;
+const STEP_STRIDE_CROUCH_M = 1.5;
 
 const HURT_MAX = 0.85;
 const HURT_FADE_PER_SEC = 4.2;
@@ -203,6 +219,17 @@ export class Game {
   readonly sky: Skybox;
   readonly chunks: ChunkRenderer;
   readonly fx: Fx;
+  /**
+   * The audio stack.
+   *
+   * `audio` owns the context and the voice pool, `spatialAudio` turns a world
+   * point into pan/gain/occlusion, and `sfx` is the catalogue plus the verbs
+   * the rest of this class calls. No AudioContext exists until `unlockAudio`
+   * is called from a real user gesture — see `main.ts`.
+   */
+  readonly audio: AudioEngine;
+  readonly sfx: Sfx;
+  private readonly spatialAudio: SpatialAudio;
   readonly viewmodel: Viewmodel;
   readonly camera: PlayerCamera;
   readonly input: InputManager;
@@ -281,6 +308,17 @@ export class Game {
   private lastFrameMs = 0;
   private timeSeconds = 0;
   private wasOnGround = true;
+  /**
+   * Footstep cadence.
+   *
+   * Steps are driven by DISTANCE TRAVELLED, not by a timer: a timer makes a
+   * crouch-walking player and a sprinting player step at the same rate, which
+   * is the single most obvious way for footsteps to sound wrong. `stepAccum`
+   * integrates horizontal speed and fires a step every `STEP_STRIDE_M`.
+   */
+  private stepAccum = 0;
+  private lastSpin = 0;
+  private wasFalling = false;
   private lastEditMs = -1e9;
   private buildMode = false;
   private buildBlockIndex = 0;
@@ -429,6 +467,22 @@ export class Game {
       })
       : null;
 
+    /* ---- audio ------------------------------------------------------- *
+     * Constructed, not started. `AudioEngine` builds no AudioContext until
+     * `unlockAudio()` runs inside a user gesture, because a context created at
+     * boot on iOS or Chrome comes up `suspended` and never recovers — the game
+     * would be silent with nothing in the console to say why.
+     *
+     * The voice cap is halved on touch devices: a phone's audio thread shares a
+     * core with the renderer, and past a dozen simultaneous voices nothing is
+     * individually audible anyway, so the cap costs nothing and buys headroom. */
+    this.audio = new AudioEngine({ maxVoices: this.touchMode ? 12 : 24 });
+    this.spatialAudio = new SpatialAudio();
+    this.spatialAudio.setWorld(this.sampleBlock, blockingSolid);
+    this.spatialAudio.setFogFar(this.materials.fogFarDistance);
+    this.sfx = new Sfx(this.audio, this.spatialAudio);
+    this.audio.applySettings(this.settings);
+
     /* ---- weapons ----------------------------------------------------- */
     this.weapons = new WeaponRuntime(this.buildWeaponFx(), this.camera, undefined);
     this.weapons.resetLoadout(ALL_WEAPONS_MASK);   // the local room grants the same set
@@ -527,6 +581,7 @@ export class Game {
     this.characters.dispose();
     this.demons?.dispose();
     this.chunks.dispose();
+    this.audio.dispose();
     this.fx.dispose();
     this.viewmodel.dispose();
     this.sky.dispose();
@@ -561,11 +616,45 @@ export class Game {
       this.renderDistance = rd;
       this.chunks.setRenderDistance(rd);
       this.materials.setFogFromRenderDistance(rd);
+      // The audio horizon follows the fog. A sound arriving clearly from a
+      // place the renderer has hidden behind fog is a bug you hear before you
+      // can explain it, so the two distances are never allowed to diverge.
+      this.spatialAudio.setFogFar(this.materials.fogFarDistance);
     }
 
     this.hud.setCrosshair(s.crosshair, s.crosshairColor);
     this.hudState.showFps = s.fpsCounter;
+    this.audio.applySettings(s);
   }
+
+  /* -------------------------------------------------------------------- *
+   * Audio lifecycle
+   * -------------------------------------------------------------------- */
+
+  /**
+   * Start (or resume) audio. MUST be called from inside a user-gesture handler.
+   *
+   * Idempotent and cheap after the first success, so `main.ts` can call it from
+   * every plausible first gesture — click, touch, keydown — without having to
+   * work out which one the player will actually use. That matters more than it
+   * looks: get this wrong and the game is silent on iOS and on Chrome with no
+   * error anywhere to explain it.
+   *
+   * The catalogue bake is queued here rather than run here; `render()` spends
+   * it a few milliseconds per frame so the click that starts the match does not
+   * also stall it.
+   */
+  unlockAudio(): boolean {
+    const ok = this.audio.unlock();
+    if (ok) {
+      this.audio.applySettings(this.settings);
+      this.sfx.beginBake();
+    }
+    return ok;
+  }
+
+  /** Tab visibility. Suspends the context so a hidden tab costs nothing. */
+  setAudioHidden(hidden: boolean): void { this.audio.setTabHidden(hidden); }
 
   /**
    * The surface atlas escape hatch, in one place.
@@ -673,6 +762,10 @@ export class Game {
       // were cut to a third, and a Horde wave turned the screen into one flat
       // orange sheet. Rising per hit is right; reaching a lens filter is not.
       this.hurtFlash = Math.min(HURT_MAX, this.hurtFlash + 0.14 + e.amount / 260);
+      // Fatal damage is the death cry's job, not the hurt cry's — playing both
+      // on the killing blow gives a doubled voice on the one event that most
+      // needs to be clean.
+      if ((e.flags & DMG_FATAL) === 0) this.sfx.hurt(e.amount);
     } else if (e.attackerId === me) {
       this.hud.hitMarker((e.flags & DMG_HEADSHOT) !== 0, (e.flags & DMG_FATAL) !== 0, e.amount);
     }
@@ -684,6 +777,7 @@ export class Game {
     const weapon = getWeapon(e.weaponId).name;
     this.hud.pushFeed(`${killer}  ›${weapon}›  ${victim}`, 'k');
     if (e.victimId === this.net.playerId) {
+      this.sfx.death();
       this.events.onDeath?.(killer);
       this.hudState.status = 'YOU DIED';
       this.hudState.subStatus = 'Click or press Space to respawn';
@@ -710,6 +804,10 @@ export class Game {
     return {
       fire: (weaponId: number): void => {
         this.viewmodel.fire(weaponId);
+        // The gunshot rides the SAME hook as the viewmodel kick, so the sound
+        // and the recoil can never drift apart by a frame — which is exactly
+        // the desync `ref/BAR.md` calls out as "no audio punch" in the bar.
+        this.sfx.weaponFire(weaponId, this.weapons.spin);
       },
       muzzleFlash: (weaponId, x, y, z, dx, dy, dz): void => {
         // Out of the BARREL, not out of the crosshair. `muzzleWorld` returns the
@@ -743,13 +841,18 @@ export class Game {
         // crack out of the struck face, so a wall that has been shot at looks
         // shot at rather than merely marked.
         this.fx.impact(x, y, z, nx, ny, nz, minimapColor(blockId), 1, blockId);
+        // Positioned, and gated: a shotgun reports seven of these in one frame
+        // and they must collapse to one impact rather than seven stacked copies.
+        this.sfx.impact(x, y, z, blockId);
       },
       blockStrike: (x, y, z, nx, ny, nz, blockId, _weaponId, power): void => {
         this.fx.blockStrike(x, y, z, nx, ny, nz, blockId, power);
         this.viewmodel.bite(0.35 + 0.5 * power);
+        this.sfx.impact(x, y, z, blockId, 0.6 + 0.4 * power);
       },
       fleshImpact: (x, y, z, nx, ny, nz, _targetId, headshot): void => {
         this.fx.blood(x, y, z, -nx, -ny, -nz, headshot ? 1.6 : 1);
+        this.sfx.flesh(x, y, z, headshot);
       },
       hitMarker: (damage, headshot, killed): void => {
         // The marker scales with damage, so a graze and a slug do not read the
@@ -761,10 +864,88 @@ export class Game {
         // A kill is a different jolt, not a bigger one — see Viewmodel.hitConfirm.
         this.viewmodel.hitConfirm(killed ? 1 : clampf(0.22 + damage / 90, 0, 1), killed);
       },
-      dryFire: (): void => { /* the click is audio-only; no visual */ },
-      reloadStart: (weaponId, ms): void => { this.viewmodel.reload(ms); void weaponId; },
-      switchStart: (_from, to): void => { this.viewmodel.setWeapon(to); },
+      dryFire: (weaponId): void => { this.sfx.weaponDry(weaponId); },
+      reloadStart: (weaponId, ms): void => {
+        this.viewmodel.reload(ms);
+        this.sfx.weaponReload(weaponId);
+      },
+      // Shell-by-shell weapons (the shotgun) get one click PER SHELL, which is
+      // what makes a partial reload audibly different from a full one.
+      reloadShell: (weaponId): void => { this.sfx.weaponReload(weaponId); },
+      switchStart: (_from, to): void => {
+        this.viewmodel.setWeapon(to);
+        this.sfx.weaponSwitch(to);
+      },
+      // The chaingun's barrels coming up to speed. Fired once on the way up,
+      // not every frame the spin value changes.
+      spin: (weaponId, value): void => {
+        if (weaponId === WeaponId.CHAINGUN && value > 0.04 && this.lastSpin <= 0.04) {
+          this.sfx.chaingunSpin();
+        }
+        this.lastSpin = value;
+      },
     };
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Movement audio
+   * -------------------------------------------------------------------- */
+
+  /**
+   * Footsteps, jumps and landings.
+   *
+   * Steps are driven by DISTANCE, not by a clock. A timer gives a
+   * crouch-walking player and a sprinting player the same cadence, which is the
+   * most obvious way for footsteps to sound wrong; integrating horizontal speed
+   * and firing every `STEP_STRIDE_M` means the cadence falls out of the
+   * movement code for free and stays correct for every speed the player can
+   * reach, including the ones added later.
+   *
+   * The material comes from the block BELOW the feet, sampled once per step
+   * rather than once per frame — one voxel lookup every ~0.4 s is free, and
+   * sampling per frame would be 60x the cost for an answer that cannot change
+   * faster than a stride.
+   */
+  private updateMovementAudio(dt: number, d: typeof this.driver): void {
+    if (!this.playing || this.net.local.dead) { this.stepAccum = 0; return; }
+
+    /* --- jump: the frame the feet leave a surface with upward velocity --- */
+    if (!d.onGround && this.wasFalling === false && d.vel[1] > 0.5) {
+      this.sfx.jump();
+      this.wasFalling = true;
+    }
+    if (d.onGround) this.wasFalling = false;
+
+    /* --- landing --- */
+    if (d.justLanded) {
+      // `landImpact` is the speed the body arrived at, which is exactly the
+      // right input: a step off a kerb and a four-storey drop are the same
+      // EVENT and must not be the same SOUND.
+      this.sfx.land(d.landImpactSpeed);
+      // Reset the stride so the first step after a landing is a full stride
+      // away rather than firing immediately on top of the landing thump.
+      this.stepAccum = 0;
+      return;
+    }
+
+    /* --- footsteps --- */
+    if (!d.onGround) { this.stepAccum = 0; return; }
+    const speed = d.horizontalSpeed;
+    if (speed < 0.6) { this.stepAccum = 0; return; }
+
+    this.stepAccum += speed * dt;
+    const stride = d.crouching ? STEP_STRIDE_CROUCH_M
+      : d.sprinting ? STEP_STRIDE_SPRINT_M : STEP_STRIDE_M;
+    if (this.stepAccum < stride) return;
+    this.stepAccum -= stride;
+
+    // One block below the feet. `pos` is feet centre, so a small bias keeps the
+    // sample inside the block being stood on rather than on the boundary.
+    const bx = Math.floor(d.pos[0]);
+    const by = Math.floor(d.pos[1] - 0.2);
+    const bz = Math.floor(d.pos[2]);
+    const below = this.sampleBlock(bx, by, bz);
+    this.sfx.footstep(below, d.sprinting && !d.crouching);
   }
 
   /* -------------------------------------------------------------------- *
@@ -845,6 +1026,7 @@ export class Game {
       nx = this.hit.nx; ny = this.hit.ny; nz = this.hit.nz;
     }
     this.fx.explosionFor(weaponId, x, y, z, nx, ny, nz);
+    this.sfx.explosion(x, y, z, radius);
 
     const dx = x - this.camera.eyeX;
     const dy = y - this.camera.eyeY;
@@ -1029,6 +1211,7 @@ export class Game {
         );
         this.camera.addShake(0.02, 60, 22);
         this.viewmodel.fire();
+        this.sfx.blockBreak(cx, cy, cz, id);
       }
       return;
     }
@@ -1045,6 +1228,7 @@ export class Game {
       this.chunks.setBlock(px, py, pz, block);
       this.fx.impact(px + 0.5, py + 0.5, pz + 0.5, 0, 1, 0, minimapColor(block), 0.4);
       this.viewmodel.fire();
+      this.sfx.blockPlace(px + 0.5, py + 0.5, pz + 0.5);
     }
   }
 
@@ -1077,6 +1261,25 @@ export class Game {
     d.justLanded = d.onGround && !this.wasOnGround;
     d.landImpactSpeed = net.predicted.landImpact;
     this.wasOnGround = d.onGround;
+
+    /* --- audio ---------------------------------------------------------- *
+     * Everything the audio layer needs per frame, in one place and in this
+     * order: keep baking if there is anything left, move the listener, then
+     * emit the movement sounds that depend on the driver state just computed.
+     */
+    if (this.audio.ready) {
+      // A slice of synthesis, not the whole catalogue. See `Sfx.bakeStep`.
+      if (!this.sfx.bakeComplete) this.sfx.bakeStep();
+
+      // The listener is the EYE and the VIEW yaw — not the feet and not the
+      // body yaw. Panning off the body would make sounds swing when the
+      // player turns their head while strafing, which reads as a bug.
+      this.spatialAudio.setListener(
+        this.camera.eyeX, this.camera.eyeY, this.camera.eyeZ, this.camera.viewYaw,
+      );
+      this.spatialAudio.beginFrame(this.timeSeconds * 1000);
+      this.updateMovementAudio(dt, d);
+    }
 
     if (this.ready && this.playing && net.local.dead) {
       this.updateDeathCamera(dt, net);

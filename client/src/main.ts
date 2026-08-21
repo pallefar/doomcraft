@@ -987,6 +987,31 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+/* ------------------------------------------------------------------------ *
+ * Audio unlock
+ *
+ * Browsers will not let a page make noise until the user has interacted with
+ * it. An AudioContext constructed outside a gesture comes up `suspended` on
+ * Chrome and on iOS Safari and never starts on its own, so a game that builds
+ * one at boot is permanently silent with nothing in the console to say why.
+ *
+ * So: no context exists until one of these fires. All three input families are
+ * covered because we cannot know which one the player will use first — a
+ * desktop player clicks, a phone player touches, and a player who tabs in and
+ * presses Space to start would otherwise reach the match before audio existed.
+ *
+ * Registered in the CAPTURE phase so a handler that stops propagation (the
+ * pause menu, the avatar editor) cannot swallow the unlock, and `once` is NOT
+ * used: iOS can drop a context again when the app is backgrounded through the
+ * app switcher, and `unlockAudio()` is idempotent and cheap, so letting every
+ * gesture re-assert it is the robust choice rather than a wasteful one.
+ * ------------------------------------------------------------------------ */
+
+const unlockAudio = (): void => { game.unlockAudio(); };
+window.addEventListener('pointerdown', unlockAudio, { capture: true });
+window.addEventListener('touchstart', unlockAudio, { capture: true, passive: true });
+window.addEventListener('keydown', unlockAudio, { capture: true });
+
 // Losing pointer lock (alt-tab, Esc) means the player is no longer driving.
 document.addEventListener('pointerlockchange', () => {
   if (autoPauseSuppressed) return;
@@ -1200,8 +1225,13 @@ raf = requestAnimationFrame(frame);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     game.net.keepaliveTick(true);
+    // A backgrounded tab that keeps an AudioContext running keeps the audio
+    // thread and its timers alive for nothing, and on mobile it is a reason
+    // for the OS to kill the page. Suspend it and cut the live voices.
+    game.setAudioHidden(true);
     return;
   }
+  game.setAudioHidden(false);
   game.net.resumeFromBackground();
   // The frame clock must not see the whole absence as one delta.
   lastFrameMs = 0;
@@ -1327,6 +1357,17 @@ window.addEventListener('pagehide', () => {
     const k = game.pixelsPerRadian;
     return { x: -out.yaw * k, y: -out.pitch * k, dist: out.dist };
   },
+  /** Voice-pool and bake telemetry, for `tools/audio-bench.mjs`. */
+  audioStats(): Record<string, number | string | boolean> {
+    return { ...game.audio.stats(), bakeProgress: +game.sfx.bakeProgress.toFixed(3) };
+  },
+  /**
+   * Bench hook: keep every scheduling call and every voice allocation, but
+   * synthesise nothing. This is what makes the A/B in `tools/audio-bench.mjs`
+   * honest — it isolates the MAIN-THREAD cost of the audio layer from the
+   * cost of the audio thread actually making sound.
+   */
+  audioSilence(on: boolean): void { game.audio.setSilent(on); },
   stats(): Record<string, number | string | boolean> {
     return {
       status: game.net.status,
@@ -1341,6 +1382,7 @@ window.addEventListener('pagehide', () => {
       health: game.net.local.health,
       weapon: game.net.local.weapon,
       medianMs: game.renderer.stats.medianMs(),
+      audioVoices: game.audio.activeVoices(),
       onePctLowFps: game.renderer.stats.onePercentLowFps(),
       charDraws: game.characterStats().draws,
       charInstances: game.characterStats().instances,
