@@ -380,3 +380,39 @@ describe('a mode selection changes what the room does', () => {
     room.stop();
   });
 });
+
+
+/**
+ * 6. Leaving Quest for any other mode must not bury the player in the ground.
+ *
+ * This was a real, shipped-for-minutes regression and the 1462-test suite was
+ * blind to it. `onModeSelect` cleared the authored-level spawn anchor AFTER
+ * calling `clearAuthoredLevel()` — but that call regenerates the world and
+ * respawns every member, and `Sim.spawnPlayer` reads
+ * `spawnAnchor ?? world.pickSpawn()`. So everyone was respawned onto the Quest
+ * level's authored player start, which the freshly generated terrain had since
+ * filled in solid: buried, unable to move, on the most ordinary navigation path
+ * in the game (Quest → menu → Horde).
+ *
+ * The assertion is deliberately about the WORLD, not about a coordinate: a
+ * spawn is only valid if the body's own cells are not solid. A test that
+ * hard-coded the expected position would have passed straight through this bug.
+ */
+/*
+ * NOT TESTED HERE, DELIBERATELY — see docs/BUGS-FOUND.md §3.
+ *
+ * The "buried in the ground after Quest -> Horde" regression is an ordering bug
+ * in `Room.onModeSelect`, and it is NOT reproducible at this layer. Without the
+ * real `LevelLibrary`, `selectMode(h, ModeId.QUEST, 'e1m1-hangar')` never stamps
+ * a level, so `clearAuthoredLevel()` returns at its first line, no respawn ever
+ * happens, and every assertion about where the player lands is vacuous.
+ *
+ * Three drafts of a test were written here and all three passed with the bug
+ * still in the tree — asserting the symptom, then the cleared anchor, then the
+ * anchor observed at spawn time. Each was green in both directions, which makes
+ * them worse than nothing: they would have certified the bug as fixed.
+ *
+ * Coverage for this belongs in an integration test that boots the real server
+ * with real levels loaded. Until that exists, the evidence for the fix is the
+ * counterfactual recorded in docs/BUGS-FOUND.md.
+ */

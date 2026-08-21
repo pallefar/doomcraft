@@ -35,11 +35,16 @@
  *
  * `game.ts` has its own crude build path bound to the mouse (`stepEdits`), and
  * it is not this mode's file to change. Rather than double-place every click,
- * the mode *takes the bindings*: `InputManager.setBinding(action, '')` removes
- * a code from the dispatch map, and the original strings are restored through
- * the `ModeScope` ledger on exit. Every button this mode wants is then read
- * from raw DOM events, which is also what makes the repeat cadence in
+ * the mode *takes the actions*: `InputManager.setActionTaken(action, true)`
+ * makes an action read released from every source at once, and the `ModeScope`
+ * ledger hands it back on exit. Every button this mode wants is then read from
+ * raw DOM events, which is also what makes the repeat cadence in
  * `placement.ts` exact rather than quantised to the 60 Hz fixed step.
+ *
+ * It used to blank the binding instead. That only ever cleared the PRIMARY
+ * layer, and once a control scheme could hang a second key on an action — the
+ * arrows move under Modern — a frozen body would have walked around under the
+ * detached camera on the arrow keys.
  *
  * ## The free camera, honestly
  *
@@ -54,7 +59,7 @@
  *
  * The body does **not** fly: the server owns it, and a client-authoritative fly
  * would be reconciled into the floor within two ticks. So while the camera is
- * detached the body stands still (its movement bindings are taken too) and the
+ * detached the body stands still (its movement actions are taken too) and the
  * reach test still runs from the body's eye with the server's exact rule — you
  * can push the camera through a wall and build inside it, and the ghost turns
  * red the moment you drift past what the server would accept. Real flight is a

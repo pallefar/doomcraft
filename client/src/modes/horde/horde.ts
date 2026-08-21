@@ -54,8 +54,9 @@
  *
  * `game.ts` owns a crude build path on the right mouse button that places
  * `PLACEABLE_BLOCKS[private index]`, and it is not this mode's file to change.
- * Horde needs the *material* to be the decision, so it takes the binding —
- * `InputManager.setBinding(action, '')`, restored through the `ModeScope`
+ * Horde needs the *material* to be the decision, so it takes the action —
+ * `InputManager.setActionTaken(action, true)`, which switches it off at every
+ * source rather than at one binding layer, restored through the `ModeScope`
  * ledger on exit — and reads the button from raw DOM events, exactly as
  * `builder.ts` does and for the same reason. It takes only what it must:
  * AltFire and BuildMode always, Fire and the weapon wheel only while the

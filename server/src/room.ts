@@ -742,12 +742,20 @@ export class Room implements NetHost {
       if (!same) this.clearAuthoredLevel();
       stamped = this.stampAuthoredLevel(plan.levelId, same);
     } else {
+      // Only an authored level pins the spawn. Everything else spawns on the
+      // arena, so a Quest run must not leave its start behind for Deathmatch.
+      //
+      // THIS MUST HAPPEN BEFORE clearAuthoredLevel(), NOT AFTER IT. That call
+      // regenerates the world AND respawns every member, and Sim.spawnPlayer
+      // reads `spawnAnchor ?? world.pickSpawn()`. With the anchor still holding
+      // the Quest level's authored player start, everyone was respawned onto a
+      // coordinate the freshly generated terrain had filled in solid — buried
+      // in the ground, unable to move, on the ordinary Quest → menu → Horde
+      // path. Clearing it first sends spawnPlayer to pickSpawn as intended.
+      this.sim.spawnAnchor = null;
       this.clearAuthoredLevel();
     }
 
-    // Only an authored level pins the spawn. Everything else spawns on the
-    // arena, so a Quest run must not leave its start behind for Deathmatch.
-    if (plan.modeId !== ModeId.QUEST) this.sim.spawnAnchor = null;
     this.sim.fallDamageEnabled = plan.fallDamage;
     this.sim.hazardsEnabled = plan.hazards;
     this.sanctuary = !plan.runMonsters && !plan.allowPvp;

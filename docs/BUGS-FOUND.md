@@ -26,3 +26,34 @@ creative from executing in the game's origin.
 
 **Fix:** a real CSP before any third-party content ships, with the creative sandbox as a separate
 origin or a sandboxed iframe.
+
+---
+
+## 3. Buried in the ground after leaving Quest — FIXED, but not unit-testable
+
+**Symptom.** Play Quest, return to the menu, start Horde / Deathmatch / Builder: you spawn inside
+solid ground and cannot move, ever. Reachable from the most ordinary navigation path in the game.
+This is very likely what the owner hit when they reported *"seemed I was going thriugh walls"*.
+
+**Mechanism.** `server/src/room.ts`, `onModeSelect`. `clearAuthoredLevel()` regenerates the world
+**and respawns every member**, and `Sim.spawnPlayer` reads `spawnAnchor ?? world.pickSpawn()`. The
+anchor was cleared five lines *after* that call, so everyone was respawned onto the Quest level's
+authored player start — a coordinate the freshly regenerated terrain had filled in solid.
+
+**Fix.** Clear `sim.spawnAnchor` *before* `clearAuthoredLevel()`. One reorder.
+
+**Evidence, since there is no unit test.** Measured on the real Room:
+`Quest (16.5, 8, 10.5) buried=false → Deathmatch (16.5, 8, 10.5) buried=TRUE → Builder buried=TRUE`,
+against a control of a fresh Deathmatch with no preceding Quest at `(41.5, 34, 94.5) buried=false`.
+In the live browser: stuck at `(16.5, 8, 11.3)` inside block id 4, 0 m travelled in 9 s of held
+sprint, 0 of 72 headings with any runway. With the reorder: `Quest → Deathmatch (95.5, 29, -29.5)
+buried=false`.
+
+**Why there is no unit test, stated plainly.** Without the real `LevelLibrary`, the room-level test
+harness never stamps a level, so `clearAuthoredLevel()` early-returns and nothing is respawned.
+Three test drafts were written and all three passed **with the bug still in the tree** — asserting
+the symptom, then the cleared anchor, then the anchor observed at spawn time. A test that is green
+in both directions is worse than no test: it would certify the bug as fixed. They were removed.
+
+**Owed:** an integration test that boots the real server with levels loaded and walks
+Quest → menu → Horde, asserting the body's own cells are not solid.

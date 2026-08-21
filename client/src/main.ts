@@ -891,10 +891,15 @@ addSelect('Control scheme', [...CONTROL_SCHEMES],
 const schemeNote = el('p', 'dc-note');
 setGrid.appendChild(schemeNote);
 function refreshSchemeNote(): void {
-  schemeNote.innerHTML = `${SCHEME_NOTES[settings.controlScheme]}`
-    + ' &nbsp;·&nbsp; Click a key to rebind, <b>Esc</b> to cancel, right-click to clear.';
+  schemeNote.textContent = SCHEME_NOTES[settings.controlScheme];
 }
 refreshSchemeNote();
+
+const keyNote = el('p', 'dc-note');
+keyNote.innerHTML = 'Left column is the <b>primary</b> key — the same under both schemes.'
+  + ' Right is the <b>second</b> key, the one the scheme sets.'
+  + ' Click either to rebind, <b>Esc</b> to cancel, right-click to clear.';
+setGrid.appendChild(keyNote);
 
 /**
  * One row per action: the primary key, then the key the scheme adds.

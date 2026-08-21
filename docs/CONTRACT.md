@@ -182,14 +182,59 @@ then armour absorbs `ARMOR_ABSORB` of it while armour remains.
 ### Input
 
 ```ts
-enum InputAction { MoveForward='moveForward', MoveBack, MoveLeft, MoveRight, Jump, Crouch,
+enum InputAction { MoveForward='moveForward', MoveBack, MoveLeft, MoveRight,
+  TurnLeft, TurnRight, StrafeMod, Jump, Crouch,
   Sprint, Fire, AltFire, Reload, Use, Melee, BuildMode, NextWeapon, PrevWeapon,
   Slot1..Slot7, Chat, Scoreboard, Map, Menu }
 
-DEFAULT_KEYBINDS: Readonly<Record<InputAction, string>>
+DEFAULT_KEYBINDS: Readonly<Record<InputAction, string>>          // PRIMARY layer
+SCHEME_ALT_BINDINGS: Readonly<Record<ControlScheme, PartialBindings>>   // ALT layer
 ```
 Binding values are `KeyboardEvent.code` (`'KeyW'`), or `'Mouse0' | 'Mouse1' | 'Mouse2'`,
 or `'WheelUp' | 'WheelDown'`.
+
+**Two layers.** `DEFAULT_KEYBINDS` is the primary map and is IDENTICAL under both control
+schemes — WASD and the mouse never move. A scheme owns only the second layer, so switching
+one can never strand a player. A code is exclusive *within* a layer but may appear once in
+each: under Classic, `Space` is `Jump` on the primary layer and DOOM's `use` on the alt one,
+and pressing it does both.
+
+**Control schemes** (`shared/src/controls.ts`), `GameSettings.controlScheme`:
+
+| | `modern` (default) | `classic` |
+| --- | --- | --- |
+| Arrow Up / Down | move forward / back | move forward / back |
+| Arrow Left / Right | strafe | **turn** |
+| `,` / `.` | — | strafe left / right |
+| Left Alt | — | strafe modifier: turn keys strafe while held |
+| Left Ctrl | — | fire |
+| Space | jump | jump **and** use |
+| Right Shift | run | run |
+
+Every number in the Classic column is DOOM 1993's, read out of id Software's released
+`linuxdoom-1.10` (`m_misc.c` defaults, `g_game.c` `G_BuildTiccmd`, `p_user.c`), not from memory.
+
+**Keyboard turning** — `InputManager.turnDelta(dt)` returns radians of yaw and the camera
+applies them; nothing about a turn key reaches the wire. Two stages, no ramp between them,
+straight off `angleturn[3] = {640, 1280, 320}` at 35 tics/s with `SLOWTURNTICS = 6`:
+
+```ts
+TURN_RATE_SLOW  =  61.523 deg/s    // the first 143 ms of any turn
+TURN_RATE_WALK  = 123.047 deg/s
+TURN_RATE_RUN   = 246.094 deg/s    // run doubles the turn as well as the legs
+TURN_ACCEL_SECONDS = 5 / 35        // `turnheld` is bumped BEFORE the compare, so 5 tics
+```
+
+**Rebinding across a scheme switch** — `resolveBindings(scheme, custom)` owns the rule:
+*a rebind pins its row; switching schemes rewrites only the rows you never touched.* Pinned
+rows live on `STORAGE_KEYS.bindings` as `{primary,alt}`, separate from the settings blob;
+"Reset controls" drops the pins. On a collision inside a layer, the pin wins and the
+scheme's row is the one that loses its key.
+
+**Taking an action from the player** — `InputManager.setActionTaken(action, on)`, not a
+blanked binding. Blanking clears one layer only; the mask switches the action off at every
+source (both key layers, the gamepad, the touch buttons). Builder's no-clip camera and
+Horde's fortify cursor both go through it.
 
 `MOUSE_RADIANS_PER_PIXEL = 0.0022`, `TOUCH_RADIANS_PER_PIXEL = 0.0042`,
 `SENSITIVITY_MIN = 0.1`, `SENSITIVITY_MAX = 5.0`, `PITCH_LIMIT = PI/2 - 0.001`.
@@ -219,6 +264,7 @@ SAVE_VERSION = 1
 type QualityPreset = 'low' | 'medium' | 'high'
 type CrosshairStyle = 'cross' | 'dot' | 'doom' | 'dynamic'
 type TouchLayout = 'right' | 'left'
+type ControlScheme = 'modern' | 'classic'
 
 interface GameSettings {
   version: number; fov: number; sensitivity: number; touchSensitivity: number; invertY: boolean;
@@ -226,7 +272,8 @@ interface GameSettings {
   ao: boolean; fog: boolean; viewBob: boolean; screenShake: number; fpsCounter: boolean;
   crosshair: CrosshairStyle; crosshairColor: number; hitMarkers: boolean;
   masterVolume: number; sfxVolume: number; musicVolume: number;
-  autoSprint: boolean; toggleCrouch: boolean; touchLayout: TouchLayout; vibration: boolean;
+  autoSprint: boolean; toggleCrouch: boolean; controlScheme: ControlScheme;
+  touchLayout: TouchLayout; vibration: boolean;
   showAds: boolean;
 }
 DEFAULT_SETTINGS: Readonly<GameSettings>
