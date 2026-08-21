@@ -1443,6 +1443,10 @@ const MAX_KICK_OFFSET = 0.24;
 const MAX_KICK_ANGLE = 0.30;
 const MAX_PARTS = 3;
 
+/** Hit-confirm brightness pop: how much, and how fast it bleeds off (1/s). */
+const HIT_GLOW_GAIN = 0.30;
+const HIT_GLOW_DECAY = 7.5;
+
 /**
  * A viewmodel drawn at the world FOV foreshortens a half-metre gun into a stack
  * of squares — that was the old model's real problem, not its box count.
@@ -1567,6 +1571,8 @@ export class Viewmodel implements OverlayPass {
   private rev = 0;
   private core = 1;
   private bright = 1;
+  /** 0..1 "that shot landed", decaying. Drives the hit jolt's brightness pop. */
+  private hitGlow = 0;
 
   constructor(opts: ViewmodelOptions = {}) {
     this.worldFov = opts.fov ?? 68;
@@ -1831,6 +1837,36 @@ export class Viewmodel implements OverlayPass {
   }
 
   /**
+   * The shot connected. This is the HANDS' share of the hit read.
+   *
+   * Kick tells you a shot left the barrel; it fires identically whether you hit
+   * a demon or the sky, which is precisely why the bar's static viewmodel and a
+   * kicking one both fail the question "which shot felt like it hit something".
+   * So a connect adds a second, different impulse: short, higher frequency, and
+   * pushing the muzzle FORWARD into the target rather than back into the
+   * shoulder, plus a roll snap and a brief brightness pop on the solid.
+   *
+   * It rides on the same spring as the fire kick, so it never fights it — a
+   * miss is the kick alone and a hit is the kick with a bite in it.
+   *
+   * `strength` is 0..1; a kill is 1.
+   */
+  hitConfirm(strength = 0.5): void {
+    if (this.disposed || !this.enabled) return;
+    const s = clamp(strength, 0, 1) * this.motionScale;
+    if (s <= 0) return;
+    // Forward (negative z is away from the player) and a touch up.
+    this.vz -= 0.30 * s;
+    this.vy += 0.16 * s;
+    // Nose dip then recover, and a roll opposite the last kick so two shots in
+    // a row do not stack into one lean.
+    this.wx -= 0.85 * s;
+    this.wz += 0.55 * s * this.kickSide * this.handSign;
+    const glow = 0.35 + 0.65 * s;
+    if (glow > this.hitGlow) this.hitGlow = glow;
+  }
+
+  /**
    * Play the reload for `ms`. Shell-by-shell weapons (`reloadShellMs > 0`) run
    * until the game says they are done, since the shooter can break off early.
    */
@@ -1847,6 +1883,7 @@ export class Viewmodel implements OverlayPass {
     this.enabled = on;
     this.root.visible = on;
     if (!on) {
+      this.hitGlow = 0;
       this.brassMesh.visible = false;
       for (let i = 0; i < SHELL_SLOTS; i++) this.shellLife[i] = 0;
     }
@@ -1891,7 +1928,9 @@ export class Viewmodel implements OverlayPass {
    */
   setLightBalance(ambient: number, sun: number): void {
     this.bright = clamp(ambient * 0.72 + sun * 0.60, 0.55, 1.6);
-    this.uniforms.uBright.value = this.bright;
+    // update() re-derives uBright every frame including the hit pop; this write
+    // covers the case where the balance changes while the model is paused.
+    this.uniforms.uBright.value = this.bright * (1 + HIT_GLOW_GAIN * this.hitGlow);
     this.brassMat.uniforms.uBright.value = this.bright;
     this.material.uniformsNeedUpdate = true;
   }
@@ -2099,6 +2138,14 @@ export class Viewmodel implements OverlayPass {
     // emissive level: settles to 1, spikes on a shot, follows the reload charge
     this.core = expDecay(this.core, pose.core, 9, step);
     this.uniforms.uEmit.value = 1.25 * this.core;
+
+    // The hit pop. Deliberately small — it has to be felt at 60 fps over three
+    // frames, not seen as the gun turning into a lightbulb.
+    if (this.hitGlow > 0) {
+      this.hitGlow -= HIT_GLOW_DECAY * step;
+      if (this.hitGlow < 0) this.hitGlow = 0;
+    }
+    this.uniforms.uBright.value = this.bright * (1 + HIT_GLOW_GAIN * this.hitGlow);
 
     /* --- part transforms ------------------------------------------------ */
     const scale = scaleOf(shape);

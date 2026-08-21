@@ -50,6 +50,7 @@ import {
   BLOCK_LAYER,
   BLOCK_LIGHT,
   BLOCK_LIQUID,
+  BLOCK_OPAQUE,
   BLOCK_SOLID,
   BlockId,
   CHUNK_HEIGHT,
@@ -64,26 +65,39 @@ import {
  * Padded neighbourhood
  * ------------------------------------------------------------------------ */
 
-/** Padded neighbourhood dimensions: the chunk plus one voxel on every side. */
-export const PAD_X = CHUNK_SIZE_X + 2;   // 34
-export const PAD_Y = CHUNK_HEIGHT + 2;   // 66
-export const PAD_Z = CHUNK_SIZE_Z + 2;   // 34
-export const PAD_XZ = PAD_X * PAD_Z;     // 1156
-export const PAD_VOLUME = PAD_XZ * PAD_Y; // 76296
+/**
+ * Horizontal skirt, in blocks, around the chunk being meshed.
+ *
+ * Face culling and AO only ever need 1. This is 8 because of the light field
+ * below: light loses `LIGHT_ATTEN` per block, so a source can reach at most
+ * `LIGHT_REACH` blocks, and PAD_R > LIGHT_REACH means every source that could
+ * possibly light a voxel of this chunk is already inside the neighbourhood.
+ * That is what makes the baked lighting seam-free without a persistent
+ * world-space light volume — and 8 still only reads into the eight immediate
+ * neighbour chunks, which `hasAllNeighbours` already guarantees are loaded.
+ */
+export const PAD_R = 8;
+
+/** Padded neighbourhood dimensions: the chunk plus PAD_R on x/z and 1 on y. */
+export const PAD_X = CHUNK_SIZE_X + PAD_R * 2;   // 48
+export const PAD_Y = CHUNK_HEIGHT + 2;           // 66
+export const PAD_Z = CHUNK_SIZE_Z + PAD_R * 2;   // 48
+export const PAD_XZ = PAD_X * PAD_Z;             // 2304
+export const PAD_VOLUME = PAD_XZ * PAD_Y;        // 152064
 
 /** Strides of the padded array, per axis (0 = x, 1 = y, 2 = z). */
 const PAD_STRIDE_X = 1;
 const PAD_STRIDE_Y = PAD_XZ;
 const PAD_STRIDE_Z = PAD_X;
 /** Index of chunk-local (0,0,0) inside the padded array. */
-const PAD_ORIGIN = PAD_STRIDE_X + PAD_STRIDE_Y + PAD_STRIDE_Z;
+const PAD_ORIGIN = PAD_R * PAD_STRIDE_X + PAD_STRIDE_Y + PAD_R * PAD_STRIDE_Z;
 
 /**
  * Index into a padded neighbourhood. Accepts chunk-local coordinates in
- * [-1, 32] for x/z and [-1, 64] for y.
+ * [-PAD_R, 32 + PAD_R) for x/z and [-1, 64] for y.
  */
 export function padIndex(x: number, y: number, z: number): number {
-  return (x + 1) + (z + 1) * PAD_X + (y + 1) * PAD_XZ;
+  return (x + PAD_R) + (z + PAD_R) * PAD_X + (y + 1) * PAD_XZ;
 }
 
 /** Allocate a padded neighbourhood buffer. Callers should keep and reuse one. */
@@ -117,74 +131,39 @@ export function buildPadded(
   if (floorBlock !== 0) pad.fill(floorBlock, 0, PAD_XZ);
   if (centre === null) return false;
 
-  // Centre: x runs fastest in both layouts, so copy 32-byte runs.
-  for (let y = 0; y < CHUNK_HEIGHT; y++) {
-    const srcY = y << 10;
-    const dstY = PAD_ORIGIN + y * PAD_STRIDE_Y;
-    for (let z = 0; z < CHUNK_SIZE_Z; z++) {
-      let s = srcY + (z << 5);
-      let d = dstY + z * PAD_STRIDE_Z;
-      for (let x = 0; x < CHUNK_SIZE_X; x++) pad[d++] = centre[s++];
+  // One rectangle per member of the 3x3 chunk block, clipped to the pad. PAD_R
+  // is under one chunk wide, so the ring is exactly the eight neighbours.
+  for (let dz = -1; dz <= 1; dz++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const src = dx === 0 && dz === 0 ? centre : fetch(cx + dx, cz + dz);
+      if (src === null) continue;
+      copyChunkRect(pad, src, dx * CHUNK_SIZE_X, dz * CHUNK_SIZE_Z);
     }
   }
-
-  // -X / +X faces: one z-column per (y,z).
-  const nx = fetch(cx - 1, cz);
-  if (nx !== null) {
-    for (let y = 0; y < CHUNK_HEIGHT; y++) {
-      const srcY = y << 10;
-      const dstY = PAD_ORIGIN + y * PAD_STRIDE_Y - PAD_STRIDE_X;
-      for (let z = 0; z < CHUNK_SIZE_Z; z++) {
-        pad[dstY + z * PAD_STRIDE_Z] = nx[srcY + (z << 5) + (CHUNK_SIZE_X - 1)];
-      }
-    }
-  }
-  const px = fetch(cx + 1, cz);
-  if (px !== null) {
-    for (let y = 0; y < CHUNK_HEIGHT; y++) {
-      const srcY = y << 10;
-      const dstY = PAD_ORIGIN + y * PAD_STRIDE_Y + CHUNK_SIZE_X * PAD_STRIDE_X;
-      for (let z = 0; z < CHUNK_SIZE_Z; z++) {
-        pad[dstY + z * PAD_STRIDE_Z] = px[srcY + (z << 5)];
-      }
-    }
-  }
-
-  // -Z / +Z faces: one contiguous x-run per y.
-  const nz = fetch(cx, cz - 1);
-  if (nz !== null) {
-    for (let y = 0; y < CHUNK_HEIGHT; y++) {
-      let s = (y << 10) + ((CHUNK_SIZE_Z - 1) << 5);
-      let d = PAD_ORIGIN + y * PAD_STRIDE_Y - PAD_STRIDE_Z;
-      for (let x = 0; x < CHUNK_SIZE_X; x++) pad[d++] = nz[s++];
-    }
-  }
-  const pz = fetch(cx, cz + 1);
-  if (pz !== null) {
-    for (let y = 0; y < CHUNK_HEIGHT; y++) {
-      let s = y << 10;
-      let d = PAD_ORIGIN + y * PAD_STRIDE_Y + CHUNK_SIZE_Z * PAD_STRIDE_Z;
-      for (let x = 0; x < CHUNK_SIZE_X; x++) pad[d++] = pz[s++];
-    }
-  }
-
-  // Four diagonal columns — needed by AO, not by face culling.
-  fillCorner(pad, fetch(cx - 1, cz - 1), CHUNK_SIZE_X - 1, CHUNK_SIZE_Z - 1, -1, -1);
-  fillCorner(pad, fetch(cx + 1, cz - 1), 0, CHUNK_SIZE_Z - 1, CHUNK_SIZE_X, -1);
-  fillCorner(pad, fetch(cx - 1, cz + 1), CHUNK_SIZE_X - 1, 0, -1, CHUNK_SIZE_Z);
-  fillCorner(pad, fetch(cx + 1, cz + 1), 0, 0, CHUNK_SIZE_X, CHUNK_SIZE_Z);
   return true;
 }
 
-function fillCorner(
-  pad: Uint8Array, src: Uint8Array | null,
-  sx: number, sz: number, dx: number, dz: number,
-): void {
-  if (src === null) return;
-  const s0 = (sz << 5) + sx;
-  const d0 = padIndex(dx, 0, dz);
+/**
+ * Copy the part of one chunk that falls inside the pad. `(offX, offZ)` is that
+ * chunk's origin in the centre chunk's local coordinates.
+ */
+function copyChunkRect(pad: Uint8Array, src: Uint8Array, offX: number, offZ: number): void {
+  const lx0 = offX < -PAD_R ? -PAD_R : offX;
+  const lx1 = offX + CHUNK_SIZE_X > CHUNK_SIZE_X + PAD_R ? CHUNK_SIZE_X + PAD_R : offX + CHUNK_SIZE_X;
+  if (lx0 >= lx1) return;
+  const lz0 = offZ < -PAD_R ? -PAD_R : offZ;
+  const lz1 = offZ + CHUNK_SIZE_Z > CHUNK_SIZE_Z + PAD_R ? CHUNK_SIZE_Z + PAD_R : offZ + CHUNK_SIZE_Z;
+  if (lz0 >= lz1) return;
+
+  const run = lx1 - lx0;
   for (let y = 0; y < CHUNK_HEIGHT; y++) {
-    pad[d0 + y * PAD_STRIDE_Y] = src[(y << 10) + s0];
+    const srcY = y << 10;
+    const dstY = PAD_ORIGIN + y * PAD_STRIDE_Y;
+    for (let lz = lz0; lz < lz1; lz++) {
+      let s = srcY + ((lz - offZ) << 5) + (lx0 - offX);
+      let d = dstY + lz * PAD_STRIDE_Z + lx0;
+      for (let k = 0; k < run; k++) pad[d++] = src[s++];
+    }
   }
 }
 

@@ -616,6 +616,10 @@ export class Game {
       hitMarker: (_damage, headshot, killed): void => {
         if (this.settings.hitMarkers) this.hud.hitMarker(headshot, killed);
       },
+      hitConfirm: (x, y, z, nx, ny, nz, damage, headshot, killed): void => {
+        this.fx.hitConfirm(x, y, z, nx, ny, nz, damage, headshot, killed);
+        this.viewmodel.hitConfirm(killed ? 1 : clampf(0.22 + damage / 90, 0, 1));
+      },
       dryFire: (): void => { /* the click is audio-only; no visual */ },
       reloadStart: (weaponId, ms): void => { this.viewmodel.reload(ms); void weaponId; },
       switchStart: (_from, to): void => { this.viewmodel.setWeapon(to); },
@@ -882,7 +886,9 @@ export class Game {
     s.mag = w.magazine;
     s.reserve = w.reserveAmmo;
     s.owned = w.owned;
-    s.spread = w.spreadFraction;
+    // The TRUE cone, not just the heat: a crosshair that stays tight while you
+    // are airborne is telling the player something that is not so.
+    s.spread = w.liveSpreadFraction(!this.net.predicted.onGround, this.net.predicted.crouching);
     s.reloading = w.reloading;
     const def = getWeapon(w.current);
     s.reloadFrac = w.reloading && def.reloadMs > 0
@@ -1004,7 +1010,9 @@ export class Game {
     for (let i = 0; i < net.players.length; i++) {
       const p = net.players[i];
       if (!p.active || p.id === net.playerId) continue;
-      pushPlayerTarget(t, p.id, p.x, p.y, p.z, p.health > 0, p.team);
+      // Health goes in so WeaponRuntime can predict a KILL on the same frame
+      // as the shot instead of waiting for the server's DMG_FATAL.
+      pushPlayerTarget(t, p.id, p.x, p.y, p.z, p.health > 0, p.team, p.health);
     }
     for (let i = 0; i < net.entities.length; i++) {
       const e = net.entities[i];
@@ -1014,7 +1022,7 @@ export class Game {
       if (look === undefined) continue;
       pushEntityTarget(
         t, e.id, e.x, e.y, e.z, look.halfW, look.height,
-        look.height * 0.78, look.halfW * 0.7, true, 254,
+        look.height * 0.78, look.halfW * 0.7, true, 254, e.health,
       );
     }
     return t;

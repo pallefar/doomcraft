@@ -87,8 +87,31 @@ export interface WeaponFx {
     nx: number, ny: number, nz: number,
     targetId: number, headshot: boolean, weaponId: number,
   ): void;
-  /** Crosshair hit marker. Called once per shot, not once per pellet. */
-  hitMarker?(damage: number, headshot: boolean, killed: boolean): void;
+  /**
+   * Crosshair hit marker. Called once per shot, not once per pellet.
+   *
+   * `hits` / `pellets` let the marker scale with how much of a shotgun blast
+   * actually landed — one pellet grazing and all seven at point blank are the
+   * same event to a boolean, and they are not the same event to the player.
+   */
+  hitMarker?(
+    damage: number, headshot: boolean, killed: boolean,
+    hits?: number, pellets?: number,
+  ): void;
+  /**
+   * One call per shot that CONNECTED, fired after every pellet is resolved and
+   * anchored at the heaviest hit.
+   *
+   * It exists because lethality is a property of the SHOT, not of a pellet: a
+   * shotgun kills with seven pellets none of which is fatal alone, so the
+   * per-pellet `fleshImpact` hook can never know. This is the hook that makes
+   * a kill look different from a hit on the frame it happens.
+   */
+  hitConfirm?(
+    x: number, y: number, z: number,
+    nx: number, ny: number, nz: number,
+    damage: number, headshot: boolean, killed: boolean,
+  ): void;
   /** Viewmodel impulse, view space: +x right, +y up, +z toward the player. */
   viewKick?(
     kx: number, ky: number, kz: number,
@@ -154,6 +177,12 @@ export interface HitTargets {
   readonly headHalfWidth: Float32Array;
   readonly alive: Uint8Array;
   readonly team: Uint8Array;
+  /**
+   * Current health, so a kill can be predicted on the SAME FRAME as the shot
+   * rather than a round trip later. 0 means "unknown" and never predicts a
+   * kill: a hit marker that lies is worse than one that is late.
+   */
+  readonly health: Float32Array;
 }
 
 export function createHitTargets(capacity: number = MAX_PLAYERS + MAX_ENTITIES): HitTargets {
@@ -169,13 +198,14 @@ export function createHitTargets(capacity: number = MAX_PLAYERS + MAX_ENTITIES):
     headHalfWidth: new Float32Array(capacity),
     alive: new Uint8Array(capacity),
     team: new Uint8Array(capacity),
+    health: new Float32Array(capacity),
   };
 }
 
 /** Append a standard humanoid target. Returns false when the buffer is full. */
 export function pushPlayerTarget(
   t: HitTargets, id: number, x: number, y: number, z: number,
-  alive: boolean = true, team: number = 0,
+  alive: boolean = true, team: number = 0, health: number = 0,
 ): boolean {
   const i = t.count;
   if (i >= t.id.length) return false;
@@ -187,6 +217,7 @@ export function pushPlayerTarget(
   t.headHalfWidth[i] = PLAYER_HEAD_HALF_WIDTH;
   t.alive[i] = alive ? 1 : 0;
   t.team[i] = team;
+  t.health[i] = health;
   t.count = i + 1;
   return true;
 }
@@ -195,7 +226,7 @@ export function pushPlayerTarget(
 export function pushEntityTarget(
   t: HitTargets, id: number, x: number, y: number, z: number,
   halfWidth: number, height: number, headMinY: number, headHalfWidth: number,
-  alive: boolean = true, team: number = 255,
+  alive: boolean = true, team: number = 255, health: number = 0,
 ): boolean {
   const i = t.count;
   if (i >= t.id.length) return false;
@@ -207,6 +238,7 @@ export function pushEntityTarget(
   t.headHalfWidth[i] = headHalfWidth;
   t.alive[i] = alive ? 1 : 0;
   t.team[i] = team;
+  t.health[i] = health;
   t.count = i + 1;
   return true;
 }
@@ -234,6 +266,18 @@ export interface ShotReport {
   totalDamage: number;
   /** True when at least one pellet found a body. */
   connected: boolean;
+  /**
+   * Bodies this shot is PREDICTED to have killed, summing every pellet that
+   * landed on the same target. Zero whenever target health is unknown.
+   */
+  kills: number;
+  /** First predicted victim, or 0. */
+  lethalId: number;
+  /** The heaviest single pellet — where the hit burst is anchored. */
+  bestDamage: number;
+  bestX: number; bestY: number; bestZ: number;
+  /** Unit normal pointing back at the shooter from that hit. */
+  bestNx: number; bestNy: number; bestNz: number;
   readonly kind: Uint8Array;
   readonly targetId: Uint16Array;
   readonly damage: Float32Array;
@@ -251,6 +295,9 @@ export function createShotReport(): ShotReport {
   return {
     weaponId: 0, shotSeq: 0, pellets: 0, hits: 0, headshots: 0,
     totalDamage: 0, connected: false,
+    kills: 0, lethalId: 0,
+    bestDamage: 0, bestX: 0, bestY: 0, bestZ: 0,
+    bestNx: 0, bestNy: 0, bestNz: 1,
     kind: new Uint8Array(MAX_PELLETS),
     targetId: new Uint16Array(MAX_PELLETS),
     damage: new Float32Array(MAX_PELLETS),
@@ -353,6 +400,19 @@ export class WeaponRuntime {
   private readonly rng = new Rng(1);
   private readonly dir = new Float64Array(3);
 
+  /**
+   * Per-shot damage tally, keyed by target id.
+   *
+   * A shotgun kills with seven pellets none of which is fatal on its own, so
+   * lethality can only be decided once the whole shot is resolved. At most
+   * MAX_PELLETS distinct bodies can be struck by one shot, so a linear scan
+   * over a fixed array is both allocation-free and faster than a Map.
+   */
+  private readonly tallyId = new Uint16Array(MAX_PELLETS);
+  private readonly tallyDmg = new Float32Array(MAX_PELLETS);
+  private readonly tallyHp = new Float32Array(MAX_PELLETS);
+  private tallyCount = 0;
+
   fx: WeaponFx | null = null;
   camera: CameraFeedback | null = null;
   projectiles: ProjectileSpawner | null = null;
@@ -414,11 +474,37 @@ export class WeaponRuntime {
     const t = ammoTypeOf(this.current);
     return t === AmmoType.NONE ? Infinity : this.reserve[t];
   }
-  /** 0..1 for the dynamic crosshair (bar weakness #3: theirs never moves). */
+  /** 0..1 of the HEAT alone. Prefer `liveSpreadFraction` for the crosshair. */
   get spreadFraction(): number { return spreadFraction(this.current, this.heat[this.current]); }
   /** Live cone half-angle in radians, including airborne and crouch modifiers. */
   liveSpread(airborne: boolean, crouched: boolean): number {
     return currentSpread(this.current, this.heat[this.current], airborne, crouched);
+  }
+
+  /**
+   * 0..1 for the dynamic crosshair, measured against the cone the shot will
+   * ACTUALLY use — heat plus the airborne penalty and the crouch bonus.
+   *
+   * `spreadFraction` normalises heat alone, and a crosshair driven off that
+   * sits perfectly still while you jump even though the cone has trebled. That
+   * is a smaller version of the bar's own weakness #3: a crosshair that does
+   * not describe where the bullets go. Two consequences fall out of measuring
+   * against the true cone, and both are wanted:
+   *
+   *  - Leaving the ground opens the crosshair immediately.
+   *  - A shotgun's crosshair sits wider AT REST than a pistol's, because its
+   *    cone is wider at rest. Under the heat-only fraction both read zero.
+   *
+   * The scale runs from the tightest cone the weapon can make (crouched, cold)
+   * to the widest (max heat, airborne), so the ends of the scale never move.
+   */
+  liveSpreadFraction(airborne: boolean, crouched: boolean): number {
+    const d = getWeapon(this.current);
+    const floor = d.spread * d.spreadCrouchScale;
+    const ceil = d.spreadMax + d.spreadAir;
+    if (ceil <= floor) return 0;
+    const live = currentSpread(this.current, this.heat[this.current], airborne, crouched);
+    return clampf((live - floor) / (ceil - floor), 0, 1);
   }
   /** True when the trigger would produce a shot right now. */
   get ready(): boolean {
@@ -643,6 +729,10 @@ export class WeaponRuntime {
     report.headshots = 0;
     report.totalDamage = 0;
     report.connected = false;
+    report.kills = 0;
+    report.lethalId = 0;
+    report.bestDamage = 0;
+    this.tallyCount = 0;
 
     const spread = currentSpread(id, this.heat[id], ctx.airborne, ctx.crouched);
 
@@ -653,8 +743,58 @@ export class WeaponRuntime {
     }
 
     this.heat[id] = applyShotSpread(id, this.heat[id]);
+    this.resolveKills(report);
     this.emitFeedback(ctx, id, report);
     return report;
+  }
+
+  /**
+   * Record one pellet's damage against a body and, on the first pellet to hit
+   * it, that body's health.
+   */
+  private tally(targetId: number, damage: number, health: number): void {
+    for (let i = 0; i < this.tallyCount; i++) {
+      if (this.tallyId[i] === targetId) {
+        this.tallyDmg[i] += damage;
+        return;
+      }
+    }
+    if (this.tallyCount >= MAX_PELLETS) return;
+    const i = this.tallyCount++;
+    this.tallyId[i] = targetId;
+    this.tallyDmg[i] = damage;
+    this.tallyHp[i] = health;
+  }
+
+  /**
+   * Turn the tally into a predicted kill count.
+   *
+   * Deliberately conservative: health 0 means the caller did not supply it, and
+   * an unknown-health target never produces a kill marker. The server's
+   * authoritative DMG_FATAL still arrives and still fires the marker, so the
+   * cost of not predicting is a late marker and the cost of over-predicting is
+   * a marker that lied. Late is cheaper.
+   */
+  private resolveKills(report: ShotReport): void {
+    for (let i = 0; i < this.tallyCount; i++) {
+      const hp = this.tallyHp[i];
+      if (hp > 0 && this.tallyDmg[i] >= hp) {
+        report.kills++;
+        if (report.lethalId === 0) report.lethalId = this.tallyId[i];
+      }
+    }
+  }
+
+  /** Keep the heaviest pellet of the shot — the hit burst is anchored there. */
+  private noteBestHit(
+    damage: number, x: number, y: number, z: number,
+    nx: number, ny: number, nz: number,
+  ): void {
+    const r = this.report;
+    if (damage < r.bestDamage) return;
+    r.bestDamage = damage;
+    r.bestX = x; r.bestY = y; r.bestZ = z;
+    r.bestNx = nx; r.bestNy = ny; r.bestNz = nz;
   }
 
   private emitFeedback(ctx: FireContext, id: number, report: ShotReport): void {
@@ -674,8 +814,19 @@ export class WeaponRuntime {
           def.viewKickPitch, def.viewKickYaw, def.viewKickRoll, def.viewKickRecovery,
         );
       }
-      if (report.connected && fx.hitMarker) {
-        fx.hitMarker(report.totalDamage, report.headshots > 0, false);
+      if (report.connected) {
+        const killed = report.kills > 0;
+        const headshot = report.headshots > 0;
+        if (fx.hitMarker) {
+          fx.hitMarker(report.totalDamage, headshot, killed, report.hits, report.pellets);
+        }
+        if (fx.hitConfirm) {
+          fx.hitConfirm(
+            report.bestX, report.bestY, report.bestZ,
+            report.bestNx, report.bestNy, report.bestNz,
+            report.totalDamage, headshot, killed,
+          );
+        }
       }
     }
     const cam = this.camera;
@@ -683,6 +834,12 @@ export class WeaponRuntime {
       cam.addRecoil(def.recoilPitch, def.recoilYaw, def.recoilRecovery);
       cam.addShake(def.shakeAmplitude, def.shakeMs, def.shakeFrequency);
       if (def.shakeAmplitude >= 0.3) cam.addFovPunch(-def.shakeAmplitude * 3.0, 7);
+      // A KILL shakes; a hit does not. That asymmetry is the whole point — if
+      // every connecting pellet nudged the camera, a chaingun burst would be
+      // one continuous rumble and the kill would vanish inside it. The camera's
+      // own "a stronger source wins the slot" rule keeps this from stomping the
+      // weapon's shake on heavy guns.
+      if (report.kills > 0) cam.addShake(KILL_SHAKE_AMPLITUDE, KILL_SHAKE_MS, KILL_SHAKE_HZ);
     }
   }
 
@@ -741,6 +898,8 @@ export class WeaponRuntime {
         if (head) report.headshots++;
         report.totalDamage += dmg;
         report.connected = true;
+        this.tally(scratchTargetId, dmg, scratchTargetHealth);
+        this.noteBestHit(dmg, hx, hy, hz, -dir[0], -dir[1], -dir[2]);
         if (this.fx?.tracer) this.fx.tracer(id, ctx.ox, ctx.oy, ctx.oz, hx, hy, hz, getWeapon(id).projectileColor);
         if (this.fx?.fleshImpact) {
           this.fx.fleshImpact(hx, hy, hz, -dir[0], -dir[1], -dir[2], scratchTargetId, head, id);
@@ -780,6 +939,7 @@ export class WeaponRuntime {
   ): number {
     scratchTargetId = 0;
     scratchHeadshot = false;
+    scratchTargetHealth = 0;
     const t = ctx.targets;
     if (t === null || t.count === 0) return -1;
 
@@ -813,6 +973,7 @@ export class WeaponRuntime {
         best = dist;
         scratchTargetId = t.id[i];
         scratchHeadshot = useHead;
+        scratchTargetHealth = t.health[i];
       }
     }
     return best;
@@ -882,6 +1043,8 @@ export class WeaponRuntime {
     const hy = ctx.oy + ctx.dy * dist;
     const hz = ctx.oz + ctx.dz * dist;
     report.hitX[0] = hx; report.hitY[0] = hy; report.hitZ[0] = hz;
+    this.tally(scratchTargetId, dmg, scratchTargetHealth);
+    this.noteBestHit(dmg, hx, hy, hz, -ctx.dx, -ctx.dy, -ctx.dz);
     if (this.fx?.fleshImpact) {
       this.fx.fleshImpact(hx, hy, hz, -ctx.dx, -ctx.dy, -ctx.dz, scratchTargetId, head, id);
     }
@@ -903,6 +1066,16 @@ export class WeaponRuntime {
 
 let scratchTargetId = 0;
 let scratchHeadshot = false;
+let scratchTargetHealth = 0;
+
+/**
+ * The kill shake. Small in metres and short in time — this rides ON TOP of the
+ * weapon's own shake, so it only has to be the difference between "I hit it"
+ * and "it is dead", not a second recoil.
+ */
+const KILL_SHAKE_AMPLITUDE = 0.11;
+const KILL_SHAKE_MS = 130;
+const KILL_SHAKE_HZ = 24;
 
 /** Hitscan stops on solids only — you can shoot through water and lava. */
 function hitscanBlocking(id: number): boolean { return BLOCK_SOLID[id] === 1; }

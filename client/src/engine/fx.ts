@@ -263,6 +263,24 @@ export type FxSolidAt = (x: number, y: number, z: number) => boolean;
 
 const MAX_LIGHT_SLOTS = 12;
 
+/**
+ * How much of an impact spark is "hot" versus "the material it came off".
+ *
+ * 0 makes every strike the colour of the wall, which reads as dust; 1 makes
+ * every strike the same orange, which is what most shooters do and is the
+ * reason you cannot tell stone from steel from grass by the hit. 0.55 keeps a
+ * white-hot core while leaving the corona unmistakably the surface's own hue.
+ */
+const SPARK_HEAT = 0.55;
+
+/**
+ * Two impact lights closer than this in time AND space are one light. Sized to
+ * swallow a shotgun's cone at close range (its seven pellets land inside about
+ * a metre) without merging two aimed shots at different walls.
+ */
+const IMPACT_LIGHT_MERGE_S = 0.05;
+const IMPACT_LIGHT_MERGE_M2 = 1.6 * 1.6;
+
 export class Fx {
   readonly group = new THREE.Group();
   readonly stats: FxStats = { sparks: 0, debris: 0, tracers: 0, blasts: 0, lights: 0, trauma: 0 };
@@ -329,6 +347,30 @@ export class Fx {
   /** Drawing-buffer height in pixels; drives the minimum tracer width. */
   private viewportHeight = 720;
   private minTracerPx = 2.2;
+
+  /**
+   * Last frame's camera, cached so a SPAWNER can size a sprite in screen space.
+   *
+   * This is the difference between an impact you can see and one you cannot. A
+   * 5 cm spark subtends one pixel at 35 m, so sizing hit effects in metres
+   * reproduces the bar's own failure at any real fighting distance: the shot
+   * lands and the frame does not change. Every impact sprite is therefore given
+   * a floor in PIXELS and a cap in multiples of its world size, so it stays
+   * legible at 40 m without becoming a sheet of white at 2 m.
+   */
+  private camX = 0; private camY = 0; private camZ = 0;
+  private camTanHalfFov = 0.6;
+
+  /**
+   * Where and when the last impact light was placed.
+   *
+   * A shotgun fires seven pellets into the same square metre of wall on the
+   * same frame. Seven point lights at the same place is seven times the shader
+   * cost for one blown-out white patch, and it evicts every other light in the
+   * scene. Coalescing them into one is both cheaper and more accurate.
+   */
+  private lastImpactLightT = -1;
+  private lastImpactX = 0; private lastImpactY = 0; private lastImpactZ = 0;
 
   constructor(scene: THREE.Scene, opts: FxOptions = {}) {
     this.materials = opts.materials ?? null;
@@ -558,6 +600,26 @@ export class Fx {
     this.shakeScale = clamp(v, 0, 2);
   }
 
+  /* -- screen-space sizing ----------------------------------------------- */
+
+  /** World metres covered by one screen pixel at a point. */
+  private metresPerPixel(x: number, y: number, z: number): number {
+    const dx = x - this.camX, dy = y - this.camY, dz = z - this.camZ;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    return (2 * this.camTanHalfFov * (dist < 0.15 ? 0.15 : dist)) / this.viewportHeight;
+  }
+
+  /**
+   * `base` metres, but never smaller on screen than `px` pixels and never more
+   * than `cap` times its own world size.
+   */
+  private floorPx(mpp: number, base: number, px: number, cap: number): number {
+    const want = px * mpp;
+    const v = want > base ? want : base;
+    const lim = base * cap;
+    return v > lim ? lim : v;
+  }
+
   /* -- spawners ---------------------------------------------------------- */
 
   /**
@@ -637,7 +699,25 @@ export class Fx {
     this.trColor[i * 3 + 2] = (color & 0xff) / 255;
   }
 
-  /** Sparks off a surface, thrown along the hit normal. */
+  /**
+   * A bullet hit a surface.
+   *
+   * Three layers, and each one answers a different part of "did that hit?":
+   *
+   *  1. A **core flash** — one additive puck at the point of impact, sized with
+   *     a pixel floor so it survives 40 m. Without it a hit at range is a dozen
+   *     sub-pixel dots and the frame does not visibly change, which is exactly
+   *     the bar's failure.
+   *  2. **Sparks that inherit the surface**, not a fixed orange. Hot things go
+   *     white in the middle, but the corona of a strike carries the material's
+   *     own hue: red brick throws red-orange, grass throws yellow-green, ice
+   *     throws white-blue. Mixing the surface colour into the spark is what
+   *     makes the impact read as coming off THAT wall.
+   *  3. **Chips** in the surface colour, which bounce.
+   *
+   * The bounce light is tinted the same way, so the flash you see on the wall
+   * beside you is the colour of the thing you just shot.
+   */
   impact(
     x: number, y: number, z: number,
     nx: number, ny: number, nz: number,
@@ -646,7 +726,28 @@ export class Fx {
     const r = ((color >>> 16) & 0xff) / 255;
     const g = ((color >>> 8) & 0xff) / 255;
     const b = (color & 0xff) / 255;
-    const n = Math.round(6 + 8 * intensity);
+    const mpp = this.metresPerPixel(x, y, z);
+
+    // The strike colour: the surface pushed toward incandescent. `SPARK_HEAT`
+    // is how much of the hot end wins — at 0 the spark is just the wall's
+    // colour and reads as dust, at 1 it is the fixed orange every shooter uses
+    // and the surface stops mattering.
+    const sr = r * (1 - SPARK_HEAT) + 1.00 * SPARK_HEAT;
+    const sg = g * (1 - SPARK_HEAT) + 0.84 * SPARK_HEAT;
+    const sb = b * (1 - SPARK_HEAT) + 0.42 * SPARK_HEAT;
+
+    /* 1 — core flash */
+    this.spawnSpark(
+      x + nx * 0.03, y + ny * 0.03, z + nz * 0.03,
+      nx * 0.6, ny * 0.6, nz * 0.6,
+      0.075 + 0.03 * intensity,
+      this.floorPx(mpp, 0.085 * intensity, 9, 6), this.floorPx(mpp, 0.02, 2, 6),
+      sr * 0.45 + 0.55, sg * 0.45 + 0.55, sb * 0.45 + 0.55, 1, 1, 4, 0,
+    );
+
+    /* 2 — sparks, in the strike colour */
+    const n = Math.round(3 + 5 * intensity);
+    const sparkSize = this.floorPx(mpp, 0.05 * intensity, 2.4, 7);
     for (let i = 0; i < n; i++) {
       const sx = nx + (Math.random() - 0.5) * 1.5;
       const sy = ny + (Math.random() - 0.5) * 1.5 + 0.4;
@@ -656,23 +757,48 @@ export class Fx {
         x + nx * 0.04, y + ny * 0.04, z + nz * 0.04,
         sx * sp, sy * sp, sz * sp,
         0.14 + Math.random() * 0.24,
-        0.05 * intensity, 0.008,
-        1, 0.82, 0.45, 1, 0.55, 6, 14,
+        sparkSize, 0.008,
+        sr, sg, sb, 1, 0.55, 6, 14,
       );
     }
-    // A short-lived puff in the surface colour so the material reads.
-    for (let i = 0; i < 4; i++) {
+
+    /* 3 — chips of the material itself */
+    const chipSize = this.floorPx(mpp, 0.055, 2, 5);
+    for (let i = 0; i < 3; i++) {
       this.spawnDebris(
         x + nx * 0.05, y + ny * 0.05, z + nz * 0.05,
         (Math.random() - 0.5) * 3 + nx * 2,
         Math.random() * 2.4 + ny * 2,
         (Math.random() - 0.5) * 3 + nz * 2,
         0.25 + Math.random() * 0.3,
-        0.055, 0.02,
+        chipSize, chipSize * 0.36,
         r * 0.8, g * 0.8, b * 0.8, 1, 0.4, 20, 1,
       );
     }
-    this.addLight(x + nx * 0.2, y + ny * 0.2, z + nz * 0.2, 1, 0.8, 0.5, 2.6, 0.5, 0.07);
+
+    if (this.claimImpactLight(x, y, z)) {
+      this.addLight(
+        x + nx * 0.2, y + ny * 0.2, z + nz * 0.2,
+        sr * 0.55 + 0.45, sg * 0.55 + 0.45, sb * 0.55 + 0.45,
+        3.0, 0.7 * intensity, 0.09,
+      );
+    }
+  }
+
+  /**
+   * True when this impact should own a point light. False for the second and
+   * later pellets of a single blast landing in the same place.
+   */
+  private claimImpactLight(x: number, y: number, z: number): boolean {
+    if (this.lastImpactLightT >= 0 && this.time - this.lastImpactLightT < IMPACT_LIGHT_MERGE_S) {
+      const dx = x - this.lastImpactX;
+      const dy = y - this.lastImpactY;
+      const dz = z - this.lastImpactZ;
+      if (dx * dx + dy * dy + dz * dz < IMPACT_LIGHT_MERGE_M2) return false;
+    }
+    this.lastImpactLightT = this.time;
+    this.lastImpactX = x; this.lastImpactY = y; this.lastImpactZ = z;
+    return true;
   }
 
   /** A block just broke: throw chips of it, in its own colour. */
@@ -700,9 +826,29 @@ export class Fx {
     }
   }
 
-  /** Hit a body. Dark red, heavier, sticks around a beat longer. */
+  /**
+   * Hit a body.
+   *
+   * This is the single most important effect in the game, because it is the
+   * only thing that separates "I fired" from "I connected", and the bar has
+   * nothing here at all. It gets a bright hot puff so the hit is visible even
+   * against a dark demon at 30 m, then the dark spray behind it so the READ is
+   * blood and not a spark. Both are sized with a pixel floor.
+   */
   blood(x: number, y: number, z: number, dx: number, dy: number, dz: number, amount = 1): void {
-    const n = Math.round(10 * amount);
+    const mpp = this.metresPerPixel(x, y, z);
+
+    // The visible confirmation: one bright puff, hot pink-white at the core.
+    this.spawnSpark(
+      x + dx * 0.05, y + dy * 0.05, z + dz * 0.05,
+      dx * 1.2, dy * 1.2 + 0.6, dz * 1.2,
+      0.085 + 0.03 * amount,
+      this.floorPx(mpp, 0.10 * amount, 8, 6), this.floorPx(mpp, 0.03, 2, 6),
+      1, 0.42, 0.36, 1, 0.85, 5, 0,
+    );
+
+    const n = Math.round(8 * amount);
+    const drop = this.floorPx(mpp, 0.075, 1.8, 5);
     for (let i = 0; i < n; i++) {
       const sp = 2.5 + Math.random() * 6;
       this.spawnDebris(
@@ -711,7 +857,7 @@ export class Fx {
         (dy + (Math.random() - 0.5) * 1.2) * sp + 1.5,
         (dz + (Math.random() - 0.5) * 1.2) * sp,
         0.32 + Math.random() * 0.4,
-        0.075, 0.02,
+        drop, drop * 0.27,
         0.42 + Math.random() * 0.18, 0.03, 0.03, 1, 0.35, 18, 1,
       );
     }
@@ -719,10 +865,87 @@ export class Fx {
       this.spawnSpark(
         x, y, z,
         dx * 2, dy * 2 + 1, dz * 2,
-        0.18, 0.28, 0.55,
+        0.18, this.floorPx(mpp, 0.28, 4, 3), 0.55,
         0.55, 0.05, 0.05, 0.55, 0, 3, 0,
       );
     }
+  }
+
+  /**
+   * The shot connected — called ONCE per shot, after every pellet is resolved,
+   * so it is the only place that knows whether the shot was fatal.
+   *
+   * Answering "which shot feels like it hit something?" needs three distinct
+   * readings, not one: a graze, a solid hit, and a kill. Damage drives a
+   * continuous strength, a headshot recolours the pop gold, and a kill adds a
+   * white flash, a spray of gibs and a light — an event that is obviously not
+   * the same event as a hit.
+   */
+  hitConfirm(
+    x: number, y: number, z: number,
+    nx: number, ny: number, nz: number,
+    damage: number, headshot: boolean, killed: boolean,
+  ): void {
+    const s = clamp(damage / 90, 0.22, 1);
+    const mpp = this.metresPerPixel(x, y, z);
+
+    // The pop: white for a hit, gold for a headshot, and blown out on a kill.
+    const cr = 1;
+    const cg = killed ? 0.86 : headshot ? 0.80 : 0.94;
+    const cb = killed ? 0.72 : headshot ? 0.30 : 0.90;
+    this.spawnSpark(
+      x + nx * 0.05, y + ny * 0.05, z + nz * 0.05,
+      nx * 0.4, ny * 0.4 + 0.3, nz * 0.4,
+      killed ? 0.16 : 0.085,
+      this.floorPx(mpp, (killed ? 0.34 : 0.13) * (0.55 + 0.45 * s), killed ? 20 : 11, 6),
+      this.floorPx(mpp, 0.02, 2, 6),
+      cr, cg, cb, 1, 1, killed ? 3 : 6, 0,
+    );
+
+    if (!killed) {
+      // A solid hit throws a couple of extra hot flecks; a graze does not.
+      const n = s > 0.5 ? 3 : 1;
+      for (let i = 0; i < n; i++) {
+        this.spawnSpark(
+          x, y, z,
+          (Math.random() - 0.5) * 5 + nx * 3,
+          Math.random() * 3 + 1.2,
+          (Math.random() - 0.5) * 5 + nz * 3,
+          0.16 + Math.random() * 0.12,
+          this.floorPx(mpp, 0.045, 2.2, 6), 0.006,
+          1, 0.76, 0.55, 1, 0.7, 7, 12,
+        );
+      }
+      return;
+    }
+
+    /* --- the kill --------------------------------------------------------- */
+    const gib = this.floorPx(mpp, 0.11, 3, 5);
+    for (let i = 0; i < 12; i++) {
+      const th = Math.random() * TAU;
+      const ph = Math.acos(2 * Math.random() - 1);
+      const sp = 3.5 + Math.random() * 6.5;
+      this.spawnDebris(
+        x, y, z,
+        Math.sin(ph) * Math.cos(th) * sp,
+        Math.cos(ph) * sp + 2.6,
+        Math.sin(ph) * Math.sin(th) * sp,
+        0.55 + Math.random() * 0.45,
+        gib, gib * 0.4,
+        0.46 + Math.random() * 0.2, 0.05, 0.05, 1, 0.2, 16, 1,
+      );
+    }
+    for (let i = 0; i < 6; i++) {
+      this.spawnSpark(
+        x, y, z,
+        (Math.random() - 0.5) * 9, Math.random() * 5 + 1.5, (Math.random() - 0.5) * 9,
+        0.20 + Math.random() * 0.2,
+        this.floorPx(mpp, 0.06, 2.6, 6), 0.01,
+        1, 0.55, 0.35, 1, 0.8, 5, 11,
+      );
+    }
+    this.addLight(x + nx * 0.3, y + ny * 0.3 + 0.3, z + nz * 0.3, 1, 0.62, 0.45, 5.5, 1.5, 0.22);
+    this.addTrauma(0.26);
   }
 
   /**
@@ -867,10 +1090,17 @@ export class Fx {
     if (this.trauma <= 0) this.shakeAmp = 0;
     else this.shakeAmp *= Math.max(0, 1 - this.shakeDecay * step * 0.9);
 
+    // Cache the camera so the SPAWNERS can size hit effects in screen space.
+    // They run in the fixed step, which is one frame ahead of this at worst.
+    this.camX = camera.position.x;
+    this.camY = camera.position.y;
+    this.camZ = camera.position.z;
+    const halfFov = Math.tan((camera.fov * Math.PI) / 360);
+    this.camTanHalfFov = halfFov;
+
     this.sparkCount = this.stepParticles(this.sp, this.sparkCount, this.sparkSet, step, false);
     this.debrisCount = this.stepParticles(this.db, this.debrisCount, this.debrisSet, step, true);
     if (this.beamMaterial !== null) {
-      const halfFov = Math.tan((camera.fov * Math.PI) / 360);
       this.beamMaterial.uniforms.uPxScale.value =
         (2 * halfFov * this.minTracerPx) / this.viewportHeight;
       this.beamMaterial.uniformsNeedUpdate = true;
@@ -1155,6 +1385,7 @@ export class Fx {
 
   /** Wipe every live effect, e.g. on respawn or map change. */
   clear(): void {
+    this.lastImpactLightT = -1;
     this.sparkCount = 0;
     this.debrisCount = 0;
     this.tracerCount = 0;

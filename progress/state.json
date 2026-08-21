@@ -1,7 +1,7 @@
 {
   "updated": "2026-08-20T16:40:00Z",
-  "phase": "Paused \u2014 handover",
-  "phaseNote": "Spine done and verified. Mode framework done; four mode builders were mid-flight when we stopped. Resume 22:00 \u2014 see HANDOVER.md.",
+  "phase": "Gauntlet",
+  "phaseNote": "Build is real: 4 modes, textures, 7 readable weapons, both bugs fixed. Now running the actual builder-vs-critic loop.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -279,6 +279,18 @@
     {
       "t": "23:20",
       "m": "User decisions: run BOTH programmatic (AdSense/networks) as fill AND direct-sold as it arrives; support ALL THREE prize shapes. Flagged: AdSense covers page slots only \u2014 in-game/rewarded needs a games network (the bar uses AdInPlay)."
+    },
+    {
+      "t": "03:30",
+      "m": "Textures landed and measured: dark surfaces 0.66->2.72 and 0.84->3.39 grey levels, inside the bar band. At matched luminance our sand 3.62 vs bar 3.32, grass 4.35 vs 4.39 \u2014 dead level."
+    },
+    {
+      "t": "03:35",
+      "m": "Found the metric is scale-dependent: voxiom own sand reads 1.80 at nose, 3.32 mid, 8.51 far. The \"3.32 band\" was one slice of a curve. Our depth curve now sits on theirs."
+    },
+    {
+      "t": "03:40",
+      "m": "Both real bugs fixed: net pump off rAF (tab-background no longer disconnects), CSP added. Regression to fix: quest tile floor went 4.03 -> 2.56 because seam strength was cut."
     }
   ],
   "bars": [
