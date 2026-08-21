@@ -64,7 +64,6 @@ import {
   Topology,
   WRITE_ACCOUNT_RECORD,
   WRITE_PERSISTENT_WORLD,
-  isClientOwnedProfileField,
   isTrustedTopology,
   rewardKeys,
   sealSessionTrust,
@@ -193,7 +192,7 @@ export class SessionLedger {
    */
   addParticipant(sessionId: string, deviceId: string): boolean {
     const s = this.sessions.get(sessionId);
-    if (s === null || s === undefined) return false;
+    if (s === undefined) return false;
     if (s.closedMs !== 0) return false;
     s.participants.add(deviceId);
     return true;
@@ -471,8 +470,11 @@ export function reviewSubmission(
    *    read `record.trust.topology` — the fact the server stamped at creation —
    *    and never `sub.claimedTopology`. */
   if (!isTrustedTopology(trust.topology) || !record.simulatedHere) {
-    const claimedTrusted = sub.claimedTopology === Topology.SERVER_AUTHORITATIVE;
-    return reject(codeForTopology(trust.topology), sessionId, deviceId, trust, claimedTrusted);
+    // Always a violation. There is no legitimate path that assembles a payout
+    // for a session we did not simulate, so reaching this line at all is either
+    // a bug upstream or somebody probing — both are worth an alert, and neither
+    // gets quieter because the submission was honest about its topology.
+    return reject(codeForTopology(trust.topology), sessionId, deviceId, trust, true);
   }
 
   /* 5. The submitter has to have been in the match. Otherwise the winner of a
@@ -638,9 +640,10 @@ export function guardProfileWrite(body: unknown): ProfileWriteVerdict {
       accepted[key] = clean;
       continue;
     }
-    if (isClientOwnedProfileField(key) || !SERVER_OWNED_PROFILE_FIELDS.includes(key)) {
-      accepted[key] = value;
-    }
+    // Reaching here means the key is not server-owned, so the client may send
+    // it — whether or not it is one we recognise. Unknown keys are the caller's
+    // problem to validate; this function only defends the ownership line.
+    accepted[key] = value;
   }
 
   return Object.freeze({
@@ -688,7 +691,7 @@ export class EntitlementGuard {
 
   /** Record a session the server created. */
   open(spec: OpenSessionSpec): SessionRecord {
-    return this.ledger.open({ nowMs: this.clock(), ...spec });
+    return this.ledger.open({ ...spec, nowMs: spec.nowMs ?? this.clock() });
   }
 
   /** Review, count and log. The one call a caller needs. */

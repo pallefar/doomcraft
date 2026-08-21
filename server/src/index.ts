@@ -25,8 +25,10 @@ import { WebSocketServer } from 'ws';
 import type { WebSocket } from 'ws';
 
 import { DEFAULT_SERVER_PORT, GameMode, WS_PATH } from '@doomcraft/shared';
+import { SIGNAL_PATH } from '@doomcraft/shared/signal';
 import { Room } from './room.js';
 import type { NetTransport } from './net.js';
+import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
 import { JsonFileStore, isValidDeviceId, migrateProfile, publicProfile } from './persistence.js';
 import type { PersistenceStore, StoredProfile } from './persistence.js';
 
@@ -529,8 +531,41 @@ class WsTransport implements NetTransport {
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024, perMessageDeflate: false });
 
+/* ------------------------------------------------------------------------ *
+ * WebRTC signalling
+ *
+ * The same `ws` server, a different path. This is the whole server-side cost
+ * of peer hosting: an SDP offer, an answer and a few ICE candidates relayed
+ * once per match. It holds no game state and never sees a game packet — see
+ * signal.ts. Peer-hosted rooms award nothing, so there is nothing here worth
+ * attacking except the relay itself, which is why the hub rate limits hard.
+ * ------------------------------------------------------------------------ */
+
+const signalHub = new SignalHub({ ice: iceConfigFromEnv() });
+const signalSweeper = setInterval(() => { signalHub.sweep(); }, 60_000);
+if (typeof signalSweeper.unref === 'function') signalSweeper.unref();
+
+/** Behind a load balancer this must come from a TRUSTED proxy header only. */
+function clientAddress(req: IncomingMessage): string {
+  const trustProxy = process.env.DOOMCRAFT_TRUST_PROXY === '1';
+  if (trustProxy) {
+    const fwd = req.headers['x-forwarded-for'];
+    const first = Array.isArray(fwd) ? fwd[0] : fwd;
+    if (typeof first === 'string' && first.length > 0) return first.split(',')[0].trim();
+  }
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
 httpServer.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+
+  if (url.pathname === SIGNAL_PATH) {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      attachSignalSocket(signalHub, ws as unknown as WsLike, clientAddress(req));
+    });
+    return;
+  }
+
   if (url.pathname !== WS_PATH) {
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
     socket.destroy();
@@ -577,6 +612,8 @@ async function shutdown(signal: string): Promise<void> {
   process.stdout.write(`\n${signal}: draining…\n`);
 
   room.stop();
+  clearInterval(signalSweeper);
+  signalHub.closeAll(1001, 'server shutting down');
   for (const conn of [...room.net.connections]) room.net.detach(conn, 1001, 'server shutting down');
   for (const client of wss.clients) {
     try { client.close(1001, 'server shutting down'); } catch { /* ignore */ }
@@ -605,4 +642,4 @@ process.on('unhandledRejection', (err) => {
   process.stderr.write(`unhandled rejection: ${String(err)}\n`);
 });
 
-export { room, store, httpServer, wss };
+export { room, store, httpServer, wss, signalHub };

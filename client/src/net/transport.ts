@@ -59,7 +59,7 @@ import { C2S_MODE, S2C_MODE } from '@shared/modes';
 export const enum TransportState { CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3 }
 
 /** Which pipe a transport is really made of. Telemetry and UI only. */
-export type TransportKind = 'websocket' | 'worker' | 'webrtc' | 'memory';
+export type TransportKind = 'websocket' | 'worker' | 'webrtc';
 
 /** Everything NetClient needs from a pipe. A WebSocket and a Worker both fit. */
 export interface ClientTransport {
@@ -77,8 +77,9 @@ export interface ClientTransport {
 /**
  * Everything the authoritative room needs from a socket. Structurally
  * identical to `NetTransport` in server/src/net.ts — declared again here so
- * the client bundle never imports the server package just for a type, and
- * asserted equal in transport.test.ts so the two cannot drift.
+ * the client bundle never imports the server package just for a type. The two
+ * are asserted assignable in peerHost.test.ts, so they cannot drift apart
+ * without a failing build.
  */
 export interface ServerTransport {
   send(data: Uint8Array): void;
@@ -111,8 +112,20 @@ export function clientMessageReliability(messageId: number): Reliability {
     case C2S.INPUT:
     case C2S.PING:
       return Reliability.UNRELIABLE;
-    // HELLO, BLOCK_EDIT, CHAT, RESPAWN, APPEARANCE, MODE.SELECT, MODE.ACTION.
-    // Every one of them is a one-shot the room can never re-derive.
+
+    // Listed rather than defaulted, so adding a message id to the protocol
+    // forces a decision here instead of silently inheriting one.
+    case C2S.HELLO:
+    case C2S.BLOCK_EDIT:
+    case C2S.CHAT:
+    case C2S.RESPAWN:
+    case C2S.APPEARANCE:
+    case C2S_MODE.SELECT:
+    case C2S_MODE.ACTION:
+      return Reliability.RELIABLE;
+
+    // An id this build does not know. Reliable is the safe answer: the cost of
+    // being wrong is a few bytes of retransmit, not a permanently lost message.
     default:
       return Reliability.RELIABLE;
   }
@@ -124,15 +137,21 @@ export function serverMessageReliability(messageId: number): Reliability {
     case S2C.SNAPSHOT:
     case S2C.PONG:
       return Reliability.UNRELIABLE;
-    // WELCOME, CHUNK, BLOCK_DELTA, DAMAGE, KILL, CHAT, MODE.STATE/EVENT/CONTEXT.
+
+    case S2C.WELCOME:
+    case S2C.CHUNK:
+    case S2C.BLOCK_DELTA:
+    case S2C.DAMAGE:
+    case S2C.KILL:
+    case S2C.CHAT:
+    case S2C_MODE.STATE:
+    case S2C_MODE.EVENT:
+    case S2C_MODE.CONTEXT:
+      return Reliability.RELIABLE;
+
     default:
       return Reliability.RELIABLE;
   }
-}
-
-/** For logs and the net debug overlay. */
-export function reliabilityName(r: Reliability): string {
-  return r === Reliability.RELIABLE ? 'reliable' : 'unreliable';
 }
 
 /* ------------------------------------------------------------------------ *
@@ -240,10 +259,13 @@ export class DatagramCounter {
   reordered = 0;
   /** Datagrams accepted and handed up. */
   received = 0;
+  /** Datagrams handed to the wire. */
+  sent = 0;
 
   next(): number {
     const s = this.outSeq;
     this.outSeq = (s + 1) & 0xffff;
+    this.sent++;
     return s;
   }
 
@@ -278,6 +300,7 @@ export class DatagramCounter {
     this.lost = 0;
     this.reordered = 0;
     this.received = 0;
+    this.sent = 0;
   }
 
   /** Fraction of datagrams that never arrived. 0 before anything arrives. */
@@ -320,63 +343,4 @@ export function webSocketTransport(url: string): ClientTransport {
 export function defaultServerUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${location.host}/ws`;
-}
-
-/* ------------------------------------------------------------------------ *
- * In-memory pair — used by the worker server, by peerHost's loopback and by
- * every test that wants the real Room without a real socket.
- * ------------------------------------------------------------------------ */
-
-export interface MemoryTransportPair {
-  readonly client: ClientTransport;
-  readonly server: ServerTransport;
-  /** Close both halves. `code`/`reason` reach the client's `onclose`. */
-  close(code?: number, reason?: string): void;
-}
-
-/**
- * A ClientTransport and a ServerTransport wired straight to each other.
- * Delivery is synchronous and lossless; `deliverToServer` is called with every
- * byte the client sends, so the caller decides what the room does with it.
- */
-export function memoryTransportPair(
-  deliverToServer: (bytes: Uint8Array) => void,
-): MemoryTransportPair {
-  let open = true;
-
-  const client: ClientTransport = {
-    kind: 'memory',
-    get readyState(): number { return open ? TransportState.OPEN : TransportState.CLOSED; },
-    send(data: Uint8Array): void {
-      if (!open) return;
-      // The writers reuse their buffers, so copy before the bytes leave.
-      deliverToServer(data.slice());
-    },
-    close(code = 1000, reason = 'closed'): void { pair.close(code, reason); },
-    onopen: null,
-    onmessage: null,
-    onclose: null,
-    onerror: null,
-  };
-
-  const server: ServerTransport = {
-    get isOpen(): boolean { return open; },
-    get bufferedAmount(): number { return 0; },
-    send(data: Uint8Array): void {
-      if (!open) return;
-      client.onmessage?.(data.slice());
-    },
-    close(code = 1000, reason = 'closed'): void { pair.close(code, reason); },
-  };
-
-  const pair: MemoryTransportPair = {
-    client,
-    server,
-    close(code = 1000, reason = 'closed'): void {
-      if (!open) return;
-      open = false;
-      client.onclose?.(code, reason);
-    },
-  };
-  return pair;
 }

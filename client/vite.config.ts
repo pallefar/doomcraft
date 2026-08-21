@@ -7,9 +7,18 @@ const repoRoot = path.resolve(clientDir, '..');
 const sharedSrc = path.resolve(repoRoot, 'shared/src');
 const clientSrc = path.resolve(clientDir, 'src');
 
-/** Dev-server proxy: the game server owns ws://localhost:8080/ws. */
+/**
+ * Dev-server proxy: the game server owns ws://localhost:8080/ws, and the
+ * WebRTC signalling hub owns /rtc on the same port (server/src/signal.ts).
+ */
 const wsProxy = {
   '/ws': {
+    target: 'ws://localhost:8080',
+    ws: true,
+    changeOrigin: false,
+    rewriteWsOrigin: true,
+  },
+  '/rtc': {
     target: 'ws://localhost:8080',
     ws: true,
     changeOrigin: false,
