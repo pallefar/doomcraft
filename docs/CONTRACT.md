@@ -599,14 +599,30 @@ stamps its own arena furniture (platforms, towers, cover) on the terraced ground
 
 ## 5. `shared/src/protocol.ts`
 
-Binary, little-endian, one `uint8` message id first. `PROTOCOL_VERSION = 3`.
+Binary, little-endian, one `uint8` message id first.
 
 ```ts
-enum C2S { HELLO=1, INPUT=2, BLOCK_EDIT=3, CHAT=4, RESPAWN=5, PING=6 }
+PROTOCOL_VERSION       = 3      // what this build speaks
+PROTOCOL_MIN_SUPPORTED = 2      // the oldest it still SERVES — a window, not equality
+
+enum C2S { HELLO=1, INPUT=2, BLOCK_EDIT=3, CHAT=4, RESPAWN=5, PING=6, APPEARANCE=7 }
 enum S2C { WELCOME=1, CHUNK=2, SNAPSHOT=3, BLOCK_DELTA=4, DAMAGE=5, KILL=6, CHAT=7, PONG=8,
-           CHUNK_Z=9 }
+           CHUNK_Z=9, UPDATE_REQUIRED=10, SESSION_CONFIG=11 }
 readMessageId(data: ArrayBuffer | Uint8Array | DataView): number
 ```
+
+**A connection is gated against the WINDOW, never against equality** — `checkProtocol()` in
+`shared/src/version.ts` is the single place that rule is written, and `server/src/net.ts` calls it.
+Strict equality made every deploy a fleet-wide simultaneous logout. `docs/PATCHING.md` §1.
+
+**An unknown message id is IGNORED, on both sides.** That is load-bearing, not sloppiness: it is what
+lets a message id be appended without a version bump, which is how `UPDATE_REQUIRED` and
+`SESSION_CONFIG` shipped at protocol 3. Do not turn either `default: break` into an error.
+
+**Trailing fields are appended and guarded by `r.remaining >= k`, never inserted.** `decodeHello`
+does this twice (`avatar`, then `contentVersion`). Renumbering an id, reordering a bitmask bit or
+moving a quantisation constant is a real break: bump `PROTOCOL_VERSION`, update this section, and
+update the ratchet in `shared/src/version.test.ts` in the same commit.
 
 ### Quantisation
 
@@ -690,9 +706,9 @@ enum ChatChannel { ALL=0, TEAM=1, SYSTEM=2, KILLFEED=3, TIP=4 }
 | `PING` | `u8 id, u32 clientTimeMs` | 5 |
 
 ```ts
-interface HelloMessage { protocolVersion, name, skin, caps }
+interface HelloMessage { protocolVersion, name, skin, caps, avatar, contentVersion }
 createHelloMessage(): HelloMessage
-encodeHello(w, name, skin, caps): PacketWriter
+encodeHello(w, name, skin, caps, avatar = 0, contentVersion = 0): PacketWriter
 decodeHello(r, out): HelloMessage
 
 interface InputCommand { seq, dtMs, yaw, pitch, buttons, moveX, moveZ, slot }
@@ -775,6 +791,46 @@ main thread.
 
 The server caches the finished `CHUNK_Z` packet per chunk per room and drops it whenever that
 chunk's voxels change, so the deflate is paid once and every later joiner gets a `send`.
+
+#### `SESSION_CONFIG` — the two version axes that are not the protocol
+
+```ts
+interface SessionConfigMessage {
+  serverProtocol, serverMinProtocol, contentVersion, contentHash, flags, buildId
+}
+createSessionConfigMessage(): SessionConfigMessage
+encodeSessionConfig(w, serverProtocol, serverMinProtocol, contentVersion, contentHash,
+                    flags, buildId): PacketWriter
+decodeSessionConfig(r, out): SessionConfigMessage
+```
+Layout: `u8 id, u8 serverProtocol, u8 serverMinProtocol, u16 contentVersion, u32 contentHash,
+u32 flags, str buildId` — 13 bytes plus the build id. Sent **once**, immediately after `WELCOME`.
+
+`contentVersion` and `contentHash` are the ROOM's, pinned when it was constructed, so a room that
+outlives a deploy keeps serving what its players joined for. `flags` is the feature-flag bitmask
+**resolved server-side for this player** — bit *i* is `FLAG_ORDER[i]` in `shared/src/flags.ts`, and
+the client never resolves a flag itself. A 33rd flag appends a second `u32` guarded by
+`r.remaining >= 4`; this one is never widened. `buildId` is telemetry and gates nothing.
+
+#### `UPDATE_REQUIRED` — a refusal the client can act on
+
+```ts
+interface UpdateRequiredMessage {
+  reason, serverProtocol, serverMinProtocol, contentVersion, detail
+}
+createUpdateRequiredMessage(): UpdateRequiredMessage
+encodeUpdateRequired(w, reason, serverProtocol, serverMinProtocol, contentVersion,
+                     detail): PacketWriter
+decodeUpdateRequired(r, out): UpdateRequiredMessage
+```
+Layout: `u8 id, u8 reason, u8 serverProtocol, u8 serverMinProtocol, u16 contentVersion,
+str detail` — 6 bytes plus the detail (≤ 96). Sent immediately **before** the close, never after.
+
+`reason` is `UpdateReason` (`shared/src/version.ts`). The same verdict also travels as the
+**WebSocket close code** (4001 too old, 4002 too new, 4003 content, 4004 draining, 4005 revoked),
+because a client old enough to need this message is by definition too old to decode it. `detail` is
+diagnostic; what a player is shown comes from the client's own `UPDATE_REASON_TEXT`, so a server can
+never put a string on a player's screen.
 
 ```ts
 interface BlockDelta { x, y, z, id }

@@ -485,20 +485,27 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
 
   /* --- binding takeover ------------------------------------------------ */
 
-  const savedBindings = new Map<InputAction, string>();
+  /**
+   * Taken through `setActionTaken`, not by blanking the binding.
+   *
+   * Blanking only ever cleared the PRIMARY layer, and since a control scheme
+   * gives actions a second key — the arrows move under Modern — a freecam that
+   * blanked WASD would still have let the arrows walk the body around under the
+   * detached camera. The mask switches the action off at every source: both key
+   * layers, the pad and the touch buttons.
+   */
+  const heldTaken = new Set<InputAction>();
   function take(actions: readonly InputAction[]): void {
     for (const a of actions) {
-      if (savedBindings.has(a)) continue;
-      savedBindings.set(a, game.input.bindings[a]);
-      game.input.setBinding(a, '');
+      if (heldTaken.has(a)) continue;
+      heldTaken.add(a);
+      game.input.setActionTaken(a, true);
     }
   }
   function give(actions: readonly InputAction[]): void {
     for (const a of actions) {
-      const code = savedBindings.get(a);
-      if (code === undefined) continue;
-      savedBindings.delete(a);
-      game.input.setBinding(a, code);
+      if (!heldTaken.delete(a)) continue;
+      game.input.setActionTaken(a, false);
     }
   }
 

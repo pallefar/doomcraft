@@ -146,6 +146,16 @@ export const enum QuestEvent {
   EXIT_REACHED = 8,
   /** A plain line for the log. `text` carries it. */
   MESSAGE = 9,
+  /**
+   * `index` = door index, `a` = rows now retracted into the lintel.
+   *
+   * The one runtime event that is not for the player: it fires on every frame a
+   * door's VOXELS actually change, so the mode can tell a room that owns this
+   * level to carve the same rows. Without it a room simulating the authored
+   * geometry keeps a solid slab in an opened doorway, and the player walks into
+   * a door they can see straight through. See `ModeAction.SET_DOOR`.
+   */
+  DOOR_ROWS = 10,
 }
 
 /** One callback, no allocation. `text` is '' for events that carry no line. */
@@ -695,6 +705,8 @@ export class QuestLevelRuntime {
       }
     }
     this.doorRows[i] = want;
+    // Only on a frame that really moved voxels — `want === have` returned above.
+    this.emit(QuestEvent.DOOR_ROWS, i, want, '');
   }
 
   private testSecrets(px: number, py: number, pz: number): void {

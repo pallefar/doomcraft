@@ -301,6 +301,25 @@ const ES_DEAD = 1 << 3;
 /** Monster slots tracked for kill attribution. More than any level ships. */
 const MONSTER_SLOTS = 256;
 
+/**
+ * How long placement waits for the room to answer "do you own this level?"
+ *
+ * The answer decides WHERE the level goes, and getting it wrong is the bug this
+ * whole handshake exists for: a room that simulates the authored geometry and a
+ * client that relocated it are two different worlds, and the room wins every
+ * argument about every wall. The room holds its `S2C_MODE.CONTEXT` back while a
+ * level is loading, so this only ever expires against a room too old to answer
+ * — and then the old relocate-onto-my-spawn behaviour is the right fallback.
+ */
+const ROOM_CONTEXT_WAIT_S = 3;
+/**
+ * ...and how long it then waits for the room to put the body on the authored
+ * player start before opening the level anyway. Placement is correct either
+ * way (the room's coordinates are the room's coordinates); this is only so the
+ * campaign does not open with the camera out on the arena.
+ */
+const AUTHORED_SPAWN_WAIT_S = 2;
+
 class QuestMode implements ModeInstance {
   readonly id = ModeId.QUEST;
 
@@ -322,6 +341,23 @@ class QuestMode implements ModeInstance {
   private paused = false;
   private useWasDown = false;
   private actionSeq = 1;
+
+  /* --- who owns the geometry -------------------------------------------- *
+   * A Quest level is a FILE, and until the room could read that file too the
+   * campaign was played in two different worlds: the client blitted the level
+   * into its own voxel store and relocated it onto whatever arena spawn it got,
+   * while the room went on colliding the body against generated terrain. The
+   * room's reconciliation wins, so the player was dragged through authored
+   * floors and stopped dead in empty corridors — "I was going through walls".
+   *
+   * `S2C_MODE.CONTEXT` now says which it is. A non-zero `contentHash` means the
+   * ROOM stamped this level into its own world, and then the authored
+   * coordinates are the only placement the two simulations can agree on.
+   * ---------------------------------------------------------------------- */
+  private contextSeen = false;
+  private roomOwnsLevel = false;
+  /** Seconds spent waiting for that answer, and then for the authored spawn. */
+  private placeWait = 0;
 
   /* --- server authority --------------------------------------------------- */
   private serverDriven = false;
@@ -490,7 +526,7 @@ class QuestMode implements ModeInstance {
     }
 
     if (!this.placed) {
-      this.tryPlace();
+      this.tryPlace(dt);
       this.hud.update(dt);
       return;
     }
@@ -523,13 +559,24 @@ class QuestMode implements ModeInstance {
    * -------------------------------------------------------------------- */
 
   /**
-   * Stamp the level as soon as the player exists. When an authoritative Quest
-   * room has already dropped us on the authored start we keep the authored
-   * coordinates; otherwise the level is relocated so its player start lands
-   * exactly where we are, which is what makes the campaign playable against a
-   * room that knows nothing about levels.
+   * Stamp the level as soon as the player exists, on coordinates the ROOM
+   * agrees with.
+   *
+   * Two cases, and the distinction is the whole fix for "I was going through
+   * walls":
+   *
+   *   - **The room owns the level** (`roomOwnsLevel`). Its world already holds
+   *     these voxels at their authored coordinates, so the origin stays at
+   *     zero. Relocating here would produce two different worlds and the room's
+   *     reconciliation would drag the body through the level's floors. We wait
+   *     a moment for the room's respawn to land on the authored player start so
+   *     the level opens where it was authored to open — but we place either
+   *     way, because agreeing with the room matters more than the view.
+   *   - **The room does not** (an old room, or one with no copy of the file).
+   *     Then the client's blit is the only level there is, and relocating it
+   *     onto our spawn is what makes the campaign playable at all.
    */
-  private tryPlace(): void {
+  private tryPlace(dt: number): void {
     const game = this.ctx.host.game;
     if (game.net.status !== 'playing') return;
     if (game.net.world.chunkCount === 0) return;
@@ -539,11 +586,20 @@ class QuestMode implements ModeInstance {
     const pz = game.net.renderPos[2];
     if (px === 0 && py === 0 && pz === 0) return;
 
+    this.placeWait += dt;
+    // Placing before the room has answered risks placing it in the wrong place.
+    if (!this.contextSeen && this.placeWait < ROOM_CONTEXT_WAIT_S) return;
+
     const authored = primarySpawn(this.level);
     const onSpawn = Math.abs(px - authored.x) < 3
       && Math.abs(pz - authored.z) < 3
       && Math.abs(py - authored.y) < 4;
-    if (!onSpawn) this.runtime.alignSpawnTo(px, py, pz);
+
+    if (this.roomOwnsLevel) {
+      if (!onSpawn && this.placeWait < AUTHORED_SPAWN_WAIT_S) return;
+    } else if (!onSpawn) {
+      this.runtime.alignSpawnTo(px, py, pz);
+    }
 
     this.runtime.place();
     this.placed = true;
@@ -566,6 +622,15 @@ class QuestMode implements ModeInstance {
     );
     if (this.level.meta.description.length > 0) game.hud.pushFeed(this.level.meta.description, 's');
     game.hud.pushFeed('Press E to use switches and doors.', 's');
+
+    /* The room could not take the level over, so it is still simulating its own
+     * terrain under our feet and its reconciliation will win every argument
+     * about every wall. Say so. "You went through a wall and nobody told you
+     * why" is the failure this whole handshake exists to end; when the fallback
+     * is genuinely unavoidable, the least it owes the player is a reason. */
+    if (!this.roomOwnsLevel) {
+      game.hud.pushFeed('This room has no copy of the level — movement may fight the walls.', 'k');
+    }
   }
 
   /* -------------------------------------------------------------------- *
@@ -799,6 +864,12 @@ class QuestMode implements ModeInstance {
       case QuestEvent.DOOR_OPENED:
         if (a !== 0) game.camera.addShake(0.02, 50, 14);
         break;
+      case QuestEvent.DOOR_ROWS:
+        // A room that is simulating this level has to carve the same rows, or
+        // the doorway we can see through is still a wall to it. A room that is
+        // not drops the action — see `ModeAction.SET_DOOR`.
+        if (this.roomOwnsLevel) this.sendAction(ModeAction.SET_DOOR, index, a, 0, 0, 0);
+        break;
       case QuestEvent.ENEMY_WOKE:
         this.requestEnemyBody(index, a);
         break;
@@ -998,7 +1069,16 @@ class QuestMode implements ModeInstance {
 
   onModeContext(context: ModeContextMessage): void {
     if (context.modeId !== ModeId.QUEST) return;
-    if (context.levelId.length === 0 || context.levelId === this.levelId) return;
+    if (context.levelId.length === 0 || context.levelId === this.levelId) {
+      // The room has answered the only question placement is waiting on. A
+      // non-zero content hash is its statement that its own world IS this
+      // level; zero means the client's blit is the only copy there is.
+      this.contextSeen = true;
+      // Never downgrade after the level is on the ground: re-placing would
+      // reset every door and switch the player has already used.
+      if (!this.placed) this.roomOwnsLevel = context.contentHash !== 0;
+      return;
+    }
     // The room is running a different level than we loaded — follow it.
     const params = { ...this.ctx.params, levelId: context.levelId, skill: context.skill };
     void this.ctx.registry.activate(params);

@@ -1604,8 +1604,8 @@ export class Hud {
     this.elFeed = div('dc-pad dc-feed');
     root.appendChild(this.elFeed);
     this.elHint = div('dc-pad dc-hint');
-    this.elHint.innerHTML = '<b>WASD</b> move &nbsp;<b>Shift</b> sprint &nbsp;<b>RMB</b> place'
-      + ' &nbsp;<b>1-7</b> weapon &nbsp;<b>Tab</b> scores';
+    this.elHint.innerHTML = '<b>WASD</b>/<b>arrows</b> move &nbsp;<b>Shift</b> sprint'
+      + ' &nbsp;<b>RMB</b> place &nbsp;<b>1-7</b> weapon &nbsp;<b>Tab</b> scores';
     root.appendChild(this.elHint);
 
     /* vitals */

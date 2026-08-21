@@ -738,8 +738,24 @@ export enum ModeAction {
    * the same.
    */
   SET_SPAWN = 11,
+  /**
+   * Quest only: "door `a` is now retracted by `b` rows".
+   *
+   * A voxel door opens by deleting itself row by row into its own lintel, and
+   * that carve used to happen ONLY in the client's voxel store. The moment the
+   * room started simulating the authored level (`Room.stampAuthoredLevel`) that
+   * became the last place the two worlds could disagree — and the worst one,
+   * because a door is a wall you are *supposed* to walk through: the client saw
+   * an open doorway, the room still had a solid slab there, and reconciliation
+   * shoved the player back out of it.
+   *
+   * The room owns the level file, so `a` and `b` are all it needs to carve the
+   * identical rows. It is bounded by construction: a door index the level does
+   * not have, or more rows than the door is tall, is dropped.
+   */
+  SET_DOOR = 12,
 }
-export const MODE_ACTION_COUNT = 12;
+export const MODE_ACTION_COUNT = 13;
 
 export interface ModeActionMessage {
   action: ModeAction;

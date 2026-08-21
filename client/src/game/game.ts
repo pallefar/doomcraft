@@ -36,6 +36,7 @@ import {
   SURFACE_DETAIL_SCALE, SURFACE_SEAM_SCALE,
   type GameSettings,
 } from '@shared/constants';
+import { type CustomBindings } from '@shared/controls';
 import {
   BlockId, BLOCK_SOLID, BLOCK_LIQUID, minimapColor, PLACEABLE_BLOCKS,
 } from '@shared/blocks';
@@ -70,7 +71,14 @@ import {
 import { NetClient, type NetStatus } from '@/net/client';
 import { ThirdPersonRenderer, loadCharacterAtlas } from '@/characters/thirdPerson';
 import type { EnemyRenderer } from '@/characters/enemyRenderer';
-import { createLocalServer, type LocalServer } from '@/net/localServer';
+import type { LocalServer } from '@/net/localServer';
+import {
+  GameSession,
+  REMOTE_CONNECT_DEADLINE_MS,
+  type SessionKind,
+  type SessionState,
+  type SessionTarget,
+} from '@/net/session';
 
 import {
   Hud, createHudState, BLIP_ENEMY, BLIP_PLAYER, BLIP_PICKUP, MAX_BLIPS, MAX_BOARD_ROWS,
@@ -197,6 +205,8 @@ export interface GameEvents {
   /** Pointer lock was lost while playing — open the pause menu. */
   onPauseRequested?(): void;
   onMatchOver?(): void;
+  /** The client moved between the Worker room and a server, or fell back. */
+  onSession?(state: SessionState): void;
 }
 
 export interface GameOptions {
@@ -207,12 +217,64 @@ export interface GameOptions {
   /** Packed avatar (client/src/characters/avatar.ts). 0 is the default marine. */
   avatar?: number;
   seed?: number;
+  /** Legacy three-way `GameMode`, which is all the room constructor takes. */
   mode?: number;
+  /**
+   * The real four-way mode. Preferred over `mode`, which cannot express the
+   * Quest/Builder split — `legacyGameMode` maps both onto `SANDBOX`.
+   */
+  modeId?: ModeId;
   bots?: number;
   enemies?: number;
   /** Force the touch HUD on. Auto-detected otherwise. */
   touch?: boolean;
   events?: GameEvents;
+
+  /* --- online ---------------------------------------------------------- *
+   * Empty by default, and that is load-bearing: the shipped static build has
+   * no server, so an unconfigured client must never try to reach one. See
+   * client/src/net/serverConfig.ts.
+   * --------------------------------------------------------------------- */
+
+  /** Game server origin. '' or absent = this build is offline-only. */
+  serverUrl?: string;
+  /** Stable per-device id, so a remote room can credit XP to the profile. */
+  deviceId?: string;
+  /** Pre-built session. Tests inject one; production lets Game build it. */
+  session?: GameSession;
+}
+
+/**
+ * How long `enterSession` waits for a new world before giving up on it.
+ *
+ * Generous, because the honest worst case is a cold room on a distant server
+ * streaming its join burst over a phone connection. It is a backstop, not a
+ * budget: the remote WELCOME deadline (`REMOTE_CONNECT_DEADLINE_MS`) is what
+ * actually catches a dead server, six seconds earlier and without waiting for
+ * any terrain at all.
+ */
+const SESSION_LIVE_TIMEOUT_MS = 12_000;
+
+/**
+ * Chunks that must have landed before a world counts as somewhere to stand.
+ * The spawn neighbourhood is 3x3; this is the same bar `checkReady` uses.
+ */
+const MIN_LIVE_CHUNKS = 9;
+
+/**
+ * The best `ModeId` for a legacy `GameMode`.
+ *
+ * Lossy on purpose and only used as a fallback: `legacyGameMode` collapses
+ * Quest and Builder onto `SANDBOX`, so the reverse cannot tell them apart and
+ * picks Builder. Anything that knows the real mode passes `GameOptions.modeId`
+ * instead, which every caller in this repo does.
+ */
+function modeIdFromLegacy(mode: number | undefined): ModeId {
+  switch (mode) {
+    case GameMode.HORDE: return ModeId.HORDE;
+    case GameMode.SANDBOX: return ModeId.BUILDER;
+    default: return ModeId.DEATHMATCH;
+  }
 }
 
 /* ------------------------------------------------------------------------ *
@@ -250,7 +312,23 @@ export class Game {
   /** The touch pad, or null on a mouse-and-keyboard device. */
   readonly mobile: MobileControls | null;
   readonly net: NetClient;
-  readonly server: LocalServer;
+  /**
+   * Which authoritative room this client is talking to and how.
+   *
+   * `game.ts:446` used to call `createLocalServer()` unconditionally and hand
+   * its transport to `NetClient`, so there was no branch to a server at all.
+   * The session owns that branch now — see client/src/net/session.ts.
+   */
+  readonly session: GameSession;
+
+  /**
+   * The Worker room, when this session is in one. Null while remote.
+   *
+   * Kept because it was public surface before the session existed; the only
+   * honest answer for a remote session is `null`, and every caller has to
+   * handle that.
+   */
+  get server(): LocalServer | null { return this.session.localServer; }
 
   readonly hudState: HudState = createHudState();
   readonly events: GameEvents;
@@ -263,6 +341,16 @@ export class Game {
   interactiveAtMs = 0;
 
   private settings: GameSettings;
+  /** The session `connect()` brings up. Always local — see `connect()`. */
+  private readonly bootTarget: SessionTarget;
+  /** Timer id, non-null only while a remote session owes us a WELCOME. */
+  private remoteWatchdog: number | null = null;
+  /** True once any session has produced a WELCOME. */
+  private netEverConnected = false;
+  /** Bumped by every `enterSession`, so an overtaken switch bails out. */
+  private sessionEpoch = 0;
+  /** True while `enterSession`/`failOverToLocal` is tearing a session down. */
+  private switching = false;
   private readonly touchMode: boolean;
   private readonly vmInput: ViewmodelInput = createViewmodelInput();
   private readonly fireCtx: FireContext = createFireContext();
@@ -450,6 +538,7 @@ export class Game {
 
     this.input = new InputManager({
       target: opts.canvas,
+      controlScheme: this.settings.controlScheme,
       toggleCrouch: this.settings.toggleCrouch,
       autoSprint: this.settings.autoSprint,
     });
@@ -534,24 +623,39 @@ export class Game {
     this.characters = new ThirdPersonRenderer(this.renderer.scene, { grade: this.materials });
     // `demons` is built in checkReady(), off the critical path.
 
-    /* ---- net --------------------------------------------------------- */
-    this.server = createLocalServer({
+    /* ---- net --------------------------------------------------------- *
+     * The transport is chosen per session, not once at construction. Boot is
+     * always the Worker room — it is free, it is instant, and it is what the
+     * menu renders behind — and `enterSession()` moves the client to a server
+     * when a mode wants one. See client/src/net/session.ts for the policy.
+     * ------------------------------------------------------------------- */
+    this.bootTarget = {
+      modeId: opts.modeId ?? modeIdFromLegacy(opts.mode),
       seed: opts.seed,
-      mode: opts.mode ?? GameMode.DEATHMATCH,
       botFill: opts.bots,
       enemies: opts.enemies ?? -1,
       allWeapons: true,
-      onError: (m) => { this.events.onStatus?.('error', m); },
+      // Boot never probes: the first frame must not wait on a network round
+      // trip. `warmServer()` starts that in the background instead.
+      force: 'local',
+    };
+    this.session = opts.session ?? new GameSession({
+      serverUrl: opts.serverUrl,
+      deviceId: opts.deviceId,
+      onState: (state) => { this.onSessionState(state); },
     });
 
     this.localAvatar = (opts.avatar ?? 0) >>> 0;
     this.net = new NetClient({
       name: opts.name ?? 'Marine',
       avatar: opts.avatar ?? 0,
-      transport: this.server.transport,
+      // The factory, not a fixed transport: `NetClient` calls it on the first
+      // connect AND on every reconnect, which is the seam that lets a session
+      // move between the Worker and a socket without rebuilding the client.
+      createTransport: () => this.session.createTransport(),
       autoReconnect: false,
       events: {
-        onStatus: (s, d) => this.events.onStatus?.(s, d),
+        onStatus: (s, d) => { this.onNetStatus(s, d); },
         onChunk: (cx, cz, voxels, received, total) => this.onChunk(cx, cz, voxels, received, total),
         onBlocks: (n, x, y, z, id) => this.onBlocks(n, x, y, z, id),
         onDamage: (e) => this.onDamage(e),
@@ -571,8 +675,173 @@ export class Game {
    * Lifecycle
    * -------------------------------------------------------------------- */
 
+  /**
+   * Bring the boot session up and connect to it.
+   *
+   * Always local, always synchronous, exactly as it was before there was a
+   * choice: the menu renders a live match behind it and the measured 305 ms
+   * time-to-interactive is not allowed to grow a network round trip. The probe
+   * that decides whether online is available runs in parallel and is finished
+   * long before anybody clicks Play.
+   */
   connect(): void {
+    void this.session.start(this.bootTarget).then(() => {
+      if (!this.disposed) this.net.connect();
+    });
+    // Fire and forget: warms the health cache so `enterSession` is instant.
+    void this.session.checkServer();
+  }
+
+  /**
+   * Move this client to the room a mode wants — the Worker's or a server's.
+   *
+   * Resolves with where it actually landed, which is not always where it was
+   * asked to go: an unreachable server resolves as `'local'` rather than
+   * rejecting, because the fallback is a real match and not an error state.
+   *
+   * Switching is a disconnect and a reconnect by construction. There is no
+   * in-place handover: the two rooms are different simulations with different
+   * worlds and different player ids, so the client's world and meshes are
+   * dropped and re-streamed. See the header of session.ts.
+   */
+  async enterSession(target: SessionTarget): Promise<SessionKind> {
+    if (this.disposed) return this.session.kind;
+    const sameLocal = this.session.kind === 'local'
+      && !this.session.prefersRemote(target)
+      && this.netEverConnected;
+    // Staying in the Worker for a mode that was already in the Worker is the
+    // overwhelmingly common case (Quest -> Builder -> Quest). Tearing the room
+    // down and re-streaming 169 chunks to arrive back where we started would
+    // be a visible, pointless stall, so the mode layer's own
+    // `C2S_MODE.SELECT` handles it exactly as it always has.
+    if (sameLocal) return 'local';
+
+    /* Two fast clicks on two tiles must not leave two half-built sessions
+     * racing each other onto one `NetClient`. `sessionEpoch` makes the later
+     * call the only one that gets to connect; `switching` suppresses the
+     * failover path below, because the `closed` status our own `disconnect()`
+     * raises is not a server going away. */
+    const epoch = ++this.sessionEpoch;
+    this.switching = true;
+    this.clearRemoteWatchdog();
+    this.net.disconnect();
+    this.dropWorld();
+    const state = await this.session.start(target);
+    if (this.disposed || epoch !== this.sessionEpoch) return state.kind;
+    this.switching = false;
+    this.net.setAutoReconnect(this.session.wantsAutoReconnect);
+    this.armRemoteWatchdog();
     this.net.connect();
+
+    /* The switch is not finished when the socket is open — it is finished when
+     * the NEW world has arrived. A mode's `enter()` reads `net.world` to place
+     * its level and its props, so activating it against the empty store we just
+     * cleared would put the player inside a void. Waiting here is what keeps
+     * every mode's own code unchanged by the existence of a server. */
+    if (!await this.waitUntilLive(SESSION_LIVE_TIMEOUT_MS)) {
+      // Nothing arrived. If we were waiting on a server, stop waiting on it.
+      if (epoch === this.sessionEpoch && this.session.kind === 'remote') {
+        this.failOverToLocal('server did not answer');
+        await this.waitUntilLive(SESSION_LIVE_TIMEOUT_MS);
+      }
+    }
+    return this.session.kind;
+  }
+
+  /**
+   * Resolve once the current session has a world and a body in it.
+   *
+   * Polled rather than event-driven: "live" is a conjunction of three separate
+   * signals (net status, chunk count, and the spawn actually existing) that
+   * arrive in no fixed order, and a 60 ms poll against the frame loop that is
+   * already running is both simpler and impossible to deadlock. Returns false
+   * on the deadline instead of throwing — a timeout here is a fallback, not an
+   * error.
+   */
+  private async waitUntilLive(timeoutMs: number): Promise<boolean> {
+    const deadline = performance.now() + timeoutMs;
+    for (;;) {
+      if (this.disposed) return false;
+      if (this.net.status === 'playing' && this.net.world.chunkCount >= MIN_LIVE_CHUNKS) return true;
+      if (performance.now() >= deadline) return false;
+      await new Promise<void>((done) => { setTimeout(done, 60); });
+    }
+  }
+
+  /**
+   * Forget the world we were in.
+   *
+   * Two different servers do not share a seed, and `NetClient.resetSession`
+   * deliberately keeps the voxel store across a reconnect (a reconnect to the
+   * SAME room must not re-download 169 chunks). Moving between rooms is the
+   * case where that is wrong, and it is the only one, so the drop lives here
+   * rather than in the net layer.
+   */
+  private dropWorld(): void {
+    this.net.world.clear();
+    this.chunks.clear();
+    this.hud.clearFeed();
+  }
+
+  /* -------------------------------------------------------------------- *
+   * The fallback watchdog
+   *
+   * "Offline must keep working" has a second half that is easy to miss: a
+   * server that ACCEPTS the socket and then says nothing is worse than one
+   * that refuses it, because the refusal is instant and the silence is a
+   * spinner. `NetClient` on its own would sit in `reconnecting` forever. So a
+   * remote session gets one deadline to produce a WELCOME, and misses it into
+   * the Worker room instead.
+   * -------------------------------------------------------------------- */
+
+  private armRemoteWatchdog(): void {
+    this.clearRemoteWatchdog();
+    if (this.session.kind !== 'remote') return;
+    this.remoteWatchdog = setTimeout(() => {
+      this.remoteWatchdog = null;
+      this.failOverToLocal('server did not answer');
+    }, REMOTE_CONNECT_DEADLINE_MS) as unknown as number;
+  }
+
+  private clearRemoteWatchdog(): void {
+    if (this.remoteWatchdog === null) return;
+    clearTimeout(this.remoteWatchdog as unknown as ReturnType<typeof setTimeout>);
+    this.remoteWatchdog = null;
+  }
+
+  /** Give up on the server and bring the Worker room up in its place. */
+  private failOverToLocal(reason: string): void {
+    if (this.disposed || this.switching) return;
+    this.clearRemoteWatchdog();
+    if (!this.session.fallBackToLocal(reason)) return;
+    this.switching = true;
+    this.net.disconnect();
+    this.dropWorld();
+    this.switching = false;
+    this.net.setAutoReconnect(false);
+    this.net.connect();
+  }
+
+  private onNetStatus(status: NetStatus, detail?: string): void {
+    // WELCOME landed: the server is real and the deadline has been met.
+    if (status === 'loading' || status === 'playing') {
+      this.netEverConnected = true;
+      this.clearRemoteWatchdog();
+    }
+    /* A remote session that closes for good — refused, 1013 server full, a
+     * protocol mismatch — must not leave the player staring at a dead menu.
+     * `switching` excludes the `closed` we raise ourselves while moving between
+     * sessions, which is not a server going away and must not be reported as
+     * one (nor spend the single fallback this session is allowed). */
+    if (!this.switching && this.session.kind === 'remote' && (status === 'closed' || status === 'error')) {
+      this.failOverToLocal(detail !== undefined && detail.length > 0 ? detail : 'server closed the connection');
+      return;
+    }
+    this.events.onStatus?.(status, detail);
+  }
+
+  private onSessionState(state: SessionState): void {
+    this.events.onSession?.(state);
   }
 
   /** Enter play: pointer lock, input on, HUD live. */
@@ -613,8 +882,9 @@ export class Game {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.clearRemoteWatchdog();
     this.net.dispose();
-    this.server.stop();
+    this.session.dispose();
     this.input.detach();
     this.mobile?.dispose();
     this.hud.dispose();
@@ -634,6 +904,22 @@ export class Game {
    * Settings
    * -------------------------------------------------------------------- */
 
+  /**
+   * The rows the player rebound by hand. Sparse, and NOT part of `GameSettings`
+   * — it persists on its own key so a settings reset does not wipe a keymap and
+   * a keymap reset does not wipe the settings.
+   */
+  private customBindings: CustomBindings = {};
+
+  /**
+   * Replace the pinned rows and re-resolve both binding layers against the live
+   * scheme. The settings panel calls this after every rebind.
+   */
+  setCustomBindings(custom: CustomBindings): void {
+    this.customBindings = custom;
+    this.input.applyControlScheme(this.settings.controlScheme, custom);
+  }
+
   applySettings(s: GameSettings): void {
     this.settings = s;
     this.camera.baseFov = s.fov;
@@ -644,6 +930,9 @@ export class Game {
     this.camera.bobScale = s.viewBob ? 1 : 0;
     this.input.toggleCrouch = s.toggleCrouch;
     this.input.autoSprint = s.autoSprint;
+    // Both binding layers are rebuilt from (scheme + the player's pinned rows),
+    // so a scheme switch and a rebind can never disagree about what is bound.
+    this.input.applyControlScheme(s.controlScheme, this.customBindings);
 
     this.renderer.setRenderScale(s.renderScale);
     this.materials.setQuality(s.quality);
@@ -1238,8 +1527,14 @@ export class Game {
 
     const playing = this.playing && !this.net.local.dead;
 
-    /* --- look --------------------------------------------------------- */
+    /* --- look ---------------------------------------------------------
+       `turnDelta` is polled unconditionally, playing or not: it owns the
+       held-time ramp behind DOOM's two-stage keyboard turn, and a step that
+       skipped it would leave a stale ramp for the next turn. It returns 0
+       under the Modern scheme, where nothing is bound to the turn actions. */
+    const keyTurn = input.turnDelta(dt);
     if (this.playing) {
+      if (keyTurn !== 0) this.camera.addLook(keyTurn, 0);
       if (input.lookDx !== 0 || input.lookDy !== 0) {
         this.camera.addLookPixels(input.lookDx, input.lookDy, false);
       }

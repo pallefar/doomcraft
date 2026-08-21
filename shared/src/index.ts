@@ -10,6 +10,7 @@
  */
 
 export * from './constants.ts';
+export * from './controls.ts';
 export * from './blocks.ts';
 export * from './weapons.ts';
 export * from './math.ts';

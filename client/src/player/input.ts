@@ -7,6 +7,14 @@
  *   - touch, exposed as a small imperative surface the mobile-controls piece
  *     drives; this file deliberately draws no UI and owns no DOM of its own
  *
+ * The keyboard resolves through TWO layers — a primary map that never changes
+ * and an alt map that a control scheme owns (`shared/src/controls.ts`). That is
+ * what lets Modern and Classic coexist: WASD and the mouse are the same under
+ * both, the arrows move under Modern and TURN under Classic, and a code may
+ * appear once per layer so Space can jump and open a door on the same press.
+ * `turnDelta` is the classic scheme's other half — DOOM's two-stage keyboard
+ * turn, in radians, applied to the camera and never sent as a key.
+ *
  * The output is `InputCommand` exactly as the protocol defines it, so the same
  * frame feeds local prediction and the wire with no translation layer in
  * between. Look deltas are kept OUT of the command (the command carries absolute
@@ -16,8 +24,12 @@
  */
 
 import {
-  InputAction, DEFAULT_KEYBINDS,
+  InputAction, DEFAULT_KEYBINDS, type ControlScheme,
 } from '@shared/constants';
+import {
+  resolveBindings, keyboardTurnRate, blankBindings,
+  type CustomBindings, type BindingLayer,
+} from '@shared/controls';
 import {
   BTN_FIRE, BTN_ALT_FIRE, BTN_JUMP, BTN_CROUCH, BTN_SPRINT, BTN_RELOAD,
   BTN_USE, BTN_MELEE, BTN_BUILD, BTN_NEXT_WEAPON, BTN_PREV_WEAPON, BTN_RESPAWN,
@@ -59,17 +71,39 @@ export const MOUSE_CODES: readonly string[] = Object.freeze([
 export const WHEEL_UP = 'WheelUp';
 export const WHEEL_DOWN = 'WheelDown';
 
+/** Codes whose browser default would fight the game while it has focus. */
+const SWALLOW_DEFAULT: ReadonlySet<string> = new Set([
+  // Tab moves focus, Space scrolls, the arrows scroll the page under the canvas
+  // — which is exactly what a Classic player pressing Left for a whole second
+  // would otherwise get. Alt reaches for the Windows menu bar on keyup.
+  'Tab', 'Space',
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+  'AltLeft', 'AltRight',
+]);
+
+/** Symbols the settings screen should show instead of a DOM code. */
+const CODE_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  Comma: ',', Period: '.', Slash: '/', Backslash: '\\', Semicolon: ';', Quote: '\'',
+  Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backquote: '`',
+  Space: 'Space', Escape: 'Esc', Enter: 'Enter', Tab: 'Tab', Backspace: 'Backspace',
+  ControlLeft: 'L Ctrl', ControlRight: 'R Ctrl',
+  AltLeft: 'L Alt', AltRight: 'R Alt',
+  ShiftLeft: 'L Shift', ShiftRight: 'R Shift',
+  MetaLeft: 'L Meta', MetaRight: 'R Meta',
+});
+
 /** Human label for a binding code, for the settings screen. */
 export function bindingLabel(code: string): string {
   if (code === '') return '—';
   if (code === WHEEL_UP) return 'Wheel Up';
   if (code === WHEEL_DOWN) return 'Wheel Down';
+  const named = CODE_LABELS[code];
+  if (named !== undefined) return named;
   if (code.startsWith('Mouse')) return `Mouse ${Number(code.slice(5)) + 1}`;
   if (code.startsWith('Key')) return code.slice(3);
   if (code.startsWith('Digit')) return code.slice(5);
   if (code.startsWith('Numpad')) return `Num ${code.slice(6)}`;
   if (code.startsWith('Arrow')) return code.slice(5);
-  if (code === 'Space') return 'Space';
   if (code.endsWith('Left')) return `L ${code.slice(0, -4)}`;
   if (code.endsWith('Right')) return `R ${code.slice(0, -5)}`;
   return code;
@@ -140,6 +174,10 @@ export interface InputManagerOptions {
   /** Element that owns pointer lock. Usually the #game canvas. */
   target?: HTMLElement | null;
   bindings?: Partial<BindingMap>;
+  /** Which second binding layer to start on. Default `modern`. */
+  controlScheme?: ControlScheme;
+  /** Rows the player rebound by hand; they survive every scheme switch. */
+  customBindings?: CustomBindings;
   /** Crouch is a toggle rather than a hold. */
   toggleCrouch?: boolean;
   /** Sprint whenever moving forward without holding the key. */
@@ -147,8 +185,18 @@ export interface InputManagerOptions {
 }
 
 export class InputManager implements TouchSurface {
-  /** Live bindings, action -> code. Mutate through `setBinding`. */
+  /**
+   * Live PRIMARY bindings, action -> code. Mutate through `setBinding`.
+   *
+   * There is a second layer — see `altBindings`. A code is exclusive within a
+   * layer but may appear once in each, which is how Classic hangs DOOM's `use`
+   * on Space without taking Jump away from it.
+   */
   readonly bindings: BindingMap;
+  /** Live ALT bindings. This is the layer a control scheme writes. */
+  readonly altBindings: BindingMap;
+  /** Which scheme `altBindings` currently reflects. */
+  controlScheme: ControlScheme = 'modern';
 
   /** Off means every action reads as released; the UI sets this for menus. */
   enabled = true;
@@ -194,8 +242,20 @@ export class InputManager implements TouchSurface {
   private readonly touchDown = new Uint8Array(ACTION_COUNT);
   /** One-frame pulses: wheel notches and touch taps. */
   private readonly pulse = new Uint8Array(ACTION_COUNT);
+  /**
+   * Actions a MODE has taken off the player for the moment — Builder's no-clip
+   * camera freezing the body, Horde's fortify cursor stealing the mouse.
+   *
+   * A mask rather than blanking the binding, because blanking only ever cleared
+   * the primary layer: once an action can also carry an alt key, "unbind it"
+   * stops meaning "switch it off". `setActionTaken` means it exactly.
+   */
+  private readonly taken = new Uint8Array(ACTION_COUNT);
 
   private readonly codeToAction = new Map<string, number>();
+  private readonly altCodeToAction = new Map<string, number>();
+  /** Seconds either turn key has been held, for DOOM's two-stage turn. */
+  private turnHeld = 0;
 
   private target: HTMLElement | null = null;
   private attached = false;
@@ -207,7 +267,8 @@ export class InputManager implements TouchSurface {
   private touchMoveZ = 0;
 
   private rebindAction = -1;
-  private rebindDone: ((action: InputAction, code: string) => void) | null = null;
+  private rebindLayer: BindingLayer = 'primary';
+  private rebindDone: ((action: InputAction, code: string, layer: BindingLayer) => void) | null = null;
   /**
    * `navigator.getGamepads()` mints a fresh array on every call, so polling it
    * unconditionally allocates once per frame for the large majority of players
@@ -231,9 +292,11 @@ export class InputManager implements TouchSurface {
     if (this.rebindAction >= 0) { this.finishRebind(code); e.preventDefault(); return; }
     if (!this.enabled) return;
     const id = this.codeToAction.get(code);
-    if (id === undefined) return;
+    const altId = this.altCodeToAction.get(code);
+    if (id === undefined && altId === undefined) return;
     // A wheel notch is a pulse: press this frame, release at endFrame.
-    this.pulse[id] = 1;
+    if (id !== undefined) this.pulse[id] = 1;
+    if (altId !== undefined && altId !== id) this.pulse[altId] = 1;
     e.preventDefault();
   };
   private readonly onContextMenu = (e: Event): void => { e.preventDefault(); };
@@ -255,8 +318,9 @@ export class InputManager implements TouchSurface {
 
   constructor(options: InputManagerOptions = {}) {
     this.bindings = { ...DEFAULT_KEYBINDS } as BindingMap;
+    this.altBindings = blankBindings() as BindingMap;
+    this.applyControlScheme(options.controlScheme ?? 'modern', options.customBindings);
     if (options.bindings) this.loadBindings(options.bindings);
-    this.rebuildCodeMap();
     this.target = options.target ?? null;
     this.toggleCrouch = options.toggleCrouch ?? false;
     this.autoSprint = options.autoSprint ?? false;
@@ -333,6 +397,7 @@ export class InputManager implements TouchSurface {
     this.lookDx = 0; this.lookDy = 0;
     this.touchLookDx = 0; this.touchLookDy = 0;
     this.stickLookX = 0; this.stickLookY = 0;
+    this.turnHeld = 0;
   }
 
   /* -------------------------------------------------------------------- *
@@ -341,50 +406,121 @@ export class InputManager implements TouchSurface {
 
   private rebuildCodeMap(): void {
     this.codeToAction.clear();
+    this.altCodeToAction.clear();
     for (let i = 0; i < ACTIONS.length; i++) {
       const code = this.bindings[ACTIONS[i]];
       if (code) this.codeToAction.set(code, i);
+      const alt = this.altBindings[ACTIONS[i]];
+      if (alt) this.altCodeToAction.set(alt, i);
     }
   }
 
-  setBinding(action: InputAction, code: string): void {
-    // One code drives one action. Steal it from whoever had it.
-    for (let i = 0; i < ACTIONS.length; i++) {
-      if (ACTIONS[i] !== action && this.bindings[ACTIONS[i]] === code) {
-        this.bindings[ACTIONS[i]] = '';
+  /** The map that owns `layer`. */
+  private layerMap(layer: BindingLayer): BindingMap {
+    return layer === 'alt' ? this.altBindings : this.bindings;
+  }
+
+  /** The code bound to `action` on `layer`, or `''`. */
+  binding(action: InputAction, layer: BindingLayer = 'primary'): string {
+    return this.layerMap(layer)[action] ?? '';
+  }
+
+  /**
+   * Bind `code` to `action` on one layer.
+   *
+   * One code drives one action WITHIN a layer — it is stolen from whoever held
+   * it. Across layers it is not: Space is Jump on the primary layer and, under
+   * Classic, `use` on the alt one, and pressing it does both.
+   */
+  setBinding(action: InputAction, code: string, layer: BindingLayer = 'primary'): void {
+    const map = this.layerMap(layer);
+    if (code !== '') {
+      for (let i = 0; i < ACTIONS.length; i++) {
+        if (ACTIONS[i] !== action && map[ACTIONS[i]] === code) map[ACTIONS[i]] = '';
       }
     }
-    this.bindings[action] = code;
+    map[action] = code;
     this.rebuildCodeMap();
   }
 
-  loadBindings(partial: Partial<BindingMap>): void {
+  loadBindings(partial: Partial<BindingMap>, layer: BindingLayer = 'primary'): void {
+    const map = this.layerMap(layer);
     for (const key of Object.keys(partial)) {
       const a = key as InputAction;
       const v = partial[a];
-      if (typeof v === 'string') this.bindings[a] = v;
+      if (typeof v === 'string') map[a] = v;
     }
-    this.rebuildCodeMap();
-  }
-
-  resetBindings(): void {
-    for (const a of ACTIONS) this.bindings[a] = DEFAULT_KEYBINDS[a];
     this.rebuildCodeMap();
   }
 
   /**
-   * Capture the next key, mouse button or wheel notch and bind it to `action`.
-   * The captured event is swallowed, so the settings screen never also fires it.
+   * Rebuild BOTH layers from a control scheme plus the player's pinned rows.
+   *
+   * This is the only way a scheme is ever applied. `resolveBindings` owns the
+   * rule that a hand-rebound row survives the switch —
+   * `shared/src/controls.ts`.
    */
-  beginRebind(action: InputAction, done?: (action: InputAction, code: string) => void): void {
+  applyControlScheme(scheme: ControlScheme, custom: CustomBindings = {}): void {
+    const resolved = resolveBindings(scheme, custom);
+    this.controlScheme = scheme;
+    for (const a of ACTIONS) {
+      this.bindings[a] = resolved.primary[a] ?? '';
+      this.altBindings[a] = resolved.alt[a] ?? '';
+    }
+    this.rebuildCodeMap();
+  }
+
+  /** Back to the current scheme's own table, dropping every pinned row. */
+  resetBindings(): void {
+    this.applyControlScheme(this.controlScheme);
+  }
+
+  /**
+   * Take an action off the player, or hand it back.
+   *
+   * A taken action reads released from every source and produces no edges, so a
+   * mode does not have to know which of the two layers — or the gamepad, or the
+   * touch pad — is currently driving it.
+   */
+  setActionTaken(action: InputAction, taken: boolean): void {
+    const id = actionId(action);
+    if (id < 0) return;
+    this.taken[id] = taken ? 1 : 0;
+  }
+
+  /** True while a mode is holding `action` hostage. */
+  isActionTaken(action: InputAction): boolean {
+    const id = actionId(action);
+    return id >= 0 && this.taken[id] !== 0;
+  }
+
+  /**
+   * Capture the next key, mouse button or wheel notch and bind it to `action`
+   * on `layer`. The captured event is swallowed, so the settings screen never
+   * also fires it.
+   */
+  beginRebind(
+    action: InputAction,
+    layer: BindingLayer = 'primary',
+    done?: (action: InputAction, code: string, layer: BindingLayer) => void,
+  ): void {
     this.rebindAction = actionId(action);
+    this.rebindLayer = layer;
     this.rebindDone = done ?? null;
     this.releaseAll();
   }
 
+  /**
+   * Abandon a capture. The callback still fires, with `code === ''`, so the
+   * settings screen can put the row's label back without polling for it.
+   */
   cancelRebind(): void {
+    const id = this.rebindAction;
+    const done = this.rebindDone;
+    const layer = this.rebindLayer;
     this.rebindAction = -1;
     this.rebindDone = null;
+    if (id >= 0 && done) done(ACTIONS[id], '', layer);
   }
 
   get rebinding(): boolean { return this.rebindAction >= 0; }
@@ -393,29 +529,27 @@ export class InputManager implements TouchSurface {
     const id = this.rebindAction;
     this.rebindAction = -1;
     const done = this.rebindDone;
+    const layer = this.rebindLayer;
     this.rebindDone = null;
     if (id < 0) return;
     const action = ACTIONS[id];
-    this.setBinding(action, code);
-    if (done) done(action, code);
+    this.setBinding(action, code, layer);
+    if (done) done(action, code, layer);
   }
 
   /* -------------------------------------------------------------------- *
    * DOM handlers
    * -------------------------------------------------------------------- */
 
-  private handleKey(e: KeyboardEvent, down: boolean): void {
-    if (e.repeat) return;
-    if (down && this.rebindAction >= 0) {
-      if (e.code === 'Escape') this.cancelRebind();
-      else this.finishRebind(e.code);
-      e.preventDefault();
-      return;
-    }
-    const id = this.codeToAction.get(e.code);
-    if (id === undefined) return;
-    // Tab and the digits must not scroll or move focus while playing.
-    if (down && (e.code === 'Tab' || e.code === 'Space')) e.preventDefault();
+  /**
+   * Drive one action from one physical code.
+   *
+   * Split out because a code can now hit two actions at once — Space is Jump on
+   * the primary layer and, under Classic, `use` on the alt one — and both have
+   * to latch identically.
+   */
+  private driveKey(id: number | undefined, down: boolean, other: number | undefined): void {
+    if (id === undefined || id === other) return;
     if (!this.enabled) { this.keyDown[id] = 0; return; }
     this.keyDown[id] = down ? 1 : 0;
     // Latch the press. A tap that goes down and up inside one frame — a
@@ -426,14 +560,43 @@ export class InputManager implements TouchSurface {
     if (down) this.pulse[id] = 1;
   }
 
+  private handleKey(e: KeyboardEvent, down: boolean): void {
+    if (e.repeat) return;
+    if (down && this.rebindAction >= 0) {
+      if (e.code === 'Escape') this.cancelRebind();
+      else this.finishRebind(e.code);
+      // Swallowed for real. `preventDefault` alone leaves every other window
+      // listener running, and the shell's own Escape handler would have closed
+      // the settings panel out from under the capture it was cancelling.
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      return;
+    }
+    const id = this.codeToAction.get(e.code);
+    const altId = this.altCodeToAction.get(e.code);
+    if (id === undefined && altId === undefined) return;
+    // Tab must not move focus, and Space and the arrows must not scroll the
+    // page out from under the canvas while playing.
+    if (down && SWALLOW_DEFAULT.has(e.code)) e.preventDefault();
+    this.driveKey(id, down, undefined);
+    this.driveKey(altId, down, id);
+  }
+
   private handleMouse(e: MouseEvent, down: boolean): void {
     const code = `Mouse${e.button}`;
-    if (down && this.rebindAction >= 0) { this.finishRebind(code); e.preventDefault(); return; }
+    if (down && this.rebindAction >= 0) {
+      this.finishRebind(code);
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      return;
+    }
     const id = this.codeToAction.get(code);
-    if (id === undefined) return;
-    if (!this.enabled) { this.keyDown[id] = 0; return; }
-    this.keyDown[id] = down ? 1 : 0;
-    if (down) this.pulse[id] = 1;
+    const altId = this.altCodeToAction.get(code);
+    if (id === undefined && altId === undefined) return;
+    this.driveKey(id, down, undefined);
+    this.driveKey(altId, down, id);
     if (down && e.button === 2) e.preventDefault();
   }
 
@@ -491,7 +654,7 @@ export class InputManager implements TouchSurface {
     this.pollGamepad();
 
     for (let i = 0; i < ACTION_COUNT; i++) {
-      const now = this.enabled
+      const now = (this.enabled && this.taken[i] === 0)
         ? (this.keyDown[i] | this.padDown[i] | this.touchDown[i] | this.pulse[i])
         : 0;
       const was = this.downState[i];
@@ -584,6 +747,41 @@ export class InputManager implements TouchSurface {
     return id !== undefined && this.releaseEdge[id] !== 0;
   }
 
+  /* -------------------------------------------------------------------- *
+   * Keyboard turning — DOOM's, not an approximation of it
+   * -------------------------------------------------------------------- */
+
+  /**
+   * DOOM's `key_strafe` (RALT). While it is held the turn keys strafe instead
+   * of turning, which is `G_BuildTiccmd`'s `if (strafe) { side += ... }` branch.
+   */
+  get strafeModifier(): boolean {
+    return this.isDown(InputAction.StrafeMod);
+  }
+
+  /**
+   * Radians of yaw the keyboard asks for this step. Positive turns LEFT, which
+   * is the sign `PlayerCamera.addLook` wants.
+   *
+   * Call once per fixed step, ALWAYS — the held timer that drives DOOM's
+   * two-stage acceleration lives behind it, so skipping the call on a frame the
+   * player is not in control would leave a stale ramp for the next turn.
+   *
+   * Returns 0 in the Modern scheme, where nothing is bound to the turn actions.
+   */
+  turnDelta(dt: number): number {
+    const left = this.isDown(InputAction.TurnLeft);
+    const right = this.isDown(InputAction.TurnRight);
+    if (!left && !right) { this.turnHeld = 0; return 0; }
+    // DOOM accumulates turnheld whenever either key is down, strafing or not,
+    // and does it BEFORE the SLOWTURNTICS compare.
+    this.turnHeld += dt;
+    if (this.strafeModifier) return 0;
+    const dir = (left ? 1 : 0) - (right ? 1 : 0);
+    if (dir === 0) return 0;         // both held: DOOM's -= and += cancel out
+    return dir * keyboardTurnRate(this.turnHeld, this.sprinting) * dt;
+  }
+
   /** Crouch after the toggle setting is applied. */
   get crouching(): boolean {
     return this.toggleCrouch ? this.crouchLatched : this.isDown(InputAction.Crouch);
@@ -600,6 +798,12 @@ export class InputManager implements TouchSurface {
     let v = 0;
     if (this.isDown(InputAction.MoveRight)) v += 1;
     if (this.isDown(InputAction.MoveLeft)) v -= 1;
+    // Alt held converts the turn keys into strafe, exactly as DOOM does — and
+    // `turnDelta` returns 0 for the same frames, so the two never double up.
+    if (this.strafeModifier) {
+      if (this.isDown(InputAction.TurnRight)) v += 1;
+      if (this.isDown(InputAction.TurnLeft)) v -= 1;
+    }
     if (v === 0) v = this.padMoveX !== 0 ? this.padMoveX : this.touchMoveX;
     return v < -1 ? -1 : v > 1 ? 1 : v;
   }

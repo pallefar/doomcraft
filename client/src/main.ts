@@ -25,10 +25,16 @@ import {
   AD_SLOT_IDS, IAP_PRICE_USD, IAP_PRODUCT_REMOVE_ADS,
   GAME_MODE_NAMES, GameMode, FOV_MIN, FOV_MAX,
   RENDER_DISTANCE_MIN, RENDER_DISTANCE_MAX,
-  SENSITIVITY_MIN, SENSITIVITY_MAX,
+  SENSITIVITY_MIN, SENSITIVITY_MAX, InputAction,
   type GameSettings, type SaveProgress, type QualityPreset, type CrosshairStyle,
   type SurfaceDetailPreset,
 } from '@shared/constants';
+import {
+  CONTROL_SCHEMES, SCHEME_LABELS, SCHEME_NOTES,
+  asControlScheme, sanitiseCustomBindings,
+  type CustomBindings, type BindingLayer,
+} from '@shared/controls';
+import { bindingLabel } from '@/player/input';
 
 import {
   MODE_KEYS,
@@ -51,6 +57,14 @@ import {
 } from '@shared/saves';
 
 import { Game } from '@/game/game';
+import { resolveServerUrl } from '@/net/serverConfig';
+import type { SessionState } from '@/net/session';
+import {
+  createPrivateRoom,
+  listRooms,
+  resolveCode,
+  type RoomRow,
+} from '@/net/matchmaker';
 import { AudioMixer, mountAudioSettings } from '@/audio/settings';
 import { Feature, isEnabled, setOverride } from '@shared/features';
 import { DEFAULT_PALETTE, MODE_PALETTES, applyModePalette, applyPalette } from '@/engine/palette';
@@ -71,6 +85,8 @@ import {
   type ModeSelectLevel,
 } from '@/ui/modeSelect';
 import { avatarButtonLabel, createAvatarEditor, type AvatarEditor } from '@/ui/avatarEditor';
+import { installUpdates, type UpdateSnapshot } from '@/boot/updates';
+import { UpdateReason } from '@shared/version';
 import { AVATAR_PALETTE, legacySkinFromAvatar, unpackAvatar, writeAvatar } from '@/characters/avatar';
 
 /* ------------------------------------------------------------------------ *
@@ -165,6 +181,22 @@ const SHELL_CSS = `
 .dc-locker i{width:11px;height:11px;border-radius:50%;flex:0 0 11px;
   box-shadow:0 0 0 1px rgba(0,0,0,.6),0 0 0 2px rgba(255,255,255,.18)}
 .dc-note{margin-top:16px;font-size:12px;color:#7d7873}
+/* --- online strip. Only in the DOM when a server is configured. --- */
+.dc-online{display:flex;gap:8px;justify-content:center;align-items:center;margin-top:14px;flex-wrap:wrap}
+.dc-online b{font:700 11px/1 system-ui;letter-spacing:.16em;text-transform:uppercase}
+.dc-online .dc-dot{width:8px;height:8px;border-radius:50%;background:#6b6660;flex:0 0 8px}
+.dc-online[data-kind="remote"] .dc-dot{background:#4fb84a;box-shadow:0 0 8px rgba(79,184,74,.8)}
+.dc-online[data-kind="local"] .dc-dot{background:#8a8078}
+.dc-online[data-kind="down"] .dc-dot{background:#e03c1c}
+.dc-online span{font-size:12px;color:#9d968f}
+.dc-code{width:118px;padding:8px 10px;background:rgba(12,12,16,.72);
+  border:1px solid rgba(255,255,255,.18);color:#e6e1dc;border-radius:2px;
+  font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.18em;text-transform:uppercase}
+.dc-rooms{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-top:8px}
+.dc-room{padding:6px 12px;background:rgba(12,12,16,.72);border:1px solid rgba(255,255,255,.14);
+  color:#c7c1bb;border-radius:2px;font-size:12px}
+.dc-room:hover{border-color:rgba(255,255,255,.4)}
+.dc-room[disabled]{opacity:.4}
 .dc-note b{color:#b4aea8}
 .dc-stats{display:flex;gap:22px;justify-content:center;margin-top:18px;font-size:12px;color:#8a8078}
 .dc-stats b{display:block;font-size:19px;color:#e8e6e3;font-variant-numeric:tabular-nums}
@@ -184,6 +216,21 @@ const SHELL_CSS = `
   padding:5px;border-radius:2px}
 .dc-set .val{text-align:right;font-variant-numeric:tabular-nums;color:#e8e6e3}
 .dc-set .chk{grid-column:2 / span 2;justify-self:end}
+/* Key rows: label in column 1, the two binding layers sharing columns 2-3.
+   The grid template is left alone so these rows line up with every slider. */
+.dc-set .dc-keys{grid-column:2 / span 2;display:flex;gap:6px}
+.dc-set .dc-key{flex:1 1 0;min-width:0;background:#17171d;color:#e8e6e3;
+  border:1px solid rgba(255,255,255,.18);border-radius:2px;padding:5px 4px;
+  font:inherit;font-size:12px;text-align:center;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dc-set .dc-key.empty{color:#5f5a56}
+.dc-set .dc-key.listening{border-color:#e03c1c;color:#ffb9a6;background:#24100c}
+.dc-set .dc-key.scheme{border-style:dashed}
+.dc-note{grid-column:1 / -1;margin:2px 0 6px;font-size:11.5px;line-height:1.5;color:#8a8078}
+.dc-note b{color:#c9c4bf;font-weight:600}
+.dc-row-btn{grid-column:1 / -1;justify-self:start;background:transparent;
+  border:1px solid rgba(255,255,255,.2);color:#c9c4bf;border-radius:2px;padding:6px 12px;
+  font:inherit;font-size:12px}
 .dc-sec{margin:18px 0 8px;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:#6f6a66;
   border-top:1px solid rgba(255,255,255,.09);padding-top:12px}
 .dc-actions{display:flex;gap:10px;margin-top:18px;flex:0 0 auto;
@@ -327,7 +374,23 @@ style.textContent = SHELL_CSS;
 document.head.appendChild(style);
 
 const settings: GameSettings = loadJson<GameSettings>(STORAGE_KEYS.settings, DEFAULT_SETTINGS as GameSettings);
+settings.controlScheme = asControlScheme(settings.controlScheme);
 const progress: SaveProgress = loadJson<SaveProgress>(STORAGE_KEYS.progress, DEFAULT_PROGRESS as SaveProgress);
+
+/**
+ * The rows the player rebound by hand — sparse, and stored apart from
+ * `settings` on `STORAGE_KEYS.bindings`. Its own key because a keymap and a
+ * settings blob have different lifetimes: resetting one must not clear the
+ * other, and this one carries no `version` field for `loadJson` to stamp.
+ */
+let customBindings: CustomBindings = (() => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.bindings);
+    return raw === null ? { primary: {}, alt: {} } : sanitiseCustomBindings(JSON.parse(raw));
+  } catch {
+    return { primary: {}, alt: {} };
+  }
+})();
 
 const params = new URLSearchParams(location.search);
 const autoplay = params.get('autoplay') === '1';
@@ -380,6 +443,31 @@ const mode: number = legacyGameMode(bootParams.modeId);
  */
 let avatarEditor: AvatarEditor | null = null;
 
+/**
+ * Where the game server is, if anywhere.
+ *
+ * Empty on the shipped static build, and everything downstream is written so
+ * that empty is a first-class answer rather than a failure: see
+ * `client/src/net/serverConfig.ts` and `client/src/net/session.ts`.
+ */
+const serverUrl = resolveServerUrl();
+
+/**
+ * Declared before `new Game` on purpose.
+ *
+ * `Game.connect()` starts the boot session, and a LOCAL session settles
+ * synchronously — the callback fires before `connect()` returns. Anything this
+ * handler touches therefore has to already exist, or boot dies in a temporal
+ * dead zone before the first frame. `onlineReady` is the same guard for the
+ * menu strip, which is built further down.
+ */
+let sessionState: SessionState = {
+  kind: 'local', url: '', reason: 'starting', fellBack: false, health: null,
+};
+let onlineReady = false;
+/** The code the next Play will join with, or '' for public matchmaking. */
+let pendingCode = '';
+
 const game = new Game({
   canvas,
   hudRoot,
@@ -388,6 +476,9 @@ const game = new Game({
   avatar: save.profile.avatar >>> 0,
   seed: seedParam !== null ? Number(seedParam) >>> 0 : undefined,
   mode,
+  modeId: bootParams.modeId,
+  serverUrl,
+  deviceId: deviceId(),
   bots: 8,
   enemies: 12,
   touch: forceTouch ? true : undefined,
@@ -396,13 +487,32 @@ const game = new Game({
     onReady: () => onReady(),
     onDeath: () => { /* the HUD prints the prompt */ },
     onPauseRequested: () => openPause(),
+    onSession: (state) => { onSessionState(state); },
     onStatus: (s, d) => {
       if (s === 'error') setBootProgress(0, `Error: ${d ?? 'unknown'}`);
     },
   },
 });
 
+// The scheme itself came in through `settings`; this hands over the rows the
+// player pinned by hand, which outlive every scheme switch.
+game.setCustomBindings(customBindings);
+
 game.connect();
+
+/* ------------------------------------------------------------------------ *
+ * Online status
+ *
+ * One line of text and nothing else. The session decides where a match runs
+ * (session.ts); this only reports it, because a player who is quietly playing
+ * offline because a server was down deserves to know why the scoreboard has
+ * bots in it.
+ * ------------------------------------------------------------------------ */
+
+function onSessionState(state: SessionState): void {
+  sessionState = state;
+  renderOnlineStatus();
+}
 
 /* ------------------------------------------------------------------------ *
  * Loading screen
@@ -457,7 +567,19 @@ const modeSelect: ModeSelect = createModeSelect({
   initialMode: bootParams.modeId,
   worlds: worldRowsFrom(save),
   onPlay: (p) => { void startMode(p); },
-  onModeChange: (m) => { pendingParams.modeId = m; },
+  onModeChange: (m) => {
+    pendingParams.modeId = m;
+    /* Picking a mode is an unambiguous "public match of THIS mode". A join code
+     * overrides the mode entirely server-side (a code names one room), so a
+     * code left pending here would send the player somewhere they did not
+     * choose — and the client-side mode layer would come up as Deathmatch over
+     * a room the server is running as Quest. */
+    if (pendingCode.length > 0) {
+      pendingCode = '';
+      if (onlineReady) codeInput.value = '';
+      renderOnlineStatus();
+    }
+  },
   onCreateWorld: (name, seed) => {
     const w = addBuilderWorld(save, name, seed >>> 0, Date.now());
     flushSave();
@@ -470,6 +592,123 @@ const modeSelect: ModeSelect = createModeSelect({
     modeSelect.setWorlds(worldRowsFrom(save));
   },
 });
+
+/* ------------------------------------------------------------------------ *
+ * The online strip
+ *
+ * Built ONLY when a server is configured. On the shipped static build
+ * `serverUrl` is '' and none of this reaches the DOM, so the offline menu is
+ * byte-for-byte what it was — no dead "Online" button that cannot work, no
+ * request to a host that does not exist.
+ *
+ * What it does: report where the current session is, let a player paste a join
+ * code, mint a private room, and list the rooms that have people in them. The
+ * room list is a convenience; nothing here is on the path to playing, because
+ * `/ws?mode=deathmatch` already lands in a live room with bots in it. See
+ * server/src/directory.ts.
+ * ------------------------------------------------------------------------ */
+
+const onlineStrip = el('div', 'dc-online');
+const onlineDot = el('i', 'dc-dot');
+const onlineText = el('span', undefined, 'Offline');
+const codeInput = document.createElement('input');
+codeInput.className = 'dc-code';
+codeInput.placeholder = 'CODE';
+codeInput.maxLength = 10;
+codeInput.spellcheck = false;
+codeInput.autocomplete = 'off';
+const roomsRow = el('div', 'dc-rooms');
+
+function renderOnlineStatus(): void {
+  if (!onlineReady) return;
+  const s = sessionState;
+  const kind = s.kind === 'remote' ? 'remote' : (s.fellBack ? 'down' : 'local');
+  onlineStrip.dataset.kind = kind;
+  const suffix = pendingCode.length > 0 ? ` · code ${pendingCode.toUpperCase()}` : '';
+  onlineText.textContent = s.kind === 'remote'
+    ? `Online — ${s.reason}${suffix}`
+    : `${s.fellBack ? 'Offline — ' : 'Local — '}${s.reason}${suffix}`;
+}
+
+async function refreshRoomList(): Promise<void> {
+  if (serverUrl.length === 0) return;
+  let rows: RoomRow[] = [];
+  try { rows = await listRooms(serverUrl); } catch { rows = []; }
+  roomsRow.replaceChildren();
+  const withPeople = rows.filter((r) => r.humans > 0).slice(0, 6);
+  if (withPeople.length === 0) {
+    roomsRow.appendChild(el('span', undefined, 'No one online yet — you will play against bots.'));
+    return;
+  }
+  for (const r of withPeople) {
+    const b = button(`${r.mode} · ${r.humans}/${r.maxPlayers}`, 'dc-room', () => {
+      pendingCode = '';
+      codeInput.value = '';
+      const id = r.modeId;
+      if (isModeId(id)) {
+        pendingParams.modeId = id;
+        pendingParams.levelId = r.levelId;
+        pendingParams.worldId = r.worldId;
+        pendingParams.skill = r.skill;
+      }
+      void startMode(pendingParams);
+    });
+    if (!r.open) b.disabled = true;
+    roomsRow.appendChild(b);
+  }
+}
+
+if (serverUrl.length > 0) {
+  onlineStrip.append(onlineDot, onlineText, codeInput);
+  onlineStrip.appendChild(button('Join code', 'dc-ghost', () => { void joinByCode(); }));
+  onlineStrip.appendChild(button('Create private', 'dc-ghost', () => { void makePrivateRoom(); }));
+  onlineStrip.appendChild(button('Refresh', 'dc-ghost', () => { void refreshRoomList(); }));
+  menuInner.appendChild(onlineStrip);
+  menuInner.appendChild(roomsRow);
+  onlineReady = true;
+  renderOnlineStatus();
+  void refreshRoomList();
+}
+
+/**
+ * Resolve a typed code BEFORE opening a socket, so a typo is a sentence in the
+ * menu rather than a failed connection behind a spinner.
+ */
+async function joinByCode(): Promise<void> {
+  const typed = codeInput.value.trim();
+  if (typed.length === 0) return;
+  onlineText.textContent = 'Looking up that code…';
+  const ticket = await resolveCode(serverUrl, typed);
+  if (ticket === null) {
+    onlineText.textContent = 'No room with that code.';
+    return;
+  }
+  pendingCode = ticket.code ?? typed;
+  if (isModeId(ticket.modeId)) pendingParams.modeId = ticket.modeId;
+  pendingParams.levelId = ticket.levelId;
+  pendingParams.worldId = ticket.worldId;
+  renderOnlineStatus();
+  void startMode(pendingParams);
+}
+
+/** Mint a code for friends. Nothing is built server-side until one joins. */
+async function makePrivateRoom(): Promise<void> {
+  onlineText.textContent = 'Creating a private room…';
+  const made = await createPrivateRoom(serverUrl, {
+    modeId: pendingParams.modeId,
+    levelId: pendingParams.levelId,
+    worldId: pendingParams.worldId,
+    skill: pendingParams.skill,
+  });
+  if (made === null) {
+    onlineText.textContent = 'Could not create a private room.';
+    return;
+  }
+  pendingCode = made.code;
+  codeInput.value = made.code.toUpperCase();
+  renderOnlineStatus();
+  onlineText.textContent = `Private room ${made.code.toUpperCase()} — share the code, then press Play.`;
+}
 
 const statRow = el('div', 'dc-stats');
 const statKills = el('span', undefined);
@@ -496,7 +735,8 @@ menuInner.appendChild(menuRow);
 
 menuInner.appendChild(el(
   'p', 'dc-note',
-  'WASD move · Shift sprint · Space jump · LMB fire · RMB place a block · B build mode · Esc menu',
+  'WASD or arrows move · Shift sprint · Space jump · LMB fire · RMB place a block'
+  + ' · B build mode · Esc menu — classic Doom keys in Settings › Control scheme',
 ));
 
 uiRoot.appendChild(menu);
@@ -589,16 +829,25 @@ function addSlider(
   setGrid.append(input, val);
 }
 
-function addSelect(label: string, options: string[], get: () => string, set: (v: string) => void): void {
+/**
+ * `labels` is optional: without it the option text is the value, which is what
+ * every existing row wants ('low' / 'medium' / 'high'). The control scheme is
+ * the first row that needs a human name over a stored id, so it passes one
+ * rather than growing a second select builder.
+ */
+function addSelect(
+  label: string, options: string[], get: () => string, set: (v: string) => void,
+  labels?: Readonly<Record<string, string>>, after?: () => void,
+): void {
   setGrid.appendChild(el('label', undefined, label));
   const sel = el('select');
   for (const o of options) {
-    const opt = el('option', undefined, o);
+    const opt = el('option', undefined, labels?.[o] ?? o);
     opt.value = o;
     sel.appendChild(opt);
   }
   sel.value = get();
-  sel.addEventListener('change', () => { set(sel.value); applySettings(); });
+  sel.addEventListener('change', () => { set(sel.value); applySettings(); after?.(); });
   const spacer = el('span', 'val');
   setGrid.append(sel, spacer);
 }
@@ -622,6 +871,153 @@ addSlider('Touch sensitivity', SENSITIVITY_MIN, SENSITIVITY_MAX, 0.05,
 addToggle('Invert look', () => settings.invertY, (v) => { settings.invertY = v; });
 addToggle('Toggle crouch', () => settings.toggleCrouch, (v) => { settings.toggleCrouch = v; });
 addToggle('Auto sprint', () => settings.autoSprint, (v) => { settings.autoSprint = v; });
+
+/* --- the keyboard ------------------------------------------------------- *
+ * The owner played the live build and said the keyboard navigation was off and
+ * "should be like the classic games". Two things were true: the arrow keys were
+ * bound to nothing at all, and there was no way to ask for DOOM's layout, where
+ * Left/Right TURN rather than strafe.
+ *
+ * The scheme select drives the alt binding layer only, so WASD and mouselook
+ * are identical under both and switching can never strand anyone. Every row
+ * below can still be rebound on top of a scheme, and a row you rebind is pinned
+ * — the next scheme switch leaves it exactly where you put it.
+ * ---------------------------------------------------------------------- */
+addSelect('Control scheme', [...CONTROL_SCHEMES],
+  () => settings.controlScheme,
+  (v) => { settings.controlScheme = asControlScheme(v); },
+  SCHEME_LABELS, () => { refreshSchemeNote(); refreshBindRows(); });
+
+const schemeNote = el('p', 'dc-note');
+setGrid.appendChild(schemeNote);
+function refreshSchemeNote(): void {
+  schemeNote.innerHTML = `${SCHEME_NOTES[settings.controlScheme]}`
+    + ' &nbsp;·&nbsp; Click a key to rebind, <b>Esc</b> to cancel, right-click to clear.';
+}
+refreshSchemeNote();
+
+/**
+ * One row per action: the primary key, then the key the scheme adds.
+ *
+ * `Menu` is deliberately absent. Escape is the only way out of a pointer-locked
+ * game and out of a half-finished rebind, and a player who binds it to a key
+ * they then forget has no way back.
+ */
+const BIND_ROWS: ReadonlyArray<readonly [InputAction, string]> = Object.freeze([
+  [InputAction.MoveForward, 'Move forward'],
+  [InputAction.MoveBack, 'Move back'],
+  [InputAction.MoveLeft, 'Strafe left'],
+  [InputAction.MoveRight, 'Strafe right'],
+  [InputAction.TurnLeft, 'Turn left'],
+  [InputAction.TurnRight, 'Turn right'],
+  [InputAction.StrafeMod, 'Strafe modifier'],
+  [InputAction.Jump, 'Jump'],
+  [InputAction.Crouch, 'Crouch'],
+  [InputAction.Sprint, 'Run'],
+  [InputAction.Fire, 'Fire'],
+  [InputAction.AltFire, 'Place block'],
+  [InputAction.Reload, 'Reload'],
+  [InputAction.Use, 'Use / open'],
+  [InputAction.Melee, 'Melee'],
+  [InputAction.BuildMode, 'Build mode'],
+  [InputAction.NextWeapon, 'Next weapon'],
+  [InputAction.PrevWeapon, 'Previous weapon'],
+  [InputAction.Slot1, 'Weapon 1'],
+  [InputAction.Slot2, 'Weapon 2'],
+  [InputAction.Slot3, 'Weapon 3'],
+  [InputAction.Slot4, 'Weapon 4'],
+  [InputAction.Slot5, 'Weapon 5'],
+  [InputAction.Slot6, 'Weapon 6'],
+  [InputAction.Slot7, 'Weapon 7'],
+  [InputAction.Chat, 'Chat'],
+  [InputAction.Scoreboard, 'Scoreboard'],
+  [InputAction.Map, 'Map'],
+]);
+
+/** Every key button on screen, so a rebind can redraw the row it stole from. */
+const bindButtons: Array<{ btn: HTMLButtonElement; action: InputAction; layer: BindingLayer }> = [];
+
+/**
+ * A rebind ends on a MOUSE press as often as a key press, and the `click` that
+ * follows that press lands right back on the button that armed it. Without a
+ * short deadline, binding Fire to Mouse 1 immediately re-arms the same row and
+ * the panel never lets go.
+ */
+let rebindSettledAt = 0;
+
+function refreshBindRows(): void {
+  for (const row of bindButtons) drawKeyButton(row.btn, row.action, row.layer);
+}
+
+function drawKeyButton(btn: HTMLButtonElement, action: InputAction, layer: BindingLayer): void {
+  const code = game.input.binding(action, layer);
+  btn.textContent = bindingLabel(code);
+  btn.className = 'dc-key'
+    + (code === '' ? ' empty' : '')
+    + (layer === 'alt' ? ' scheme' : '');
+  btn.title = layer === 'alt'
+    ? 'Second key — the control scheme fills this in'
+    : 'Primary key';
+}
+
+/** Pin one row so every future scheme switch leaves it alone. */
+function pinBinding(action: InputAction, code: string, layer: BindingLayer): void {
+  const next: CustomBindings = {
+    primary: { ...(customBindings.primary ?? {}) },
+    alt: { ...(customBindings.alt ?? {}) },
+  };
+  const pins = (layer === 'alt' ? next.alt : next.primary) as Record<string, string>;
+  pins[action] = code;
+  customBindings = next;
+  game.setCustomBindings(customBindings);
+  saveJson(STORAGE_KEYS.bindings, customBindings);
+}
+
+function keyButton(action: InputAction, layer: BindingLayer): HTMLButtonElement {
+  const btn = el('button', 'dc-key');
+  btn.type = 'button';
+  drawKeyButton(btn, action, layer);
+  bindButtons.push({ btn, action, layer });
+
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (performance.now() - rebindSettledAt < 250) return;
+    if (game.input.rebinding) { game.input.cancelRebind(); refreshBindRows(); return; }
+    btn.className = 'dc-key listening';
+    btn.textContent = 'Press…';
+    // `code === ''` is the cancel path — Escape, which must not pin anything.
+    game.input.beginRebind(action, layer, (a, code, l) => {
+      rebindSettledAt = performance.now();
+      if (code !== '') pinBinding(a, code, l);
+      refreshBindRows();
+    });
+  });
+
+  // Right-click clears the row, and pins the clear so a scheme switch does not
+  // quietly hand the key back.
+  btn.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (game.input.rebinding) game.input.cancelRebind();
+    pinBinding(action, '', layer);
+    refreshBindRows();
+  });
+  return btn;
+}
+
+for (const [action, label] of BIND_ROWS) {
+  setGrid.appendChild(el('label', undefined, label));
+  const keys = el('span', 'dc-keys');
+  keys.append(keyButton(action, 'primary'), keyButton(action, 'alt'));
+  setGrid.appendChild(keys);
+}
+
+setGrid.appendChild(button('Reset controls', 'dc-row-btn', () => {
+  if (game.input.rebinding) game.input.cancelRebind();
+  customBindings = { primary: {}, alt: {} };
+  game.setCustomBindings(customBindings);
+  saveJson(STORAGE_KEYS.bindings, customBindings);
+  refreshBindRows();
+}));
 
 /* --- the audio mix ------------------------------------------------------ *
  * `save.audio` is the versioned home of the five volumes, the mute-on-blur rule
@@ -963,7 +1359,41 @@ async function startMode(p: ModeEnterParams): Promise<void> {
   pendingParams.seed = p.seed;
   pendingParams.flags = p.flags;
 
-  modeSelect.setBusy(true, `Starting ${getMode(p.modeId).name}…`);
+  const wantsRemote = game.session.prefersRemote({
+    modeId: p.modeId,
+    worldId: p.worldId,
+    code: pendingCode.length > 0 ? pendingCode : undefined,
+  });
+  modeSelect.setBusy(
+    true,
+    wantsRemote ? 'Finding a match…' : `Starting ${getMode(p.modeId).name}…`,
+  );
+
+  /* --- pick the room this mode plays in -------------------------------- *
+   * The only await between the click and the match, and it is skipped
+   * entirely for the offline build (`prefersRemote` is false with no server
+   * configured, so `enterSession` returns without touching the network) and
+   * for a mode that was already local. When it does run, the health answer is
+   * normally already cached from boot — see `GameSession.checkServer`.
+   *
+   * It cannot reject: an unreachable server resolves as a local session, which
+   * is a real match against bots, not an error screen.
+   * -------------------------------------------------------------------- */
+  const kind = await game.enterSession({
+    modeId: p.modeId,
+    levelId: p.levelId,
+    worldId: p.worldId,
+    skill: p.skill,
+    code: pendingCode.length > 0 ? pendingCode : undefined,
+    seed: p.seed,
+    allWeapons: true,
+  });
+  /* A code that WORKED is kept, so leaving to the menu and pressing Play again
+   * rejoins the same friends. A code that landed us in the Worker room did not
+   * work — the room is gone, or the server is — and keeping it would make every
+   * later Play retry a dead room. */
+  if (kind === 'local') pendingCode = '';
+
   setScreen('playing');
   game.enterPlay();
   registry.setPaused(false);
@@ -974,7 +1404,13 @@ async function startMode(p: ModeEnterParams): Promise<void> {
   /* Tell the room before the mode comes up. Three of the four modes also send
    * their own `SELECT` from `enter()`; that duplicate is free (the room only
    * re-streams the world when the mode id actually changes), and doing it here
-   * as well is what covers the fourth — and any mode added later that forgets. */
+   * as well is what covers the fourth — and any mode added later that forgets.
+   *
+   * On a REMOTE session the room was already chosen from the socket URL and is
+   * locked (`RoomOptions.lockMode`), so this `SELECT` cannot reconfigure a room
+   * full of other players — the server answers it with the room's real context
+   * and changes nothing. It still matters: that context reply is how the mode
+   * layer learns which level it is standing in. */
   announceMode(pendingParams);
 
   try {
@@ -1053,6 +1489,7 @@ async function backToMenu(): Promise<void> {
   saveJson(STORAGE_KEYS.progress, progress);
   save = loadSave(saveStorage, Date.now());
   modeSelect.setSave(save);
+  if (serverUrl.length > 0) void refreshRoomList();
   modeSelect.setWorlds(worldRowsFrom(save));
   refreshStats();
   setScreen('menu');
@@ -1560,3 +1997,93 @@ window.addEventListener('pagehide', () => {
     };
   },
 };
+
+
+/* ------------------------------------------------------------------------ *
+ * Client delivery — the service worker, and the one rule it obeys
+ *
+ *   > Never activate a new bundle while `game.playing === true`.
+ *
+ * docs/INFRASTRUCTURE.md §6, and docs/PATCHING.md for the whole procedure. The
+ * policy lives in `client/src/boot/updates.ts` and is tested there; this is the
+ * mount, and it is deliberately the last thing in the file so that nothing the
+ * game needs can ever be blocked behind it.
+ *
+ * It hooks nothing in the shell. `#ui[data-screen]` is already the shell's
+ * published state (docs/CONTRACT.md §6), so observing that attribute tells the
+ * controller when the player left a match without a single call site having to
+ * remember to say so — and a call site that forgets is exactly how a rule like
+ * this rots.
+ * ------------------------------------------------------------------------ */
+
+const updates = installUpdates({
+  isPlaying: () => game.playing,
+  onState: (state) => { renderUpdatePrompt(state); },
+});
+
+let updateCard: HTMLDivElement | null = null;
+
+function renderUpdatePrompt(state: UpdateSnapshot): void {
+  // The prompt itself is behind a flag, so a release that ships a broken card
+  // can have it taken away without a deploy. The SWAP is not behind the flag —
+  // with the prompt off the new build still lands at the next safe moment, the
+  // player is simply not asked first.
+  const allowed = game.net.flag('client_update_prompt');
+  const show = allowed && state.state === 'ready' && uiRoot!.dataset.screen === 'menu';
+
+  if (!show) {
+    updateCard?.remove();
+    updateCard = null;
+    return;
+  }
+  if (updateCard !== null) return;
+
+  const card = el('div', 'dc-update');
+  card.style.position = 'absolute';
+  card.style.right = '16px';
+  card.style.bottom = '16px';
+  card.style.zIndex = '30';
+  card.style.display = 'flex';
+  card.style.gap = '10px';
+  card.style.alignItems = 'center';
+  card.style.padding = '10px 12px';
+  card.style.borderRadius = '8px';
+  card.style.background = 'var(--panel)';
+  card.style.border = '1px solid var(--line)';
+  card.style.font = '13px/1.3 inherit';
+  card.appendChild(el('span', undefined, state.forced ? 'Update required' : 'Update ready'));
+  card.appendChild(button('Restart', 'dc-ghost', () => {
+    // "Restarting to update": the swap is instant and the reload is warm,
+    // because every hashed asset the next build shares is already cached.
+    updates?.applyNow();
+  }));
+  updateCard = card;
+  uiRoot!.appendChild(card);
+}
+
+if (updates !== null) {
+  const controller = updates;
+
+  /* Leaving a match is the moment the rule is about. The shell publishes the
+   * transition as `#ui[data-screen]`, so this needs no hook inside it. */
+  new MutationObserver(() => {
+    controller.pump();
+    // Only ever checks while out of a match; `check()` enforces that itself.
+    void controller.check();
+  }).observe(uiRoot!, { attributes: true, attributeFilter: ['data-screen'] });
+
+  /* The backstop. A tab left open for a week in the menu still finds a new
+   * build, and a forced update still lands even if the screen never changes. */
+  const updateTimer = window.setInterval(() => {
+    // A server that refused us for being too old turns the update from an offer
+    // into a requirement. `NetClient` keeps the reason sticky across the close,
+    // which is why this can be read on a timer rather than needing a callback
+    // threaded through the game's event table.
+    if (game.net.updateReason !== UpdateReason.NONE) {
+      controller.requireUpdate(game.net.updateReason);
+    }
+    controller.pump();
+    void controller.check();
+  }, 60_000);
+  window.addEventListener('pagehide', () => { window.clearInterval(updateTimer); });
+}

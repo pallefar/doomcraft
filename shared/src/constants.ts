@@ -317,6 +317,20 @@ export enum InputAction {
   MoveBack = 'moveBack',
   MoveLeft = 'moveLeft',
   MoveRight = 'moveRight',
+  /**
+   * Keyboard TURN, not strafe — DOOM's `key_left` / `key_right`.
+   *
+   * Unbound in the Modern scheme (mouselook turns you) and on the arrows in the
+   * Classic one. `InputManager.turnDelta` is the only consumer; the wire carries
+   * the resulting yaw, never the key, so the server needs to know nothing.
+   */
+  TurnLeft = 'turnLeft',
+  TurnRight = 'turnRight',
+  /**
+   * DOOM's `key_strafe` (RALT): a MODIFIER, not an action. While it is held the
+   * turn keys strafe instead of turning, exactly as `G_BuildTiccmd` does it.
+   */
+  StrafeMod = 'strafeMod',
   Jump = 'jump',
   Crouch = 'crouch',
   Sprint = 'sprint',
@@ -341,12 +355,23 @@ export enum InputAction {
   Menu = 'menu',
 }
 
-/** Values are KeyboardEvent.code, or 'Mouse0'/'Mouse1'/'Mouse2', or 'WheelUp'/'WheelDown'. */
+/**
+ * PRIMARY bindings. Values are KeyboardEvent.code, or 'Mouse0'/'Mouse1'/'Mouse2',
+ * or 'WheelUp'/'WheelDown'. `''` means the action has no primary key.
+ *
+ * This layer is the SAME under both control schemes: WASD and the mouse never
+ * move, so a Classic player keeps WASD and a Modern player keeps mouselook.
+ * Everything a scheme changes lives in the second layer —
+ * `SCHEME_ALT_BINDINGS` in `shared/src/controls.ts`.
+ */
 export const DEFAULT_KEYBINDS: Readonly<Record<InputAction, string>> = Object.freeze({
   [InputAction.MoveForward]: 'KeyW',
   [InputAction.MoveBack]: 'KeyS',
   [InputAction.MoveLeft]: 'KeyA',
   [InputAction.MoveRight]: 'KeyD',
+  [InputAction.TurnLeft]: '',
+  [InputAction.TurnRight]: '',
+  [InputAction.StrafeMod]: '',
   [InputAction.Jump]: 'Space',
   [InputAction.Crouch]: 'KeyC',
   [InputAction.Sprint]: 'ShiftLeft',
@@ -454,6 +479,20 @@ export const SURFACE_SEAM_SCALE: Readonly<Record<SurfaceDetailPreset, number>> =
 export type CrosshairStyle = 'cross' | 'dot' | 'doom' | 'dynamic';
 export type TouchLayout = 'right' | 'left';
 
+/**
+ * Which keyboard scheme the second binding layer carries.
+ *
+ * `modern`  — WASD + mouselook. The arrows duplicate WASD, so a player who
+ *             reaches for them moves instead of getting nothing.
+ * `classic` — DOOM 1993's own defaults, read out of id's released
+ *             `linuxdoom-1.10/m_misc.c`: arrows turn, `,`/`.` strafe, RALT makes
+ *             the arrows strafe, Ctrl fires, Space uses, Shift runs.
+ *
+ * The tables live in `shared/src/controls.ts`; the type is here because
+ * `GameSettings` is here.
+ */
+export type ControlScheme = 'modern' | 'classic';
+
 export interface GameSettings {
   version: number;
   fov: number;
@@ -478,6 +517,8 @@ export interface GameSettings {
   musicVolume: number;
   autoSprint: boolean;
   toggleCrouch: boolean;
+  /** Which second binding layer is live. See `shared/src/controls.ts`. */
+  controlScheme: ControlScheme;
   touchLayout: TouchLayout;
   vibration: boolean;
   showAds: boolean;         // forced false once the remove-ads product is owned
@@ -506,6 +547,7 @@ export const DEFAULT_SETTINGS: Readonly<GameSettings> = Object.freeze({
   musicVolume: 0.5,
   autoSprint: false,
   toggleCrouch: false,
+  controlScheme: 'modern' as ControlScheme,
   touchLayout: 'right' as TouchLayout,
   vibration: true,
   showAds: true,

@@ -84,6 +84,22 @@ export default defineConfig({
     },
   },
 
+  /**
+   * Axis 3 of three: the build id. It NEVER gates anything — it exists so a
+   * crash report, a metric and a support ticket can name the same bytes.
+   * See shared/src/version.ts and docs/PATCHING.md.
+   *
+   * Vercel exports the commit sha; a local build falls back to `dev`, which is
+   * exactly what a local build is.
+   */
+  define: {
+    __DC_BUILD_ID__: JSON.stringify(
+      process.env.DOOMCRAFT_BUILD_ID
+      ?? process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12)
+      ?? 'dev',
+    ),
+  },
+
   esbuild: {
     legalComments: 'none',
     target: 'esnext',

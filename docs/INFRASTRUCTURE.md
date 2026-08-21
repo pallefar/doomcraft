@@ -16,10 +16,13 @@ content-addressed creative origin and §5.3's ad/privacy defaults, both assumed 
 
 ## 0. The three things to take away
 
-1. **Today the game costs $0 to run at any player count, and that is not a joke.** No shipped client
-   code path connects to a server. `client/src/game/game.ts:446` always calls `createLocalServer()`
-   and hands `NetClient` the Web Worker transport. All four modes run the authoritative room in the
-   browser. You can launch on static hosting and pay nothing until you decide to wire online mode.
+1. **The static build still costs $0 to run at any player count, and that is not a joke.** It is no
+   longer because there is no branch — there is one now: `GameSession`
+   (`client/src/net/session.ts`) picks the Web Worker room or a WebSocket per mode, and a build with
+   no server configured never looks for one, so all four modes still run the authoritative room in
+   the browser. **The $0 is now a deployment choice rather than a missing feature**, which is the
+   version of it you want: you can launch on static hosting, pay nothing, and turn online play on for
+   Deathmatch by deploying `Dockerfile` and pointing the client at it. See `docs/ONLINE.md`.
 2. **When you do wire it, the provider decision is worth more than every other engineering decision
    combined — and it is free to make correctly right now.** The identical bytes cost **$0/month** on
    unmetered bare metal and **$968,550/month** on raw EC2 at 1M CCU. That is a 19× difference on the
@@ -588,16 +591,36 @@ Two products, deliberately not one, for the same reason `docs/ECONOMY.md` keeps 
 
 Nothing on the market versions a custom binary protocol against live matches.
 
-### What is there today, and what breaks
+### BUILT — see `docs/PATCHING.md`
 
-- `shared/src/protocol.ts:31` — `PROTOCOL_VERSION = 2`.
+> **Status, 2026-08-21.** Everything in this section has been implemented. `docs/PATCHING.md` is the
+> operational manual: what to type, what happens to a player, how to roll back, how to land a feature
+> dark. What follows is the design and the reasoning behind it, kept as written.
+>
+> - Three axes: `PROTOCOL_VERSION` / `PROTOCOL_MIN_SUPPORTED` (`shared/src/protocol.ts`),
+>   `CONTENT_VERSION` + `BUILD_ID` (`shared/src/version.ts`).
+> - The window: `checkProtocol()`, called from `server/src/net.ts`. Refusals carry
+>   `S2C.UPDATE_REQUIRED` **and** a 4001–4005 close code.
+> - Content pinned per room (`RoomOptions.contentVersion`), announced in `S2C.SESSION_CONFIG`.
+> - Drain: `HostLifecycle` in `server/src/deploy.ts`, mounted in `server/src/index.ts`, driven by
+>   `POST /api/admin/drain`.
+> - Flags: `shared/src/flags.ts` + `FlagService`, resolved server-side, delivered in-band.
+> - Service worker: `client/public/sw.js` + `client/src/boot/updates.ts`.
+> - Ratchets and golden vectors: `shared/src/version.test.ts`.
+
+### What was there before this, and what broke
+
+- `shared/src/protocol.ts` — `PROTOCOL_VERSION = 2` at the time this was written; 3 now.
 - `server/src/net.ts:401` — `if (this.hello.protocolVersion !== PROTOCOL_VERSION) { this.detach(conn, 1002, 'protocol version mismatch'); }`
   **Strict equality, hard disconnect. Under this rule every deploy is a fleet-wide simultaneous logout.**
+  Replaced by `checkProtocol()` against the window.
 - `shared/src/protocol.ts:486` — `out.avatar = r.remaining >= 4 ? r.u32() : 0`. Someone already solved
-  backward compatibility correctly, once. **That is the pattern; codify it.**
+  backward compatibility correctly, once. **That is the pattern; codify it.** Codified: `decodeHello`
+  now does it twice, and `docs/CONTRACT.md` §5 states the rule.
 - `SAVES_VERSION = 3` with a total `migrateSave` and an ordered `SAVE_MIGRATIONS` chain;
-  `PERSIST_VERSION = 3` with `migrateProfile`. Both good — extend, don't reinvent.
-- **No service worker exists.**
+  `PERSIST_VERSION = 3` with `migrateProfile`. Both good — extend, don't reinvent. Extended: 4 now,
+  plus the `_unknown` downgrade guard below.
+- **No service worker existed.** There is one now, and it never activates during play.
 - The warning shot is already in the record: `TERRAIN_VERSION` went 4 → 5 while `server/src/world.ts`
   still asserted 4, and **the server stopped booting mid-run**. That code is still an equality assert
   today (`world.ts:72`, `EXPECTED_TERRAIN_VERSION = 5`). It happened during a load test rather than in
@@ -653,8 +676,11 @@ minimum build and a reason, so the client can hard-reload its service worker and
 
 ### Rooms are the deploy unit. Drain, never restart.
 
-This needs one structural change first: **`server/src/index.ts:272` constructs exactly one `Room`.**
-Split into two tiers:
+This needed one structural change first, and **that change is now made**: `server/src/index.ts` used
+to construct exactly one `Room` and therefore capped at 32 players per process. It now mounts
+`ModeRouter` and hosts up to `DOOMCRAFT_MAX_ROOMS` of them, keyed by mode and content, created on the
+first socket that asks and reaped once empty — with the single-process form of the drain below
+already implemented (`docs/ONLINE.md` §6). What is still ahead is splitting that into two tiers:
 
 - **Director** (stateless, small, behind Cloudflare): room registry, matchmaker, and **the version
   routing table**. Answers "where do I play?" with `{host, port, ticket, protocolVersion, contentHash}`.

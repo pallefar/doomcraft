@@ -35,6 +35,7 @@ import {
   XP_PER_MINUTE,
   XP_PER_WIN,
   Rng,
+  BlockId,
   clamp,
 } from '@doomcraft/shared';
 import {
@@ -52,6 +53,16 @@ import {
   type ModeEventMessage,
   type ModeSelectMessage,
 } from '@doomcraft/shared/modes';
+import {
+  DR_START_OPEN,
+  applyLevelToWorld,
+  encodeLevel,
+  hashLevelBytes,
+  primarySpawn,
+  type Level,
+} from '@doomcraft/shared/level';
+import { CONTENT_VERSION, contentHashFor } from '@doomcraft/shared/version';
+import { defaultFlagBits } from '@doomcraft/shared/flags';
 import { BotDriver, MonsterManager, botSkillFor } from './bots.js';
 import { HordeDirector } from './horde.js';
 import {
@@ -126,6 +137,41 @@ export interface RoomOptions {
   plan?: ModeSimPlan;
   /** Level manifest, so a `SELECT` naming an unknown level can be refused. */
   levels?: ContentResolver | null;
+  /**
+   * Refuse a `C2S_MODE.SELECT` that names a DIFFERENT place than this room is.
+   *
+   * A single-room server (and the local Worker) wants the old behaviour: one
+   * room, and whoever selects a mode reconfigures it. A routed server does not
+   * — `ModeRouter` already put one plan in each room, so a joiner sending
+   * `SELECT quest` into a live Deathmatch would wipe out everybody else's
+   * match. Locked, such a `SELECT` is answered with the room's real context and
+   * otherwise ignored; the client is expected to reconnect to the right room.
+   *
+   * Off by default, so nothing that exists today changes behaviour.
+   */
+  lockMode?: boolean;
+  /**
+   * The `CONTENT_VERSION` this room runs for its whole life. Defaults to
+   * whatever this build was compiled with.
+   *
+   * PINNED AT CONSTRUCTION, deliberately. A balance patch applies to every NEW
+   * room immediately and no in-flight match ever has its time-to-kill changed
+   * underneath it — changing weapon damage mid-match is not a rollout strategy,
+   * it is a bug that looks like one (docs/INFRASTRUCTURE.md §6). A room that
+   * outlives a deploy keeps serving the content its players joined for; the
+   * next room on the same host gets the new one.
+   */
+  contentVersion?: number;
+  /** Hash of the exact tables and levels this room loaded. */
+  contentHash?: number;
+  /**
+   * False once this host is draining: `net.ts` refuses new HELLOs with
+   * `UpdateReason.HOST_DRAINING` while everybody already inside plays on.
+   * Read live, so flipping it is instant.
+   */
+  admitting?: () => boolean;
+  /** Resolve this player's feature flags, server-side. See shared/src/flags.ts. */
+  resolveFlags?(conn: Connection): number;
 }
 
 interface PickupSpot {
@@ -184,6 +230,44 @@ export class Room implements NetHost {
 
   private readonly allWeaponsAtBoot: boolean;
   private readonly levelsResolver: ContentResolver | null;
+  /**
+   * The authored level this room's world currently holds, and its content hash.
+   *
+   * '' means "this room is running generated terrain". The hash is what
+   * `sendModeContext` puts on the wire: a non-zero `contentHash` is the client's
+   * proof that the ROOM owns the level's voxels, and therefore that the client
+   * must place the level on its authored coordinates rather than relocating it
+   * onto whatever arena spawn it happened to get. See `stampAuthoredLevel`.
+   */
+  private stampedLevelId = '';
+  private stampedLevelHash = 0;
+  /** The level behind `stampedLevelId`, kept so doors can be carved. */
+  private stampedLevel: Level | null = null;
+  /** Rows currently retracted per door, so a repeat or a no-op costs nothing. */
+  private doorRows: Int16Array = new Int16Array(0);
+  /** A level asked for but not yet in memory. See `ContentResolver.requestLevel`. */
+  private levelRequestId = '';
+  /** Ids already asked for, so a resolver that cannot produce one is asked once. */
+  private readonly levelsRequested = new Set<string>();
+  /** See `RoomOptions.lockMode`. */
+  readonly modeLocked: boolean;
+
+  /* --- the patch system's half of NetHost (see server/src/net.ts) ------- */
+
+  /** Pinned at construction and never reassigned. See `RoomOptions.contentVersion`. */
+  readonly contentVersion: number;
+  readonly contentHash: number;
+  private readonly admittingFn: () => boolean;
+  private readonly flagResolver: ((conn: Connection) => number) | null;
+
+  /** `NetHost.admitting` — false stops NEW players joining THIS room. */
+  get admitting(): boolean { return this.admittingFn(); }
+
+  /** `NetHost.resolveFlags` — server-side flag resolution for one player. */
+  resolveFlags(conn: Connection): number {
+    return this.flagResolver !== null ? this.flagResolver(conn) : defaultFlagBits();
+  }
+
   private readonly modeRoomState: ModeRoomState = createModeRoomState();
   private modeTracker: ModeStateTracker;
   private readonly modePlayers = new Map<number, ModePlayerState>();
@@ -229,6 +313,11 @@ export class Room implements NetHost {
     this.net = new NetHub(this.sim, this.world, this, () => this.elapsedMs);
 
     this.levelsResolver = options.levels ?? null;
+    this.modeLocked = options.lockMode === true;
+    this.contentVersion = options.contentVersion ?? CONTENT_VERSION;
+    this.contentHash = options.contentHash ?? contentHashFor();
+    this.admittingFn = options.admitting ?? ((): boolean => true);
+    this.flagResolver = options.resolveFlags ?? null;
     this.plan = options.plan ?? defaultPlan({ seed: this.seed });
     this.modeTracker = new ModeStateTracker(this.plan);
 
@@ -327,10 +416,32 @@ export class Room implements NetHost {
    * -------------------------------------------------------------- */
 
   onModeSelect(conn: Connection, msg: ModeSelectMessage): void {
+    /* A LOCKED room is one place, decided by the router before this socket ever
+     * attached (server/src/index.ts). It answers a `SELECT` with what it
+     * actually is and changes nothing at all — not even for a `SELECT` that
+     * names this very room. Two reasons, and the second one is the subtle one:
+     *
+     *   1. A mismatched `SELECT` reconfiguring the room would take everybody
+     *      else's match away. That is the obvious hole.
+     *   2. A MATCHING `SELECT` re-planned from the client's own message would
+     *      quietly discard the router's `ModePlanOverrides` — the operator's
+     *      `DOOMCRAFT_BOTS` and `DOOMCRAFT_SEED` — and would honour the
+     *      client's `flags`, which include `MSF_NO_BOTS`. One player could
+     *      empty a public arena of its bots for everyone in it.
+     *
+     * A single-room server and the browser Worker keep the original behaviour:
+     * there, the client selecting a mode IS how the room learns what to be. */
+    if (this.modeLocked) {
+      this.sendModeContext(conn);
+      return;
+    }
     const req = sanitiseJoin(msg, this.levelsResolver);
     if (req.seed === 0) req.seed = this.seed;
     this.applyPlan(resolveModePlan(req), true);
-    this.sendModeContext(conn);
+    // A level still being loaded means the honest answer to "do you own this
+    // geometry?" is not known yet, and the client uses that answer to decide
+    // where to put the level. Hold the reply; `finishLevelRequest` sends it.
+    if (this.levelRequestId.length === 0) this.sendModeContext(conn);
   }
 
   onModeAction(conn: Connection, msg: ModeActionMessage): void {
@@ -349,6 +460,7 @@ export class Room implements NetHost {
 
     if (msg.action === ModeAction.SPAWN_ENEMY) { this.spawnAuthoredEnemy(msg); return; }
     if (msg.action === ModeAction.SET_SPAWN) { this.setAuthoredSpawn(msg); return; }
+    if (msg.action === ModeAction.SET_DOOR) { this.setAuthoredDoor(msg); return; }
 
     if (msg.action === ModeAction.RESTART) {
       // A Quest restart is the level going back to how it was authored, and the
@@ -359,9 +471,171 @@ export class Room implements NetHost {
     }
   }
 
+  /* -------------------------------------------------------------- *
+   * Authored geometry
+   *
+   * THE BUG THIS SOLVES. A Quest level used to exist only in the CLIENT's
+   * voxel store: `client/src/modes/quest/levelRuntime.ts` blitted it into
+   * `NetClient.world`, relocating it onto whatever arena spawn the room
+   * happened to hand out, and this room went on colliding the player's body
+   * against generated terrain it had never replaced. `NetClient.applyLocal`
+   * rewinds the body onto the server's answer on every snapshot, so the server
+   * won every argument about every wall — using hills and cliffs the player
+   * could not see. Measured on e1m1: the two worlds agreed on ~20 % of their
+   * columns, up to 40 blocks apart, which is a floor you fall through here and
+   * an invisible wall in an empty corridor there.
+   *
+   * The room now owns the geometry. `RoomOptions.levels` supplies the campaign,
+   * these methods stamp one level into `ServerWorld`, pin the respawn to the
+   * authored player start, re-stream the world so every client is looking at
+   * the voxels that are actually being simulated, and carve the doors the level
+   * script opens (`setAuthoredDoor`). The client's own blit then lands on the
+   * same coordinates — `quest.ts` keeps the authored origin when the room says
+   * it owns the level — and the two simulations agree voxel for voxel.
+   * -------------------------------------------------------------- */
+
+  /** The level this room's world is running, '' for generated terrain. */
+  get authoredLevelId(): string { return this.stampedLevelId; }
+
+  /**
+   * Put `levelId`'s voxels into the world. True when the world now holds it.
+   *
+   * Returns false — and asks for the level, once — when the resolver knows the
+   * id but has not loaded it yet. The client is told nothing in that case, so
+   * it keeps the old "relocate onto my spawn" behaviour, which is wrong but
+   * playable. `finishLevelRequest` re-runs this the moment the level lands, and
+   * `onModeSelect` holds the client's answer back until then.
+   */
+  private stampAuthoredLevel(levelId: string, repaint = false): boolean {
+    if (levelId.length === 0) return false;
+    if (this.stampedLevelId === levelId && !repaint) return true;
+    const src = this.levelsResolver;
+    if (src === null || src.levelFor === undefined) return false;
+
+    const level = src.levelFor(levelId);
+    if (level === null || level === undefined) {
+      if (src.requestLevel === undefined) return false;
+      if (this.levelsRequested.has(levelId)) return false;
+      this.levelsRequested.add(levelId);
+      this.levelRequestId = levelId;
+      const settle = (): void => { this.finishLevelRequest(levelId); };
+      void Promise.resolve(src.requestLevel(levelId)).then(settle, settle);
+      return false;
+    }
+
+    this.paintAuthoredLevel(levelId, level);
+    return true;
+  }
+
+  /**
+   * A lazy level load finished, one way or the other.
+   *
+   * The context is broadcast either way, because the client is WAITING on it:
+   * `onModeSelect` holds the reply back while a level is in flight so the
+   * campaign never has to guess whether the room is going to own its geometry.
+   */
+  private finishLevelRequest(levelId: string): void {
+    if (this.levelRequestId !== levelId) return;
+    this.levelRequestId = '';
+    if (this.plan.modeId === ModeId.QUEST && this.plan.levelId === levelId) {
+      this.stampAuthoredLevel(levelId);
+    }
+    this.broadcastModeContext();
+  }
+
+  private paintAuthoredLevel(levelId: string, level: Level): void {
+    applyLevelToWorld(level, this.world, WORLD_MIN_BLOCK_X, WORLD_MIN_BLOCK_Z, WORLD_SIZE_BLOCKS);
+    this.stampedLevelId = levelId;
+    this.stampedLevel = level;
+    // 0 is reserved for "this room is running generated terrain", so a level
+    // that hashes to zero still has to say something.
+    this.stampedLevelHash = (hashLevelBytes(encodeLevel(level)) >>> 0) || 1;
+
+    // `compileLevel` has already carved the doors that start open; every other
+    // door is stamped shut, which is exactly what the client's blit produces.
+    this.doorRows = new Int16Array(level.doors.length);
+    for (let i = 0; i < level.doors.length; i++) {
+      if ((level.doors[i].flags & DR_START_OPEN) !== 0) this.doorRows[i] = level.doors[i].h;
+    }
+
+    const s = primarySpawn(level);
+    this.sim.spawnAnchor = { x: s.x, y: s.y, z: s.z, yaw: s.yaw };
+    // Everybody in the room is standing on an arena that no longer exists.
+    for (const m of this.members.values()) this.sim.spawnPlayer(m.player);
+    // A monster spawned against the old terrain is now inside a wall.
+    this.clearMonsters();
+    this.net.resetWorldStreams();
+  }
+
+  /**
+   * `ModeAction.SET_DOOR` — carve a door to the row count the level script has
+   * it at. See the enum for why the room has to be told rather than deciding.
+   *
+   * Every input is checked against the level file itself, so the worst a
+   * malformed action can do is move voxels the level already authored as a
+   * door, between fully shut and fully open.
+   */
+  private setAuthoredDoor(msg: ModeActionMessage): void {
+    const level = this.stampedLevel;
+    if (this.plan.modeId !== ModeId.QUEST || level === null) return;
+    const i = msg.a | 0;
+    if (i < 0 || i >= level.doors.length) return;
+
+    const d = level.doors[i];
+    let want = msg.b | 0;
+    if (want < 0) want = 0;
+    if (want > d.h) want = d.h;
+    const have = this.doorRows[i];
+    if (want === have) return;
+
+    const y1 = d.y + d.h - 1;
+    const x1 = d.x + d.w - 1;
+    const z1 = d.z + d.d - 1;
+    if (want > have) {
+      for (let r = have; r < want; r++) {
+        const y = y1 - r;
+        for (let z = d.z; z <= z1; z++) {
+          for (let x = d.x; x <= x1; x++) this.world.setBlock(x, y, z, BlockId.AIR, 0);
+        }
+      }
+    } else {
+      for (let r = have - 1; r >= want; r--) {
+        const y = y1 - r;
+        for (let z = d.z; z <= z1; z++) {
+          for (let x = d.x; x <= x1; x++) this.world.setBlock(x, y, z, d.block, 0);
+        }
+      }
+    }
+    this.doorRows[i] = want;
+  }
+
+  /** Drop authored geometry and go back to the seed's terrain. */
+  private clearAuthoredLevel(): void {
+    if (this.stampedLevelId.length === 0) return;
+    this.stampedLevelId = '';
+    this.stampedLevelHash = 0;
+    this.stampedLevel = null;
+    this.doorRows = new Int16Array(0);
+    this.levelRequestId = '';
+    this.world.reset(this.seed);
+    this.buildWorld();
+    for (const m of this.members.values()) this.sim.spawnPlayer(m.player);
+    this.net.resetWorldStreams();
+  }
+
+  private broadcastModeContext(): void {
+    const conns = this.net.connections;
+    for (let i = 0; i < conns.length; i++) {
+      if (conns[i].ready) this.sendModeContext(conns[i]);
+    }
+  }
+
   /** `ModeAction.SET_SPAWN` — where an authored level says the player starts. */
   private setAuthoredSpawn(msg: ModeActionMessage): void {
     if (this.plan.modeId !== ModeId.QUEST) return;
+    // The room owns this level's voxels and therefore its player start; a
+    // client-relocated anchor would move the respawn off the geometry.
+    if (this.stampedLevelId.length > 0) return;
     const x = msg.x + 0.5;
     const y = msg.y;
     const z = msg.z + 0.5;
@@ -451,6 +725,26 @@ export class Room implements NetHost {
      * mode with no monsters at all in its definition — still let a zombieman
      * shoot you dead while you were placing your third block.
      * -------------------------------------------------------------------- */
+    /* --- authored geometry ------------------------------------------------ *
+     * Quest is the one mode whose world is a FILE. Stamp it into `ServerWorld`
+     * so the body this room simulates is colliding with the level the player
+     * is looking at; leaving Quest throws the level away and regenerates the
+     * seed's terrain, or the next Deathmatch would be played inside E1M1.
+     * -------------------------------------------------------------------- */
+    let stamped = false;
+    if (plan.modeId === ModeId.QUEST) {
+      // A Quest `SELECT` is a level STARTING, and the client that sent it has a
+      // brand-new level script with every door shut and every trigger re-armed
+      // (a restart, or the next level). So the same level is REPAINTED, not
+      // left alone: otherwise the room keeps the doors it carved for the last
+      // attempt and the two worlds part company at the first doorway.
+      const same = this.stampedLevelId.length > 0 && this.stampedLevelId === plan.levelId;
+      if (!same) this.clearAuthoredLevel();
+      stamped = this.stampAuthoredLevel(plan.levelId, same);
+    } else {
+      this.clearAuthoredLevel();
+    }
+
     // Only an authored level pins the spawn. Everything else spawns on the
     // arena, so a Quest run must not leave its start behind for Deathmatch.
     if (plan.modeId !== ModeId.QUEST) this.sim.spawnAnchor = null;
@@ -473,10 +767,13 @@ export class Room implements NetHost {
      * mode change re-streams the authoritative world to every client, and the
      * next mode starts on the terrain the server actually has.
      * -------------------------------------------------------------------- */
-    // ...but not when the mode we are entering is the one that paints. Quest
-    // covers the terrain with its own level the moment it places; re-streaming
-    // 169 chunks into it would just race the blit for a second and lose.
-    if (changed && announce && plan.modeId !== ModeId.QUEST) this.net.resetWorldStreams();
+    // ...but not when the mode we are entering is the one that paints and the
+    // room could NOT take that level over: there the client's blit is the only
+    // copy of the level there is, and re-streaming would just race it and lose.
+    // A stamp that succeeded has already re-streamed from `paintAuthoredLevel`.
+    if (changed && announce && plan.modeId !== ModeId.QUEST && !stamped) {
+      this.net.resetWorldStreams();
+    }
 
     // Only on a real change: the shell announces a mode and then the mode
     // announces itself, and two identical lines in the feed is a bug people see.
@@ -544,7 +841,15 @@ export class Room implements NetHost {
     c.levelId = plan.levelId;
     c.worldId = plan.worldId;
     c.title = plan.levelId.length > 0 ? plan.levelId : def.name;
-    c.contentHash = 0;
+    /* Non-zero means "this room's world IS that level".
+     *
+     * It is the only thing that tells a Quest client not to relocate the level
+     * onto its own spawn — the move that used to leave the client walking
+     * around geometry the server had never heard of. Zero keeps the old
+     * behaviour, so a room that could not load the level still plays. */
+    c.contentHash = plan.levelId.length > 0 && this.stampedLevelId === plan.levelId
+      ? this.stampedLevelHash
+      : 0;
     c.parTimeSec = 0;
     c.skyColor = def.accent;
     c.fogColor = def.accent;
@@ -800,6 +1105,15 @@ export class Room implements NetHost {
       else { this.world.pumpGeneration(25); this.worldReady = false; }
       this.sim.clearWorldEntities();
       this.seedPickups();
+      // A new seed just regenerated terrain over the authored level. Put it
+      // back, or this room would go on claiming (in `sendModeContext`) to be
+      // running a level whose voxels it has thrown away — which is precisely
+      // the client/server split this whole path exists to close.
+      const authored = this.stampedLevelId;
+      if (authored.length > 0) {
+        this.stampedLevelId = '';
+        this.stampAuthoredLevel(authored);
+      }
       this.net.resetWorldStreams();
     }
     this.state = RoundState.LIVE;

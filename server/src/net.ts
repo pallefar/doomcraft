@@ -77,7 +77,10 @@ import {
   encodeKill,
   encodePong,
   encodeSnapshot,
+  encodeSessionConfig,
+  encodeUpdateRequired,
   encodeWelcome,
+  PROTOCOL_MIN_SUPPORTED,
   playerDeltaMask,
   quantizeAngle,
   quantizePos,
@@ -101,6 +104,15 @@ import {
   type ModeSelectMessage,
   type ModeStateBuffer,
 } from '@doomcraft/shared/modes';
+import {
+  BUILD_ID,
+  CLOSE_CODE_BY_REASON,
+  CONTENT_VERSION,
+  UpdateReason,
+  checkProtocol,
+  contentHashFor,
+} from '@doomcraft/shared/version';
+import { defaultFlagBits } from '@doomcraft/shared/flags';
 import type { PlayerEntity } from './sim.js';
 import { EditResult, Simulation } from './sim.js';
 import { ServerWorld } from './world.js';
@@ -241,6 +253,36 @@ export interface NetHost {
   readonly seed: number;
   readonly gameMode: number;
   readonly matchOver: boolean;
+
+  /* ---- the patch system's half of the host contract ------------------ *
+   *
+   * All optional, so the four rooms that predate the patch system satisfy
+   * this interface unchanged and a test harness can implement two methods and
+   * be done. Where a host says nothing, `net.ts` falls back to the values this
+   * build was compiled with — which is exactly right for a single-room process.
+   * See docs/PATCHING.md.
+   */
+
+  /**
+   * The `CONTENT_VERSION` this ROOM is running, pinned when it was constructed.
+   *
+   * Pinned, not read live, is the whole point: a balance patch reaches every
+   * new room immediately and no in-flight match ever has its time-to-kill
+   * changed underneath it.
+   */
+  readonly contentVersion?: number;
+  /** Hash of the exact tables and levels this room loaded. */
+  readonly contentHash?: number;
+  /**
+   * False when this host is draining. New sockets are refused with
+   * `UpdateReason.HOST_DRAINING`; everyone already inside plays to the end.
+   */
+  readonly admitting?: boolean;
+  /**
+   * Resolve this player's feature flags. Called once, at HELLO, and the result
+   * is transmitted — the client never resolves a flag itself.
+   */
+  resolveFlags?(conn: Connection): number;
 }
 
 export interface ConnectionStats {
@@ -274,6 +316,12 @@ export class Connection {
   closed = false;
   /** Device id supplied out of band by the HTTP profile API, for persistence. */
   deviceId = '';
+  /** Protocol version this client actually spoke. Inside the supported window. */
+  protocolVersion = 0;
+  /** `CONTENT_VERSION` the client declared in HELLO. 0 = it did not say. */
+  clientContentVersion = 0;
+  /** Feature flags resolved for this player, as sent in `S2C.SESSION_CONFIG`. */
+  flagBits = 0;
 
   readonly stats: ConnectionStats = {
     droppedInputs: 0, rejectedEdits: 0, appliedInputs: 0,
@@ -516,13 +564,55 @@ export class NetHub {
     }
   }
 
+  /**
+   * Refuse a connection with a reason the client can act on.
+   *
+   * Sent twice, in two forms, on purpose. `S2C.UPDATE_REQUIRED` is structured
+   * and lets a current client show the player the right dialog and take the
+   * right action; the close code carries the same verdict for every client too
+   * old to know the message exists — including, by definition, the ones this
+   * path exists to turn away. A client that predates the message ignores the
+   * unknown id (`client.ts` has always had `default: break`) and reads the code.
+   */
+  private refuse(conn: Connection, reason: UpdateReason, detail: string): void {
+    const w = this.shared;
+    encodeUpdateRequired(
+      w, reason, PROTOCOL_VERSION, PROTOCOL_MIN_SUPPORTED, this.contentVersion(), detail,
+    );
+    conn.send(w.copy());
+    this.detach(conn, CLOSE_CODE_BY_REASON[reason] ?? 1002, detail.slice(0, 120));
+  }
+
+  private contentVersion(): number {
+    return this.host.contentVersion ?? CONTENT_VERSION;
+  }
+
   private onHello(conn: Connection, bytes: Uint8Array): void {
     if (conn.ready) { conn.stats.violations++; return; }
     decodeHello(this.reader.reset(bytes), this.hello);
-    if (this.hello.protocolVersion !== PROTOCOL_VERSION) {
-      this.detach(conn, 1002, 'protocol version mismatch');
+
+    /* A supported WINDOW, never equality.
+     *
+     * This line used to be `!== PROTOCOL_VERSION`, which made the first byte of
+     * every deploy a fleet-wide simultaneous logout: the moment a new binary
+     * answered, every connected client was one version behind by definition.
+     * docs/INFRASTRUCTURE.md §6 and docs/PATCHING.md. */
+    const verdict = checkProtocol(this.hello.protocolVersion);
+    if (!verdict.ok) {
+      this.refuse(conn, verdict.reason, verdict.detail);
       return;
     }
+
+    /* A draining host finishes its matches and starts no new relationships.
+     * Everyone already inside is untouched — nothing a player is in is ever
+     * restarted, which is why a deploy drops nobody. */
+    if (this.host.admitting === false) {
+      this.refuse(conn, UpdateReason.HOST_DRAINING, 'host is draining; ask the director for another');
+      return;
+    }
+
+    conn.protocolVersion = this.hello.protocolVersion;
+    conn.clientContentVersion = this.hello.contentVersion;
     conn.name = sanitiseName(this.hello.name);
     conn.skin = this.hello.skin & 0xff;
     conn.avatar = this.hello.avatar >>> 0;
@@ -552,6 +642,21 @@ export class NetHub {
       (conn.caps & CAP_LOW_SPEC) !== 0 ? 5 : 6,
       CHUNK_SIZE, CHUNK_HEIGHT, MAX_PLAYERS, this.host.gameMode,
       this.nowMs >>> 0, WORLD_CHUNK_COUNT,
+    );
+    conn.send(w.copy());
+
+    /* The other two version axes, immediately after WELCOME.
+     *
+     * Flags are resolved HERE, server-side, once, and transmitted. The client
+     * is told; it never decides. That is what makes a flag a kill switch
+     * rather than a suggestion, and it is why this rides a packet that was
+     * already going out instead of a per-player config fetch — see the cost
+     * note at the top of shared/src/flags.ts. */
+    conn.flagBits = (this.host.resolveFlags?.(conn) ?? defaultFlagBits()) >>> 0;
+    encodeSessionConfig(
+      w, PROTOCOL_VERSION, PROTOCOL_MIN_SUPPORTED,
+      this.contentVersion(), this.host.contentHash ?? contentHashFor(),
+      conn.flagBits, BUILD_ID,
     );
     conn.send(w.copy());
   }

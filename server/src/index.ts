@@ -1,17 +1,32 @@
 /**
  * DOOMCRAFT — server entry point.
  *
- * One HTTP server that does four jobs:
+ * One HTTP server that does six jobs:
  *   1. serves the built client from <repo>/dist in production,
  *   2. exposes the JSON profile / entitlement API used for saved progress,
- *   3. upgrades /ws into the binary game protocol,
- *   4. puts a strict Content-Security-Policy on EVERY response — see the
+ *   3. hosts MANY rooms through `ModeRouter` and upgrades /ws into the binary
+ *      game protocol, routed by `?mode=&level=&world=&skill=&code=`,
+ *   4. answers the room directory / matchmaking API (`/api/rooms`,
+ *      `/api/quickplay`) — see directory.ts for why it is never a queue,
+ *   5. puts a strict Content-Security-Policy on EVERY response — see the
  *      "Security headers" block below. This is the control that keeps a
- *      third-party ad tag from executing in the game's own origin.
+ *      third-party ad tag from executing in the game's own origin,
+ *   6. drains gracefully on SIGTERM instead of dropping live matches.
  *
- * `PORT` (default 8080) and `DOOMCRAFT_DATA` (default <repo>/server/.data)
- * come from the environment. SIGINT and SIGTERM flush saves and drain sockets
- * before the process exits.
+ * WHY ROUTING HAPPENS AT UPGRADE TIME, NOT ON `C2S_MODE.SELECT`
+ *
+ * `Room` has always accepted a `SELECT` and reconfigured itself. That is right
+ * for one room per process and wrong for many: a joiner selecting Quest would
+ * wipe out the Deathmatch everybody else was in. So the mode travels in the
+ * WebSocket URL, the router picks the room BEFORE the socket attaches, and the
+ * room is constructed with `lockMode: true` so a later `SELECT` naming a
+ * different place is answered with the room's real context and ignored.
+ *
+ * The environment contract is documented in full in docs/ONLINE.md. The short
+ * version: PORT, HOST, DOOMCRAFT_DATA, DOOMCRAFT_STATIC, DOOMCRAFT_ORIGINS,
+ * DOOMCRAFT_MAX_ROOMS, DOOMCRAFT_DRAIN_MS. SIGINT and SIGTERM stop admitting
+ * new players, let live matches finish inside the drain budget, then flush
+ * saves and exit.
  */
 
 import { createServer } from 'node:http';
@@ -26,10 +41,36 @@ import { WebSocketServer } from 'ws';
 import type { WebSocket } from 'ws';
 
 import { DEFAULT_SERVER_PORT, GameMode, WS_PATH } from '@doomcraft/shared';
+import { MODE_KEYS, ModeId } from '@doomcraft/shared/modes';
 import { SIGNAL_PATH } from '@doomcraft/shared/signal';
 import { Room } from './room.js';
 import { setChunkCompressor } from './net.js';
 import type { NetTransport } from './net.js';
+import {
+  DEFAULT_MAX_ROOMS,
+  DEFAULT_ROOM_IDLE_MS,
+  ModeRouter,
+  joinRequestFor,
+  roomOptionsFor,
+  type ModeJoinRequest,
+  type ModeSimPlan,
+} from './modes.js';
+import {
+  RoomDirectory,
+  UnknownCodeError,
+  joinRequestFromQuery,
+} from './directory.js';
+import { levelLibrary } from './levels.js';
+import {
+  FlagService,
+  HostLifecycle,
+  stableIdFor,
+  versionDocument,
+  type LiveRoom,
+} from './deploy.js';
+import { CONTENT_VERSION, contentHashFor } from '@doomcraft/shared/version';
+import { flagConfigETag } from '@doomcraft/shared/flags';
+import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
 import { JsonFileStore, isValidDeviceId, migrateProfile, publicProfile } from './persistence.js';
 import type { PersistenceStore, StoredProfile } from './persistence.js';
@@ -51,11 +92,104 @@ const SEED = Number.parseInt(process.env.DOOMCRAFT_SEED ?? '', 10);
 const BOT_FILL = Number.parseInt(process.env.DOOMCRAFT_BOTS ?? '', 10);
 const MAX_BODY_BYTES = 64 * 1024;
 
+/**
+ * Rooms this process will hold. The default of 32 is `DEFAULT_MAX_ROOMS`, i.e.
+ * ~1,024 players at 32 a room — a long way past what one box wants, so the real
+ * limit is set from the cost model in docs/INFRASTRUCTURE.md and not from here.
+ */
+const MAX_ROOMS = intEnv('DOOMCRAFT_MAX_ROOMS', DEFAULT_MAX_ROOMS, 1, 4096);
+/** How long an empty room lingers before the sweeper stops and forgets it. */
+const ROOM_IDLE_MS = intEnv('DOOMCRAFT_ROOM_IDLE_MS', DEFAULT_ROOM_IDLE_MS, 5_000, 3_600_000);
+/**
+ * How long SIGTERM waits for live matches to end before closing them anyway.
+ * Must be shorter than the orchestrator's own kill grace period or the process
+ * is SIGKILLed mid-drain and the point is lost. Docker Compose and Kubernetes
+ * both default to 30 s, so 25 s is the largest safe default.
+ */
+const DRAIN_MS = intEnv('DOOMCRAFT_DRAIN_MS', 25_000, 0, 30 * 60_000);
+/** Build the default room at boot so the first player never waits for terrain. */
+const PREWARM = process.env.DOOMCRAFT_PREWARM !== '0';
+/**
+ * The DEPLOY drain's hard stop, distinct from `DOOMCRAFT_DRAIN_MS` above.
+ *
+ * A deploy marks a host draining and lets its matches finish; this bounds how
+ * long "finish" is allowed to take. Without it one player idling in a Builder
+ * world pins an old binary online indefinitely, and "we cannot finish the
+ * rollout because of one AFK" is how a fleet ends up running six versions.
+ * 30 minutes is docs/INFRASTRUCTURE.md's number, set beyond p99 match length
+ * for every mode. See docs/PATCHING.md.
+ */
+const FORCE_MIGRATE_MS = intEnv('DOOMCRAFT_FORCE_MIGRATE_MS', 30 * 60_000, 0, 6 * 3600_000);
+/** Token for `POST /api/admin/drain`. Unset disables the endpoint entirely. */
+const ADMIN_TOKEN = (process.env.DOOMCRAFT_ADMIN_TOKEN ?? '').trim();
+
+/**
+ * Browser origins allowed to open a game socket and to call the JSON API.
+ *
+ * UNSET means "any origin", which is what a dev box and a single-origin deploy
+ * both want and is exactly as permissive as the `access-control-allow-origin: *`
+ * this file already shipped. SET means only these, and it is what you want the
+ * moment the client is served from somewhere else (a static host) and the game
+ * server is a separate origin — see docs/ONLINE.md.
+ *
+ * A request with NO `Origin` header is always allowed: that is a load test, a
+ * health probe or a native client, none of which a browser can forge an origin
+ * for, and refusing them would break `tools/loadtest.mjs`.
+ */
+const ALLOWED_ORIGINS = parseOriginList(process.env.DOOMCRAFT_ORIGINS);
+
+function intEnv(name: string, fallback: number, min: number, max: number): number {
+  const v = Number.parseInt(process.env[name] ?? '', 10);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.min(max, Math.max(min, v));
+}
+
+/** `https://a.example, http://localhost:5173` -> a set. `*` means everything. */
+function parseOriginList(raw: string | undefined): Set<string> | null {
+  const v = (raw ?? '').trim();
+  if (v.length === 0 || v === '*') return null;
+  const out = new Set<string>();
+  for (const part of v.split(',')) {
+    const origin = part.trim();
+    if (origin.length === 0 || origin.length > 200) continue;
+    if (!/^https?:\/\/[a-z0-9.-]+(:\d{1,5})?$/i.test(origin)) continue;
+    out.add(origin.toLowerCase());
+  }
+  return out.size > 0 ? out : null;
+}
+
+/** True when this request may talk to us. No Origin header is always allowed. */
+function originAllowed(req: IncomingMessage): boolean {
+  if (ALLOWED_ORIGINS === null) return true;
+  const raw = req.headers.origin;
+  const origin = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof origin !== 'string' || origin.length === 0) return true;
+  return ALLOWED_ORIGINS.has(origin.toLowerCase());
+}
+
+/** The value for `access-control-allow-origin`, echoing only what is allowed. */
+function corsOrigin(req: IncomingMessage): string | null {
+  if (ALLOWED_ORIGINS === null) return '*';
+  const raw = req.headers.origin;
+  const origin = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof origin !== 'string' || origin.length === 0) return null;
+  return ALLOWED_ORIGINS.has(origin.toLowerCase()) ? origin : null;
+}
+
 function parseMode(v: string | undefined): GameMode {
   switch ((v ?? '').toLowerCase()) {
     case 'horde': return GameMode.HORDE;
     case 'sandbox': return GameMode.SANDBOX;
     default: return GameMode.DEATHMATCH;
+  }
+}
+
+/** The ModeId a socket with no `?mode=` gets, from `DOOMCRAFT_MODE`. */
+function defaultModeId(): ModeId {
+  switch (MODE) {
+    case GameMode.HORDE: return ModeId.HORDE;
+    case GameMode.SANDBOX: return ModeId.BUILDER;
+    default: return ModeId.DEATHMATCH;
   }
 }
 
@@ -251,8 +385,29 @@ function readHtml(target: string, mtimeMs: number): string {
 }
 
 /**
- * Stamp the nonce onto every inline `<style>` and `<script>` in the document
- * and inject the shim as the first thing in `<head>`.
+ * The tag that tells the page it is being served by a host that also runs the
+ * rooms, so online play needs no configuration at all in this deployment.
+ *
+ * Why a meta tag and not a build-time constant: the SAME client bundle is
+ * served by the static host (which has no rooms) and by this server (which
+ * does). A constant baked at build time would have to be different in the two,
+ * which means two builds of an identical bundle and a way to get them mixed up.
+ * The host that answers the request is the one thing that knows the truth, and
+ * it stamps it on the way out.
+ *
+ * `self` rather than an absolute URL because the origin the browser used is the
+ * only correct one: behind a proxy, a CDN, or on localhost, anything this
+ * process believes about its own hostname is a guess. `connect-src 'self'` in
+ * the CSP above already allows exactly this and nothing else.
+ *
+ * Read by `resolveServerUrl` in client/src/net/serverConfig.ts.
+ */
+const SERVER_META = '<meta name="doomcraft-server" content="self">';
+
+/**
+ * Stamp the nonce onto every inline `<style>` and `<script>` in the document,
+ * inject the shim as the first thing in `<head>`, and advertise that this
+ * origin hosts rooms.
  *
  * `<noscript>` and `</script>` do not match: the lookahead requires the tag
  * name to be followed by whitespace or `>`, and a closing tag starts with `</`.
@@ -261,9 +416,10 @@ function stampNonce(html: string, nonce: string): string {
   const out = html
     .replace(/<style(?=[\s>])/gi, `<style nonce="${nonce}"`)
     .replace(/<script(?=[\s>])/gi, `<script nonce="${nonce}"`);
+  const injected = SERVER_META + nonceShim(nonce);
   const head = /<head(\s[^>]*)?>/i.exec(out);
-  if (head === null) return nonceShim(nonce) + out;
-  return out.replace(head[0], head[0] + nonceShim(nonce));
+  if (head === null) return injected + out;
+  return out.replace(head[0], head[0] + injected);
 }
 
 /* ------------------------------------------------------------------------ *
@@ -273,29 +429,195 @@ function stampNonce(html: string, nonce: string): string {
 const store: PersistenceStore = new JsonFileStore(dataRoot);
 const bootMs = Date.now();
 
-const room = new Room({
-  seed: Number.isFinite(SEED) ? SEED >>> 0 : undefined,
-  mode: MODE,
-  botFill: Number.isFinite(BOT_FILL) ? BOT_FILL : undefined,
-  store,
-  eagerWorld: true,
+/**
+ * The installed campaign. The router uses it as its `ContentResolver`, so a
+ * `?level=` naming something that is not on disk lands on a level that is,
+ * rather than on an empty room. A library that cannot load is not fatal — the
+ * three generated modes do not need it.
+ */
+const levels = (() => {
+  try { return levelLibrary(); } catch { return null; }
+})();
+
+/* ------------------------------------------------------------------------ *
+ * The room table
+ *
+ * This is the change docs/INFRASTRUCTURE.md asked for: the process used to hold
+ * exactly one `Room` and therefore capped at `MAX_PLAYERS` (32) players. It now
+ * holds up to `MAX_ROOMS` of them, keyed by mode and content, created on the
+ * first socket that asks for one and reaped once empty.
+ * ------------------------------------------------------------------------ */
+
+let draining = false;
+
+/* ------------------------------------------------------------------------ *
+ * The deploy tier
+ *
+ * Two DIFFERENT drains, and conflating them is a mistake worth naming:
+ *
+ *   - `draining` above is the SHUTDOWN drain. SIGTERM, `DOOMCRAFT_DRAIN_MS`
+ *     (25 s by default), bounded by the orchestrator's kill grace period. It
+ *     refuses the upgrade outright, because in 25 s this process is gone.
+ *   - `lifecycle` below is the DEPLOY drain (docs/PATCHING.md). Hours if it
+ *     needs them. It refuses to CREATE a room and lets every match already
+ *     running finish, so a deploy drops nobody. A player can still join a
+ *     friend's live match here; only new rooms are refused.
+ *
+ * A deploy uses the second and only then, once the host reports `drained`,
+ * the first. That ordering is what makes a rollout free of dropped players.
+ * ------------------------------------------------------------------------ */
+
+/** Feature flags, resolved server-side. `DOOMCRAFT_FLAGS` is the boot document. */
+const flags = new FlagService();
+flags.loadJson(process.env.DOOMCRAFT_FLAGS);
+
+/**
+ * The content this PROCESS is on. Each room pins the value it was constructed
+ * with, so a room that outlives a deploy keeps serving what its players joined
+ * for — see `RoomOptions.contentVersion`.
+ */
+const contentHash = contentHashFor(
+  // Every installed level's own FNV-1a content hash, in the library's stable
+  // order. Two hosts on the same CONTENT_VERSION with different level files on
+  // disk is a real operational mistake, and comparing `/api/version` between
+  // hosts is the only thing that catches it.
+  levels === null ? [] : levels.all().map((l) => l.contentHash),
+);
+
+/* `lifecycle` and `router` refer to each other — the gate is inside the room
+ * factory, and the drain reads the room table — so both need an explicit type
+ * annotation to break the inference cycle. */
+const lifecycle: HostLifecycle = new HostLifecycle({
   clock: () => Date.now(),
-  name: process.env.DOOMCRAFT_ROOM ?? 'doomcraft-1',
+  forceMigrateMs: FORCE_MIGRATE_MS,
+  liveRooms: (): LiveRoom[] => router.keys()
+    .map((key: string): LiveRoom => ({ key, humans: router.get(key)?.humanCount ?? 0 })),
+  stopRoom: (key: string): void => { router.get(key)?.stop(); },
+  onDrained: () => {
+    process.stdout.write('deploy drain complete: every match finished, no player was dropped\n');
+  },
 });
-room.start();
+
+const router: ModeRouter<Room> = new ModeRouter<Room>({
+  maxRooms: MAX_ROOMS,
+  idleMs: ROOM_IDLE_MS,
+  levels,
+  clock: () => Date.now(),
+  overrides: {
+    seed: Number.isFinite(SEED) ? SEED >>> 0 : undefined,
+    botFill: Number.isFinite(BOT_FILL) ? BOT_FILL : undefined,
+  },
+  /*
+   * Wrapped, so the DEPLOY drain gates the one place a room can come into
+   * existence — no matter who calls `route`, now or later. `route` already
+   * answers a throw here with a 503 at the upgrade.
+   */
+  create: lifecycle.guardCreate((key: string, plan: ModeSimPlan, options: RoomOptions): Room => {
+    const room = new Room({
+      ...options,
+      store,
+      // A real server generates all 169 chunks once, at room construction; the
+      // browser Worker trickles. `roomOptionsFor` already turns this off for an
+      // authored Quest level, whose terrain is replaced anyway.
+      eagerWorld: options.eagerWorld,
+      clock: () => Date.now(),
+      levels,
+      name: key,
+      plan,
+      // Many rooms in one process: a `SELECT` naming a different place must not
+      // reconfigure this one. See the header note.
+      lockMode: true,
+      /* --- the patch system, per room --------------------------------- *
+       * Content is PINNED here and never re-read: a balance patch reaches
+       * every new room at once and no in-flight match has its time-to-kill
+       * changed underneath it. Flags are resolved server-side, per player, and
+       * transmitted in `S2C.SESSION_CONFIG` — the client never decides. */
+      contentVersion: CONTENT_VERSION,
+      contentHash,
+      admitting: () => !draining,
+      resolveFlags: (conn) => flags.bitsFor(stableIdFor(conn)),
+    });
+    room.start();
+    return room;
+  }),
+});
+
+const directory = new RoomDirectory<Room>({ source: router, clock: () => Date.now() });
+
+/** Reap empty rooms and expired join codes. Cheap, idempotent, unref'd. */
+const roomSweeper = setInterval(() => {
+  // The deploy drain reaps empty rooms itself and reports when the last match
+  // has finished, so it runs even while the shutdown drain has stopped the
+  // ordinary sweep.
+  lifecycle.tick();
+  if (draining) return;
+  router.sweep();
+  directory.sweep();
+}, 30_000);
+if (typeof roomSweeper.unref === 'function') roomSweeper.unref();
+
+/**
+ * Build the default room at boot.
+ *
+ * Not an optimisation for the server — an optimisation for the FIRST player.
+ * `eagerWorld` generation plus the bot fill is the only slow part of a join,
+ * and doing it before anybody is watching is what keeps the promise in
+ * docs/MODES.md that Deathmatch is playable one frame after the click.
+ */
+const bootRequest: ModeJoinRequest = joinRequestFor(defaultModeId());
+if (PREWARM) router.route(bootRequest);
+
+/**
+ * Constant-time-ish bearer check for the two admin routes.
+ *
+ * Unset token means the routes do not exist — they answer 404, not 401, so an
+ * unconfigured deployment does not advertise an admin surface at all.
+ */
+function adminAuthorised(req: IncomingMessage): boolean {
+  if (ADMIN_TOKEN.length === 0) return false;
+  const raw = req.headers.authorization;
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof header !== 'string') return false;
+  const supplied = header.startsWith('Bearer ') ? header.slice(7) : header;
+  if (supplied.length !== ADMIN_TOKEN.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ADMIN_TOKEN.length; i++) diff |= supplied.charCodeAt(i) ^ ADMIN_TOKEN.charCodeAt(i);
+  return diff === 0;
+}
+
+/** Totals across every live room, for `/health` and the status page. */
+function fleetStatus(): Record<string, unknown> {
+  let humans = 0;
+  let players = 0;
+  let connections = 0;
+  for (const key of router.keys()) {
+    const r = router.get(key);
+    if (r === null) continue;
+    humans += r.humanCount;
+    players += r.sim.players.length;
+    connections += r.net.connections.length;
+  }
+  return { rooms: router.size, maxRooms: MAX_ROOMS, humans, players, connections };
+}
 
 /* ------------------------------------------------------------------------ *
  * HTTP
  * ------------------------------------------------------------------------ */
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(res: ServerResponse, status: number, body: unknown, allowOrigin: string | null = '*'): void {
   const text = JSON.stringify(body);
-  res.writeHead(status, {
+  const headers: Record<string, string | number> = {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(text),
     'cache-control': 'no-store',
-    'access-control-allow-origin': '*',
-  });
+  };
+  // Only ever echo an origin the allowlist already accepted. `vary` matters:
+  // a CDN must not serve one origin's permissive response to another origin.
+  if (allowOrigin !== null) {
+    headers['access-control-allow-origin'] = allowOrigin;
+    if (allowOrigin !== '*') headers.vary = 'origin';
+  }
+  res.writeHead(status, headers);
   res.end(text);
 }
 
@@ -395,52 +717,211 @@ function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: string
   stream.pipe(res);
 }
 
+/**
+ * The room a status query is about. An explicit `?room=<key>` wins; otherwise
+ * the busiest public room, which is what a single-room deploy used to be.
+ */
+function pickRoom(key: string | null): { key: string; room: Room } | null {
+  if (key !== null && key.length > 0) {
+    const exact = router.get(key);
+    return exact === null ? null : { key, room: exact };
+  }
+  let best: { key: string; room: Room } | null = null;
+  for (const k of router.keys()) {
+    const room = router.get(k);
+    if (room === null) continue;
+    if (best === null || room.humanCount > best.room.humanCount) best = { key: k, room };
+  }
+  return best;
+}
+
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
   const path = url.pathname;
+  const cors = corsOrigin(req);
 
   if (req.method === 'OPTIONS' && path.startsWith('/api/')) {
-    res.writeHead(204, {
-      'access-control-allow-origin': '*',
+    const headers: Record<string, string> = {
       'access-control-allow-methods': 'GET,POST,OPTIONS',
       'access-control-allow-headers': 'content-type',
       'access-control-max-age': '86400',
-    });
+    };
+    if (cors !== null) {
+      headers['access-control-allow-origin'] = cors;
+      if (cors !== '*') headers.vary = 'origin';
+    }
+    res.writeHead(204, headers);
     res.end();
     return true;
   }
 
+  /* --- health ---------------------------------------------------------- *
+   * Two states, and the difference is the whole point of having it: a healthy
+   * process answers 200, a DRAINING one answers 503 so the load balancer stops
+   * sending it new players while the matches already inside it finish. A
+   * container orchestrator's liveness probe must therefore point at /health
+   * only if it tolerates the drain window — point readiness here, liveness at
+   * nothing at all, and let the drain deadline do the killing.
+   * --------------------------------------------------------------------- */
   if (path === '/health' || path === '/api/health') {
-    sendJson(res, 200, {
-      ok: true,
+    // Either drain takes this host out of rotation: the shutdown one because
+    // the process is about to be gone, the deploy one because it must stop
+    // being handed new rooms. Both are a 503 to a load balancer and neither
+    // touches the matches already inside.
+    const out = draining || lifecycle.draining;
+    sendJson(res, out ? 503 : 200, {
+      ok: !out,
+      draining,
+      deploy: lifecycle.report(),
       uptimeMs: Date.now() - bootMs,
       protocol: 1,
-      room: room.status(),
+      version: versionDocument(),
+      fleet: fleetStatus(),
+    }, cors);
+    return true;
+  }
+
+  /* --- the three version axes ------------------------------------------ *
+   * What a bug report should carry, and what deploy tooling compares between
+   * hosts. `protocol.fingerprint` is the interesting field: two hosts claiming
+   * the same protocol version but hashing differently is a mixed fleet, which
+   * is the failure nobody thinks to look for. See docs/PATCHING.md.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/version') {
+    sendJson(res, 200, versionDocument({ deploy: lifecycle.report() }), cors);
+    return true;
+  }
+
+  /* --- feature flags ---------------------------------------------------- *
+   * The MENU's copy, fetched once per boot, before there is a game socket.
+   * The authoritative per-player values ride `S2C.SESSION_CONFIG` on the game
+   * connection instead, so this is one request per session and not one per
+   * minute per player — docs/INFRASTRUCTURE.md prices the latter at ~$10.8k a
+   * month and rejects it. A strong ETag makes even this one a 304 at the edge.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/flags') {
+    const device = url.searchParams.get('device') ?? '';
+    const id = isValidDeviceId(device) ? device : 'anonymous';
+    const etag = `W/${flagConfigETag(flags.document).slice(0, -1)}-${id.slice(0, 8)}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { etag, 'cache-control': 'public, max-age=60, stale-while-revalidate=600' });
+      res.end();
+      return true;
+    }
+    const headers: Record<string, string> = {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'public, max-age=60, stale-while-revalidate=600',
+      etag,
+      vary: 'origin',
+    };
+    if (cors !== null) headers['access-control-allow-origin'] = cors;
+    const body = JSON.stringify({
+      revision: flags.document.revision,
+      frozen: flags.frozen,
+      flags: flags.resolveFor(id),
     });
+    headers['content-length'] = String(Buffer.byteLength(body));
+    res.writeHead(200, headers);
+    res.end(body);
+    return true;
+  }
+
+  /* --- the operator's two switches -------------------------------------- *
+   * Both are refused outright unless `DOOMCRAFT_ADMIN_TOKEN` is set, so a
+   * default deployment has no admin surface at all. "Freeze all rollouts" is
+   * INFRASTRUCTURE.md's one toggle reachable from a phone; `drain` is how a
+   * deploy takes a host out of rotation without dropping a single match.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/admin/drain' && req.method === 'POST') {
+    if (!adminAuthorised(req)) { sendJson(res, 404, { error: 'not found' }, cors); return true; }
+    lifecycle.beginDrain();
+    sendJson(res, 200, { deploy: lifecycle.report() }, cors);
+    return true;
+  }
+
+  if (path === '/api/admin/flags' && req.method === 'POST') {
+    if (!adminAuthorised(req)) { sendJson(res, 404, { error: 'not found' }, cors); return true; }
+    const doc = flags.load(await readBody(req));
+    // Everyone already connected keeps the flags they were resolved with for
+    // the life of their session. That is deliberate: a feature appearing or
+    // vanishing under a player mid-match is the thing flags exist to prevent.
+    sendJson(res, 200, { revision: doc.revision, frozen: doc.frozen, registry: flags.registry() }, cors);
     return true;
   }
 
   if (path === '/api/status') {
-    sendJson(res, 200, { room: room.status(), scoreboard: room.scoreboard() });
+    sendJson(res, 200, {
+      draining,
+      fleet: fleetStatus(),
+      directory: directory.status(),
+      rooms: router.status(),
+    }, cors);
     return true;
   }
 
   if (path === '/api/scoreboard') {
-    sendJson(res, 200, { scoreboard: room.scoreboard() });
+    const target = pickRoom(url.searchParams.get('room'));
+    if (target === null) { sendJson(res, 404, { error: 'no such room' }, cors); return true; }
+    sendJson(res, 200, { key: target.key, scoreboard: target.room.scoreboard() }, cors);
+    return true;
+  }
+
+  /* --- the directory ---------------------------------------------------- *
+   * Three endpoints and no queue. See directory.ts for why.
+   * --------------------------------------------------------------------- */
+
+  if (path === '/api/rooms' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const modeParam = (url.searchParams.get('mode') ?? '').toLowerCase();
+    const modeIndex = MODE_KEYS.indexOf(modeParam);
+    sendJson(res, 200, {
+      draining,
+      rooms: directory.list(modeIndex >= 0 ? (modeIndex as ModeId) : undefined),
+    }, cors);
+    return true;
+  }
+
+  /** "Where do I play?" — one round trip, never a wait. */
+  if (path === '/api/quickplay') {
+    const code = url.searchParams.get('code');
+    try {
+      const ticket = directory.quickplay(joinRequestFromQuery(url.searchParams), code);
+      sendJson(res, 200, { draining, ticket }, cors);
+    } catch (err) {
+      if (err instanceof UnknownCodeError) sendJson(res, 404, { error: 'no such room code' }, cors);
+      else throw err;
+    }
+    return true;
+  }
+
+  /** Mint a private room. Nothing is built until somebody actually joins it. */
+  if (path === '/api/rooms/private' && req.method === 'POST') {
+    if (draining) { sendJson(res, 503, { error: 'draining' }, cors); return true; }
+    const body = await readBody(req) as Record<string, unknown>;
+    const params = new URLSearchParams();
+    for (const k of ['mode', 'level', 'world', 'skill', 'seed']) {
+      const v = body[k];
+      if (typeof v === 'string' || typeof v === 'number') params.set(k, String(v));
+    }
+    const reservation = directory.createPrivate(joinRequestFromQuery(params));
+    if (reservation === null) { sendJson(res, 503, { error: 'too many private rooms' }, cors); return true; }
+    sendJson(res, 200, {
+      code: reservation.code,
+      ticket: directory.quickplay(reservation.req, reservation.code),
+    }, cors);
     return true;
   }
 
   if (path === '/api/profile' && req.method === 'GET') {
     const deviceId = url.searchParams.get('device') ?? '';
-    if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }); return true; }
+    if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
     const profile = await store.ensure(deviceId);
-    sendJson(res, 200, { profile: publicProfile(profile) });
+    sendJson(res, 200, { profile: publicProfile(profile) }, cors);
     return true;
   }
 
   if (path === '/api/profile' && req.method === 'POST') {
     const body = await readBody(req) as Record<string, unknown>;
     const deviceId = String(body.deviceId ?? '');
-    if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }); return true; }
+    if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
     const merged = await store.update(deviceId, (p) => {
       // The client may only send the parts it owns; everything is re-validated.
       const incoming = migrateProfile({ ...p, ...body, deviceId }, deviceId);
@@ -452,7 +933,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       p.progress.adsRemoved = p.entitlements.adsRemoved;
       if (p.entitlements.adsRemoved) p.settings.showAds = false;
     });
-    sendJson(res, 200, { profile: publicProfile(merged) });
+    sendJson(res, 200, { profile: publicProfile(merged) }, cors);
     return true;
   }
 
@@ -461,12 +942,12 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const deviceId = String(body.deviceId ?? '');
     const product = String(body.product ?? '');
     const receipt = typeof body.receipt === 'string' ? body.receipt : null;
-    if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }); return true; }
+    if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
     // A real build verifies `receipt` with the payment provider here. Until a
     // provider is wired up this endpoint is the single place that decides, so
     // the client can never grant itself the entitlement.
     const profile = await store.grantEntitlement(deviceId, product, receipt);
-    sendJson(res, 200, { profile: publicProfile(profile), granted: profile.entitlements.adsRemoved });
+    sendJson(res, 200, { profile: publicProfile(profile), granted: profile.entitlements.adsRemoved }, cors);
     return true;
   }
 
@@ -475,11 +956,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const deviceId = String(body.deviceId ?? '');
     const accountId = String(body.accountId ?? '');
     if (!isValidDeviceId(deviceId) || accountId.length < 3 || accountId.length > 64) {
-      sendJson(res, 400, { error: 'bad request' });
+      sendJson(res, 400, { error: 'bad request' }, cors);
       return true;
     }
     const { profile, secret } = await store.linkAccount(deviceId, accountId);
-    sendJson(res, 200, { profile: publicProfile(profile), secret });
+    sendJson(res, 200, { profile: publicProfile(profile), secret }, cors);
     return true;
   }
 
@@ -488,8 +969,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const accountId = String(body.accountId ?? '');
     const secret = String(body.secret ?? '');
     const profile: StoredProfile | null = await store.resolveAccount(accountId, secret);
-    if (!profile) { sendJson(res, 404, { error: 'no such account' }); return true; }
-    sendJson(res, 200, { profile: publicProfile(profile) });
+    if (!profile) { sendJson(res, 404, { error: 'no such account' }, cors); return true; }
+    sendJson(res, 200, { profile: publicProfile(profile) }, cors);
     return true;
   }
 
@@ -592,10 +1073,26 @@ function clientAddress(req: IncomingMessage): string {
   return req.socket.remoteAddress ?? 'unknown';
 }
 
+/** Refuse an upgrade with a real HTTP status, so the browser sees a reason. */
+function refuseUpgrade(socket: { write(s: string): void; destroy(): void }, status: number, text: string): void {
+  socket.write(
+    `HTTP/1.1 ${status} ${text}\r\n`
+    + 'connection: close\r\n'
+    + 'content-length: 0\r\n\r\n',
+  );
+  socket.destroy();
+}
+
 httpServer.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
+  // A browser cannot forge `Origin`, so this is the one cheap control that
+  // stops another site from opening sockets against this fleet on its
+  // visitors' behalf. Unset `DOOMCRAFT_ORIGINS` means "any", as documented.
+  if (!originAllowed(req)) { refuseUpgrade(socket, 403, 'Forbidden'); return; }
+
   if (url.pathname === SIGNAL_PATH) {
+    if (draining) { refuseUpgrade(socket, 503, 'Draining'); return; }
     wss.handleUpgrade(req, socket, head, (ws) => {
       attachSignalSocket(signalHub, ws as unknown as WsLike, clientAddress(req));
     });
@@ -603,14 +1100,51 @@ httpServer.on('upgrade', (req, socket, head) => {
   }
 
   if (url.pathname !== WS_PATH) {
-    socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-    socket.destroy();
+    refuseUpgrade(socket, 404, 'Not Found');
     return;
   }
+
+  // Step 3 of the drain: no new players onto a host that is going away. The
+  // matches already inside it keep running untouched.
+  if (draining) { refuseUpgrade(socket, 503, 'Draining'); return; }
+
+  /* --- which room? ------------------------------------------------------ *
+   * Decided here, before a single game byte moves, from the URL. A join code
+   * overrides the content key entirely; an unknown code is refused rather than
+   * quietly dropped into a public room, because "my friend's code did nothing
+   * and I am in a stranger's match" is worse than an error.
+   * --------------------------------------------------------------------- */
+  const request = joinRequestFromQuery(url.searchParams);
+  const codeParam = url.searchParams.get('code');
+  let baseKey: string | undefined;
+  let joinRequest = request;
+  if (codeParam !== null && codeParam.length > 0) {
+    const reservation = directory.resolveCode(codeParam);
+    if (reservation === null) { refuseUpgrade(socket, 404, 'Unknown Room Code'); return; }
+    baseKey = reservation.key;
+    joinRequest = reservation.req;
+  } else if (url.searchParams.get('mode') === null) {
+    // Backwards compatibility: a bare `/ws`, which is what `tools/loadtest.mjs`
+    // and every pre-router client open, still lands in the default room.
+    joinRequest = bootRequest;
+  }
+
+  let routed;
+  try {
+    routed = router.route(joinRequest, baseKey);
+  } catch {
+    refuseUpgrade(socket, 503, 'No Room Available');
+    return;
+  }
+  const { key, room } = routed;
+
   wss.handleUpgrade(req, socket, head, (ws) => {
     const deviceId = url.searchParams.get('device') ?? '';
     const conn = room.join(new WsTransport(ws));
     if (isValidDeviceId(deviceId)) conn.deviceId = deviceId;
+    // Keep the reaper off a room somebody is walking into but has not yet
+    // said HELLO in — `humanCount` is still 0 for those few hundred ms.
+    router.touch(key);
 
     ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => {
       if (Array.isArray(data)) {
@@ -632,25 +1166,93 @@ httpServer.on('upgrade', (req, socket, head) => {
 
 httpServer.listen(PORT, HOST, () => {
   const hasBundle = existsSync(join(staticRoot, 'index.html'));
+  const first = router.keys()[0] ?? '(none — built on first join)';
   process.stdout.write(
     `doomcraft server listening on http://${HOST}:${PORT}${WS_PATH}\n` +
-    `  world seed   ${room.seed}\n` +
-    `  game mode    ${GameMode[room.gameMode]}\n` +
+    `  default room ${first}\n` +
+    `  default mode ${MODE_KEYS[defaultModeId()]}  (legacy ${GameMode[MODE]})\n` +
+    `  room cap     ${MAX_ROOMS}  (idle reap ${Math.round(ROOM_IDLE_MS / 1000)}s)\n` +
+    `  levels       ${levels === null ? 'none' : `${levels.dir}`}\n` +
+    `  origins      ${ALLOWED_ORIGINS === null ? '* (any — set DOOMCRAFT_ORIGINS to restrict)' : [...ALLOWED_ORIGINS].join(' ')}\n` +
     `  static root  ${staticRoot}${hasBundle ? '' : '  (no bundle yet — run npm run build)'}\n` +
-    `  data root    ${dataRoot}\n`,
+    `  data root    ${dataRoot}\n` +
+    `  drain budget ${Math.round(DRAIN_MS / 1000)}s\n`,
   );
 });
+
+/* ------------------------------------------------------------------------ *
+ * Graceful drain
+ *
+ * docs/INFRASTRUCTURE.md §"Rooms are the deploy unit. Drain, never restart."
+ * asks for four things, and this is the single-process shape of all four:
+ *
+ *   1. stop admitting new players     — `draining` gates the /ws upgrade,
+ *   2. tell the load balancer         — /health flips to 503,
+ *   3. leave live matches alone       — rooms keep ticking, nothing is stopped,
+ *   4. exit when the last room empties, bounded by a deadline.
+ *
+ * What is deliberately NOT here: migrating a live match to another host. That
+ * needs the director tier and a `S2C.UPDATE_REQUIRED`-style message the
+ * protocol does not have yet (see the note in INFRASTRUCTURE.md on the
+ * protocol window). Until then the bound is honest: everybody still playing at
+ * `DRAIN_MS` is closed with 1001, and their client reconnects — which, with
+ * the router, lands them in a fresh room on the new host.
+ * ------------------------------------------------------------------------ */
+
+/** Humans still in a match anywhere in this process. */
+function liveHumans(): number {
+  let n = 0;
+  for (const key of router.keys()) n += router.get(key)?.humanCount ?? 0;
+  return n;
+}
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  process.stdout.write(`\n${signal}: draining…\n`);
+  draining = true;
+  // The deploy drain too, so an operator who never called /api/admin/drain
+  // still gets "no new rooms" and the "every match finished" report. It is
+  // idempotent, so a host that was already draining for a deploy keeps its
+  // original deadline rather than being handed a fresh one.
+  lifecycle.beginDrain();
 
-  room.stop();
+  const deadline = Date.now() + DRAIN_MS;
+  process.stdout.write(
+    `\n${signal}: draining — ${liveHumans()} player(s) in ${router.size} room(s), ` +
+    `budget ${Math.round(DRAIN_MS / 1000)}s\n`,
+  );
+
+  /* The HTTP listener STAYS UP for the whole drain, and that is the point.
+   *
+   * A load balancer only learns that this host is going away by asking it, and
+   * `/health` is where it asks. Closing the listener here — which is the
+   * obvious thing to write — makes the probe fail to CONNECT rather than
+   * answer 503, which reads as "the box is gone" to some balancers and as "not
+   * yet, retry" to others, and gives the ones in the second camp no reason to
+   * stop routing. Refusing the /ws upgrade (see `draining` there) is what
+   * actually stops new players; the listener is what tells anybody so.
+   * server/src/online.test.ts pins this. */
+  clearInterval(roomSweeper);
   clearInterval(signalSweeper);
+  // Signalling holds no match state; nothing is lost by ending it at once.
   signalHub.closeAll(1001, 'server shutting down');
-  for (const conn of [...room.net.connections]) room.net.detach(conn, 1001, 'server shutting down');
+
+  while (Date.now() < deadline && liveHumans() > 0) {
+    await new Promise<void>((done) => { setTimeout(done, 250); });
+  }
+
+  const stranded = liveHumans();
+  if (stranded > 0) {
+    process.stdout.write(`drain deadline reached with ${stranded} player(s) still in a match\n`);
+  }
+
+  for (const key of router.keys()) {
+    const r = router.get(key);
+    if (r === null) continue;
+    for (const conn of [...r.net.connections]) r.net.detach(conn, 1001, 'server shutting down');
+  }
+  router.stopAll();
   for (const client of wss.clients) {
     try { client.close(1001, 'server shutting down'); } catch { /* ignore */ }
   }
@@ -663,6 +1265,7 @@ async function shutdown(signal: string): Promise<void> {
 
   try { await store.flush(); await store.close(); } catch { /* best effort */ }
   await new Promise<void>((done) => { wss.close(() => done()); });
+  // Only now: every match is over and there is nothing left to tell anybody.
   await new Promise<void>((done) => { httpServer.close(() => done()); });
   clearTimeout(forced);
   process.stdout.write('bye\n');
@@ -678,4 +1281,4 @@ process.on('unhandledRejection', (err) => {
   process.stderr.write(`unhandled rejection: ${String(err)}\n`);
 });
 
-export { room, store, httpServer, wss, signalHub };
+export { router, directory, store, httpServer, wss, signalHub };

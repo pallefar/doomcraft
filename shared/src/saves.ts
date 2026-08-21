@@ -231,7 +231,37 @@ export interface SaveFile {
   builder: BuilderSave;
   horde: HordeSave;
   deathmatch: DeathmatchSave;
+  /**
+   * The DOWNGRADE GUARD. Top-level keys this build does not recognise, carried
+   * through untouched and written back out.
+   *
+   * `migrateSave` clamps every document to `SAVES_VERSION`, so without this a
+   * v5 save opened by a rolled-back v4 client is silently rewritten as v4 and
+   * every v5 field is gone — permanently, on the player's own machine. A
+   * rollback that destroys player data is worse than the bug it rolled back
+   * from (docs/INFRASTRUCTURE.md §6, "Saves and profiles"), and a rollback is
+   * the one moment you are least able to notice it happening.
+   *
+   * Never read from this. It exists to be preserved, not consulted: a field in
+   * here means the reader has no idea what it is.
+   */
+  _unknown?: Record<string, unknown>;
 }
+
+/**
+ * Top-level keys this build owns. Anything else in a document goes to
+ * `_unknown` and comes back out unchanged.
+ *
+ * Add a key here in the SAME change that adds it to `SaveFile`, or the new
+ * field will round-trip through `_unknown` and be written twice.
+ */
+export const KNOWN_SAVE_KEYS: readonly string[] = Object.freeze([
+  'version', 'updatedMs', 'profile', 'audio', 'quest', 'builder', 'horde',
+  'deathmatch', '_unknown',
+  // Consumed by migrateV3toV4 and deleted by it; listed so a document caught
+  // mid-migration does not carry it into `_unknown` and resurrect it later.
+  'legacySettings',
+]);
 
 /* ------------------------------------------------------------------------ *
  * Defaults
@@ -678,7 +708,35 @@ export function migrateSave(input: unknown, nowMs = 0): SaveFile {
     horde: coerceHorde(raw.horde),
     deathmatch: coerceDeathmatch(raw.deathmatch),
   };
+
+  /* The downgrade guard. `file.version` has just been clamped DOWN to what this
+   * build understands, which is correct for reading and catastrophic for
+   * writing: the next `storeSave` would overwrite a newer document with a
+   * strictly smaller one. Anything unrecognised is set aside here and put back
+   * verbatim on the way out. See `SaveFile._unknown`. */
+  const carried = collectUnknown(raw);
+  if (carried !== null) file._unknown = carried;
   return file;
+}
+
+/** Top-level keys this build has no idea about, or null when there are none. */
+function collectUnknown(raw: Record<string, unknown>): Record<string, unknown> | null {
+  let out: Record<string, unknown> | null = null;
+  // A previous reader may already have carried a bag; merge it in first so a
+  // field survives being opened by two different old builds in a row.
+  const prior = raw._unknown;
+  if (typeof prior === 'object' && prior !== null && !Array.isArray(prior)) {
+    for (const [k, v] of Object.entries(prior as Record<string, unknown>)) {
+      if (KNOWN_SAVE_KEYS.includes(k)) continue;
+      (out ??= {})[k] = v;
+    }
+  }
+  for (const [k, v] of Object.entries(raw)) {
+    if (KNOWN_SAVE_KEYS.includes(k)) continue;
+    if (v === undefined) continue;
+    (out ??= {})[k] = v;
+  }
+  return out;
 }
 
 /** A v1 blob rebuilt from a v2 save, for the parts of the stack still on v1. */
@@ -756,11 +814,25 @@ export function storeSave(storage: SaveStorage, save: SaveFile, nowMs = 0): bool
   save.version = SAVES_VERSION;
   save.updatedMs = nowMs;
   try {
-    storage.setItem(SAVE_STORAGE_KEY, JSON.stringify(save));
+    storage.setItem(SAVE_STORAGE_KEY, JSON.stringify(serialiseSave(save)));
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * The document as it goes to storage: this build's fields, plus every unknown
+ * key put back at the top level exactly where it was found.
+ *
+ * The bag is spread FIRST so a known field always wins. An older build must
+ * never be able to resurrect a stale copy of a field it does own, and the bag
+ * is by definition made of fields it does not.
+ */
+export function serialiseSave(save: SaveFile): Record<string, unknown> {
+  const { _unknown, ...known } = save;
+  if (_unknown === undefined) return known as unknown as Record<string, unknown>;
+  return { ..._unknown, ...(known as unknown as Record<string, unknown>) };
 }
 
 /* ------------------------------------------------------------------------ *

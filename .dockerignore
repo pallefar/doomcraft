@@ -1,0 +1,25 @@
+# The build context is the repo. Everything below is development apparatus and
+# would be uploaded to the daemon on every `docker build` for nothing — `shots`
+# alone is over a thousand files.
+node_modules
+**/node_modules
+.git
+.vercel
+dist
+client/dist
+server/dist
+shared/dist
+server/.data
+
+# Measurement apparatus and captures.
+ref
+shots
+vendor
+progress/thumbs
+tools/.profile
+*.log
+
+# Nothing in the image reads these.
+Dockerfile
+.dockerignore
+.gitignore

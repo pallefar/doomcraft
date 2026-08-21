@@ -36,6 +36,22 @@ import {
  */
 export const PROTOCOL_VERSION = 3;
 
+/**
+ * The OLDEST protocol this build still serves. Axis 1 of three — see
+ * `shared/src/version.ts` for the other two and for why this is a window
+ * rather than an equality test.
+ *
+ * Raising this is a deliberate act with a date attached: it strands every tab
+ * that has not reloaded inside `PROTOCOL_WINDOW_DAYS`. Lowering it is free but
+ * dishonest unless the older version genuinely still works — v2 does, because
+ * v2 -> v3 hid entirely behind the `CAP_INFLATE` capability bit, and
+ * `server/src/patch.test.ts` runs a real v2 handshake to keep that true.
+ *
+ * v1 is deliberately outside the window: a v1 decoder cannot skip the
+ * `PF_AVATAR` field bit, so it would mis-parse every spawn record.
+ */
+export const PROTOCOL_MIN_SUPPORTED = 2;
+
 /* ------------------------------------------------------------------------ *
  * Message ids
  * ------------------------------------------------------------------------ */
@@ -73,6 +89,30 @@ export enum S2C {
    * smaller on the wire.
    */
   CHUNK_Z = 9,
+  /**
+   * "I cannot serve you, and here is exactly why." Sent immediately before the
+   * socket closes, so a client that IS new enough to decode it can show the
+   * player a reason and take the right action instead of guessing at a close
+   * code. See `shared/src/version.ts` for the reason codes.
+   *
+   * Additive, and therefore NOT a protocol bump: `client/src/net/client.ts`
+   * has always had `default: break` on an unknown message id, so a v2 client
+   * ignores this and falls back to the close code — which carries the same
+   * verdict. Belt and braces, on purpose.
+   */
+  UPDATE_REQUIRED = 10,
+  /**
+   * The room's identity on the two axes that are not the protocol: which
+   * content it is running, and which feature flags the SERVER resolved for
+   * this player. Sent once, right after `WELCOME`.
+   *
+   * Flags are resolved server-side and told to the client — the client never
+   * decides. That is what makes a flag a kill switch rather than a suggestion,
+   * and it is why this rides the game socket instead of being a second HTTP
+   * request per player (docs/INFRASTRUCTURE.md prices that mistake at
+   * ~$10.8k/month).
+   */
+  SESSION_CONFIG = 11,
 }
 
 /* ------------------------------------------------------------------------ *
@@ -479,12 +519,23 @@ export interface HelloMessage {
    * it back out in PF_SPAWN — so the roster can grow without a server change.
    */
   avatar: number;
+  /**
+   * The `CONTENT_VERSION` this client's bundle carries. `0` means "did not
+   * say" — every client older than the patch system, and every tool that
+   * builds a HELLO by hand.
+   *
+   * It is advisory. Content is server truth: the room answers with the version
+   * it is actually running in `S2C.SESSION_CONFIG`, and the client adopts it.
+   * This field exists so the server can log the spread across a fleet and so a
+   * room can refuse a client whose content is too old to render it at all.
+   */
+  contentVersion: number;
 }
 export function createHelloMessage(): HelloMessage {
-  return { protocolVersion: PROTOCOL_VERSION, name: '', skin: 0, caps: 0, avatar: 0 };
+  return { protocolVersion: PROTOCOL_VERSION, name: '', skin: 0, caps: 0, avatar: 0, contentVersion: 0 };
 }
 export function encodeHello(
-  w: PacketWriter, name: string, skin: number, caps: number, avatar = 0,
+  w: PacketWriter, name: string, skin: number, caps: number, avatar = 0, contentVersion = 0,
 ): PacketWriter {
   w.reset();
   w.u8(C2S.HELLO);
@@ -493,6 +544,7 @@ export function encodeHello(
   w.u8(skin & 0xff);
   w.u16(caps & 0xffff);
   w.u32(avatar >>> 0);
+  w.u16(contentVersion & 0xffff);
   return w;
 }
 export function decodeHello(r: PacketReader, out: HelloMessage): HelloMessage {
@@ -501,9 +553,12 @@ export function decodeHello(r: PacketReader, out: HelloMessage): HelloMessage {
   out.name = r.str();
   out.skin = r.u8();
   out.caps = r.u16();
-  // Trailing field: a HELLO written by anything that predates the avatar still
-  // decodes, it just arrives wearing the default marine.
+  // Trailing fields, each guarded by what is left in the packet. This is THE
+  // pattern (docs/INFRASTRUCTURE.md §6 rule 1): a HELLO written by anything
+  // that predates the avatar still decodes, it just arrives wearing the default
+  // marine and declaring no content version. Append here, never insert.
   out.avatar = r.remaining >= 4 ? r.u32() : 0;
+  out.contentVersion = r.remaining >= 2 ? r.u16() : 0;
   return out;
 }
 
@@ -695,6 +750,106 @@ export function decodeWelcome(r: PacketReader, out: WelcomeMessage): WelcomeMess
   out.gameMode = r.u8();
   out.serverTimeMs = r.u32();
   out.chunkCount = r.u16();
+  return out;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Patch-system messages
+ *
+ * Both are additive and neither moved a byte of anything that existed, so
+ * neither cost a `PROTOCOL_VERSION` bump. That is the point of the exercise:
+ * a bump strands tabs, so the protocol is designed so that most changes do not
+ * need one. See docs/PATCHING.md for the rule and its four escape hatches.
+ * ------------------------------------------------------------------------ */
+
+/** How much of a rejection detail string ever reaches the wire. */
+export const MAX_UPDATE_DETAIL_LENGTH = 96;
+/** How much of a build id ever reaches the wire. */
+export const MAX_BUILD_ID_BYTES = 32;
+
+export interface UpdateRequiredMessage {
+  /** `UpdateReason` from shared/src/version.ts. */
+  reason: number;
+  /** The protocol this host speaks, and the oldest it accepts. */
+  serverProtocol: number;
+  serverMinProtocol: number;
+  /** The content this host is on, for a client deciding what to refetch. */
+  contentVersion: number;
+  /** Short, human, safe to show. Never trusted as markup. */
+  detail: string;
+}
+export function createUpdateRequiredMessage(): UpdateRequiredMessage {
+  return { reason: 0, serverProtocol: 0, serverMinProtocol: 0, contentVersion: 0, detail: '' };
+}
+export function encodeUpdateRequired(
+  w: PacketWriter, reason: number, serverProtocol: number, serverMinProtocol: number,
+  contentVersion: number, detail: string,
+): PacketWriter {
+  w.reset();
+  w.u8(S2C.UPDATE_REQUIRED);
+  w.u8(reason & 0xff);
+  w.u8(serverProtocol & 0xff);
+  w.u8(serverMinProtocol & 0xff);
+  w.u16(contentVersion & 0xffff);
+  w.str(detail, MAX_UPDATE_DETAIL_LENGTH);
+  return w;
+}
+export function decodeUpdateRequired(r: PacketReader, out: UpdateRequiredMessage): UpdateRequiredMessage {
+  r.u8();
+  out.reason = r.u8();
+  out.serverProtocol = r.u8();
+  out.serverMinProtocol = r.u8();
+  out.contentVersion = r.u16();
+  out.detail = r.str();
+  return out;
+}
+
+export interface SessionConfigMessage {
+  serverProtocol: number;
+  serverMinProtocol: number;
+  /** The content version THIS ROOM is running, pinned at its construction. */
+  contentVersion: number;
+  /** Hash of the exact tables plus levels the room loaded. */
+  contentHash: number;
+  /**
+   * Feature flags, resolved server-side for this player. Bit i is the flag at
+   * index i of `FLAG_ORDER` in shared/src/flags.ts.
+   *
+   * When a 33rd flag is needed, append a second `u32` guarded by
+   * `r.remaining >= 4` — do not widen this one.
+   */
+  flags: number;
+  /** Telemetry only. Never branch on it. */
+  buildId: string;
+}
+export function createSessionConfigMessage(): SessionConfigMessage {
+  return {
+    serverProtocol: 0, serverMinProtocol: 0, contentVersion: 0,
+    contentHash: 0, flags: 0, buildId: '',
+  };
+}
+export function encodeSessionConfig(
+  w: PacketWriter, serverProtocol: number, serverMinProtocol: number,
+  contentVersion: number, contentHash: number, flags: number, buildId: string,
+): PacketWriter {
+  w.reset();
+  w.u8(S2C.SESSION_CONFIG);
+  w.u8(serverProtocol & 0xff);
+  w.u8(serverMinProtocol & 0xff);
+  w.u16(contentVersion & 0xffff);
+  w.u32(contentHash >>> 0);
+  w.u32(flags >>> 0);
+  w.str(buildId, MAX_BUILD_ID_BYTES);
+  return w;
+}
+export function decodeSessionConfig(r: PacketReader, out: SessionConfigMessage): SessionConfigMessage {
+  r.u8();
+  out.serverProtocol = r.u8();
+  out.serverMinProtocol = r.u8();
+  out.contentVersion = r.u16();
+  out.contentHash = r.u32();
+  out.flags = r.u32();
+  out.buildId = r.str();
   return out;
 }
 

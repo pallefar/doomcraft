@@ -344,6 +344,17 @@ export class LevelLibrary {
     return applyLevelToWorld(level, world, WORLD_MIN_BLOCK_X, WORLD_MIN_BLOCK_Z, WORLD_SIZE_BLOCKS);
   }
 
+  /**
+   * `ContentResolver.levelFor` — hand a room the level so it can simulate it.
+   *
+   * Everything is already in memory (the whole campaign is loaded at boot), so
+   * there is no `requestLevel` to go with it: a level this server has is a
+   * level a room can have synchronously, inside `applyPlan`.
+   */
+  levelFor(id: string): Level | null {
+    return this.getPlayable(id);
+  }
+
   /** Where a player should appear in this level. Null when unknown. */
   spawnFor(id: string): { x: number; y: number; z: number; yaw: number } | null {
     const level = this.getPlayable(id);

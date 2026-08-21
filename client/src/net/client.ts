@@ -68,6 +68,8 @@ import {
   createDamageEvent,
   createKillEvent,
   createPongMessage,
+  createSessionConfigMessage,
+  createUpdateRequiredMessage,
   createWelcomeMessage,
   decodeBlockDeltas,
   decodeChatS2C,
@@ -75,7 +77,9 @@ import {
   decodeDamage,
   decodeKill,
   decodePong,
+  decodeSessionConfig,
   decodeSnapshot,
+  decodeUpdateRequired,
   decodeWelcome,
   dequantizeAngle,
   dequantizePitch,
@@ -105,11 +109,51 @@ import {
   type ModeContextMessage,
   type ModeEventMessage,
 } from '@shared/modes';
-import type { ChatMessage, DamageEvent, KillEvent, SolidAt, WelcomeMessage } from '@shared';
+import {
+  CLOSE_BUILD_REVOKED,
+  CLOSE_CONTENT_UNAVAILABLE,
+  CLOSE_HOST_DRAINING,
+  CLOSE_PROTOCOL_TOO_NEW,
+  CLOSE_PROTOCOL_TOO_OLD,
+  CONTENT_VERSION,
+  UPDATE_REASON_TEXT,
+  UpdateReason,
+} from '@shared/version';
+import { defaultFlagBits, flagOn } from '@shared/flags';
+import type {
+  ChatMessage, DamageEvent, KillEvent, SessionConfigMessage, SolidAt,
+  UpdateRequiredMessage, WelcomeMessage,
+} from '@shared';
 import { createMoveState, eyeHeightOf, moveStep } from '@doomcraft/server/src/sim.js';
 import type { CollisionWorld, MoveState } from '@doomcraft/server/src/sim.js';
 import { defaultServerUrl, webSocketTransport } from './transport.js';
 import type { ClientTransport } from './transport.js';
+
+/* ------------------------------------------------------------------------ *
+ * Refusals
+ *
+ * The server says "no, and here is why" twice: as `S2C.UPDATE_REQUIRED`, which
+ * only a client new enough to know the message can read, and as a close code,
+ * which every client can. This table is the second reading. It exists so a
+ * client one protocol version behind still learns the real reason instead of
+ * reconnect-looping against a host that will never accept it.
+ * ------------------------------------------------------------------------ */
+
+const REFUSAL_CLOSE_CODES: ReadonlySet<number> = new Set([
+  CLOSE_PROTOCOL_TOO_OLD, CLOSE_PROTOCOL_TOO_NEW,
+  CLOSE_CONTENT_UNAVAILABLE, CLOSE_HOST_DRAINING, CLOSE_BUILD_REVOKED,
+]);
+
+function reasonForCloseCode(code: number): UpdateReason {
+  switch (code) {
+    case CLOSE_PROTOCOL_TOO_OLD: return UpdateReason.PROTOCOL_TOO_OLD;
+    case CLOSE_PROTOCOL_TOO_NEW: return UpdateReason.PROTOCOL_TOO_NEW;
+    case CLOSE_CONTENT_UNAVAILABLE: return UpdateReason.CONTENT_UNAVAILABLE;
+    case CLOSE_HOST_DRAINING: return UpdateReason.HOST_DRAINING;
+    case CLOSE_BUILD_REVOKED: return UpdateReason.BUILD_REVOKED;
+    default: return UpdateReason.NONE;
+  }
+}
 import type { InflateRequest, InflateResult } from './chunkInflate.worker.js';
 
 /* ------------------------------------------------------------------------ *
@@ -576,6 +620,22 @@ export interface NetClientEvents {
   onModeEvent?(event: ModeEventMessage): void;
   /** Which level/world the room is running. The record is reused. */
   onModeContext?(context: ModeContextMessage): void;
+  /**
+   * The room's content version, content hash, build id and the feature flags
+   * the SERVER resolved for this player. Arrives once, immediately after
+   * WELCOME. The record is reused — read it now.
+   */
+  onSessionConfig?(config: SessionConfigMessage): void;
+  /**
+   * The server refused this connection and said why. Fires BEFORE the close,
+   * so the shell can show the right thing rather than "connection lost".
+   *
+   * `reason` is an `UpdateReason`. `requiresClientReload(reason)` is true when
+   * the bytes in this tab are the problem, which is the one case allowed to
+   * ask the service worker to swap early — and only once the player is out of
+   * a match (`client/src/boot/updates.ts`).
+   */
+  onUpdateRequired?(msg: UpdateRequiredMessage): void;
 }
 
 export interface NetClientOptions {
@@ -704,6 +764,28 @@ export const CORRECTION_RATE = 11;
 /** Predicted steps per frame, so a long frame cannot stall the loop. */
 export const MAX_PREDICT_STEPS = 4;
 
+/* --- auto step-up, as the eye sees it ---------------------------------- *
+ *
+ * `STEP_HEIGHT` is 1.05 on purpose (docs/CONTRACT.md §11): you walk up a whole
+ * block without jumping, which is a deliberate break from the bar and is not
+ * negotiable. What was NOT intended is that the metre of rise arrived in a
+ * SINGLE 50 ms tick, straight into the camera — `moveStep` has always set
+ * `MoveState.stepped` and, on the shipped path, nothing ever read it. Sprint at
+ * a waist-high wall and the view jolted a metre upward in one frame and you
+ * were on the other side, which is exactly what "I went through that wall"
+ * looks like from inside the helmet.
+ *
+ * So the BODY still steps instantly — the physics is untouched, and it has to
+ * be, because the server runs the same kernel — and the EYE is left behind and
+ * catches up over ~150 ms. `PlayerController` (unused) has always done this;
+ * these two constants are its `STEP_SMOOTH_RATE` and a cap of one step.
+ * ----------------------------------------------------------------------- */
+
+/** 1/s the eye catches up after an auto step-up. ~0.15 s for a full block. */
+export const STEP_SMOOTH_RATE = 14;
+/** Most the eye may ever trail the body, metres. One full step and no more. */
+export const STEP_SMOOTH_MAX = 1.2;
+
 export class NetClient {
   readonly world = new ClientWorld();
   readonly events: NetClientEvents;
@@ -737,6 +819,11 @@ export class NetClient {
   /** Predicted position plus the smoothed correction offset. Render from this. */
   readonly renderPos = new Float64Array(3);
   readonly correction = new Float64Array(3);
+  /**
+   * Metres the RENDERED body still trails the predicted body after an auto
+   * step-up. See `STEP_SMOOTH_RATE`. Zero except for ~150 ms after a step.
+   */
+  stepOffset = 0;
 
   readonly local: LocalPlayerView = {
     id: 0, health: 100, armor: 0, weapon: 0, mag: 0, reserve: 0,
@@ -780,11 +867,40 @@ export class NetClient {
   /** Keepalives sent because the render loop had stopped. Asserted by tests. */
   keepalivesSent = 0;
 
+  /* --- the patch system's client-side state ------------------------------ *
+   *
+   * All three are SERVER truth once a session exists. Before that they hold
+   * this build's own compiled-in values, which is the right answer for the
+   * static single-player deploy that ships today: no server, no flags service,
+   * a complete game anyway.
+   */
+
+  /** Content version of the room we are in. `CONTENT_VERSION` until told. */
+  contentVersion = CONTENT_VERSION;
+  /** Hash of the exact tables and levels that room loaded. */
+  contentHash = 0;
+  /** The server's build id. Telemetry and bug reports only; never branch on it. */
+  serverBuildId = '';
+  /** Feature flags the server resolved for this player. Read with `flag()`. */
+  flagBits = defaultFlagBits();
+  /**
+   * Why the server refused us, if it did. Sticky across the close so the shell
+   * can still read it in `onStatus('closed')`.
+   */
+  updateReason: UpdateReason = UpdateReason.NONE;
+
+  /** Is this feature on for this player? The client's whole flag API. */
+  flag(key: string): boolean {
+    return flagOn(this.flagBits, key);
+  }
+
   /* --- protocol scratch (allocated once) --- */
   private readonly writer = new PacketWriter(2048);
   private readonly reader = new PacketReader();
   private readonly snapshot = new SnapshotBuffer(MAX_PLAYERS, MAX_ENTITIES, MAX_PROJECTILES);
   private readonly welcome = createWelcomeMessage();
+  private readonly sessionConfig = createSessionConfigMessage();
+  private readonly updateMsg = createUpdateRequiredMessage();
   private readonly damage = createDamageEvent();
   private readonly kill = createKillEvent();
   private readonly chat = createChatMessage();
@@ -942,6 +1058,24 @@ export class NetClient {
     if (t.readyState === 1) this.onOpen();
   }
 
+  /**
+   * Turn the built-in reconnect backoff on or off after construction.
+   *
+   * `disconnect()` clears it permanently — that is right for "the player left"
+   * and wrong for "we are moving this client to a different server", which is
+   * exactly what `client/src/net/session.ts` does when a mode switches between
+   * the Worker room and a remote one. A local session wants it OFF (the Worker
+   * room does not drop, and reconnecting to it would silently start a new
+   * match); a remote session wants it ON.
+   */
+  setAutoReconnect(on: boolean): void {
+    this.autoReconnect = on;
+    if (!on && this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
   disconnect(): void {
     this.autoReconnect = false;
     this.stopKeepalive();
@@ -952,6 +1086,19 @@ export class NetClient {
       t.onopen = null; t.onmessage = null; t.onclose = null; t.onerror = null;
       t.close(1000, 'client left');
     }
+    /* The session is over, so forget it.
+     *
+     * `onClose` does this on a DROPPED connection, but the handlers are
+     * detached two lines up precisely so a deliberate close does not look like
+     * one — which meant a deliberate close reset nothing. That was invisible
+     * while nothing ever connected again after a disconnect. It stopped being
+     * invisible the moment `client/src/net/session.ts` started moving a client
+     * from the Worker room to a server: `spawnReceived` survived, so the first
+     * snapshot from the NEW room took the reconciliation path instead of the
+     * "adopt the server's spawn" path, the client stayed in `loading` forever,
+     * and the player watched a world they were not standing in. The stale
+     * player-slot table and chunk epoch were the same bug waiting to happen. */
+    this.resetSession();
     this.setStatus('closed');
   }
 
@@ -1044,11 +1191,15 @@ export class NetClient {
   private onOpen(): void {
     this.setStatus('loading');
     this.reconnectAttempts = 0;
+    this.updateReason = UpdateReason.NONE;
     const caps = this.hello.caps
       | (this.everConnected ? CAP_RETURNING : 0)
       | (chunkInflateSupported() ? CAP_INFLATE : 0);
     this.everConnected = true;
-    encodeHello(this.writer, this.hello.name, this.hello.skin, caps, this.hello.avatar);
+    encodeHello(
+      this.writer, this.hello.name, this.hello.skin, caps, this.hello.avatar,
+      CONTENT_VERSION,
+    );
     this.rawSend(this.writer.copy());
     this.sendPing();
   }
@@ -1056,6 +1207,15 @@ export class NetClient {
   private onClose(code: number, reason: string): void {
     this.transport = null;
     this.resetSession();
+    /* A refusal is not a network blip, and retrying one is a hot loop against
+     * a server that has already said no. The close CODE carries the verdict
+     * even for a client too old to decode `S2C.UPDATE_REQUIRED`, which is
+     * exactly the client this guard has to work for. */
+    const refusal = REFUSAL_CLOSE_CODES.has(code);
+    if (refusal) {
+      if (this.updateReason === UpdateReason.NONE) this.updateReason = reasonForCloseCode(code);
+      this.autoReconnect = false;
+    }
     if (!this.autoReconnect || this.disposed) {
       // The session is over; nothing left to keep alive.
       this.stopKeepalive();
@@ -1212,11 +1372,16 @@ export class NetClient {
       if (Math.abs(this.correction[i]) < 1e-4) this.correction[i] = 0;
     }
 
+    // The eye catching up after an auto step-up, on the same principle as the
+    // correction above: the body is already on the ledge, the view arrives.
+    this.stepOffset = expDecay(this.stepOffset, 0, STEP_SMOOTH_RATE, dtSeconds);
+    if (this.stepOffset < 1e-4) this.stepOffset = 0;
+
     // Sub-step extrapolation removes the beat between a 60 Hz input step and a
     // display running at some other rate.
     const lead = Math.min(this.accumulatorMs, INPUT_SEND_MS) / 1000;
     this.renderPos[0] = this.predicted.pos[0] + this.predicted.vel[0] * lead + this.correction[0];
-    this.renderPos[1] = this.predicted.pos[1] + this.predicted.vel[1] * lead + this.correction[1];
+    this.renderPos[1] = this.predicted.pos[1] + this.predicted.vel[1] * lead + this.correction[1] - this.stepOffset;
     this.renderPos[2] = this.predicted.pos[2] + this.predicted.vel[2] * lead + this.correction[2];
 
     this.updateInterpolation(dtSeconds);
@@ -1245,7 +1410,19 @@ export class NetClient {
     m.yaw = yaw;
     m.pitch = pitch;
     if (!this.local.dead) {
+      const beforeY = m.pos[1];
       moveStep(m, moveX, moveZ, this.inButtons, dtMs / 1000, this.world);
+      // `moveAABB` teleports the body up to a whole block onto a ledge in one
+      // tick. Hold the eye where it was and let it climb; see STEP_SMOOTH_RATE.
+      // Only the FRESH input feeds this — a reconciliation replay re-runs steps
+      // that have already been smoothed, and would double-count them.
+      if (m.stepped) {
+        const rise = m.pos[1] - beforeY;
+        if (rise > 0) {
+          this.stepOffset += rise;
+          if (this.stepOffset > STEP_SMOOTH_MAX) this.stepOffset = STEP_SMOOTH_MAX;
+        }
+      }
     }
 
     const i = this.hHead;
@@ -1299,6 +1476,11 @@ export class NetClient {
       case S2C_MODE.STATE: this.onModeState(r); break;
       case S2C_MODE.EVENT: this.onModeEvent(r); break;
       case S2C_MODE.CONTEXT: this.onModeContext(r); break;
+      case S2C.SESSION_CONFIG: this.onSessionConfig(r); break;
+      case S2C.UPDATE_REQUIRED: this.onUpdateRequired(r); break;
+      // An unknown id is a message from a NEWER server. Ignoring it is what
+      // makes an additive protocol change free — do not turn this into an
+      // error, it is load-bearing. docs/PATCHING.md.
       default: break;
     }
   }
@@ -1313,6 +1495,29 @@ export class NetClient {
     this.chunksReceived = this.world.chunkCount;
     this.loadProgress = Math.min(1, this.chunksReceived / this.chunksExpected);
     this.events.onWelcome?.(w);
+  }
+
+  private onSessionConfig(r: PacketReader): void {
+    const c = decodeSessionConfig(r, this.sessionConfig);
+    // Content is server truth: the room pinned this at construction and we
+    // adopt it. A client that disagrees is the one that is wrong, and it stays
+    // wrong for the life of the match rather than having the tables changed
+    // underneath it mid-fight.
+    this.contentVersion = c.contentVersion;
+    this.contentHash = c.contentHash;
+    this.serverBuildId = c.buildId;
+    this.flagBits = c.flags >>> 0;
+    this.events.onSessionConfig?.(c);
+  }
+
+  private onUpdateRequired(r: PacketReader): void {
+    const m = decodeUpdateRequired(r, this.updateMsg);
+    this.updateReason = m.reason as UpdateReason;
+    // The server's `detail` is diagnostic and written for us; the text shown to
+    // a player comes from our own table, keyed by the reason code, so a server
+    // can never put a string on our screen.
+    this.events.onUpdateRequired?.(m);
+    this.events.onStatus?.('error', UPDATE_REASON_TEXT[this.updateReason] ?? m.detail);
   }
 
   private onChunk(r: PacketReader): void {
@@ -1672,6 +1877,7 @@ export class NetClient {
       this.predicted.coyote = 0;
       this.predicted.jumpBuffer = 0;
       this.correction[0] = 0; this.correction[1] = 0; this.correction[2] = 0;
+      this.stepOffset = 0;
       this.hHead = 0;
       this.hCount = 0;
       this.spawnReceived = true;

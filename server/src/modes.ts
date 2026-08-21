@@ -29,6 +29,7 @@ import {
   MAX_PLAYERS,
   clamp,
 } from '@doomcraft/shared';
+import type { Level } from '@doomcraft/shared/level';
 import {
   BuildPolicy,
   BreakPolicy,
@@ -108,6 +109,32 @@ export interface ModeJoinRequest {
 export interface ContentResolver {
   /** Map a requested level id to one that exists and validates. '' when none. */
   resolveId(requested: string): string;
+  /**
+   * The compiled level for an id, when this resolver already holds it.
+   *
+   * This is what stops a Quest room simulating a world nobody can see. Before
+   * it existed the campaign's geometry lived ONLY in the client's voxel store
+   * (`client/src/modes/quest/levelRuntime.ts` blitted it there); the server
+   * kept colliding the player's body against its own generated terrain, and
+   * `NetClient.applyLocal` rewound the body onto the server's answer every
+   * snapshot. The two worlds agreed on about a fifth of their columns, so the
+   * player was dragged through level floors and stopped dead in empty
+   * corridors — reported as "I was going through walls".
+   *
+   * Returning a level here makes the ROOM the authority for that geometry:
+   * `Room.applyPlan` stamps it into `ServerWorld` and pins the spawn to the
+   * authored start, which is the placement the client already uses when it is
+   * spawned on it. Null means "not in memory" — see `requestLevel`.
+   */
+  levelFor?(id: string): Level | null;
+  /**
+   * Ask for a level this resolver could serve but has not loaded yet. Resolves
+   * (or returns) once `levelFor(id)` will answer. The browser Worker uses it to
+   * fetch exactly the one level that was selected instead of paying for the
+   * whole campaign on every local session; a server with the files on disk does
+   * not implement it at all.
+   */
+  requestLevel?(id: string): Promise<void> | void;
 }
 
 /**
@@ -150,6 +177,27 @@ export function toSelectMessage(req: ModeJoinRequest): ModeSelectMessage {
   m.levelId = req.levelId;
   m.worldId = req.worldId;
   return m;
+}
+
+/** The router key for a request. The one definition both tiers agree on. */
+export function roomKeyForRequest(req: ModeJoinRequest): string {
+  return roomKeyFor(toSelectMessage(req));
+}
+
+/**
+ * The router key a room ALREADY running this plan would have. `Room` compares
+ * it against an incoming `SELECT` so a joiner cannot reconfigure a shared room
+ * out from under everybody else in it — see `RoomOptions.lockMode`.
+ */
+export function roomKeyForPlan(plan: ModeSimPlan): string {
+  return roomKeyForRequest({
+    modeId: plan.modeId,
+    skill: plan.skill,
+    levelId: plan.levelId,
+    worldId: plan.worldId,
+    seed: plan.seed,
+    flags: 0,
+  });
 }
 
 /* ------------------------------------------------------------------------ *
@@ -483,14 +531,20 @@ export class ModeRouter<T extends RoomLike> {
   planOf(key: string): ModeSimPlan | null { return this.slots.get(key)?.plan ?? null; }
 
   /** Route a raw wire message. Sanitises, plans and finds or creates a room. */
-  routeMessage(msg: ModeSelectMessage): RoutedRoom<T> {
-    return this.route(sanitiseJoin(msg, this.levels));
+  routeMessage(msg: ModeSelectMessage, baseKey?: string): RoutedRoom<T> {
+    return this.route(sanitiseJoin(msg, this.levels), baseKey);
   }
 
-  /** Route a sanitised request. */
-  route(req: ModeJoinRequest): RoutedRoom<T> {
+  /**
+   * Route a sanitised request.
+   *
+   * `baseKey` overrides the content-derived key. That is the whole of private
+   * rooms: a join code becomes `deathmatch~AB12CD`, which no public request can
+   * ever produce, so a coded room is unlisted and unreachable by accident.
+   */
+  route(req: ModeJoinRequest, baseKey?: string): RoutedRoom<T> {
     const plan = resolveModePlan(req, this.overrides);
-    const base = roomKeyFor(toSelectMessage(req));
+    const base = baseKey ?? roomKeyForRequest(req);
 
     // A key with room for one more human wins. Quest and Builder are keyed by
     // content, so this is also how two friends land in the same session.

@@ -29,6 +29,81 @@
  */
 
 import { TransportState, type ClientTransport, type ServerTransport } from './transport.js';
+import type { Level } from '@shared/level';
+import type { ContentResolver } from '@doomcraft/server/src/modes.js';
+
+/* ------------------------------------------------------------------------ *
+ * The campaign, for the Worker room
+ *
+ * WHY THIS EXISTS. A Quest level used to live only in the CLIENT's voxel store
+ * while the room this file boots went on simulating the player's body against
+ * generated terrain. The client rewinds onto the server's answer every
+ * snapshot, so the room's invisible hills decided where you could walk: you
+ * fell through authored floors and stopped dead in empty corridors.
+ *
+ * The room now stamps the level into its own world (`Room.installLevels` ->
+ * `applyLevelToWorld`), which means it needs the bytes. The ids come from the
+ * bundler for free — a new .json in content/levels is a new campaign entry with
+ * no code change, exactly as `quest.ts` promises — but the CONTENT is fetched
+ * lazily, one level, the first time a room is actually asked to run it. A
+ * Deathmatch session downloads none of it.
+ * ------------------------------------------------------------------------ */
+
+const BUNDLED_LEVEL_SOURCES = import.meta.glob(
+  '../../../content/levels/*.json',
+  { query: '?raw', import: 'default' },
+) as Record<string, () => Promise<string>>;
+
+/** `../../../content/levels/e1m2-coolant.json` -> `e1m2-coolant`. */
+function levelIdFromPath(path: string): string {
+  const slash = path.lastIndexOf('/');
+  const name = slash < 0 ? path : path.slice(slash + 1);
+  return name.endsWith('.json') ? name.slice(0, -5) : name;
+}
+
+/**
+ * `ContentResolver` over the bundled campaign.
+ *
+ * `resolveId` answers synchronously from the glob's keys, so a `SELECT` naming
+ * a level that does not exist is still corrected on the spot. `levelFor` only
+ * answers for levels already compiled; `requestLevel` is what pulls one in.
+ */
+function createBundledLevels(): ContentResolver {
+  const sources = new Map<string, () => Promise<string>>();
+  for (const path of Object.keys(BUNDLED_LEVEL_SOURCES)) {
+    sources.set(levelIdFromPath(path), BUNDLED_LEVEL_SOURCES[path]);
+  }
+  const ids = [...sources.keys()].sort();
+  const compiled = new Map<string, Level>();
+  const inFlight = new Map<string, Promise<void>>();
+
+  return {
+    resolveId(requested: string): string {
+      return sources.has(requested) ? requested : (ids[0] ?? '');
+    },
+    levelFor(id: string): Level | null {
+      return compiled.get(id) ?? null;
+    },
+    requestLevel(id: string): Promise<void> {
+      const running = inFlight.get(id);
+      if (running !== undefined) return running;
+      const load = sources.get(id);
+      if (load === undefined) return Promise.resolve();
+      const job = (async (): Promise<void> => {
+        // Dynamic, so the level compiler rides in the room's chunk rather than
+        // the page's: a tab that never opens the campaign never loads it.
+        const [{ compileLevel, parseLevelJson }, raw] = await Promise.all([
+          import('@shared/level'),
+          load(),
+        ]);
+        const src = parseLevelJson(raw);
+        if (src !== null) compiled.set(id, compileLevel(src));
+      })().finally(() => { inFlight.delete(id); });
+      inFlight.set(id, job);
+      return job;
+    },
+  };
+}
 
 /* ------------------------------------------------------------------------ *
  * Wire between the page and the worker
@@ -233,6 +308,9 @@ async function createRoomHost(
     eagerWorld: false,
     clock: clock ?? (() => nowMs()),
     name: 'local',
+    // The campaign, so a Quest `SELECT` makes this room's world BE the level
+    // instead of leaving the level on the client and the collision on a hill.
+    levels: createBundledLevels(),
   });
 
   interface Peer { conn: Conn; open: boolean }

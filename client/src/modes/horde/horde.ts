@@ -921,10 +921,9 @@ export class HordeMode implements ModeInstance {
 
   private takeBinding(action: InputAction): void {
     const input = this.ctx.host.game.input;
-    const original = input.bindings[action];
-    if (original === '') return;
-    input.setBinding(action, '');
-    this.ctx.scope.add(() => { input.setBinding(action, original); });
+    if (input.isActionTaken(action)) return;
+    input.setActionTaken(action, true);
+    this.ctx.scope.add(() => { input.setActionTaken(action, false); });
   }
 
   /**
@@ -949,22 +948,22 @@ export class HordeMode implements ModeInstance {
     const input = this.ctx.host.game.input;
     for (let i = 0; i < set.length; i++) {
       const action = set[i];
-      const held = this.taken.get(action);
-      if (want) {
-        if (held !== undefined) continue;
-        const original = input.bindings[action];
-        this.taken.set(action, original);
-        if (original !== '') input.setBinding(action, '');
-      } else {
-        if (held === undefined) continue;
-        this.taken.delete(action);
-        if (held !== '') input.setBinding(action, held);
-      }
+      const held = this.taken.has(action);
+      if (want === held) continue;
+      if (want) this.taken.add(action); else this.taken.delete(action);
+      input.setActionTaken(action, want);
     }
   }
 
-  /** Bindings currently held hostage, action -> the code it had. */
-  private readonly taken = new Map<InputAction, string>();
+  /**
+   * Actions currently held hostage.
+   *
+   * A mask on the action, not a blanked binding: a control scheme can give an
+   * action a second key (Classic fires on Ctrl as well as the mouse), and
+   * clearing one layer would have left the other one live — the fortify cursor
+   * would have salvaged AND fired.
+   */
+  private readonly taken = new Set<InputAction>();
 
   private addListeners(): void {
     const { scope, host } = this.ctx;
@@ -985,9 +984,7 @@ export class HordeMode implements ModeInstance {
     // this covers the input map.
     scope.add(() => {
       const input = host.game.input;
-      for (const [action, code] of this.taken) {
-        if (code !== '') input.setBinding(action, code);
-      }
+      for (const action of this.taken) input.setActionTaken(action, false);
       this.taken.clear();
     });
   }

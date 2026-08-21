@@ -12,11 +12,13 @@
     "dev:client": "vite --config client/vite.config.ts",
     "dev:server": "tsx watch server/src/index.ts",
     "build": "tsc -b && vite build --config client/vite.config.ts",
+    "build:server": "npx esbuild server/src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=server/dist/server.mjs --external:ws --log-level=warning",
     "preview": "vite preview --config client/vite.config.ts --port 4173",
-    "start": "node server/dist/index.js",
+    "start": "node server/dist/server.mjs",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
-    "bench": "node tools/bench.mjs"
+    "bench": "node tools/bench.mjs",
+    "verify:online": "node tools/online-verify.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
