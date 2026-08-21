@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HUD probe</title>
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#0a0a0d}
+#bg{position:fixed;inset:0;z-index:0}
+#bg.dark{background:linear-gradient(180deg,#1b1420 0%,#2a1414 55%,#4a1c14 100%)}
+#bg.bright{background:linear-gradient(180deg,#8ec6f0 0%,#9fd07a 52%,#e3d39a 100%)}
+#hud{position:fixed;inset:0;z-index:10;pointer-events:none}
+</style></head><body>
+<div id="bg" class="dark"></div>
+<div id="hud" data-mode="idle"></div>
+<script type="module">
+const m = await import('/src/hud/hud.ts');
+const root = document.getElementById('hud');
+const hud = new m.Hud(root, { crosshair: 'dynamic', crosshairColor: 0xffffff });
+const s = m.createHudState();
+s.showFps = true; s.fps = 60; s.ping = 24; s.playersAlive = 6; s.kills = 4; s.deaths = 1;
+s.matchSeconds = 137; s.owned = 0b1011111; s.reserveByType = Int32Array.from([0, 120, 24, 8, 0]);
+s.weapon = 0; s.mag = 15; s.reserve = 120; s.health = 100; s.armor = 50;
+hud.setTouchVisible(false);
+hud.pushFeed('Marine  ›Shotgun›  Imp', 'k');
+hud.pushFeed('Cacodemon joined the fight', 'j');
+let last = performance.now();
+const loop = (t) => { const dt = Math.min(0.05, (t - last) / 1000); last = t; hud.update(s, dt); requestAnimationFrame(loop); };
+requestAnimationFrame(loop);
+window.__P = {
+  hud, s, m,
+  bg(k) { document.getElementById('bg').className = k; },
+  touch(on) { hud.setTouchVisible(on); },
+  hurt(a, yaw) { hud.hurt(a, yaw, 0); },
+  mark(h, k, d) { hud.hitMarker(h, k, d); },
+  set(o) { Object.assign(s, o); },
+  reserve(t, v) { s.reserveByType[t] = v; },
+};
+</script></body></html>

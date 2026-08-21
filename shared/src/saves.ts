@@ -27,8 +27,8 @@ import { WeaponId } from './weapons.ts';
  * Version
  * ------------------------------------------------------------------------ */
 
-/** v1 = the flat SaveProgress. v2 = per-mode slots (this file). */
-export const SAVES_VERSION = 2;
+/** v1 = the flat SaveProgress. v2 = per-mode slots. v3 = the packed avatar. */
+export const SAVES_VERSION = 3;
 
 export const SAVE_STORAGE_KEY = `${STORAGE_PREFIX}saves`;
 /** The v1 key, read once during migration and then left alone. */
@@ -46,7 +46,19 @@ export const MAX_LEVEL_RECORDS = 64;
 
 export interface SaveProfile {
   name: string;
+  /**
+   * Legacy appearance: an index into the six flat marine colours the renderer
+   * used before the Kenney rig. Kept because the wire still carries it and an
+   * older client still reads it; `avatar` is the truth.
+   */
   skin: number;
+  /**
+   * The packed avatar — four outfit indices and two palette indices in one
+   * uint32. See `client/src/characters/avatar.ts` for the bit layout; nothing
+   * on the server or in this file needs to understand it, which is exactly why
+   * it is stored as a number and not as a struct.
+   */
+  avatar: number;
   xp: number;
   level: number;
   /** Total seconds across every mode. */
@@ -223,7 +235,7 @@ export function createSaveFile(nowMs = 0): SaveFile {
     version: SAVES_VERSION,
     updatedMs: nowMs,
     profile: {
-      name: '', skin: 0, xp: 0, level: 1, secondsPlayed: 0, adsRemoved: false,
+      name: '', skin: 0, avatar: 0, xp: 0, level: 1, secondsPlayed: 0, adsRemoved: false,
       createdMs: nowMs, lastMode: ModeId.QUEST,
     },
     quest: { activeSlot: -1, slots: [] },
@@ -282,6 +294,8 @@ function coerceProfile(v: unknown, nowMs: number): SaveProfile {
   return {
     name: s(r.name, ''),
     skin: i(r.skin, 0, 0, 255),
+    // uint32, so it survives a round trip through JSON without losing bits.
+    avatar: i(r.avatar, 0, 0, 0xffffffff),
     xp,
     level: i(r.level, levelForXp(xp), 1, 200),
     secondsPlayed: i(r.secondsPlayed, 0, 0, 1e9),
@@ -454,6 +468,8 @@ const migrateV1toV2: SaveMigration = {
     const file = out as unknown as SaveFile;
     file.profile.name = s(p.name, '');
     file.profile.skin = i(p.skin, 0, 0, 255);
+    // Straight to v3's representation: a v1 player who was purple stays purple.
+    file.profile.avatar = LEGACY_AVATAR_BY_SKIN[file.profile.skin % LEGACY_AVATAR_BY_SKIN.length];
     file.profile.xp = i(p.xp, 0, 0, 1e9);
     file.profile.level = i(p.level, levelForXp(file.profile.xp), 1, 200);
     file.profile.secondsPlayed = i(p.secondsPlayed, 0, 0, 1e9);
@@ -483,8 +499,46 @@ const migrateV1toV2: SaveMigration = {
   },
 };
 
-/** Applied in order. A v3 is one more entry here and a bump of SAVES_VERSION. */
-export const SAVE_MIGRATIONS: readonly SaveMigration[] = Object.freeze([migrateV1toV2]);
+/**
+ * The six legacy `skin` bytes, pre-packed as avatars.
+ *
+ * The bit layout and the outfit roster live in
+ * `client/src/characters/avatar.ts`; this table is the one place the SERVER-side
+ * schema needs to know a concrete value, so it is stated as constants rather
+ * than by importing client code into shared. `avatar.test.ts` asserts that
+ * `packAvatar(avatarFromLegacySkin(k))` equals each entry, so the two can never
+ * drift apart silently.
+ *
+ *   0 green  -> Marine   1 purple -> Warden   2 orange -> Timber
+ *   3 blue   -> Enforcer 4 red    -> Ranger   5 grey   -> Sentry
+ */
+export const LEGACY_AVATAR_BY_SKIN: readonly number[] = Object.freeze([
+  0x00000000, 0x00a09999, 0x00404444, 0x00c01111, 0x00602222, 0x01808888,
+]);
+
+/**
+ * v2 -> v3. Adds `profile.avatar`. Nobody who has already picked a colour loses
+ * it: the old `skin` byte is translated into the nearest full avatar, so a
+ * player who was purple comes back purple rather than coming back as the
+ * default marine.
+ */
+const migrateV2toV3: SaveMigration = {
+  from: 2,
+  to: 3,
+  apply(raw) {
+    const profile = rec(raw.profile);
+    const skin = i(profile.skin, 0, 0, 255);
+    if (profile.avatar === undefined) {
+      profile.avatar = LEGACY_AVATAR_BY_SKIN[skin % LEGACY_AVATAR_BY_SKIN.length];
+    }
+    raw.profile = profile;
+    raw.version = 3;
+    return raw;
+  },
+};
+
+/** Applied in order. A v4 is one more entry here and a bump of SAVES_VERSION. */
+export const SAVE_MIGRATIONS: readonly SaveMigration[] = Object.freeze([migrateV1toV2, migrateV2toV3]);
 
 /** True for a document that at least claims to be a v2+ per-mode save. */
 function looksLikeV2(raw: Record<string, unknown>): boolean {
@@ -504,7 +558,7 @@ export function migrateSave(input: unknown, nowMs = 0): SaveFile {
     raw = rec(input);
   }
 
-  let version = i(raw.version, looksLikeV2(raw) ? SAVES_VERSION : 1, 0, 1000);
+  let version = i(raw.version, looksLikeV2(raw) ? 2 : 1, 0, 1000);
   if (version < 1) version = 1;
 
   // v1 documents that were never written at all: start clean.

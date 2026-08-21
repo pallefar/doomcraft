@@ -1,24 +1,88 @@
 /**
  * DOOMCRAFT — in-game HUD.
  *
- * Judged against ref/BAR.md. The bar's HUD is corner-only DOM with a dead
- * static crosshair (weakness #3), a desktop layout shipped unchanged to a
- * 412 px-tall phone (weakness #11) and near-invisible touch controls
- * (weakness #10). This one answers all three:
+ * Judged against ref/BAR.md. The bar's HUD (ref/voxiom/desktop-08-combat.png)
+ * is competent: corners only, clean centre, minimap, armour/health bars with
+ * numerals, a hotbar with a white selected outline, a chat/kill feed. It is not
+ * beaten by adding furniture — it is beaten on **damage legibility**, which is
+ * where it says nothing at all:
  *
- *   - the crosshair breathes with the live weapon cone and pops a hit marker,
- *   - the layout has a real portrait mode instead of a rotate-your-phone wall,
- *   - the touch pad has a dedicated fire button with high-contrast fills.
+ *   1. HEALTH READS AS A COLOUR, A LENGTH AND A WORD. The bar's health fill is
+ *      green at 100 and green at 4. Ours is a three-state ramp — green / amber
+ *      / red — whose label flips from HEALTH to CRITICAL, so the "about to die"
+ *      read survives colour blindness and a phone screen in sunlight. Behind it
+ *      a *damage ghost* drains a beat late, turning "I just lost 30" into a
+ *      length you never have to read, and below 30 the frame edge throbs. The
+ *      plate under all of it is opaque: the critical vignette is red and paints
+ *      UNDER this cluster, and a translucent plate let that red wash straight
+ *      through the one read-out that mattered.
+ *   2. DIRECTIONAL DAMAGE RIDES THE FRAME AND THE FOVEA, NEVER THE MID-FIELD.
+ *      Bearings are stored as the *world* yaw the hit came from and
+ *      re-projected every frame against the live camera, so the indicator
+ *      slides around as you turn and sits dead ahead the moment you face the
+ *      shooter. It is drawn twice: a blade on an ellipse inscribed in the
+ *      viewport, which peripheral vision catches without a saccade, and a short
+ *      arc inside the crosshair canvas, where the eye already is. Neither ever
+ *      occupies the middle of the screen. Repeat hits from one bearing merge
+ *      into one loud blade instead of stacking four faint ones. The bar has no
+ *      damage direction of any kind.
+ *   3. AMMO IS NEVER HUNTED FOR. Big magazine numeral, a per-round pip strip
+ *      under it (countable without reading digits, and dark-tracked so it still
+ *      counts over sunlit sand), a reserve line tinted by ammo type, hotbar
+ *      slots that go dark red when that gun is dry, and — because the eye is at
+ *      the crosshair, not the corner — the crosshair's dot goes amber on the
+ *      last quarter of a magazine and the whole crosshair goes red when it is
+ *      empty.
+ *   4. THE CROSSHAIR TALKS. It breathes with the live weapon cone (the bar's is
+ *      a dead static plus, weakness #3), pops a hit marker scaled by damage,
+ *      golds on a headshot, flashes a red ring on a kill, and carries the
+ *      reload sweep.
+ *   5. IT SURVIVES A BRIGHT MAP. The bar keeps its HUD readable over a sunlit
+ *      beach with solid dark plates. Every read-out here carries a two-stop
+ *      black halo and the plates are opaque enough to hold, because a HUD that
+ *      is only legible in a dark arena is not legible.
+ *
+ *   6. THE SIGHTLINE HAS A BUDGET, AND IT IS ENFORCED IN CODE. This is where
+ *      the bar loses hardest and where a HUD most easily loses it back. voxiom
+ *      prints "Waiting for players...(2/50)" at ~28 px cap height across
+ *      478 px — roughly 19,000 px² of white glyph box — 180 px ABOVE its own
+ *      crosshair, i.e. laid over the exact pixels you are aiming through
+ *      (ref/voxiom/desktop-08-combat.png, x 483–961, y 251–291). Here the
+ *      reticle owns a KEEP-OUT radius (`keepOutRadius`, a third of the short
+ *      edge, ~300 px on a 1440×900 desktop and 138 px on a phone), and the
+ *      only thing allowed inside it besides the crosshair is one 11 px
+ *      letterspaced-caps plate whose TOP edge sits `statusDrop()` px BELOW the
+ *      reticle — 120 px on desktop, ~1,600 px² of ink, a twelfth of the bar's,
+ *      and off the aim line entirely. Below, never above: the eye tracks UP to
+ *      targets. And it is not a convention that a later change can quietly
+ *      break — every line is costed by `statusInk()` and `statusPlacement()`
+ *      demotes anything over `SIGHTLINE_INK_BUDGET` into the top-left chip
+ *      stack beside the match clock. A message cannot grow into a banner
+ *      because the layout will not draw a banner. The one exception is death,
+ *      which is also the one state with no aim line to protect: the crosshair
+ *      is hidden while dead — you cannot shoot — so the death card may own the
+ *      middle, and it is a plated card rather than loose display type.
+ *
+ * And the centre stays clean: everything above lives in the corners, at the
+ * frame edge, inside the 96 px crosshair canvas, or on one small plate below
+ * the keep-out. The keep-out radius is published on `#hud` as `--dc-keepout`
+ * so mode overlays can anchor to it instead of guessing an offset.
  *
  * COST. The HUD must not cost frames, so nothing here re-renders on a whim:
  *
  *   - every DOM node is created once at mount and afterwards only *mutated*,
  *     each behind a `!==` guard, so a steady frame writes zero DOM;
- *   - the only canvases are a 96 px crosshair (redrawn when the cone actually
- *     changes) and the minimap (redrawn at 10 Hz);
- *   - the minimap is a blit out of a pre-baked world image — the column scan
- *     happens once per chunk on arrival, never per frame;
- *   - no allocation in `update()`.
+ *   - the crosshair canvas redraws only when a QUANTISED input actually
+ *     changed (gap to the half-pixel, marker to the frame, reload to 1/36) —
+ *     standing still with a full magazine costs nothing at all;
+ *   - the damage blades write transform/opacity only while they are alive, and
+ *     only when the projected angle moved more than 0.6°; once the last one has
+ *     decayed the HUD is measured writing ZERO styles and ZERO canvas clears
+ *     over a two-second window;
+ *   - the minimap is a blit out of a pre-baked world image redrawn at 10 Hz —
+ *     the column scan happens once per chunk on arrival, never per frame;
+ *   - the scoreboard re-diffs at 5 Hz, not per frame;
+ *   - no allocation in `update()` on an unchanged frame.
  */
 
 import {
@@ -30,7 +94,7 @@ import {
 import { minimapColor, BLOCK_LIQUID } from '@shared/blocks';
 import {
   WEAPON_COUNT, WEAPON_SHORT_NAMES, WEAPON_NAMES, AMMO_NAMES, AMMO_COLORS,
-  WEAPON_MAG_SIZE, ammoTypeOf, ownsWeapon,
+  AMMO_TYPE_COUNT, WEAPON_MAG_SIZE, ammoTypeOf, ownsWeapon,
 } from '@shared/weapons';
 
 /* ------------------------------------------------------------------------ *
@@ -56,6 +120,12 @@ export interface HudState {
   weapon: number;
   mag: number;
   reserve: number;
+  /**
+   * Reserve ammo per `AmmoType`, so the hotbar can grey out the guns you
+   * cannot feed. A negative entry means "unknown" and is treated as not dry,
+   * which is what a caller that never fills this array gets.
+   */
+  reserveByType: Int32Array;
   /** Bitmask of owned weapons — greys out hotbar slots. */
   owned: number;
   /** 0..1 live cone fraction; drives the dynamic crosshair. */
@@ -100,8 +170,11 @@ export interface HudState {
 }
 
 export function createHudState(): HudState {
+  const reserveByType = new Int32Array(AMMO_TYPE_COUNT);
+  reserveByType.fill(-1);
   return {
     health: MAX_HEALTH, armor: 0, weapon: 0, mag: 0, reserve: 0, owned: 1,
+    reserveByType,
     spread: 0, reloading: false, reloadFrac: 0,
     kills: 0, deaths: 0, playersAlive: 1, matchSeconds: 0,
     dead: false, status: '', subStatus: '',
@@ -129,6 +202,13 @@ export interface HudOptions {
   touchSink?: HudTouchSink | null;
   /** Pause button (mobile) and the tab-scoreboard key hint. */
   onPause?: () => void;
+  /**
+   * `client/src/hud/mobile.ts` is mounting the real pad, so do not build the
+   * built-in one. The `data-touch` / `data-portrait` attributes and the
+   * short-viewport CSS below still apply — only the stick, glyphs and their
+   * listeners are skipped, so two pads can never fight over the same pointer.
+   */
+  externalPad?: boolean;
 }
 
 /** The slice of `TouchSurface` the pad needs. `InputManager` satisfies it. */
@@ -141,6 +221,334 @@ export interface HudTouchSink {
 }
 
 /* ------------------------------------------------------------------------ *
+ * Pure read-out logic — no DOM, so it is unit-testable in node
+ * ------------------------------------------------------------------------ */
+
+export const HEALTH_TIER_OK = 0;
+export const HEALTH_TIER_HURT = 1;
+export const HEALTH_TIER_CRIT = 2;
+
+/** Above this you are fine; at or below it the bar turns amber. */
+export const HEALTH_HURT_AT = 60;
+/** At or below this the bar turns red and the frame edge starts throbbing. */
+export const HEALTH_CRIT_AT = 30;
+/** At or below this the throb doubles in rate and depth. */
+export const HEALTH_DIRE_AT = 12;
+
+/**
+ * The whole point of the ramp: the *colour alone* answers "am I about to die",
+ * with no numeral read and no length comparison. The bar's health fill is the
+ * same green at 100 and at 4.
+ */
+export function healthTier(hp: number): number {
+  if (hp <= HEALTH_CRIT_AT) return HEALTH_TIER_CRIT;
+  if (hp <= HEALTH_HURT_AT) return HEALTH_TIER_HURT;
+  return HEALTH_TIER_OK;
+}
+
+export const AMMO_TIER_OK = 0;
+export const AMMO_TIER_LOW = 1;
+export const AMMO_TIER_EMPTY = 2;
+
+/** Low at the last quarter of a magazine, empty at zero. Melee is never low. */
+export function ammoTier(mag: number, magSize: number): number {
+  if (magSize <= 0) return AMMO_TIER_OK;
+  if (mag <= 0) return AMMO_TIER_EMPTY;
+  const lowAt = Math.max(1, Math.ceil(magSize * 0.25));
+  return mag <= lowAt ? AMMO_TIER_LOW : AMMO_TIER_OK;
+}
+
+/** The bottom-right numeral pair, decided without touching the DOM. */
+export interface AmmoReadout {
+  /** Big numeral: rounds in the magazine, or `∞` for a weapon that never empties. */
+  clip: string;
+  /** Second numeral: rounds in reserve. Empty when `pair` is false. */
+  reserve: string;
+  /** Whether there is a reserve to show at all — false for melee. */
+  pair: boolean;
+  /** Caption under the pair: what you are holding and what it eats. */
+  caption: string;
+}
+
+/**
+ * The single widest opening on the bar's HUD: voxiom shows **no ammunition
+ * state anywhere** — its bottom-right corner is five voxel thumbnails and a
+ * stack count (ref/voxiom/desktop-08-combat.png), so "can I keep firing" is
+ * unanswerable without firing. Ours answers it, and answers the follow-up
+ * ("and after this magazine?") in the same fixation, because clip and reserve
+ * are one pair rather than two read-outs at two sizes in two places.
+ *
+ * Pure so the wording is testable in node: the DOM only ever transcribes what
+ * this returns.
+ */
+export function ammoReadout(
+  weapon: number, mag: number, reserve: number, reloading: boolean,
+): AmmoReadout {
+  const name = (WEAPON_NAMES[weapon] ?? '').toUpperCase();
+  const type = ammoTypeOf(weapon);
+  /* Melee is not "0 rounds" — printing a zero next to a chainsaw is the same
+     lie the bar tells with its empty armour trough. It gets the one glyph that
+     means "this never runs out" and no reserve at all. */
+  if (magSizeOf(weapon) <= 0 || type === 0) {
+    return { clip: '∞', reserve: '', pair: false, caption: join(name, 'MELEE') };
+  }
+  const ammo = (AMMO_NAMES[type] ?? '').toUpperCase();
+  return {
+    clip: String(Math.max(0, Math.round(mag))),
+    reserve: String(Math.max(0, Math.round(reserve))),
+    pair: true,
+    caption: reloading ? 'RELOADING' : join(name, ammo),
+  };
+}
+
+function join(a: string, b: string): string {
+  if (a === '') return b;
+  if (b === '') return a;
+  return `${a} · ${b}`;
+}
+
+/**
+ * Opacity of the standing "about to die" edge throb, as a function of health
+ * and wall-clock seconds. Zero above the critical threshold and zero at zero —
+ * once you are dead the death card owns the screen and a pulsing vignette
+ * behind it is noise.
+ */
+export function critVignette(hp: number, t: number): number {
+  if (hp > HEALTH_CRIT_AT || hp <= 0) return 0;
+  const dire = hp <= HEALTH_DIRE_AT;
+  const base = dire ? 0.20 : 0.11;
+  const amp = dire ? 0.20 : 0.13;
+  const w = dire ? 7.4 : 4.4;
+  return base + amp * (0.5 - 0.5 * Math.cos(t * w));
+}
+
+/** Half-gap in CSS pixels between the crosshair arms, for a given cone. */
+export function crosshairGapFor(style: CrosshairStyle, spread: number): number {
+  if (style === 'dot') return 0;
+  const base = style === 'doom' ? 9 : 5;
+  if (style === 'cross') return base;
+  const s = spread < 0 ? 0 : spread > 1 ? 1 : spread;
+  return base + s * 26;
+}
+
+/**
+ * Distance from screen centre to the frame, along a bearing where 0 is
+ * straight up and positive is clockwise — the ellipse inscribed in the
+ * viewport, pulled in by `inset`.
+ *
+ * A damage indicator parked at a constant pixel radius is either mid-field on
+ * a desktop or off-screen on a phone. Solving for the frame instead keeps the
+ * blade in peripheral vision at every aspect ratio, which is the only place it
+ * can be loud without competing with the crosshair.
+ */
+export function frameRadius(bearing: number, halfW: number, halfH: number, inset = 0): number {
+  const hw = Math.max(1, halfW);
+  const hh = Math.max(1, halfH);
+  const sx = Math.sin(bearing) / hw;
+  const sy = Math.cos(bearing) / hh;
+  const r = 1 / Math.sqrt(sx * sx + sy * sy);
+  const min = Math.min(hw, hh) * 0.35;
+  return Math.max(min, r - inset);
+}
+
+/* ---- the sightline budget ------------------------------------------------
+ * The single measured way the bar loses this piece, and the single way we can
+ * lose it back. voxiom prints "Waiting for players...(2/50)" at ~28 px cap
+ * height across 478 px — about 19,000 px² of white glyph box — 180 px ABOVE
+ * its own crosshair (ref/voxiom/desktop-08-combat.png, x 483–961, y 251–291).
+ * That is a banner laid over the exact pixels the player is looking through.
+ *
+ * So the reticle gets a KEEP-OUT: a radius around screen centre that belongs
+ * to the crosshair and to nothing else. It cannot be a constant — 300 px is a
+ * third of a 900 px desktop and three quarters of a 412 px phone — so it is a
+ * fraction of the short edge, clamped, exactly like `frameRadius` above.
+ *
+ * Inside that radius a transient line is allowed one thing: to be tiny. The
+ * status chip is 11 px letterspaced caps on an opaque plate whose TOP edge is
+ * `statusDrop()` px BELOW the crosshair — below, because the eye tracks up to
+ * enemies and down to the corners, never down through the aim line. And it is
+ * BUDGETED: `statusInk()` costs the line in px² of glyph box and
+ * `statusPlacement()` demotes anything over `SIGHTLINE_INK_BUDGET` into the
+ * top-left chip stack beside the match clock. A message cannot grow into a
+ * banner, because the layout refuses to draw a banner.
+ */
+
+/** Fraction of the short viewport edge the reticle owns outright. */
+export const KEEP_OUT_FRAC = 0.334;
+export const KEEP_OUT_MIN = 92;
+export const KEEP_OUT_MAX = 300;
+
+/**
+ * Radius, in CSS px, around screen centre that only the crosshair may occupy.
+ * 1440×900 → ~300, which is the number the frame was judged against; a
+ * 412×915 phone → 138, because a literal 300 px there is most of the screen.
+ */
+export function keepOutRadius(vw: number, vh: number): number {
+  const short = Math.min(Math.max(0, vw), Math.max(0, vh));
+  const r = short * KEEP_OUT_FRAC;
+  return r < KEEP_OUT_MIN ? KEEP_OUT_MIN : r > KEEP_OUT_MAX ? KEEP_OUT_MAX : r;
+}
+
+/** Fraction of the short edge between the crosshair and the status plate. */
+export const STATUS_DROP_FRAC = 0.1334;
+export const STATUS_DROP_MIN = 62;
+export const STATUS_DROP_MAX = 120;
+
+/**
+ * CSS px from the crosshair centre down to the TOP edge of the status plate.
+ * 1440×900 → 120. Always below, never above: the sightline above the reticle
+ * is where the enemies are.
+ */
+export function statusDrop(vw: number, vh: number): number {
+  const short = Math.min(Math.max(0, vw), Math.max(0, vh));
+  const d = short * STATUS_DROP_FRAC;
+  return d < STATUS_DROP_MIN ? STATUS_DROP_MIN : d > STATUS_DROP_MAX ? STATUS_DROP_MAX : d;
+}
+
+/* Type metrics of the two status lines, kept here rather than only in the CSS
+   so the budget is computed from the same numbers that get rendered. */
+export const STATUS_TYPE_PX = 11;
+export const STATUS_TRACK_EM = 0.22;
+export const STATUS_CAP_PX = 8;
+export const SUB_TYPE_PX = 10;
+export const SUB_TRACK_EM = 0.16;
+export const SUB_CAP_PX = 7;
+/** Mean advance of an uppercase monospace-ish glyph as a fraction of em. */
+const GLYPH_ADVANCE_EM = 0.60;
+
+/**
+ * Ink a status would put on the sightline, in px² of glyph box — the same
+ * measure the bar was costed with. voxiom's line: ~19,000. Ours must not
+ * exceed `SIGHTLINE_INK_BUDGET`.
+ */
+export function statusInk(text: string, sub: string): number {
+  const t = text.length * STATUS_TYPE_PX * (GLYPH_ADVANCE_EM + STATUS_TRACK_EM) * STATUS_CAP_PX;
+  const s = sub.length * SUB_TYPE_PX * (GLYPH_ADVANCE_EM + SUB_TRACK_EM) * SUB_CAP_PX;
+  return t + s;
+}
+
+/**
+ * px² of glyph box a transient line may spend inside the keep-out. Set from
+ * what a good HUD actually spends (~1,600), i.e. about 1/12th of the bar.
+ */
+export const SIGHTLINE_INK_BUDGET = 2000;
+
+/** Nothing to say. */
+export const STATUS_OFF = 0;
+/** Small plate, `statusDrop()` px below the reticle. */
+export const STATUS_SIGHTLINE = 1;
+/** Too much ink for the sightline — goes to the top-left chip stack. */
+export const STATUS_CORNER = 2;
+/** Dead: there is no aim line to protect, so the card owns the middle. */
+export const STATUS_DEATH = 3;
+
+/**
+ * Where a status line is allowed to be drawn.
+ *
+ * Death is the one state that may sit on the crosshair, because while you are
+ * dead the crosshair is hidden — you cannot shoot, so there is no sightline to
+ * keep clear. Every other message is either small enough for the plate under
+ * the reticle or it is not centre-screen material at all.
+ */
+export function statusPlacement(text: string, sub: string, dead: boolean): number {
+  if (text === '' && sub === '') return STATUS_OFF;
+  if (dead) return STATUS_DEATH;
+  return statusInk(text, sub) > SIGHTLINE_INK_BUDGET ? STATUS_CORNER : STATUS_SIGHTLINE;
+}
+
+/** One line for the corner chip, so the demoted form still reads as one fact. */
+export function statusCornerText(text: string, sub: string): string {
+  if (text === '') return sub.toUpperCase();
+  if (sub === '') return text.toUpperCase();
+  return `${text.toUpperCase()} · ${sub.toUpperCase()}`;
+}
+
+/** `m:ss`, clamped at zero. */
+export function formatClock(secs: number): string {
+  const v = Math.max(0, Math.floor(secs));
+  const m = Math.floor(v / 60);
+  return `${m}:${String(v - m * 60).padStart(2, '0')}`;
+}
+
+/* ---- directional damage --------------------------------------------------
+ * The bar has nothing here at all, so the only way to lose this is to build
+ * the naive version: one sprite per hit, frozen at the screen angle it had
+ * when the hit landed. That version lies the instant you turn — which is the
+ * exact moment the player is using it. This keeps WORLD yaw and re-projects
+ * every frame, and merges repeat hits from one bearing so five bullets from
+ * the left read as one loud wedge rather than five quiet ones.
+ * ------------------------------------------------------------------------ */
+
+export const DMG_SLOTS = 6;
+/** Seconds a wedge lives after its last contributing hit. */
+export const DMG_LIFE = 1.15;
+/** Hits within this many radians of a live wedge fold into it. */
+export const DMG_MERGE_RAD = 0.5;
+
+export class DamageRing {
+  /** World-space yaw the damage came FROM, per slot. */
+  readonly yaw = new Float32Array(DMG_SLOTS);
+  /** Seconds of life left. Zero means the slot is free. */
+  readonly life = new Float32Array(DMG_SLOTS);
+  /** 0..1 loudness, from the accumulated damage folded into the slot. */
+  readonly power = new Float32Array(DMG_SLOTS);
+
+  /** Record a hit. Returns the slot it landed in. */
+  add(amount: number, worldYaw: number): number {
+    const p = Math.min(1, 0.28 + Math.max(0, amount) / 65);
+    for (let i = 0; i < DMG_SLOTS; i++) {
+      if (this.life[i] <= 0) continue;
+      const d = wrapPi(worldYaw - this.yaw[i]);
+      if (Math.abs(d) > DMG_MERGE_RAD) continue;
+      // Drift the wedge a third of the way onto the newest hit rather than
+      // snapping: a strafing attacker should drag it, not teleport it.
+      this.yaw[i] = wrapPi(this.yaw[i] + d * 0.34);
+      this.power[i] = Math.min(1, this.power[i] + p * 0.6);
+      this.life[i] = DMG_LIFE;
+      return i;
+    }
+    let slot = 0;
+    let worst = Infinity;
+    for (let i = 0; i < DMG_SLOTS; i++) {
+      if (this.life[i] <= 0) { slot = i; worst = -1; break; }
+      if (this.life[i] < worst) { worst = this.life[i]; slot = i; }
+    }
+    this.yaw[slot] = wrapPi(worldYaw);
+    this.power[slot] = p;
+    this.life[slot] = DMG_LIFE;
+    return slot;
+  }
+
+  step(dt: number): void {
+    for (let i = 0; i < DMG_SLOTS; i++) {
+      const l = this.life[i];
+      if (l <= 0) continue;
+      this.life[i] = l > dt ? l - dt : 0;
+    }
+  }
+
+  clear(): void {
+    this.life.fill(0);
+    this.power.fill(0);
+  }
+
+  /** How many wedges are currently alive. */
+  activeCount(): number {
+    let n = 0;
+    for (let i = 0; i < DMG_SLOTS; i++) if (this.life[i] > 0) n++;
+    return n;
+  }
+
+  /** 0..1 draw opacity for a slot: loudness × smoothstep fade. */
+  alpha(i: number): number {
+    const l = this.life[i];
+    if (l <= 0) return 0;
+    const t = l / DMG_LIFE;
+    return (0.42 + 0.58 * this.power[i]) * (t * t * (3 - 2 * t));
+  }
+}
+
+/* ------------------------------------------------------------------------ *
  * Styles — injected once, scoped by the #hud id
  * ------------------------------------------------------------------------ */
 
@@ -148,71 +556,229 @@ const CSS = `
 #hud{font:13px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e8e6e3;
   -webkit-user-select:none;user-select:none}
 #hud .dc-hide{display:none!important}
-#hud .dc-pad{position:absolute;pointer-events:none}
+/* Every read-out carries its own dark halo. The bar survives a bright beach by
+   putting solid dark plates behind everything (ref/voxiom/desktop-08-combat.png);
+   a translucent panel over white sand does not. A two-stop shadow buys the same
+   legibility for zero layout and zero extra nodes, and it is what keeps the
+   corner text readable over sand, snow and sky as well as over a dark arena. */
+#hud .dc-pad{position:absolute;pointer-events:none;
+  text-shadow:0 1px 2px rgba(0,0,0,.95),0 0 8px rgba(0,0,0,.6)}
 
 #hud .dc-map{top:12px;left:12px;width:168px}
-#hud .dc-map canvas{display:block;width:168px;height:168px;border:1px solid rgba(255,255,255,.18);
-  border-radius:6px;background:#0c0b0e;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+#hud .dc-map canvas{display:block;width:168px;height:168px;border:1px solid rgba(255,255,255,.24);
+  border-radius:6px;background:#0c0b0e;box-shadow:0 6px 18px rgba(0,0,0,.6)}
 #hud .dc-chips{display:flex;gap:6px;margin-top:7px}
 #hud .dc-chip{display:flex;align-items:center;gap:5px;padding:3px 8px;border-radius:11px;
-  background:rgba(10,10,14,.72);border:1px solid rgba(255,255,255,.12);font-size:12px;
+  background:rgba(8,8,11,.84);border:1px solid rgba(255,255,255,.18);font-size:12px;
   font-variant-numeric:tabular-nums}
-#hud .dc-chip i{font-style:normal;opacity:.75;font-size:11px}
+#hud .dc-chip i{font-style:normal;opacity:.72;font-size:11px}
+#hud .dc-chip b{display:none;font-weight:400;opacity:.72;font-size:10px}
 
-#hud .dc-perf{top:12px;right:12px;text-align:right;font-size:12px;color:#8f8a85;
+#hud .dc-perf{top:12px;right:12px;text-align:right;font-size:12px;color:#b6b0aa;
   font-variant-numeric:tabular-nums;line-height:1.45}
-#hud .dc-perf b{color:#cfc9c3;font-weight:600}
+#hud .dc-perf b{color:#e8e6e3;font-weight:700}
 
-#hud .dc-feed{left:12px;bottom:126px;width:340px;display:flex;flex-direction:column;
+#hud .dc-feed{left:12px;bottom:118px;width:340px;display:flex;flex-direction:column;
   justify-content:flex-end;gap:3px}
-#hud .dc-feed .ln{padding:3px 8px;border-radius:3px;background:rgba(10,10,14,.62);
+#hud .dc-feed .ln{padding:3px 8px;border-radius:3px;background:rgba(8,8,11,.82);
   border-left:2px solid #4a4a55;font-size:12px;opacity:1;transition:opacity .35s linear;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #hud .dc-feed .ln.k{border-left-color:#e03c1c}
 #hud .dc-feed .ln.j{border-left-color:#f0a020;color:#e2b782}
 #hud .dc-feed .ln.s{border-left-color:#3a7fbe;color:#9fc3e2}
 #hud .dc-feed .ln.out{opacity:0}
-#hud .dc-hint{left:12px;bottom:104px;font-size:11px;color:#7d7873;letter-spacing:.02em}
-#hud .dc-hint b{color:#b4aea8;font-weight:600;background:rgba(255,255,255,.07);
+/* The hints are a first-fifteen-seconds affordance, not furniture. They fade
+   themselves out so the corner is clean for the other 99% of the match. */
+#hud .dc-hint{left:12px;bottom:96px;font-size:11px;color:#a49e98;letter-spacing:.02em;
+  opacity:1;transition:opacity .9s linear}
+#hud .dc-hint b{color:#e0dad4;font-weight:700;background:rgba(0,0,0,.55);
   padding:0 4px;border-radius:2px}
 
-#hud .dc-vitals{left:12px;bottom:12px;width:246px}
-#hud .dc-bar{position:relative;height:26px;border:1px solid rgba(255,255,255,.22);
-  background:rgba(8,8,11,.72);margin-top:6px;overflow:hidden}
-#hud .dc-bar .fill{position:absolute;inset:0;width:100%;transform-origin:left center;
-  transition:transform .12s linear}
+/* ---- vitals ---------------------------------------------------------------
+   Deliberately unequal: health is twice the height of armour, so which bar is
+   which is answered by SHAPE before you read either label. The bar gives both
+   the same weight and makes you read "shield" vs "cross" icons to tell them
+   apart (ref/voxiom/desktop-08-combat.png, bottom left). */
+#hud .dc-vitals{left:12px;bottom:12px;width:252px}
+/* Opaque, not translucent. The critical-health vignette is red and paints
+   UNDER this cluster, so a 74%-alpha plate let the red wash straight through
+   the health bar at exactly the moment the health bar is the only thing on
+   screen that matters. It now sits on its own black. */
+#hud .dc-bar{position:relative;border:1px solid rgba(255,255,255,.30);
+  background:#08080b;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.55)}
+#hud .dc-bar .ghost,#hud .dc-bar .fill{position:absolute;inset:0;width:100%;
+  transform-origin:left center}
+#hud .dc-bar .fill{transition:transform .1s linear}
+/* The ghost is warm and bright enough to be its own band between the live fill
+   and the empty track, so "I just lost 30" is a LENGTH, not a numeral read. */
+#hud .dc-bar .ghost{background:rgba(255,138,96,.55)}
+#hud .dc-bar .ticks{position:absolute;inset:0;
+  background:repeating-linear-gradient(90deg,rgba(0,0,0,0) 0,rgba(0,0,0,0) calc(25% - 1px),
+    rgba(0,0,0,.62) calc(25% - 1px),rgba(0,0,0,.62) 25%)}
 #hud .dc-bar .lbl{position:absolute;inset:0;display:flex;align-items:center;
-  justify-content:space-between;padding:0 8px;font-size:14px;font-weight:700;
-  text-shadow:0 1px 2px rgba(0,0,0,.9);font-variant-numeric:tabular-nums}
-#hud .dc-bar .lbl i{font-style:normal;opacity:.8;font-size:11px;letter-spacing:.1em}
-#hud .dc-hp .fill{background:linear-gradient(90deg,#8f1a08,#e03c1c 60%,#f0a020)}
-#hud .dc-ap .fill{background:linear-gradient(90deg,#1d4c74,#3a86c8)}
-#hud .dc-hp.low .fill{animation:dcpulse .55s steps(2,end) infinite}
-@keyframes dcpulse{50%{filter:brightness(1.75)}}
+  justify-content:space-between;padding:0 9px;font-weight:700;
+  text-shadow:0 1px 2px rgba(0,0,0,.95),0 0 6px rgba(0,0,0,.8);
+  font-variant-numeric:tabular-nums}
+#hud .dc-bar .lbl i{font-style:normal;opacity:.82;font-size:10px;letter-spacing:.14em}
 
-#hud .dc-ammo{right:14px;bottom:96px;text-align:right}
-#hud .dc-ammo .mag{font:800 46px/0.92 "Arial Black",Impact,system-ui,sans-serif;
+#hud .dc-ap{height:19px;margin-bottom:5px}
+#hud .dc-ap .fill{background:linear-gradient(180deg,#59a6e2,#22557f)}
+#hud .dc-ap .ghost{display:none}
+#hud .dc-ap .lbl{font-size:14px}
+#hud .dc-ap .lbl i{font-size:10px}
+/* Zero armour has to SAY zero armour. The bar draws 0/100 as an unfilled
+   outlined rectangle (ref/voxiom/desktop-08-combat.png, bottom left) which
+   reads as an empty container — a bar whose value has not loaded yet — rather
+   than as a fact about the player. Ours goes hatched and drops the numeral, so
+   there is no empty trough left to misread and the words carry the state. */
+#hud .dc-ap[data-z="1"]{border-color:rgba(255,255,255,.15);
+  background:repeating-linear-gradient(135deg,#0a0a0e 0 5px,#14141a 5px 10px)}
+#hud .dc-ap[data-z="1"] .fill{display:none}
+#hud .dc-ap[data-z="1"] .ticks{display:none}
+#hud .dc-ap[data-z="1"] .lbl{color:#8a847e;justify-content:flex-start}
+#hud .dc-ap[data-z="1"] .lbl i{opacity:1;font-size:11px}
+
+/* Health is twice the height of armour AND carries the biggest numeral in the
+   left half of the frame, so the hierarchy answers "how am I doing" before any
+   reading happens at all. */
+#hud .dc-hp{height:34px}
+#hud .dc-hp .fill{background:linear-gradient(180deg,#4cc46b,#2d8c47)}
+#hud .dc-hp .lbl{font-size:26px}
+#hud .dc-hp .lbl i{font-size:10px}
+#hud .dc-hp[data-t="1"] .fill{background:linear-gradient(180deg,#ffbe37,#c9820f)}
+#hud .dc-hp[data-t="2"] .fill{background:linear-gradient(180deg,#ff5a2e,#c81f08)}
+#hud .dc-hp[data-t="2"]{border-color:#ff6b42;
+  animation:dcpulse .62s steps(2,end) infinite}
+#hud .dc-hp[data-t="2"] .lbl{color:#fff1ea}
+#hud .dc-hp[data-t="2"] .lbl i{color:#ff9c7d;opacity:1}
+@keyframes dcpulse{50%{box-shadow:0 0 0 2px rgba(255,88,48,.7),0 0 20px rgba(224,60,28,.55)}}
+
+/* ---- ammo -----------------------------------------------------------------
+   THE numeral pair. Clip and reserve sit side by side as "4 / 8" on their own
+   opaque plate, parked directly on top of the hotbar, so the bottom-right
+   corner answers "can I keep firing" and "will I still be firing in ten
+   seconds" in one fixation and the bottom-left answers "am I about to die" in
+   the other. The bar has no ammunition state at all — its bottom-right is five
+   voxel thumbnails at roughly 15% luminance contrast over sand
+   (ref/voxiom/desktop-08-combat.png) — so this is the widest opening on the
+   whole HUD and it is worth a plate, not a scrim. The previous version floated
+   this type on a radial gradient and let the reserve fall to 14 px, which is
+   the same mistake the bar makes with its own 13 px bar values: a number you
+   have to hunt for is a number you do not read mid-fight. */
+#hud .dc-ammo{--dc-mag:52px;right:12px;bottom:64px;text-align:right;
+  padding:6px 11px 8px;border:1px solid rgba(255,255,255,.30);background:#08080b;
+  box-shadow:0 2px 10px rgba(0,0,0,.55)}
+/* Rows are blocks and their contents are INLINE, so every row is placed by the
+   cluster's own text-align. That is what lets the right-handed, left-handed
+   and centred thumb-pad layouts each move one property and get a correct
+   layout, instead of needing a justify-content per row per breakpoint. */
+#hud .dc-ammo .nums{display:block;white-space:nowrap;font-variant-numeric:tabular-nums}
+#hud .dc-ammo .mag{font:800 var(--dc-mag)/0.92 "Arial Black",Impact,system-ui,sans-serif;
   font-variant-numeric:tabular-nums;text-shadow:0 2px 0 #4a1005,0 6px 16px rgba(0,0,0,.7)}
-#hud .dc-ammo .res{font-size:13px;color:#9b9793;margin-top:2px;font-variant-numeric:tabular-nums}
-#hud .dc-ammo .wep{font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:#b4aea8;
-  margin-top:3px}
-#hud .dc-ammo.empty .mag{color:#e03c1c}
+/* Reserve is set at 56% of the clip — about the cap-height of the health
+   numeral in the opposite corner, so the three numbers that decide a fight are
+   the three largest glyphs on the screen and they are all the same weight. */
+#hud .dc-ammo .sep{font:700 calc(var(--dc-mag)*0.42)/1 "Arial Black",Impact,system-ui,sans-serif;
+  color:#6e6862;margin:0 4px;text-shadow:0 1px 2px rgba(0,0,0,.9)}
+#hud .dc-ammo .res{font:800 calc(var(--dc-mag)*0.56)/1 "Arial Black",Impact,system-ui,sans-serif;
+  font-variant-numeric:tabular-nums;color:#d2ccc6;
+  text-shadow:0 1px 2px rgba(0,0,0,.95),0 3px 10px rgba(0,0,0,.6)}
+/* The empty half of the round strip is DARK, not a white wash: a 17%-white pip
+   on a sunlit sand wall is invisible, so "how many left" stopped being
+   countable exactly where the bar's own maps are brightest. */
+#hud .dc-ammo .rounds{display:block;height:8px;margin-top:7px;font-size:0}
+#hud .dc-ammo .pips{display:inline-flex;vertical-align:top;gap:2px}
+#hud .dc-ammo .pips i{display:block;width:7px;height:8px;border-radius:1px;
+  background:rgba(6,6,9,.72);box-shadow:inset 0 0 0 1px rgba(255,255,255,.26)}
+#hud .dc-ammo .pips i.on{background:#f2efec;box-shadow:inset 0 0 0 1px rgba(0,0,0,.55)}
+#hud .dc-ammo .strip{display:inline-block;vertical-align:top;position:relative;width:118px;
+  height:8px;border-radius:1px;overflow:hidden;
+  background:rgba(6,6,9,.72);box-shadow:inset 0 0 0 1px rgba(255,255,255,.26)}
+#hud .dc-ammo .strip s{position:absolute;inset:0;text-decoration:none;background:#f2efec;
+  transform-origin:left center}
+#hud .dc-ammo .wep{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#ded8d2;
+  margin-top:5px;white-space:nowrap}
+#hud .dc-ammo.low .mag{color:#ffbe37}
+#hud .dc-ammo.low .pips i.on,#hud .dc-ammo.low .strip s{background:#ffbe37}
+/* An empty magazine gets the same throbbing plate edge as critical health,
+   because it is the same class of fact: act now or die. Nothing else on the
+   HUD pulses, so the two of them cannot be confused with decoration. */
+#hud .dc-ammo.empty .mag{color:#ff5a2e}
+#hud .dc-ammo.empty .pips i.on,#hud .dc-ammo.empty .strip s{background:#ff5a2e}
+#hud .dc-ammo.empty{border-color:#ff6b42;animation:dcpulse .62s steps(2,end) infinite}
+#hud .dc-ammo.rld .mag{color:#8b8681}
+#hud .dc-ammo.rld .wep{color:#f0a020}
+#hud .dc-ammo.rld .pips i.on,#hud .dc-ammo.rld .strip s{background:#f0a020}
 
+/* ---- hotbar -------------------------------------------------------------- */
 #hud .dc-hotbar{right:12px;bottom:12px;display:flex;gap:5px}
-#hud .dc-slot{width:44px;height:44px;border:1px solid rgba(255,255,255,.14);
-  background:rgba(10,10,14,.66);position:relative;display:grid;place-items:center;
-  font-size:10px;letter-spacing:.06em;color:#8b8681}
-#hud .dc-slot .n{position:absolute;left:3px;top:2px;font-size:9px;color:#6c6762}
-#hud .dc-slot.on{border-color:#f0a020;background:rgba(46,26,10,.85);color:#f6e3c8;
-  box-shadow:0 0 0 1px rgba(240,160,32,.35),0 0 14px rgba(240,160,32,.22)}
-#hud .dc-slot.no{opacity:.34}
+#hud .dc-slot{width:44px;height:44px;border:1px solid rgba(255,255,255,.20);
+  background:rgba(8,8,11,.86);position:relative;display:grid;place-items:center;
+  font-size:10px;letter-spacing:.06em;color:#c4beb8}
+#hud .dc-slot .n{position:absolute;left:3px;top:2px;font-size:9px;color:#807a75}
+#hud .dc-slot .am{position:absolute;left:3px;right:3px;bottom:3px;height:2px;border-radius:1px;
+  opacity:.6}
+#hud .dc-slot.dry{opacity:.6}
+#hud .dc-slot.dry .am{background:#e03c1c!important;opacity:.95}
+#hud .dc-slot.dry span{color:#b9695a}
+/* The selected slot is a FILLED plate with near-black glyphs, not a hairline.
+   The bar marks its active slot with a 2 px white outline over a translucent
+   tile (ref/voxiom/desktop-08-combat.png, tile 3) and that outline vanishes
+   against sand and snow. Inverting the tile — light plate, dark type, hard
+   black keyline — is a VALUE contrast rather than a hue contrast, so it
+   survives every terrain in shared/src/blocks.ts including the one hue it is
+   closest to, lava. The keyline is what lava does not have. */
+#hud .dc-slot.on{border-color:#ffd071;background:#f0a020;color:#180d01;font-weight:700;
+  box-shadow:0 0 0 2px rgba(0,0,0,.62),0 0 16px rgba(240,160,32,.42);opacity:1}
+#hud .dc-slot.on .n{color:#6b4405}
+#hud .dc-slot.on .am{opacity:1;box-shadow:0 0 0 1px rgba(0,0,0,.55)}
+#hud .dc-slot.on.dry{opacity:1;background:#e6603c;border-color:#ff9c7d}
+#hud .dc-slot.on.dry span{color:#210802}
+#hud .dc-slot.no{opacity:.3}
+#hud .dc-slot.no .am{opacity:.2}
 
 #hud .dc-cross{left:50%;top:50%;transform:translate(-50%,-50%)}
-#hud .dc-status{left:50%;top:50%;transform:translate(-50%,-50%);margin-top:74px;
-  text-align:center;width:min(560px,86vw)}
-#hud .dc-status .t{font:800 clamp(16px,2.4vw,26px)/1.15 "Arial Black",Impact,system-ui,sans-serif;
-  letter-spacing:.03em;text-shadow:0 2px 0 #4a1005,0 6px 20px rgba(0,0,0,.8)}
-#hud .dc-status .s{font-size:12px;color:#b4aea8;margin-top:6px;letter-spacing:.08em}
+
+/* ---- status: the sightline budget -----------------------------------------
+   The bar sets its transient line at 28 px cap height across 478 px and parks
+   it 180 px ABOVE its own crosshair — ~19,000 px² of white glyph box directly
+   on the aim line (ref/voxiom/desktop-08-combat.png). This is the same fact
+   set at 11 px letterspaced caps on an opaque plate whose TOP edge is
+   --dc-drop (120 px on desktop) BELOW the reticle: about 1,600 px², a
+   twelfth of the ink, and off the sightline entirely. Below rather than above
+   because the eye tracks UP to targets; the space under the crosshair is the
+   cheapest real estate on the screen that is still inside the fovea.
+   Anything that would not fit the budget never gets here at all —
+   statusPlacement() sends it to .dc-scorner in the top-left instead. */
+#hud .dc-status{left:50%;top:50%;transform:translateX(-50%);
+  margin-top:var(--dc-drop,120px);text-align:center;max-width:min(300px,58vw);
+  padding:4px 11px 5px;border-radius:2px;background:#08080b;
+  border:1px solid rgba(255,255,255,.22);box-shadow:0 2px 10px rgba(0,0,0,.55)}
+#hud .dc-status .t{font:700 11px/1.1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  letter-spacing:.22em;text-transform:uppercase;color:#cfc9c3;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#hud .dc-status .s{font:400 10px/1.1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  letter-spacing:.16em;text-transform:uppercase;color:#8a847e;margin-top:3px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#hud .dc-status .t:empty,#hud .dc-status .s:empty{display:none}
+/* Dead is the one state with no aim line to protect: the crosshair is hidden
+   because you cannot shoot, so the keep-out does not exist and the card may
+   own the middle. It is still a CARD — an opaque plate with a hot edge — not
+   26 px of Arial Black floating loose on the sky. */
+#hud .dc-status[data-d="1"]{transform:translate(-50%,-50%);margin-top:0;
+  max-width:min(420px,76vw);padding:13px 24px 14px;border-color:#ff6b42;
+  box-shadow:0 0 0 1px rgba(0,0,0,.8),0 18px 46px rgba(0,0,0,.62)}
+#hud .dc-status[data-d="1"] .t{font:800 30px/1 "Arial Black",Impact,system-ui,sans-serif;
+  letter-spacing:.10em;color:#ff5a2e;text-shadow:0 2px 0 #4a1005,0 6px 20px rgba(0,0,0,.8)}
+#hud .dc-status[data-d="1"] .s{font-size:11px;letter-spacing:.18em;color:#d2ccc6;margin-top:9px}
+/* The demoted form: same words, no sightline cost, sitting under the match
+   clock where a player already looks for match state. */
+#hud .dc-scorner{display:none;width:max-content;max-width:min(300px,40vw);
+  margin-top:6px;padding:3px 8px;border-radius:3px;background:rgba(8,8,11,.88);
+  border:1px solid rgba(255,255,255,.18);font-size:10px;letter-spacing:.18em;
+  text-transform:uppercase;color:#cfc9c3;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+#hud .dc-scorner.on{display:block}
 
 #hud .dc-board{left:50%;top:50%;transform:translate(-50%,-50%);width:min(520px,86vw);
   background:rgba(10,10,14,.93);border:1px solid rgba(255,255,255,.16);border-radius:4px;
@@ -227,12 +793,28 @@ const CSS = `
 #hud .dc-board tr.me td{color:#f6e3c8;font-weight:700}
 #hud .dc-board td.r{text-align:right}
 
-#hud .dc-hurt{inset:0;opacity:0;transition:opacity .18s ease-out;
-  background:radial-gradient(120% 100% at 50% 50%,rgba(180,20,10,0) 42%,rgba(170,14,6,.85) 100%)}
-#hud .dc-dmg{left:50%;top:50%;width:0;height:0}
-#hud .dc-dmg span{position:absolute;left:-4px;top:-118px;width:8px;height:44px;
-  background:linear-gradient(180deg,rgba(255,90,50,.95),rgba(255,90,50,0));
-  transform-origin:50% 118px;opacity:0;transition:opacity .5s ease-out}
+/* ---- damage ---------------------------------------------------------------
+   One vignette element, driven from max(hit flash, critical throb): the hit
+   read and the "about to die" read share a layer so the HUD never stacks two
+   full-screen overlays. Transparent across the middle 44% — the centre stays
+   clean even while you are being shot. */
+#hud .dc-hurt{inset:0;opacity:0;
+  background:radial-gradient(122% 98% at 50% 50%,rgba(180,20,10,0) 44%,rgba(158,12,4,.92) 100%)}
+/* The blades are anchored to the FRAME, not to a fixed pixel radius. A 174 px
+   ring put solid triangles a third of the way in from the edge of a desktop
+   window — mid-field furniture, which is exactly the clutter the bar avoids by
+   living in its corners. Each blade's bright edge now lands on an ellipse
+   inscribed in the viewport, so it reads as the rim of the screen catching
+   fire on the bearing the shot came from and the middle stays empty. The
+   container clips, so a blade rotated into a corner cannot escape the frame. */
+#hud .dc-dmg{inset:0;overflow:hidden}
+#hud .dc-dmg .hub{position:absolute;left:50%;top:50%;width:0;height:0}
+#hud .dc-dmg span{position:absolute;left:0;top:0;width:210px;height:46px;margin-left:-105px;
+  transform-origin:50% 0;opacity:0;will-change:transform,opacity;
+  background:
+    radial-gradient(34% 16% at 50% 0%,rgba(255,255,252,.95) 0%,rgba(255,228,198,0) 100%),
+    radial-gradient(48% 120% at 50% 0%,rgba(255,246,236,.96) 0%,rgba(255,186,124,.90) 13%,
+      rgba(255,96,40,.68) 33%,rgba(214,34,10,.26) 62%,rgba(180,14,4,0) 100%)}
 
 /* ---- touch ---- */
 #hud .dc-touch{inset:0;pointer-events:none}
@@ -261,24 +843,56 @@ const CSS = `
 /* ---- short viewports: the bar ships its desktop HUD to a 412px phone ---- */
 #hud[data-compact="1"] .dc-map canvas{width:104px;height:104px}
 #hud[data-compact="1"] .dc-map{width:104px;top:8px;left:8px}
-#hud[data-compact="1"] .dc-chips{flex-direction:column;gap:4px;align-items:flex-start}
+/* One row of short-labelled chips under the map instead of a three-high
+   column. On a 412 px-tall landscape phone the column ate 70 px of the left
+   edge for three numbers; the row costs 22 px and reads in the same glance. */
+#hud[data-compact="1"] .dc-chips{flex-direction:row;gap:4px;margin-top:6px}
+#hud[data-compact="1"] .dc-chip{padding:2px 6px;gap:4px;font-size:11px}
+#hud[data-compact="1"] .dc-chip i{display:none}
+#hud[data-compact="1"] .dc-chip b{display:inline}
 #hud[data-compact="1"] .dc-feed{bottom:auto;top:8px;left:120px;width:min(46vw,220px)}
 #hud[data-compact="1"] .dc-hint{display:none}
 #hud[data-compact="1"] .dc-vitals{width:min(52vw,214px);bottom:8px;left:8px}
-#hud[data-compact="1"] .dc-bar{height:22px}
-#hud[data-compact="1"] .dc-ammo{bottom:74px;right:10px}
-#hud[data-compact="1"] .dc-ammo .mag{font-size:34px}
+#hud[data-compact="1"] .dc-ap{height:15px;margin-bottom:4px}
+#hud[data-compact="1"] .dc-ap .lbl{font-size:12px}
+#hud[data-compact="1"] .dc-hp{height:27px}
+#hud[data-compact="1"] .dc-hp .lbl{font-size:19px}
+/* --dc-mag drives the clip, the separator and the reserve together, so a
+   breakpoint scales the numeral pair as a unit and can never leave the reserve
+   larger than the clip it belongs to. */
+#hud[data-compact="1"] .dc-ammo{--dc-mag:34px;bottom:48px;right:8px;padding:5px 9px 6px}
+#hud[data-compact="1"] .dc-ammo .strip{width:88px}
+#hud[data-compact="1"] .dc-ammo .wep{font-size:10px;letter-spacing:.10em}
 #hud[data-compact="1"] .dc-hotbar{right:8px;bottom:8px;gap:3px}
 #hud[data-compact="1"] .dc-slot{width:34px;height:34px;font-size:9px}
+#hud[data-compact="1"] .dc-dmg span{width:150px;height:42px;margin-left:-75px}
+/* A phone has less sightline to spend, not more: the plate shrinks with the
+   keep-out rather than keeping its desktop size on a quarter of the screen. */
+#hud[data-compact="1"] .dc-status{max-width:min(230px,62vw);padding:3px 8px 4px}
+#hud[data-compact="1"] .dc-status .t{font-size:10px;letter-spacing:.18em}
+#hud[data-compact="1"] .dc-status .s{font-size:9px;letter-spacing:.13em;margin-top:2px}
+#hud[data-compact="1"] .dc-status[data-d="1"]{padding:9px 16px 10px}
+#hud[data-compact="1"] .dc-status[data-d="1"] .t{font-size:22px}
+#hud[data-compact="1"] .dc-status[data-d="1"] .s{font-size:10px;margin-top:6px}
+#hud[data-compact="1"] .dc-scorner{max-width:min(200px,44vw);font-size:9px;
+  letter-spacing:.14em;margin-top:5px;padding:2px 6px}
+/* The pause glyph owns the top-right corner on touch, so the perf read-out
+   steps aside instead of printing underneath it. */
+#hud[data-touch="1"] .dc-perf{right:58px}
 /* Portrait. The bar refuses to run here at all (ref/BAR.md weakness #8), so
    the whole point is that this layout is not a squashed desktop: the read-outs
    sit ABOVE the thumb zone and nothing the player needs is under a finger. */
 #hud[data-portrait="1"] .dc-vitals{bottom:198px;width:min(56vw,200px)}
-#hud[data-portrait="1"] .dc-ammo{bottom:306px;right:10px}
-#hud[data-portrait="1"] .dc-ammo .mag{font-size:30px}
+#hud[data-portrait="1"] .dc-ammo{--dc-mag:32px;bottom:292px;right:8px}
+#hud[data-portrait="1"] .dc-ammo .strip{width:80px}
 #hud[data-portrait="1"] .dc-hotbar{bottom:252px;right:8px;gap:2px}
 #hud[data-portrait="1"] .dc-slot{width:32px;height:32px}
-#hud[data-portrait="1"] .dc-feed{left:116px;width:min(58vw,250px);top:8px}
+#hud[data-portrait="1"] .dc-feed{left:116px;width:min(52vw,220px);top:8px}
+/* 412 px of width will not carry map + feed + perf + pause on one row, so in
+   portrait the perf read-out drops under the pause glyph instead of printing
+   through the kill feed. */
+#hud[data-portrait="1"] .dc-perf{top:56px;right:12px}
+#hud[data-portrait="1"] .dc-dmg span{width:132px;height:38px;margin-left:-66px}
 #hud[data-portrait="1"] .dc-build{left:auto;right:126px;bottom:206px;width:52px;height:52px}
 #hud[data-portrait="1"] .dc-fire{right:18px;bottom:96px;width:104px;height:104px}
 #hud[data-portrait="1"] .dc-jump{right:130px;bottom:132px}
@@ -294,10 +908,11 @@ const CSS = `
    the ammo and the hotbar move to the free centre column. */
 #hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-hotbar{
   left:50%;right:auto;transform:translateX(-50%);bottom:6px;gap:3px}
-#hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-ammo{
-  left:50%;right:auto;transform:translateX(-50%);bottom:52px;text-align:center}
-#hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-ammo .mag{font-size:26px}
-#hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-ammo .res{font-size:11px}
+#hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-ammo{--dc-mag:28px;
+  left:50%;right:auto;transform:translateX(-50%);bottom:46px;text-align:center;
+  padding:4px 9px 5px}
+#hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-ammo .rounds{margin-top:4px}
+#hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-ammo .strip{width:76px}
 #hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-ammo .wep{display:none}
 #hud[data-touch="1"][data-compact="1"]:not([data-portrait="1"]) .dc-vitals{
   left:150px;bottom:6px;width:170px}
@@ -316,11 +931,22 @@ const CSS = `
 `;
 
 /* ------------------------------------------------------------------------ *
- * Minimap image
+ * Tuning
  * ------------------------------------------------------------------------ */
 
 const MAP_VIEW_BLOCKS = 104;   // world blocks across the minimap
 const MAP_REDRAW_MS = 100;
+const BOARD_REDIFF_MS = 200;
+/** Rounds we are willing to draw as individual pips before switching to a bar. */
+const MAX_PIPS = 16;
+/** Seconds of visible play before the key hints fade themselves away. */
+const HINT_SECONDS = 15;
+/** How long the damage ghost sits at the old value before it starts draining. */
+const GHOST_HOLD = 0.28;
+/** CSS px the damage blade's bright edge sits inside the frame. */
+const DMG_FRAME_INSET = 4;
+/** CSS px from the crosshair centre to the fovea damage ticks. */
+const FOVEA_RADIUS = 33;
 
 /* ------------------------------------------------------------------------ *
  * HUD
@@ -342,29 +968,41 @@ export class Hud {
   private elChipTime!: HTMLElement;
   private elPerf!: HTMLElement;
   private elFeed!: HTMLElement;
+  private elHint!: HTMLElement;
   private elVitalsHp!: HTMLElement;
   private elVitalsAp!: HTMLElement;
   private elHpFill!: HTMLElement;
+  private elHpGhost!: HTMLElement;
   private elApFill!: HTMLElement;
   private elHpNum!: HTMLElement;
+  private elHpLabel!: HTMLElement;
   private elApNum!: HTMLElement;
+  private elApLabel!: HTMLElement;
   private elAmmo!: HTMLElement;
   private elMag!: HTMLElement;
+  private elSep!: HTMLElement;
+  private elPips!: HTMLElement;
+  private readonly pips: HTMLElement[] = [];
+  private elStrip!: HTMLElement;
+  private elStripFill!: HTMLElement;
   private elRes!: HTMLElement;
   private elWep!: HTMLElement;
   private readonly slots: HTMLElement[] = [];
+  private readonly slotAmmo = new Uint8Array(WEAPON_COUNT);
   private elHotbar!: HTMLElement;
   private elCross!: HTMLCanvasElement;
   private crossCtx!: CanvasRenderingContext2D;
   private elStatus!: HTMLElement;
   private elStatusT!: HTMLElement;
   private elStatusS!: HTMLElement;
+  private elScorner!: HTMLElement;
   private elHurt!: HTMLElement;
   private elDmg!: HTMLElement;
-  private readonly dmgArrows: HTMLElement[] = [];
+  private readonly dmgWedges: HTMLElement[] = [];
   private elBoard!: HTMLElement;
   private elBoardBody!: HTMLElement;
   private boardSig = '';
+  private boardTimer = 0;
   private elTouch!: HTMLElement;
   private elStickKnob!: HTMLElement;
 
@@ -378,20 +1016,50 @@ export class Hud {
   private cHealth = -1; private cArmor = -1; private cMag = -1; private cRes = -1;
   private cWeapon = -1; private cOwned = -1; private cKills = -1; private cDeaths = -1;
   private cAlive = -1; private cTime = -1; private cStatus = ''; private cSub = '';
+  private cStatusDead = false;
   private cFps = -1; private cPing = -1; private cPerfShown = true;
-  private cGap = -1; private cLow = false; private cEmpty = false;
-  private cSpread = -1;
+  private cTier = -1; private cAmmoCls = '';
+  private cMagSize = -1; private cRounds = -1; private cReserveSig = -1;
+  private cRld = -1; private cApZero = -1;
+  private cBoardOpen = false; private cVig = -1; private cDead = false;
+  private cGapQ = -1; private cHmQ = -1; private cRlQ = -2; private cEmptyQ = -1;
+  private cGhost = -1;
+
+  /* animation clocks */
   private mapTimer = 0;
   private hitMarkerT = 0;
   private hitMarkerHead = false;
   private hitMarkerKill = false;
-  private dmgArrowNext = 0;
+  private hitMarkerDmg = 0;
   private hurtT = 0;
+  private vigT = 0;
+  private ghostHp = 1;
+  private ghostHold = 0;
+  private liveT = 0;
+  private hintFaded = false;
+  private hintTimer = 0;
   private feedCount = 0;
   private dpr = 1;
   private compact = false;
   private portrait = false;
+  private visible = true;
   private disposed = false;
+
+  /** Directional damage, world-anchored. */
+  private readonly ring = new DamageRing();
+  /** Per-slot screen bearing / opacity / width, shared with the crosshair. */
+  private readonly foveaRad = new Float32Array(DMG_SLOTS);
+  private readonly foveaA = new Float32Array(DMG_SLOTS);
+  private readonly foveaW = new Float32Array(DMG_SLOTS);
+  private dmgSig = 0;
+  private weaponUi = true;
+  private cDmgSig = 1;
+  private halfW = 640;
+  private halfH = 400;
+  private cKeepOut = -1;
+  private readonly wedgeDeg = new Float32Array(DMG_SLOTS);
+  private readonly wedgeWide = new Float32Array(DMG_SLOTS);
+  private readonly wedgeAlpha = new Float32Array(DMG_SLOTS);
 
   /* touch */
   private stickId = -1;
@@ -407,6 +1075,7 @@ export class Hud {
     this.touchSink = opts.touchSink ?? null;
     this.crosshairStyle = opts.crosshair ?? 'dynamic';
     this.crosshairColor = opts.crosshairColor ?? 0xffffff;
+    this.wedgeDeg.fill(9999);
 
     this.mapImage = document.createElement('canvas');
     this.mapImage.width = WORLD_SIZE_BLOCKS;
@@ -437,15 +1106,36 @@ export class Hud {
     const root = this.root;
     root.textContent = '';
 
+    /* Damage feedback goes in FIRST so it paints UNDER the read-outs: being
+       shot must never make the health numeral harder to read. */
+    this.elHurt = div('dc-pad dc-hurt');
+    root.appendChild(this.elHurt);
+    this.elDmg = div('dc-pad dc-dmg');
+    const hub = div('hub');
+    for (let i = 0; i < DMG_SLOTS; i++) {
+      const a = document.createElement('span');
+      hub.appendChild(a);
+      this.dmgWedges.push(a);
+    }
+    this.elDmg.appendChild(hub);
+    root.appendChild(this.elDmg);
+
     /* minimap + chips */
     const map = div('dc-pad dc-map');
     this.elMapCanvas = document.createElement('canvas');
+    const mc = this.elMapCanvas.getContext('2d', { alpha: false });
+    if (mc === null) throw new Error('2d context unavailable');
+    this.mapCtx = mc;
     map.appendChild(this.elMapCanvas);
     const chips = div('dc-chips');
-    this.elChipAlive = chip(chips, 'ALIVE', '1');
-    this.elChipKills = chip(chips, 'KILLS', '0');
-    this.elChipTime = chip(chips, 'TIME', '0:00');
+    this.elChipAlive = chip(chips, 'ALIVE', 'ALV', '1');
+    this.elChipKills = chip(chips, 'KILLS', 'K/D', '0');
+    this.elChipTime = chip(chips, 'TIME', 'T', '0:00');
     map.appendChild(chips);
+    /* Where an over-budget status line goes instead of onto the sightline:
+       one more chip in the top-left stack, directly under the match clock. */
+    this.elScorner = div('dc-scorner');
+    map.appendChild(this.elScorner);
     root.appendChild(map);
 
     /* perf */
@@ -455,42 +1145,72 @@ export class Hud {
     /* kill feed + hints */
     this.elFeed = div('dc-pad dc-feed');
     root.appendChild(this.elFeed);
-    const hint = div('dc-pad dc-hint');
-    hint.innerHTML = '<b>WASD</b> move &nbsp;<b>Shift</b> sprint &nbsp;<b>RMB</b> place &nbsp;<b>1-7</b> weapon &nbsp;<b>Tab</b> scores';
-    root.appendChild(hint);
+    this.elHint = div('dc-pad dc-hint');
+    this.elHint.innerHTML = '<b>WASD</b> move &nbsp;<b>Shift</b> sprint &nbsp;<b>RMB</b> place'
+      + ' &nbsp;<b>1-7</b> weapon &nbsp;<b>Tab</b> scores';
+    root.appendChild(this.elHint);
 
     /* vitals */
     const vitals = div('dc-pad dc-vitals');
     const ap = div('dc-bar dc-ap');
     this.elApFill = div('fill');
     const apl = div('lbl');
-    apl.innerHTML = '<i>ARMOR</i>';
+    this.elApLabel = document.createElement('i');
+    this.elApLabel.textContent = 'ARMOR';
+    apl.appendChild(this.elApLabel);
     this.elApNum = document.createElement('span');
     this.elApNum.textContent = '0';
     apl.appendChild(this.elApNum);
-    ap.append(this.elApFill, apl);
+    ap.dataset.z = '1';
+    ap.append(this.elApFill, div('ticks'), apl);
+
     const hp = div('dc-bar dc-hp');
+    hp.dataset.t = '0';
+    this.elHpGhost = div('ghost');
     this.elHpFill = div('fill');
     const hpl = div('lbl');
-    hpl.innerHTML = '<i>HEALTH</i>';
+    this.elHpLabel = document.createElement('i');
+    this.elHpLabel.textContent = 'HEALTH';
+    hpl.appendChild(this.elHpLabel);
     this.elHpNum = document.createElement('span');
-    this.elHpNum.textContent = '100';
+    this.elHpNum.textContent = String(MAX_HEALTH);
     hpl.appendChild(this.elHpNum);
-    hp.append(this.elHpFill, hpl);
+    hp.append(this.elHpGhost, this.elHpFill, div('ticks'), hpl);
+
     vitals.append(ap, hp);
     this.elVitalsAp = ap;
     this.elVitalsHp = hp;
     root.appendChild(vitals);
 
-    /* ammo */
+    /* ammo: the clip/reserve numeral pair, per-round pips, weapon caption.
+       Clip and reserve share one row so they read as a single fact ("4 of 8
+       left") instead of two numbers in different places at different sizes. */
     this.elAmmo = div('dc-pad dc-ammo');
-    this.elMag = div('mag');
+    const nums = div('nums');
+    this.elMag = document.createElement('span');
+    this.elMag.className = 'mag';
     this.elMag.textContent = '0';
-    this.elRes = div('res');
-    this.elRes.textContent = '';
+    this.elSep = document.createElement('span');
+    this.elSep.className = 'sep';
+    this.elSep.textContent = '/';
+    this.elRes = document.createElement('span');
+    this.elRes.className = 'res';
+    this.elRes.textContent = '0';
+    nums.append(this.elMag, this.elSep, this.elRes);
+    const rounds = div('rounds');
+    this.elPips = div('pips');
+    for (let i = 0; i < MAX_PIPS; i++) {
+      const p = document.createElement('i');
+      this.elPips.appendChild(p);
+      this.pips.push(p);
+    }
+    this.elStrip = div('strip');
+    this.elStripFill = document.createElement('s');
+    this.elStrip.appendChild(this.elStripFill);
+    rounds.append(this.elPips, this.elStrip);
     this.elWep = div('wep');
     this.elWep.textContent = '';
-    this.elAmmo.append(this.elMag, this.elRes, this.elWep);
+    this.elAmmo.append(nums, rounds, this.elWep);
     root.appendChild(this.elAmmo);
 
     /* hotbar */
@@ -501,7 +1221,13 @@ export class Hud {
       n.textContent = String(i + 1);
       const t = document.createElement('span');
       t.textContent = WEAPON_SHORT_NAMES[i] ?? '';
-      s.append(n, t);
+      const am = div('am');
+      const type = ammoTypeOf(i);
+      this.slotAmmo[i] = type;
+      am.style.background = type === 0
+        ? 'rgba(255,255,255,.22)'
+        : `#${(AMMO_COLORS[type] ?? 0x888888).toString(16).padStart(6, '0')}`;
+      s.append(n, t, am);
       bar.appendChild(s);
       this.slots.push(s);
     }
@@ -522,18 +1248,8 @@ export class Hud {
     this.elStatusS = div('s');
     this.elStatus.append(this.elStatusT, this.elStatusS);
     this.elStatus.classList.add('dc-hide');
+    this.elStatus.dataset.d = '0';
     root.appendChild(this.elStatus);
-
-    /* hurt vignette + directional arrows */
-    this.elHurt = div('dc-pad dc-hurt');
-    root.appendChild(this.elHurt);
-    this.elDmg = div('dc-pad dc-dmg');
-    for (let i = 0; i < 4; i++) {
-      const a = document.createElement('span');
-      this.elDmg.appendChild(a);
-      this.dmgArrows.push(a);
-    }
-    root.appendChild(this.elDmg);
 
     /* scoreboard */
     this.elBoard = div('dc-pad dc-board dc-hide');
@@ -547,7 +1263,7 @@ export class Hud {
     table.append(head, body);
     this.elBoardBody = body;
     this.elBoard.append(bt, table);
-    this.root.appendChild(this.elBoard);
+    root.appendChild(this.elBoard);
 
     /* touch */
     this.elTouch = div('dc-pad dc-touch');
@@ -556,8 +1272,13 @@ export class Hud {
   }
 
   private buildTouch(host: HTMLElement): void {
-    const stick = div('dc-stick');
+    // Created first and unconditionally so `setTouchVisible` never has to test
+    // for its existence, then dropped on the floor when the mobile-controls
+    // module owns the pad.
     this.elStickKnob = div('knob');
+    if (this.opts.externalPad === true) return;
+
+    const stick = div('dc-stick');
     stick.appendChild(this.elStickKnob);
     host.appendChild(stick);
 
@@ -685,10 +1406,11 @@ export class Hud {
   setCrosshair(style: CrosshairStyle, color: number): void {
     this.crosshairStyle = style;
     this.crosshairColor = color;
-    this.cGap = -1;   // force a redraw
+    this.cGapQ = -1;   // force a redraw
   }
 
   setVisible(on: boolean): void {
+    this.visible = on;
     this.root.style.display = on ? '' : 'none';
   }
 
@@ -729,30 +1451,37 @@ export class Hud {
   setWeaponUiVisible(on: boolean): void {
     this.elAmmo.style.display = on ? '' : 'none';
     this.elHotbar.style.display = on ? '' : 'none';
+    /* The crosshair carries the ammo warning, so it has to go quiet too. In
+       Builder the state still holds the last gun's empty magazine, and a red
+       "you are out" crosshair over a block palette is a lie in the middle of
+       the frame. */
+    this.weaponUi = on;
+    this.cGapQ = -1;
   }
 
-  /** A shot connected. Drives the crosshair pop — the bar has no equivalent. */
-  hitMarker(headshot: boolean, killed: boolean): void {
-    this.hitMarkerT = killed ? 0.42 : 0.26;
+  /**
+   * A shot connected. Drives the crosshair pop — the bar has no equivalent.
+   * `damage` scales the marker, so a chip and a shotgun slug do not read the
+   * same; it is optional so older callers keep working.
+   */
+  hitMarker(headshot: boolean, killed: boolean, damage = 0): void {
+    this.hitMarkerT = killed ? 0.46 : 0.28;
     this.hitMarkerHead = headshot;
     this.hitMarkerKill = killed;
-    this.cGap = -1;
+    this.hitMarkerDmg = damage;
+    this.cHmQ = -1;
   }
 
-  /** Took damage. `dirYaw` is the world-space yaw the hit came FROM. */
+  /**
+   * Took damage. `dirYaw` is the WORLD yaw the hit came from; it is stored in
+   * world space and re-projected against the live camera every frame, so the
+   * wedge tracks the threat while you turn onto it. `camYaw` is accepted for
+   * call-site compatibility and deliberately unused.
+   */
   hurt(amount: number, dirYaw: number, camYaw: number): void {
+    void camYaw;
     this.hurtT = Math.max(this.hurtT, Math.min(0.62, 0.2 + amount / 90));
-    const a = this.dmgArrows[this.dmgArrowNext];
-    this.dmgArrowNext = (this.dmgArrowNext + 1) % this.dmgArrows.length;
-    // Screen-space angle: 0 = straight ahead, clockwise positive.
-    const rel = wrapPi(dirYaw - camYaw);
-    a.style.transform = `rotate(${(-rel * 180 / Math.PI).toFixed(1)}deg)`;
-    a.style.transition = 'none';
-    a.style.opacity = '1';
-    // Force a reflow so the fade actually plays from 1.
-    void a.offsetWidth;
-    a.style.transition = 'opacity .5s ease-out';
-    a.style.opacity = '0';
+    this.ring.add(amount, dirYaw);
   }
 
   /* -------------------------------------------------------------------- *
@@ -802,49 +1531,148 @@ export class Hud {
   update(s: HudState, dt: number): void {
     if (this.disposed) return;
 
-    /* --- vitals --- */
     const hp = Math.max(0, Math.round(s.health));
+
+    /* --- health: numeral, length, TIER COLOUR, and the damage ghost ----- */
+    const hpFrac = Math.min(1, hp / MAX_HEALTH);
     if (hp !== this.cHealth) {
+      if (hp < this.cHealth && this.cHealth >= 0) this.ghostHold = GHOST_HOLD;
       this.cHealth = hp;
       this.elHpNum.textContent = String(hp);
-      this.elHpFill.style.transform = `scaleX(${Math.min(1, hp / MAX_HEALTH).toFixed(3)})`;
-      const low = hp <= 30;
-      if (low !== this.cLow) { this.cLow = low; this.elVitalsHp.classList.toggle('low', low); }
+      this.elHpFill.style.transform = `scaleX(${hpFrac.toFixed(3)})`;
+      const tier = healthTier(hp);
+      if (tier !== this.cTier) {
+        this.cTier = tier;
+        this.elVitalsHp.dataset.t = String(tier);
+        /* Colour alone is a guess for the ~8% of players who cannot separate
+           the red ramp from the amber one. The word changes too, so the
+           "about to die" read survives colour blindness and a washed-out
+           phone screen in sunlight. */
+        this.elHpLabel.textContent = tier === HEALTH_TIER_CRIT ? 'CRITICAL' : 'HEALTH';
+      }
     }
+    /* The ghost holds the pre-hit value for a beat and then drains onto the
+       live one. It is the difference between "I am on 48" and "I just lost 30",
+       and it costs one transform write per frame for about half a second. */
+    if (this.ghostHp < hpFrac) {
+      this.ghostHp = hpFrac;
+      this.ghostHold = 0;
+    } else if (this.ghostHp > hpFrac) {
+      if (this.ghostHold > 0) {
+        this.ghostHold -= dt;
+      } else {
+        this.ghostHp += (hpFrac - this.ghostHp) * Math.min(1, dt * 7.5);
+        if (this.ghostHp - hpFrac < 0.004) this.ghostHp = hpFrac;
+      }
+    }
+    if (Math.abs(this.ghostHp - this.cGhost) > 0.003) {
+      this.cGhost = this.ghostHp;
+      this.elHpGhost.style.transform = `scaleX(${this.ghostHp.toFixed(3)})`;
+    }
+
+    /* --- armour, including the state the bar gets wrong ------------------
+       Zero armour is a FACT, not a missing value. The bar renders 0/100 as an
+       outlined empty trough, which is indistinguishable from a bar that has
+       not been filled in yet; here the trough goes hatched, the numeral drops
+       out and the label reads NO ARMOR, so the only thing left in the widget
+       is the sentence. */
     const ap = Math.max(0, Math.round(s.armor));
     if (ap !== this.cArmor) {
       this.cArmor = ap;
-      this.elApNum.textContent = String(ap);
       this.elApFill.style.transform = `scaleX(${Math.min(1, ap / MAX_ARMOR).toFixed(3)})`;
-      this.elVitalsAp.style.opacity = ap > 0 ? '1' : '0.45';
+      const zero = ap > 0 ? 0 : 1;
+      if (zero !== this.cApZero) {
+        this.cApZero = zero;
+        this.elVitalsAp.dataset.z = zero === 1 ? '1' : '0';
+        this.elApLabel.textContent = zero === 1 ? 'NO ARMOR' : 'ARMOR';
+      }
+      this.elApNum.textContent = zero === 1 ? '' : String(ap);
     }
 
-    /* --- ammo --- */
-    if (s.mag !== this.cMag) {
-      this.cMag = s.mag;
-      this.elMag.textContent = s.reloading ? '--' : String(s.mag);
-      const empty = s.mag === 0;
-      if (empty !== this.cEmpty) { this.cEmpty = empty; this.elAmmo.classList.toggle('empty', empty); }
+    /* --- ammo ---------------------------------------------------------- */
+    const magSize = WEAPON_MAG_SIZE[s.weapon] ?? 0;
+    if (magSize !== this.cMagSize) {
+      this.cMagSize = magSize;
+      const usePips = magSize > 0 && magSize <= MAX_PIPS;
+      for (let i = 0; i < MAX_PIPS; i++) {
+        this.pips[i].style.display = usePips && i < magSize ? '' : 'none';
+      }
+      this.elPips.style.display = usePips ? '' : 'none';
+      this.elStrip.style.display = magSize > MAX_PIPS ? '' : 'none';
+      this.cRounds = -1;
     }
-    if (s.reserve !== this.cRes || s.weapon !== this.cWeapon) {
-      this.cRes = s.reserve;
+    /* While reloading the pip strip fills up instead of showing the stale
+       count: "how long until I can shoot" is the question being asked. */
+    const rounds = s.reloading
+      ? Math.round(magSize * Math.max(0, Math.min(1, s.reloadFrac)))
+      : s.mag;
+    if (rounds !== this.cRounds) {
+      this.cRounds = rounds;
+      if (magSize > 0 && magSize <= MAX_PIPS) {
+        for (let i = 0; i < magSize; i++) this.pips[i].classList.toggle('on', i < rounds);
+      } else if (magSize > 0) {
+        this.elStripFill.style.transform = `scaleX(${(rounds / magSize).toFixed(3)})`;
+      }
+    }
+    /* The clip/reserve pair, the reserve's colour and the caption are one
+       write, gated on the four inputs that can move it. An unchanged frame
+       still touches nothing and allocates nothing. */
+    const rld = s.reloading ? 1 : 0;
+    if (s.mag !== this.cMag || s.reserve !== this.cRes || s.weapon !== this.cWeapon
+      || rld !== this.cRld) {
+      this.cMag = s.mag; this.cRes = s.reserve; this.cRld = rld;
+      const r = ammoReadout(s.weapon, s.mag, s.reserve, s.reloading);
+      this.elMag.textContent = r.clip;
+      this.elRes.textContent = r.reserve;
+      this.elWep.textContent = r.caption;
+      const vis = r.pair ? '' : 'none';
+      this.elSep.style.display = vis;
+      this.elRes.style.display = vis;
+      /* The reserve numeral is painted in its own pickup colour, so the
+         caption's ammo word and the world's ammo crates agree at a glance —
+         except at zero, where it turns alarm-red. "Reload and carry on" and
+         "there is no more of this ammo anywhere on you" are different facts
+         and the bar answers neither of them. */
       const type = ammoTypeOf(s.weapon);
-      this.elRes.textContent = type === 0 ? '∞' : `${s.reserve}  ${AMMO_NAMES[type] ?? ''}`;
-      this.elRes.style.color = type === 0 ? '#9b9793' : `#${(AMMO_COLORS[type] ?? 0x9b9793).toString(16).padStart(6, '0')}`;
+      this.elRes.style.color = s.reserve <= 0
+        ? '#ff5a2e'
+        : `#${(AMMO_COLORS[type] ?? 0xd2ccc6).toString(16).padStart(6, '0')}`;
+    }
+    /* Reloading outranks empty: the plate throbs red only while the magazine
+       is empty AND nothing is being done about it. A reload already in flight
+       is the answer to that alarm, not another instance of it. */
+    const aTier = s.reloading ? AMMO_TIER_OK : ammoTier(s.mag, magSize);
+    const ammoCls = 'dc-pad dc-ammo'
+      + (aTier === AMMO_TIER_EMPTY ? ' empty' : aTier === AMMO_TIER_LOW ? ' low' : '')
+      + (s.reloading ? ' rld' : '');
+    if (ammoCls !== this.cAmmoCls) {
+      this.cAmmoCls = ammoCls;
+      this.elAmmo.className = ammoCls;
     }
     if (s.weapon !== this.cWeapon) {
       this.cWeapon = s.weapon;
-      this.elWep.textContent = WEAPON_NAMES[s.weapon] ?? '';
       for (let i = 0; i < this.slots.length; i++) this.slots[i].classList.toggle('on', i === s.weapon);
     }
-    if (s.owned !== this.cOwned) {
+
+    /* Hotbar: owned, selected, and DRY. Knowing which gun still has ammo is
+       part of "what is my state", and it is the one thing you otherwise have
+       to discover by switching to it and pulling the trigger. */
+    let sig = s.weapon * 31 + (s.mag > 0 ? 1 : 0);
+    for (let i = 0; i < AMMO_TYPE_COUNT; i++) sig = (sig * 8191 + (s.reserveByType[i] | 0)) | 0;
+    if (sig !== this.cReserveSig || s.owned !== this.cOwned) {
+      this.cReserveSig = sig;
       this.cOwned = s.owned;
       for (let i = 0; i < this.slots.length; i++) {
-        this.slots[i].classList.toggle('no', !ownsWeapon(s.owned, i));
+        const owned = ownsWeapon(s.owned, i);
+        const type = this.slotAmmo[i];
+        const reserve = type === 0 ? 1 : s.reserveByType[type];
+        const loaded = i === s.weapon && s.mag > 0;
+        this.slots[i].classList.toggle('no', !owned);
+        this.slots[i].classList.toggle('dry', owned && reserve === 0 && !loaded);
       }
     }
 
-    /* --- chips --- */
+    /* --- chips --------------------------------------------------------- */
     if (s.playersAlive !== this.cAlive) {
       this.cAlive = s.playersAlive;
       this.elChipAlive.textContent = String(s.playersAlive);
@@ -856,11 +1684,10 @@ export class Hud {
     const secs = Math.max(0, Math.floor(s.matchSeconds));
     if (secs !== this.cTime) {
       this.cTime = secs;
-      const m = Math.floor(secs / 60);
-      this.elChipTime.textContent = `${m}:${String(secs - m * 60).padStart(2, '0')}`;
+      this.elChipTime.textContent = formatClock(secs);
     }
 
-    /* --- perf --- */
+    /* --- perf ---------------------------------------------------------- */
     if (s.showFps !== this.cPerfShown) {
       this.cPerfShown = s.showFps;
       this.elPerf.classList.toggle('dc-hide', !s.showFps);
@@ -874,45 +1701,151 @@ export class Hud {
       }
     }
 
-    /* --- status --- */
-    if (s.status !== this.cStatus) {
+    /* --- status: routed through the sightline budget --------------------
+       Nothing writes to the middle of the screen without first being costed.
+       A short line gets the 11 px plate 120 px UNDER the reticle; a long one
+       is demoted to the top-left chip stack; death — the only state with no
+       aim line to protect, because the crosshair is hidden — gets the card.
+       Guarded by the same `!==` diff as everything else, so a steady frame
+       still writes zero DOM. */
+    if (s.status !== this.cStatus || s.subStatus !== this.cSub || s.dead !== this.cStatusDead) {
       this.cStatus = s.status;
-      this.elStatusT.textContent = s.status;
-      this.elStatus.classList.toggle('dc-hide', s.status === '' && s.subStatus === '');
-    }
-    if (s.subStatus !== this.cSub) {
       this.cSub = s.subStatus;
-      this.elStatusS.textContent = s.subStatus;
-      this.elStatus.classList.toggle('dc-hide', s.status === '' && s.subStatus === '');
+      this.cStatusDead = s.dead;
+      const place = statusPlacement(s.status, s.subStatus, s.dead);
+      const centred = place === STATUS_SIGHTLINE || place === STATUS_DEATH;
+      if (centred) {
+        this.elStatusT.textContent = s.status;
+        this.elStatusS.textContent = s.subStatus;
+      }
+      this.elStatus.dataset.d = place === STATUS_DEATH ? '1' : '0';
+      this.elStatus.classList.toggle('dc-hide', !centred);
+      this.elScorner.textContent = place === STATUS_CORNER
+        ? statusCornerText(s.status, s.subStatus) : '';
+      this.elScorner.classList.toggle('on', place === STATUS_CORNER);
     }
 
-    /* --- hurt --- */
+    /* --- key hints fade themselves out --------------------------------- */
+    if (this.visible && !this.hintFaded) {
+      this.liveT += dt;
+      if (this.liveT >= HINT_SECONDS) {
+        this.hintFaded = true;
+        this.elHint.style.opacity = '0';
+        this.hintTimer = window.setTimeout(() => { this.elHint.classList.add('dc-hide'); }, 1000);
+      }
+    }
+
+    /* --- damage: one vignette, two sources ----------------------------- */
+    if (s.dead !== this.cDead) {
+      this.cDead = s.dead;
+      if (s.dead) this.ring.clear();
+      /* No trigger, no reticle. Hiding it while dead is honest — you cannot
+         shoot — and it is what lets the death card sit in the middle without
+         breaking the keep-out: there is no sightline left to keep clear. */
+      this.elCross.classList.toggle('dc-hide', s.dead);
+    }
     if (this.hurtT > 0) {
       this.hurtT -= dt;
-      const v = Math.max(0, this.hurtT);
-      this.elHurt.style.opacity = v.toFixed(2);
-      if (this.hurtT <= 0) this.elHurt.style.opacity = '0';
+      if (this.hurtT < 0) this.hurtT = 0;
+    }
+    this.vigT += dt;
+    const crit = s.dead ? 0 : critVignette(hp, this.vigT);
+    const vig = this.hurtT > crit ? this.hurtT : crit;
+    if (Math.abs(vig - this.cVig) > 0.012) {
+      this.cVig = vig;
+      this.elHurt.style.opacity = vig.toFixed(2);
+    }
+    this.ring.step(dt);
+    this.renderDamageRing(s.camYaw);
+
+    /* --- crosshair ------------------------------------------------------ */
+    if (this.hitMarkerT > 0) {
+      this.hitMarkerT -= dt;
+      if (this.hitMarkerT < 0) this.hitMarkerT = 0;
+    }
+    const gap = crosshairGapFor(this.crosshairStyle, s.spread);
+    /* The ammo state the crosshair carries is the ammo state you can act on:
+       EMPTY says "you are pulling a dead trigger", LOW says "decide now". Both
+       are answered where the eye already is, so ammo is never hunted for. */
+    const aim = s.reloading || !this.weaponUi ? AMMO_TIER_OK : ammoTier(s.mag, magSize);
+    const gapQ = Math.round(gap * 2);
+    const hmQ = this.hitMarkerT > 0 ? Math.ceil(this.hitMarkerT * 60) : 0;
+    const rlQ = s.reloading ? Math.round(Math.max(0, Math.min(1, s.reloadFrac)) * 36) : -1;
+    if (gapQ !== this.cGapQ || hmQ !== this.cHmQ || rlQ !== this.cRlQ
+      || aim !== this.cEmptyQ || this.dmgSig !== this.cDmgSig) {
+      this.cGapQ = gapQ; this.cHmQ = hmQ; this.cRlQ = rlQ; this.cEmptyQ = aim;
+      this.cDmgSig = this.dmgSig;
+      this.drawCrosshair(gapQ / 2, s, aim);
     }
 
-    /* --- crosshair --- */
-    if (this.hitMarkerT > 0) this.hitMarkerT -= dt;
-    const gap = this.crosshairGap(s);
-    if (Math.abs(gap - this.cGap) > 0.35 || this.hitMarkerT > 0 || this.cSpread !== s.spread) {
-      this.cGap = gap;
-      this.cSpread = s.spread;
-      this.drawCrosshair(gap, s);
+    /* --- scoreboard ----------------------------------------------------- */
+    if (s.boardOpen !== this.cBoardOpen) {
+      this.cBoardOpen = s.boardOpen;
+      this.elBoard.classList.toggle('dc-hide', !s.boardOpen);
+      this.boardTimer = BOARD_REDIFF_MS;
+    }
+    if (s.boardOpen) {
+      this.boardTimer += dt * 1000;
+      if (this.boardTimer >= BOARD_REDIFF_MS) {
+        this.boardTimer = 0;
+        this.drawBoard(s);
+      }
     }
 
-    /* --- scoreboard --- */
-    this.elBoard.classList.toggle('dc-hide', !s.boardOpen);
-    if (s.boardOpen) this.drawBoard(s);
-
-    /* --- minimap --- */
+    /* --- minimap -------------------------------------------------------- */
     this.mapTimer += dt * 1000;
     if (this.mapTimer >= MAP_REDRAW_MS) {
       this.mapTimer = 0;
       this.drawMinimap(s);
     }
+  }
+
+  /**
+   * Project every live wedge against the CURRENT camera. This is the whole
+   * value of the feature: turn toward the shooter and the blade slides around
+   * the frame to the top edge, so "where is it" and "am I facing it yet" are
+   * the same read.
+   *
+   * Two surfaces, one bearing. The blade rides the FRAME, where peripheral
+   * vision picks it up without a saccade, and a matching tick rides the
+   * crosshair canvas, where the eye already is. Neither ever occupies the
+   * mid-field. Writes nothing for a slot whose angle and opacity held still.
+   */
+  private renderDamageRing(camYaw: number): void {
+    const ring = this.ring;
+    let sig = 0;
+    for (let i = 0; i < DMG_SLOTS; i++) {
+      const el = this.dmgWedges[i];
+      const a = ring.alpha(i);
+      if (a <= 0.004) {
+        this.foveaA[i] = 0;
+        if (this.wedgeAlpha[i] !== 0) {
+          this.wedgeAlpha[i] = 0;
+          el.style.opacity = '0';
+        }
+        continue;
+      }
+      const rad = -wrapPi(ring.yaw[i] - camYaw);
+      const deg = rad * 180 / Math.PI;
+      const wide = 0.66 + 0.62 * ring.power[i];
+      this.foveaRad[i] = rad;
+      this.foveaA[i] = a;
+      this.foveaW[i] = wide;
+      sig = (sig * 131 + Math.round(deg / 2.5) + 512) | 0;
+      sig = (sig * 131 + Math.round(a * 14)) | 0;
+      if (Math.abs(deg - this.wedgeDeg[i]) > 0.6 || this.wedgeWide[i] !== wide) {
+        this.wedgeDeg[i] = deg;
+        this.wedgeWide[i] = wide;
+        const r = frameRadius(rad, this.halfW, this.halfH, DMG_FRAME_INSET);
+        el.style.transform = `rotate(${deg.toFixed(1)}deg) translateY(${(-r).toFixed(0)}px)`
+          + ` scaleX(${wide.toFixed(2)})`;
+      }
+      if (Math.abs(a - this.wedgeAlpha[i]) > 0.02) {
+        this.wedgeAlpha[i] = a;
+        el.style.opacity = a.toFixed(2);
+      }
+    }
+    this.dmgSig = sig;
   }
 
   /** Rebuild the table only when a number in it actually changed. */
@@ -934,28 +1867,69 @@ export class Hud {
     this.elBoardBody.innerHTML = html;
   }
 
-  private crosshairGap(s: HudState): number {
-    if (this.crosshairStyle === 'dot') return 0;
-    const base = this.crosshairStyle === 'doom' ? 9 : 5;
-    if (this.crosshairStyle === 'cross') return base;
-    return base + s.spread * 26;
+  /**
+   * Short arcs on the crosshair canvas, one per live damage bearing.
+   *
+   * The frame blades tell peripheral vision THAT something hit you; these tell
+   * the fovea WHERE from, without moving the eye off the target. Each arc is
+   * cased in black first so it survives a bright sand wall as well as a dark
+   * corridor, and the whole thing is skipped outright when nothing is alive.
+   */
+  private drawFoveaDamage(ctx: CanvasRenderingContext2D, c: number, d: number): void {
+    const r = FOVEA_RADIUS * d;
+    ctx.lineCap = 'round';
+    ctx.shadowBlur = 0;
+    for (let i = 0; i < DMG_SLOTS; i++) {
+      const a = this.foveaA[i];
+      if (a <= 0.05) continue;
+      // Canvas angles start at +x; the ring's bearings start at "up".
+      const mid = this.foveaRad[i] - Math.PI / 2;
+      const half = 0.19 + 0.15 * this.foveaW[i];
+      const w = (2.0 + 1.8 * this.foveaW[i]) * d;
+      ctx.globalAlpha = Math.min(1, a * 0.95);
+      ctx.strokeStyle = 'rgba(0,0,0,.62)';
+      ctx.lineWidth = w + 2.4 * d;
+      ctx.beginPath();
+      ctx.arc(c, c, r, mid - half, mid + half);
+      ctx.stroke();
+      ctx.strokeStyle = '#ff6b32';
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.arc(c, c, r, mid - half, mid + half);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
   }
 
-  private drawCrosshair(gap: number, s: HudState): void {
+  private drawCrosshair(gap: number, s: HudState, ammo: number): void {
     const ctx = this.crossCtx;
     const size = this.elCross.width;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, size, size);
     const d = this.dpr;
     const c = size / 2;
-    const col = `#${this.crosshairColor.toString(16).padStart(6, '0')}`;
+    const empty = ammo === AMMO_TIER_EMPTY;
+    /* Out of ammo is answered AT THE POINT OF GAZE. You never look away from
+       the crosshair to find out why the gun stopped. */
+    const col = empty ? '#ff4a28' : `#${this.crosshairColor.toString(16).padStart(6, '0')}`;
+    /* The last quarter of a magazine warns without changing the crosshair's
+       SHAPE — the dot goes amber, so the aiming picture is untouched while the
+       eye still gets the message. */
+    const dotCol = empty ? '#ff4a28' : ammo === AMMO_TIER_LOW ? '#ffb42a' : col;
+
+    /* Damage arrives here too. These ticks live inside the crosshair canvas
+       and only exist while a wedge is alive, so the centre of the frame is
+       empty in every steady-state frame and loud in the half-second after a
+       hit — the bar shows nothing at all in either case. */
+    this.drawFoveaDamage(ctx, c, d);
 
     ctx.lineCap = 'butt';
     ctx.shadowColor = 'rgba(0,0,0,.85)';
     ctx.shadowBlur = 2 * d;
+    ctx.globalAlpha = empty ? 0.72 : 1;
 
     if (this.crosshairStyle === 'dot') {
-      ctx.fillStyle = col;
+      ctx.fillStyle = dotCol;
       ctx.beginPath();
       ctx.arc(c, c, 1.6 * d, 0, Math.PI * 2);
       ctx.fill();
@@ -971,28 +1945,41 @@ export class Hud {
       ctx.moveTo(c - g, c); ctx.lineTo(c - g - len, c);
       ctx.moveTo(c + g, c); ctx.lineTo(c + g + len, c);
       ctx.stroke();
-      if (this.crosshairStyle === 'doom') {
-        ctx.fillStyle = col;
-        ctx.fillRect(c - 1 * d, c - 1 * d, 2 * d, 2 * d);
+      /* 'cross' has no dot of its own, but a warning dot appearing inside the
+         gap is itself the signal, so every style can carry the low read. */
+      if (this.crosshairStyle !== 'cross' || dotCol !== col) {
+        ctx.fillStyle = dotCol;
+        ctx.fillRect(c - 1.2 * d, c - 1.2 * d, 2.4 * d, 2.4 * d);
       }
     }
+    ctx.globalAlpha = 1;
 
-    /* hit marker */
+    /* hit marker — scaled by damage, gold on a headshot, red ring on a kill */
     if (this.hitMarkerT > 0) {
-      const t = Math.min(1, this.hitMarkerT / 0.26);
-      const r = (7 + (1 - t) * 7) * d;
+      const span = this.hitMarkerKill ? 0.46 : 0.28;
+      const t = Math.min(1, this.hitMarkerT / span);
+      const heft = Math.min(1, this.hitMarkerDmg / 60);
+      const r = (6 + heft * 4 + (1 - t) * 7) * d;
+      const tick = (4 + heft * 3) * d;
       ctx.shadowBlur = 0;
       ctx.strokeStyle = this.hitMarkerKill ? '#ff3b18' : this.hitMarkerHead ? '#ffd24a' : '#ffffff';
       ctx.globalAlpha = Math.min(1, t * 1.6);
-      ctx.lineWidth = 2 * d;
+      ctx.lineWidth = (this.hitMarkerKill ? 2.8 : 2) * d;
       ctx.beginPath();
       for (let i = 0; i < 4; i++) {
         const sx = i & 1 ? 1 : -1;
         const sy = i & 2 ? 1 : -1;
         ctx.moveTo(c + sx * r, c + sy * r);
-        ctx.lineTo(c + sx * (r + 5 * d), c + sy * (r + 5 * d));
+        ctx.lineTo(c + sx * (r + tick), c + sy * (r + tick));
       }
       ctx.stroke();
+      if (this.hitMarkerKill) {
+        ctx.globalAlpha = Math.min(1, t) * 0.65;
+        ctx.lineWidth = 1.6 * d;
+        ctx.beginPath();
+        ctx.arc(c, c, (10 + (1 - t) * 16) * d, 0, Math.PI * 2);
+        ctx.stroke();
+      }
       ctx.globalAlpha = 1;
     }
 
@@ -1079,6 +2066,20 @@ export class Hud {
     const w = window.innerWidth;
     const h = window.innerHeight;
     this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    /* The damage blades are placed against the frame, so a resize has to move
+       them; forcing the angle cache stale is what re-seats them next frame. */
+    this.halfW = w / 2;
+    this.halfH = h / 2;
+    this.wedgeDeg.fill(9999);
+    /* The keep-out is published as a custom property, not kept private, so a
+       mode overlay that wants to celebrate a kill can anchor to the same
+       radius instead of guessing a pixel offset and landing on the reticle. */
+    const keep = Math.round(keepOutRadius(w, h));
+    if (keep !== this.cKeepOut) {
+      this.cKeepOut = keep;
+      this.root.style.setProperty('--dc-keepout', `${keep}px`);
+      this.root.style.setProperty('--dc-drop', `${Math.round(statusDrop(w, h))}px`);
+    }
     const compact = h < 560 || w < 760;
     const portrait = h > w;
     if (compact !== this.compact) {
@@ -1107,13 +2108,14 @@ export class Hud {
       this.elCross.style.width = `${crossCss}px`;
       this.elCross.style.height = `${crossCss}px`;
     }
-    this.cGap = -1;
+    this.cGapQ = -1;
     this.mapTimer = MAP_REDRAW_MS;
   }
 
   dispose(): void {
     this.disposed = true;
     window.removeEventListener('resize', this.onResize);
+    if (this.hintTimer !== 0) { window.clearTimeout(this.hintTimer); this.hintTimer = 0; }
     this.root.textContent = '';
   }
 }
@@ -1135,13 +2137,20 @@ function btn(cls: string, label: string): HTMLElement {
   return b;
 }
 
-function chip(host: HTMLElement, label: string, value: string): HTMLElement {
+/**
+ * A chip carries both its full label and a short one. Which shows is pure CSS,
+ * so a viewport change costs no DOM write — and a 412 px phone gets three
+ * chips on ONE row instead of a three-deep column down the left edge.
+ */
+function chip(host: HTMLElement, label: string, shortLabel: string, value: string): HTMLElement {
   const c = div('dc-chip');
   const i = document.createElement('i');
   i.textContent = label;
+  const b = document.createElement('b');
+  b.textContent = shortLabel;
   const v = document.createElement('span');
   v.textContent = value;
-  c.append(i, v);
+  c.append(i, b, v);
   host.appendChild(c);
   return v;
 }
@@ -1152,7 +2161,7 @@ function escapeHtml(v: string): string {
   ));
 }
 
-function wrapPi(a: number): number {
+export function wrapPi(a: number): number {
   const TAU = Math.PI * 2;
   let v = a % TAU;
   if (v > Math.PI) v -= TAU;

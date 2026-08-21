@@ -21,10 +21,18 @@ import {
   buildPadded,
   createPadded,
   INDICES_PER_QUAD,
+  LIGHT_ATTEN,
+  LIGHT_HUE_FIRE,
+  LIGHT_HUE_TOXIC,
+  LIGHT_MAX,
   meshChunk,
   readVertexAO,
   readVertexFace,
+  readVertexLight,
+  readVertexLightHue,
+  readVertexSky,
   readVertexX,
+  readVertexY,
   VERTS_PER_QUAD,
   type ChunkFetch,
 } from './mesher';
@@ -285,5 +293,129 @@ describe('mesher / scratch reuse', () => {
       expect(readVertexAO(op.vertexBytes, i)).toBeLessThanOrEqual(3);
     }
     expect(res.maxY).toBe(CHUNK_HEIGHT);
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+
+describe('mesher / sky exposure', () => {
+  it('gives open ground full sky and roofed ground none', () => {
+    const chunk = emptyChunk();
+    fill(chunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
+    // A floating slab: no walls, so the ONLY thing that can darken the floor
+    // under it is the sky channel.
+    fill(chunk, BlockId.STONE, 8, 5, 8, 16, 6, 16);
+
+    const res = meshOne(chunk);
+    const op = res.layers[RenderLayer.OPAQUE];
+    const b = op.vertexBytes;
+
+    const floorSky = new Set<number>();
+    let roofUnderside = 0;
+    for (let i = 0; i < op.vertexCount; i += VERTS_PER_QUAD) {
+      const face = readVertexFace(b, i);
+      const y = readVertexY(b, i);
+      if (face === Face.PY && y === 1) floorSky.add(readVertexSky(b, i));
+      if (face === Face.NY && y === 5) {
+        roofUnderside++;
+        expect(readVertexSky(b, i)).toBe(0);
+      }
+    }
+    expect(roofUnderside).toBeGreaterThan(0);
+    expect(floorSky.has(LIGHT_MAX)).toBe(true);   // out in the open
+    expect(floorSky.has(0)).toBe(true);           // under the slab
+  });
+
+  it('does not let sky through water', () => {
+    const chunk = emptyChunk();
+    fill(chunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
+    fill(chunk, BlockId.WATER, 0, 1, 0, CHUNK_SIZE_X, 4, CHUNK_SIZE_Z);
+    const res = meshOne(chunk);
+    const op = res.layers[RenderLayer.OPAQUE];
+    for (let i = 0; i < op.vertexCount; i += VERTS_PER_QUAD) {
+      if (readVertexFace(op.vertexBytes, i) === Face.PY && readVertexY(op.vertexBytes, i) === 1) {
+        expect(readVertexSky(op.vertexBytes, i)).toBe(0);   // the seabed is dark
+      }
+    }
+  });
+});
+
+describe('mesher / block light', () => {
+  it('floods an emitter across the floor and attenuates with distance', () => {
+    const chunk = emptyChunk();
+    fill(chunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
+    chunk[voxelIndex(16, 1, 16)] = BlockId.NEON;
+
+    const res = meshOne(chunk);
+    const op = res.layers[RenderLayer.OPAQUE];
+    const b = op.vertexBytes;
+
+    const levels = new Set<number>();
+    for (let i = 0; i < op.vertexCount; i += VERTS_PER_QUAD) {
+      if (readVertexFace(b, i) !== Face.PY || readVertexY(b, i) !== 1) continue;
+      levels.add(readVertexLight(b, i));
+    }
+    // The whole ramp has to be on the floor, not just a lit rim: 15 at the
+    // source, then LIGHT_ATTEN per step out to darkness.
+    for (let l = LIGHT_MAX - LIGHT_ATTEN; l > 0; l -= LIGHT_ATTEN) {
+      expect(levels.has(l)).toBe(true);
+    }
+    expect(levels.has(0)).toBe(true);
+  });
+
+  it('tags light with the hue class of its source', () => {
+    const chunk = emptyChunk();
+    fill(chunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
+    chunk[voxelIndex(16, 1, 16)] = BlockId.NEON;
+    const res = meshOne(chunk);
+    const op = res.layers[RenderLayer.OPAQUE];
+    let lit = 0;
+    for (let i = 0; i < op.vertexCount; i += VERTS_PER_QUAD) {
+      if (readVertexLight(op.vertexBytes, i) === 0) continue;
+      lit++;
+      expect(readVertexLightHue(op.vertexBytes, i)).toBe(LIGHT_HUE_TOXIC);
+    }
+    expect(lit).toBeGreaterThan(0);
+
+    const hellish = emptyChunk();
+    fill(hellish, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
+    hellish[voxelIndex(16, 1, 16)] = BlockId.LAVA;
+    const res2 = meshOne(hellish);
+    const op2 = res2.layers[RenderLayer.OPAQUE];
+    let fire = 0;
+    for (let i = 0; i < op2.vertexCount; i += VERTS_PER_QUAD) {
+      if (readVertexLight(op2.vertexBytes, i) === 0) continue;
+      fire++;
+      expect(readVertexLightHue(op2.vertexBytes, i)).toBe(LIGHT_HUE_FIRE);
+    }
+    expect(fire).toBeGreaterThan(0);
+  });
+
+  it('does not leak light through an opaque wall', () => {
+    // A lamp sealed inside solid rock lights nothing anyone can see.
+    const chunk = emptyChunk();
+    fill(chunk, BlockId.STONE, 4, 4, 4, 11, 11, 11);
+    chunk[voxelIndex(7, 7, 7)] = BlockId.NEON;
+    const res = meshOne(chunk);
+    const op = res.layers[RenderLayer.OPAQUE];
+    expect(op.quadCount).toBe(6);
+    for (let i = 0; i < op.vertexCount; i++) {
+      expect(readVertexLight(op.vertexBytes, i)).toBe(0);
+    }
+  });
+
+  it('leaves no stale light behind when the next chunk has no emitter', () => {
+    const lampChunk = emptyChunk();
+    fill(lampChunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
+    lampChunk[voxelIndex(16, 1, 16)] = BlockId.NEON;
+    meshOne(lampChunk);
+
+    const darkChunk = emptyChunk();
+    fill(darkChunk, BlockId.STONE, 0, 0, 0, CHUNK_SIZE_X, 1, CHUNK_SIZE_Z);
+    const res = meshOne(darkChunk);
+    const op = res.layers[RenderLayer.OPAQUE];
+    for (let i = 0; i < op.vertexCount; i++) {
+      expect(readVertexLight(op.vertexBytes, i)).toBe(0);
+    }
   });
 });

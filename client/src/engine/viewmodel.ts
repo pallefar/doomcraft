@@ -1220,6 +1220,7 @@ uniform vec3  uMuzzleColor;
 uniform vec3  uTint;
 uniform float uBright;
 uniform float uEmit;
+uniform vec3  uKill;
 in vec3 vColor;
 in float vLight;
 in vec2 vUv;
@@ -1246,6 +1247,14 @@ void main() {
   // The flash lights the gun that made it. Half of "the shot happened" is this.
   c += base * uMuzzleColor * uMuzzle * (0.20 + 0.50 * lit);
   c += uMuzzleColor * uMuzzle * 0.07;
+  // THE KILL FLARE. A hit only moves uBright, which is achromatic: the gun
+  // gets brighter and a brighter grey gun in one frame of a firefight is a
+  // cue nobody reads. A kill adds COLOUR on top — hot amber running into the
+  // metal — because hue is the one channel nothing else in this shader is
+  // using, and a change of hue survives a busy frame that a change of level
+  // does not. Zero on a hit and on a miss, so it never dilutes itself.
+  c += base * uKill * (0.30 + 0.60 * lit);
+  c += uKill * 0.08;
   fragColor = vec4(c, 1.0);
 }
 `;
@@ -1446,6 +1455,26 @@ const MAX_PARTS = 3;
 /** Hit-confirm brightness pop: how much, and how fast it bleeds off (1/s). */
 const HIT_GLOW_GAIN = 0.30;
 const HIT_GLOW_DECAY = 7.5;
+/**
+ * A kill's glow starts higher and bleeds off at a third of the rate, so it
+ * spans about eight frames instead of three. Duration is the axis a player
+ * reads as "that was different"; amplitude alone just reads as "that was
+ * closer".
+ */
+const KILL_GLOW_DECAY = 2.6;
+
+/**
+ * The kill flare's colour and weight.
+ *
+ * Amber-into-red rather than white: white is what uBright already does, and
+ * two cues on the same axis are one cue. Kept under a third of the model's
+ * own level so the weapon flares rather than blowing out — a silhouette that
+ * washes to a solid block is a worse read than the one it replaced.
+ */
+const KILL_TINT_R = 1.00;
+const KILL_TINT_G = 0.42;
+const KILL_TINT_B = 0.16;
+const KILL_TINT_GAIN = 0.30;
 
 /**
  * A viewmodel drawn at the world FOV foreshortens a half-metre gun into a stack
@@ -1573,6 +1602,9 @@ export class Viewmodel implements OverlayPass {
   private bright = 1;
   /** 0..1 "that shot landed", decaying. Drives the hit jolt's brightness pop. */
   private hitGlow = 0;
+  private hitGlowDecay = HIT_GLOW_DECAY;
+  /** 1 while the decaying glow belongs to a KILL rather than to a hit. */
+  private hitWasKill = 0;
 
   constructor(opts: ViewmodelOptions = {}) {
     this.worldFov = opts.fov ?? 68;
@@ -1587,6 +1619,7 @@ export class Viewmodel implements OverlayPass {
       uBright: { value: 1 },
       uEmit: { value: 1.25 },
       uGrow: { value: 0 },
+      uKill: { value: new THREE.Vector3(0, 0, 0) },
     };
     this.material = new THREE.RawShaderMaterial({
       glslVersion: THREE.GLSL3,
@@ -1849,21 +1882,78 @@ export class Viewmodel implements OverlayPass {
    * It rides on the same spring as the fire kick, so it never fights it — a
    * miss is the kick alone and a hit is the kick with a bite in it.
    *
-   * `strength` is 0..1; a kill is 1.
+   * A KILL is a third reading, not a louder second one. Scaling the same
+   * impulse up makes a kill feel like a very good hit, and the frame after a
+   * demon dies should not feel like the frame after a solid body shot — so the
+   * kill jolt is a different SHAPE: it leads with the nose coming UP and the
+   * gun rolling out (the recoil of finishing something, hands opening) where
+   * the hit jolt drives the muzzle down and forward into the target. On a
+   * spring they are distinguishable at 60 fps because they start in opposite
+   * directions, which no amount of amplitude ever achieves.
+   *
+   * `strength` is 0..1.
    */
-  hitConfirm(strength = 0.5): void {
+  hitConfirm(strength = 0.5, killed = false): void {
     if (this.disposed || !this.enabled) return;
     const s = clamp(strength, 0, 1) * this.motionScale;
     if (s <= 0) return;
+    const side = this.kickSide * this.handSign;
+
+    if (killed) {
+      // Up, back, and a hard roll out. Slower to recover, because the point of
+      // a kill is that the moment is allowed to take a beat.
+      this.vz += 0.16 * s;
+      this.vy += 0.34 * s;
+      this.wx += 1.10 * s;
+      this.wz -= 0.95 * s * side;
+      this.hitGlowDecay = KILL_GLOW_DECAY;
+      this.hitWasKill = 1;
+      const glow = 1.35;
+      if (glow > this.hitGlow) this.hitGlow = glow;
+      return;
+    }
+
     // Forward (negative z is away from the player) and a touch up.
     this.vz -= 0.30 * s;
     this.vy += 0.16 * s;
     // Nose dip then recover, and a roll opposite the last kick so two shots in
     // a row do not stack into one lean.
     this.wx -= 0.85 * s;
-    this.wz += 0.55 * s * this.kickSide * this.handSign;
+    this.wz += 0.55 * s * side;
+    this.hitGlowDecay = HIT_GLOW_DECAY;
+    // A hit landing inside a kill's afterglow must not steal it: the kill is
+    // the longer, louder read and it owns the channel until it has run out.
+    if (this.hitGlow <= 0) this.hitWasKill = 0;
     const glow = 0.35 + 0.65 * s;
     if (glow > this.hitGlow) this.hitGlow = glow;
+  }
+
+  /**
+   * THE TOOL MET SOMETHING THAT WILL NOT GIVE.
+   *
+   * `hitConfirm` drives the muzzle FORWARD, because flesh gives way and the
+   * hands follow through into it. Stone does the opposite: it stops the swing
+   * dead and shoves the tool back at you. So this is the same spring with the
+   * opposite sign on z and on pitch, and no glow at all — a wall is not a hit
+   * marker and must never light the weapon the way a body does.
+   *
+   * The roll alternates per bite, so a held saw against a wall JUDDERS instead
+   * of leaning one way and staying there. That judder is the read: without it a
+   * viewmodel swinging at a wall is a looping animation that could equally be
+   * playing in mid-air, which is exactly the frame this piece kept losing on.
+   */
+  bite(power = 0.5): void {
+    if (this.disposed || !this.enabled) return;
+    const s = clamp(power, 0, 1) * this.motionScale;
+    if (s <= 0) return;
+    const side = this.kickSide * this.handSign;
+    this.kickSide = -this.kickSide;
+    this.vz += 0.24 * s;
+    this.vy += 0.05 * s;
+    this.vx -= 0.05 * s * side;
+    this.wx += 0.40 * s;
+    this.wy -= 0.30 * s * side;
+    this.wz += 0.72 * s * side;
   }
 
   /**
@@ -1884,6 +1974,9 @@ export class Viewmodel implements OverlayPass {
     this.root.visible = on;
     if (!on) {
       this.hitGlow = 0;
+      this.hitWasKill = 0;
+      this.hitGlowDecay = HIT_GLOW_DECAY;
+      (this.uniforms.uKill.value as THREE.Vector3).set(0, 0, 0);
       this.brassMesh.visible = false;
       for (let i = 0; i < SHELL_SLOTS; i++) this.shellLife[i] = 0;
     }
@@ -2142,10 +2235,14 @@ export class Viewmodel implements OverlayPass {
     // The hit pop. Deliberately small — it has to be felt at 60 fps over three
     // frames, not seen as the gun turning into a lightbulb.
     if (this.hitGlow > 0) {
-      this.hitGlow -= HIT_GLOW_DECAY * step;
+      this.hitGlow -= this.hitGlowDecay * step;
       if (this.hitGlow < 0) this.hitGlow = 0;
     }
     this.uniforms.uBright.value = this.bright * (1 + HIT_GLOW_GAIN * this.hitGlow);
+    const kill = this.hitWasKill * Math.min(1, this.hitGlow) * KILL_TINT_GAIN;
+    (this.uniforms.uKill.value as THREE.Vector3).set(
+      KILL_TINT_R * kill, KILL_TINT_G * kill, KILL_TINT_B * kill,
+    );
 
     /* --- part transforms ------------------------------------------------ */
     const scale = scaleOf(shape);

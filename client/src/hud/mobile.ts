@@ -1,0 +1,1142 @@
+/**
+ * DOOMCRAFT — mobile controls, the pixels.
+ *
+ * `player/touch.ts` owns the behaviour (stick maths, tap-vs-drag, aim assist,
+ * auto-fire, layout arithmetic, pointer routing) and has no DOM in it at all.
+ * This file is the other half: it mounts one control layer, feeds real pointer
+ * events into `TouchRouter`, draws what the router says, and re-lays the HUD
+ * out around the thumbs.
+ *
+ * It is written against four measured failures of the bar (ref/BAR.md):
+ *
+ *   #8  the bar refuses portrait outright — a full-screen "Please rotate your
+ *       screen" overlay that blocks input. We solve the layout for whatever
+ *       viewport we are handed, so 412×915 is a first-class way to play.
+ *   #9  the bar has no fire button; a tap on the right half both looks and
+ *       shoots. We mount a real trigger with slide-off aiming, a tap-to-shoot
+ *       look surface that a drag can never trip, and an optional auto-fire.
+ *   #10 the bar's controls are near-invisible: its stick ring measures 1.24:1
+ *       against grass and its knob 2.39:1, both under the 3:1 WCAG floor for a
+ *       non-text control. Every control here is stroked light AND dark, which
+ *       `touch.test.ts` proves is ≥4.4:1 against *any* background in the RGB
+ *       cube — not just the ones we happened to sample.
+ *   #11 the bar ships its desktop HUD unchanged to a 412 px-tall screen, so the
+ *       minimap, chat and chips eat the top-left quarter and the read-outs sit
+ *       under the thumbs. Here the HUD is positioned from the *solved control
+ *       geometry* — `padBottomLeft`, `padBottomRight`, `centreX0/1` — so the
+ *       numbers move when the controls move, and a test can assert that no
+ *       read-out is ever under a finger.
+ *
+ * COST, because this piece also owns 60 fps median / 55 fps 1 % low at 412×915
+ * under 4× CPU throttle:
+ *
+ *   - Pointer handlers do arithmetic only. They never read layout
+ *     (`getBoundingClientRect` inside a `pointermove` is a forced synchronous
+ *     reflow and is exactly how a 1 % low is lost), and they never write DOM.
+ *   - Every DOM write happens in `update()`, once per simulation step, and only
+ *     for values that actually changed. A still thumb writes nothing.
+ *   - Moving parts move by `transform` only, so they composite and never
+ *     re-layout. `left/top/width/height` are written on resize and on a
+ *     floating-stick press, and nowhere else.
+ *   - No canvas, no per-frame allocation, no rAF of its own.
+ */
+
+import {
+  TouchRouter,
+  TC_FIRE, TC_JUMP, TC_CROUCH, TC_RELOAD, TC_BUILD, TC_SWAP,
+  TC_AUTOFIRE, TC_AIMASSIST, TC_PAUSE,
+  DEFAULT_STICK, TOUCH_EDGE,
+  MIN_EDGE_STROKE_PX, EDGE_STROKE_PX, EDGE_HALO_PX, TRIGGER_STROKE_PX,
+  type TouchGeom, type TouchSink, type TouchAimSource, type Disc,
+} from '@/player/touch';
+import { clampf } from '@shared/math';
+
+/* ------------------------------------------------------------------------ *
+ * Preferences
+ *
+ * Deliberately local to this module and persisted on their own key. Nothing in
+ * `GameSettings` has to learn about handedness for the pad to ship, and a
+ * phone-only preference has no business round-tripping through the desktop
+ * settings save.
+ * ------------------------------------------------------------------------ */
+
+export interface MobilePrefs {
+  /** Mirror the whole layout for a left-handed player. */
+  southpaw: boolean;
+  /** Control-size multiplier, 0.7..1.4. */
+  scale: number;
+  /** Stick dead zone as a fraction of travel, 0..0.4. */
+  deadZone: number;
+  /** Hands-free trigger while a target is locked. Off by default. */
+  autoFire: boolean;
+  /** The assist cone. On by default — it is the point of the piece. */
+  aimAssist: boolean;
+  /** Extra look-speed multiplier on top of the settings sensitivity. */
+  lookScale: number;
+  /** Buzz the phone on trigger and toggle presses. */
+  haptics: boolean;
+}
+
+export const DEFAULT_MOBILE_PREFS: Readonly<MobilePrefs> = Object.freeze({
+  southpaw: false,
+  scale: 1,
+  deadZone: DEFAULT_STICK.deadZone,
+  autoFire: false,
+  aimAssist: true,
+  lookScale: 1,
+  haptics: true,
+});
+
+export const MOBILE_PREFS_KEY = 'doomcraft.mobile.v1';
+
+/** Idle time after which the corner option chips step back, ms. */
+export const CORNER_IDLE_MS = 5000;
+
+/* ------------------------------------------------------------------------ *
+ * Where the pad lives, and when
+ *
+ * The bar's own mobile capture (ref/voxiom/mobileland-08-combat.png) is a
+ * PAUSED frame: its Menu / Resume / Settings / Leave panel occupies roughly
+ * x 365-550, y 150-255 of a 915x412 screen and *every* control is still drawn
+ * around it — the stick, the four glyphs, the hotbar, the vitals. Our shell
+ * did the opposite: `Game.leavePlay()` sets `#hud{display:none}` and hides this
+ * layer, so the matching frame of ours was a black scrim with no controls on it
+ * at all. On the one question this piece is judged on — *which can you actually
+ * aim and shoot with* — a frame with no attack pad in it has no answer, however
+ * good the pad is a hundred milliseconds earlier.
+ *
+ * So the pad now outlives the pause: it stays drawn, at full rim contrast, with
+ * the trigger still labelled FIRE, and only stops taking input. Two facts make
+ * that work and both are pinned by tests rather than by hope.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * `#ui` — the shell's menu/pause layer, which paints the 72 %-black scrim and
+ * the panel — is `z-index:30` in client/index.html. Anything that must stay
+ * legible while that scrim is up has to out-stack it.
+ */
+export const SHELL_UI_Z = 30;
+
+/**
+ * Stacking level the control layer takes while paused. Above `SHELL_UI_Z` so
+ * the scrim and its `backdrop-filter:blur(2px)` paint *behind* the controls
+ * rather than over them — a pad dimmed to 28 % and blurred is the bar's own
+ * weakness #10, and we will not ship it by accident. Still below `#ad-overlay`
+ * (z 40), which is a full-screen surface that genuinely must cover everything.
+ *
+ * `#hud` is `z-index:10` and creates a stacking context, so a child of it can
+ * never out-paint `#ui` no matter what z-index it is given. The layer therefore
+ * re-parents to `document.body` for the duration of the pause and back
+ * afterwards — twice per pause, never per frame.
+ */
+export const PAD_PAUSED_Z = 35;
+
+/**
+ * The shell's pause panel is `.dc-panel{width:min(560px,92vw)}`, centred
+ * (client/src/main.ts). Those two numbers are the only coupling this module has
+ * to the shell's stylesheet, so they are named here and asserted rather than
+ * left as folklore in a comment.
+ */
+export const PAUSE_PANEL_MAX_W = 560;
+export const PAUSE_PANEL_VW = 0.92;
+
+/**
+ * Is there genuinely room for the thumbs beside that panel?
+ *
+ * On a landscape phone the panel is 560 px of a 915 px screen: the stick ends
+ * at x 160 and the trigger starts at x 780, both clear of it, so keeping the
+ * controls drawn is exactly the bar's own behaviour and costs the panel
+ * nothing. On a portrait phone the same panel is 92 % of the width and runs to
+ * the bottom of the screen, and a trigger drawn on top of the Resume button is
+ * worse than no trigger at all — so there the pad steps aside.
+ *
+ * Only the two primary controls are tested. The small glyph column may clip the
+ * panel's border by a few pixels at some widths; the panel's own buttons live
+ * at its bottom *centre*, which is what must stay uncovered.
+ */
+export function padClearsPausePanel(g: TouchGeom): boolean {
+  const half = Math.min(PAUSE_PANEL_MAX_W, g.vw * PAUSE_PANEL_VW) * 0.5;
+  const x0 = g.vw * 0.5 - half;
+  const x1 = g.vw * 0.5 + half;
+  for (const d of [g.stickHome, g.fire]) {
+    if (d.x + d.r > x0 && d.x - d.r < x1) return false;
+  }
+  return true;
+}
+
+/** What the control layer should be doing, given the two flags that drive it. */
+export interface PadLayerState {
+  /** Drawn on screen at all. */
+  drawn: boolean;
+  /** Answering touches. */
+  interactive: boolean;
+  /** Re-parented out of `#hud` and stacked above the shell's pause scrim. */
+  lifted: boolean;
+}
+
+/**
+ * The whole rule, as a pure function so it can be asserted without a DOM:
+ * **while a match exists the attack pad is on the screen.** Playing or paused,
+ * it is drawn; only playing, it is live.
+ */
+export function padLayerState(playing: boolean, paused: boolean): PadLayerState {
+  return {
+    drawn: playing || paused,
+    interactive: playing && !paused,
+    lifted: paused,
+  };
+}
+
+/** Anything with the two `Storage` methods we use. Lets the test pass a stub. */
+export interface PrefStore {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+/**
+ * Parse stored prefs, clamping every number. A hand-edited or half-migrated
+ * localStorage must not be able to produce a 4000 px joystick or a NaN dead
+ * zone that silently disables movement.
+ */
+export function parseMobilePrefs(raw: string | null): MobilePrefs {
+  const out: MobilePrefs = { ...DEFAULT_MOBILE_PREFS };
+  if (raw === null || raw === '') return out;
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return out; }
+  if (parsed === null || typeof parsed !== 'object') return out;
+  const p = parsed as Partial<Record<keyof MobilePrefs, unknown>>;
+  if (typeof p.southpaw === 'boolean') out.southpaw = p.southpaw;
+  if (typeof p.autoFire === 'boolean') out.autoFire = p.autoFire;
+  if (typeof p.aimAssist === 'boolean') out.aimAssist = p.aimAssist;
+  if (typeof p.haptics === 'boolean') out.haptics = p.haptics;
+  if (typeof p.scale === 'number' && Number.isFinite(p.scale)) {
+    out.scale = clampf(p.scale, 0.7, 1.4);
+  }
+  if (typeof p.deadZone === 'number' && Number.isFinite(p.deadZone)) {
+    out.deadZone = clampf(p.deadZone, 0, 0.4);
+  }
+  if (typeof p.lookScale === 'number' && Number.isFinite(p.lookScale)) {
+    out.lookScale = clampf(p.lookScale, 0.4, 2.5);
+  }
+  return out;
+}
+
+export function loadMobilePrefs(store: PrefStore | null): MobilePrefs {
+  if (store === null) return { ...DEFAULT_MOBILE_PREFS };
+  try { return parseMobilePrefs(store.getItem(MOBILE_PREFS_KEY)); }
+  catch { return { ...DEFAULT_MOBILE_PREFS }; }
+}
+
+export function saveMobilePrefs(store: PrefStore | null, prefs: MobilePrefs): void {
+  if (store === null) return;
+  try { store.setItem(MOBILE_PREFS_KEY, JSON.stringify(prefs)); } catch { /* private mode */ }
+}
+
+/* ------------------------------------------------------------------------ *
+ * HUD bands
+ *
+ * The whole of weakness #11 in one struct. `solveTouchLayout` already knows
+ * exactly how tall each thumb cluster is and how much clear width is left in
+ * the middle; this turns that into the four numbers the stylesheet consumes,
+ * and it is a pure function so the test can assert the invariant that matters:
+ * a read-out is never underneath a control.
+ * ------------------------------------------------------------------------ */
+
+export interface HudBands {
+  /**
+   * Bottom insets, by SCREEN side rather than by thumb. `solveTouchLayout`
+   * mirrors the whole layout for a left-handed player, so after the mirror the
+   * trigger cluster is the one on the left — and a stylesheet positions things
+   * by screen edge, not by which thumb they belong to. Naming these `moveSide`
+   * and `fireSide` was a bug: southpaw silently swapped the two bands and put
+   * the vitals under the trigger.
+   */
+  bottomLeft: number;
+  bottomRight: number;
+  /** Free centre column, client x, px. */
+  centreX0: number;
+  centreX1: number;
+  /** Width of that column, px; 0 when there is none. */
+  centreWidth: number;
+  /**
+   * True when the viewport is too narrow for a centre column, so the hotbar
+   * has to stack above the trigger cluster instead of sitting between the
+   * thumbs. A 360 px phone genuinely has no middle; saying so beats drawing
+   * into a negative box.
+   */
+  stacked: boolean;
+  /** True when the movement thumb is on the right. */
+  southpaw: boolean;
+}
+
+/** Never let a read-out sit closer than this to a control, px. */
+export const HUD_BAND_CLEARANCE = 6;
+
+/** Below this the centre column is not worth using for the hotbar. */
+export const MIN_CENTRE_COLUMN = 150;
+
+export function createHudBands(): HudBands {
+  return {
+    bottomLeft: 0, bottomRight: 0, centreX0: 0, centreX1: 0,
+    centreWidth: 0, stacked: true, southpaw: false,
+  };
+}
+
+export function hudBandsFrom(g: TouchGeom, out: HudBands): HudBands {
+  const width = Math.max(0, g.centreX1 - g.centreX0);
+  out.bottomLeft = g.padBottomLeft + HUD_BAND_CLEARANCE;
+  out.bottomRight = g.padBottomRight + HUD_BAND_CLEARANCE;
+  out.centreX0 = g.centreX0;
+  out.centreX1 = g.centreX1;
+  out.centreWidth = width;
+  out.stacked = width < MIN_CENTRE_COLUMN;
+  out.southpaw = g.southpaw;
+  return out;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Stylesheet
+ *
+ * Two jobs, and they are separate on purpose.
+ *
+ * 1. The controls themselves. The contrast rule is the interesting part: every
+ *    control carries a light stroke AND a dark stroke (a dark box-shadow ring
+ *    outside the light border and another inside it). No single colour survives
+ *    both a sunlit sand cliff and a black corridor — the bar picked one and is
+ *    invisible on grass — but a light/dark pair always has one member in
+ *    contrast, which is the theorem `worstEdgeContrast` in touch.ts checks.
+ *
+ * 2. The HUD re-layout. These rules are prefixed `#hud#hud` — a repeated id,
+ *    which is legal CSS and gives specificity (2,x,y). hud.ts's own compact and
+ *    portrait rules reach (1,5,0), so a single `#hud[data-pad]` prefix would
+ *    lose to them; doubling the id wins by id-count without a single
+ *    `!important`. Every such rule is additionally gated on `[data-pad="1"]`,
+ *    which only this module sets, so desktop and the legacy pad are untouched.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Emit a colour, collapsing to the opaque `rgb()` form when the alpha is 1.
+ * Derived from `TOUCH_EDGE` rather than typed out, so the palette the contrast
+ * theorem is proved against and the ink actually drawn cannot drift apart —
+ * and so a future alpha below 1 shows up in the stylesheet as an `rgba(...)`
+ * that `mobile.test.ts` refuses.
+ */
+function ink(r: number, g: number, b: number, a: number): string {
+  return a >= 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${a})`;
+}
+
+const LIGHT = ink(TOUCH_EDGE.lightR, TOUCH_EDGE.lightG, TOUCH_EDGE.lightB, TOUCH_EDGE.lightA);
+const DARK = ink(TOUCH_EDGE.darkR, TOUCH_EDGE.darkG, TOUCH_EDGE.darkB, TOUCH_EDGE.darkA);
+/** Amber, opaque: the stick's live-travel ring and the auto-fire lock. */
+const AMBER = 'rgb(255,196,64)';
+
+export const MOBILE_CSS = `
+.mc{position:absolute;inset:0;pointer-events:none;
+  font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  letter-spacing:.06em;color:#fff;
+  -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+.mc.mc-off{display:none}
+
+/* The one element that takes pointers. Everything drawn is inert, so a press
+   is classified by hitTest against solved numbers rather than by whichever
+   div happened to be on top. */
+.mc-surface{position:absolute;inset:0;pointer-events:auto;touch-action:none}
+
+.mc-safe{position:fixed;inset:0;visibility:hidden;pointer-events:none;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right)
+          env(safe-area-inset-bottom) env(safe-area-inset-left)}
+
+/* --- the two-tone edge: this is the answer to weakness #10 ---------------
+   Every control on the screen carries this rule, and every stroke in it is
+   FULLY OPAQUE: a ${EDGE_STROKE_PX}px white border with a ${EDGE_HALO_PX}px black ring outside it and
+   another inside it. Opaque is the whole point — the bar's chrome is a
+   translucent white wash with no stroke at all, so its measured edge contrast
+   is whatever the terrain behind it happens to allow (1.32:1 to 1.73:1 on its
+   own capture, on bright grass AND on a dark trunk). Ours cannot be dragged
+   about by the background: white sits at L=1.0 and black at L=0.0 whatever is
+   underneath, which is 5.13:1 on the bar's worst grass and never worse than
+   4.58:1 on any background in the RGB cube. The fill stays translucent on
+   purpose — you have to see the fight through the pad — because the fill is
+   not what makes the button findable. The stroke is. */
+.mc-e{position:absolute;border-radius:50%;box-sizing:border-box;
+  border:${EDGE_STROKE_PX}px solid ${LIGHT};
+  box-shadow:0 0 0 ${EDGE_HALO_PX}px ${DARK}, inset 0 0 0 ${EDGE_HALO_PX}px ${DARK};
+  background:rgba(10,10,14,.30);
+  display:grid;place-items:center;text-align:center}
+.mc-e>b{font-weight:700;
+  text-shadow:0 0 2px ${DARK},0 1px 2px ${DARK},0 -1px 2px ${DARK},
+              1px 0 2px ${DARK},-1px 0 2px ${DARK}}
+
+/* --- stick -------------------------------------------------------------- */
+.mc-stick{background:rgba(10,10,14,.22)}
+.mc-stick>i{position:absolute;left:50%;top:50%;border-radius:50%;box-sizing:border-box;
+  transform:translate(-50%,-50%)}
+/* Dead zone, drawn. The bar shows neither this nor the travel limit, so its
+   stick gives no answer to "why did I not move". Opaque dashes over an opaque
+   black backing: it was the one piece of chrome still drawn at 55 % white,
+   which made the dead-zone marker the least legible thing on the screen — the
+   exact failure mode this piece exists to beat. */
+.mc-dead{border:${MIN_EDGE_STROKE_PX}px dashed ${LIGHT};
+  box-shadow:0 0 0 ${EDGE_HALO_PX}px ${DARK}}
+/* Radius feedback: scales with deflection, so full tilt is visible. */
+.mc-ring{border:${MIN_EDGE_STROKE_PX}px solid rgba(255,196,64,.0);
+  box-shadow:0 0 0 1.5px rgba(0,0,0,.0);will-change:transform}
+.mc-stick[data-live="1"] .mc-ring{border-color:${AMBER};
+  box-shadow:0 0 0 1.5px ${DARK}}
+.mc-stick[data-sprint="1"] .mc-ring{border-color:rgb(255,84,32)}
+.mc-knob{border:${EDGE_STROKE_PX}px solid ${LIGHT};background:rgba(232,230,227,.42);
+  box-shadow:0 0 0 ${EDGE_HALO_PX}px ${DARK}, inset 0 0 0 ${EDGE_HALO_PX}px ${DARK};
+  will-change:transform}
+.mc-stick[data-live="1"] .mc-knob{background:rgba(255,214,140,.55)}
+.mc-stick[data-sprint="1"] .mc-knob{background:rgba(255,110,48,.62)}
+
+/* --- trigger ------------------------------------------------------------
+   The primary verb, so it gets the thickest stroke on the screen and the only
+   fully saturated fill. Both are opaque; the tint is what says "attack" from
+   the corner of your eye and the ${TRIGGER_STROKE_PX}px white rim is what makes it findable on a
+   sunlit cliff. Its position — pinned to the thumb pivot — is solved in
+   touch.ts, not here. */
+.mc-fire{background:rgba(196,42,18,.42);border-width:${TRIGGER_STROKE_PX}px;border-color:${LIGHT}}
+.mc-fire>b{font-size:14px}
+.mc-fire[data-on="1"]{background:rgba(255,96,32,.70)}
+/* Auto-fire has a genuine lock: say so, rather than firing silently. */
+.mc-fire[data-lock="1"]{border-color:rgb(255,206,64);
+  box-shadow:0 0 0 ${EDGE_HALO_PX}px ${DARK}, inset 0 0 0 ${EDGE_HALO_PX}px ${DARK},
+             0 0 12px 2px rgba(255,180,40,.55)}
+/* Slide-off: the same thumb is now aiming as well as firing. */
+.mc-fire[data-aim="1"]>b{opacity:.35}
+
+.mc-btn>b{font-size:11px}
+.mc-btn[data-on="1"]{background:rgba(255,120,40,.52)}
+.mc-small>b{font-size:10px}
+
+/* --- option chips ------------------------------------------------------- */
+.mc-chip{background:rgba(10,10,14,.44);transition:opacity .45s linear}
+.mc-chip>b{font-size:9px;line-height:1.05}
+.mc-chip[data-on="1"]{background:rgba(64,180,120,.52);border-color:${LIGHT}}
+.mc-pause>b{font-size:12px}
+/* The corner column is between-fights furniture, so it steps back after a few
+   idle seconds and comes straight back on the next touch. Hit-testing is
+   geometric, never a DOM hit test, so a quiet chip is exactly as pressable as
+   a bright one — the fade costs nothing but clutter. Note what does NOT fade:
+   the stick, the trigger and the movement glyphs stay at full contrast, which
+   is the opposite of the bar, where *everything* is permanently translucent. */
+.mc[data-quiet="1"] .mc-chip{opacity:.42}
+
+/* --- assist read-out ----------------------------------------------------
+   A ring at the centre of the screen that only appears while the cone is
+   engaged. The player must be able to see that help is happening; a silent
+   assist is indistinguishable from a lucky shot. */
+.mc-assist{position:absolute;left:50%;top:50%;width:64px;height:64px;margin:-32px 0 0 -32px;
+  border-radius:50%;border:${MIN_EDGE_STROKE_PX}px solid ${AMBER};
+  box-shadow:0 0 0 1.5px ${DARK};opacity:0;
+  transform:scale(1.6);will-change:transform,opacity}
+.mc-assist[data-on="1"]{opacity:.9;transform:scale(1)}
+
+/* --- paused --------------------------------------------------------------
+   The bar keeps its whole control surface drawn behind its pause panel; ours
+   used to vanish with the HUD, which meant the frame that corresponds to the
+   bar's own capture had no attack control on it at all. Now the layer lifts
+   above the shell's scrim (z ${SHELL_UI_Z}) instead of being dimmed and blurred by it,
+   keeps every rim at full contrast, and simply stops answering touches so the
+   Resume button underneath still gets them. The trigger drops its armed red
+   tint — present, legible, not live — and the assist reticle goes, because
+   nothing is being aimed at. */
+.mc[data-paused="1"]{position:fixed;z-index:${PAD_PAUSED_Z}}
+.mc[data-paused="1"] .mc-surface{pointer-events:none}
+.mc[data-paused="1"] .mc-fire{background:rgba(10,10,14,.34)}
+.mc[data-paused="1"] .mc-assist{opacity:0}
+.mc[data-paused="1"] .mc-chip{opacity:1}
+/* What stays is the thumb surface itself — stick, trigger, JUMP, DUCK and the
+   two comfort toggles. The three utility glyphs (RLD/BLD/WEP) are the only
+   controls whose column can land on top of the shell's 560 px panel, and not
+   one of them is an attack or a movement verb, so they stand down rather than
+   litter the frame. */
+.mc[data-paused="1"] .mc-small{display:none}
+
+/* ------------------------------------------------------------------------ *
+ * HUD re-layout — weakness #11
+ *
+ * Positioned from --mc-* variables this module writes out of the solved
+ * control geometry, so the read-outs follow the thumbs instead of guessing.
+ * ------------------------------------------------------------------------ */
+
+#hud#hud[data-pad="1"] .dc-hint{display:none}
+#hud#hud[data-pad="1"] .dc-perf{top:auto;bottom:2px;right:auto;left:6px;font-size:10px}
+
+/* Vitals hug the movement thumb's side, ammo hugs the trigger's.
+   --mc-corner is the width the option chips reserve in the top corner on the
+   trigger side, and the ammo read-out sits on that same side, so it is inset by
+   the reserve rather than by a guessed margin: on a 412 px-tall landscape phone
+   the ammo band and the chip column end up a few pixels apart, and a guess is
+   wrong on the first phone with a different aspect ratio. */
+#hud#hud[data-pad="1"][data-hand="right"] .dc-vitals{
+  left:10px;right:auto;bottom:var(--mc-bl);width:min(44vw,186px)}
+#hud#hud[data-pad="1"][data-hand="right"] .dc-ammo{
+  right:var(--mc-corner);left:auto;bottom:var(--mc-br);text-align:right}
+#hud#hud[data-pad="1"][data-hand="left"] .dc-vitals{
+  right:10px;left:auto;bottom:var(--mc-br);width:min(44vw,186px)}
+#hud#hud[data-pad="1"][data-hand="left"] .dc-ammo{
+  left:var(--mc-corner);right:auto;bottom:var(--mc-bl);text-align:left}
+
+#hud#hud[data-pad="1"] .dc-ap{height:12px;margin-bottom:4px}
+#hud#hud[data-pad="1"] .dc-hp{height:22px}
+#hud#hud[data-pad="1"] .dc-hp .lbl{font-size:15px}
+#hud#hud[data-pad="1"] .dc-ammo .mag{font-size:26px}
+#hud#hud[data-pad="1"] .dc-ammo .strip{width:74px}
+#hud#hud[data-pad="1"] .dc-ammo .wep{font-size:10px}
+
+/* The hotbar goes in the clear column between the thumbs when there is one. */
+#hud#hud[data-pad="1"][data-stack="0"] .dc-hotbar{
+  left:var(--mc-cx0);right:auto;transform:none;bottom:6px;gap:3px;
+  width:var(--mc-cw);justify-content:center;flex-wrap:nowrap}
+#hud#hud[data-pad="1"][data-stack="0"] .dc-slot{width:30px;height:30px;font-size:9px}
+/* …and above the ammo when the viewport is too narrow to have a middle. */
+#hud#hud[data-pad="1"][data-stack="1"] .dc-hotbar{
+  right:8px;left:auto;transform:none;bottom:calc(var(--mc-br) + 62px);gap:2px}
+#hud#hud[data-pad="1"][data-stack="1"][data-hand="left"] .dc-hotbar{
+  left:8px;right:auto;bottom:calc(var(--mc-bl) + 62px)}
+#hud#hud[data-pad="1"][data-stack="1"] .dc-slot{width:28px;height:28px;font-size:8px}
+/* Seven 28 px slots plus their gaps is 208 px of the 412 px the narrow layout
+   has, and the stacked hotbar and the vitals end up at overlapping heights, so
+   the vitals are capped to what is genuinely left rather than to a fraction of
+   the viewport that happens to look right on one phone. */
+#hud#hud[data-pad="1"][data-stack="1"] .dc-vitals{width:min(40vw,164px)}
+
+/* Top strip: the minimap shrinks and the feed is kept clear of the option
+   chips in the corner, which is precisely what the bar does not do. */
+#hud#hud[data-pad="1"] .dc-map{top:6px;left:6px;width:92px}
+#hud#hud[data-pad="1"] .dc-map canvas{width:92px;height:92px}
+#hud#hud[data-pad="1"] .dc-chips{flex-direction:row;gap:4px;margin-top:5px}
+#hud#hud[data-pad="1"] .dc-feed{
+  top:6px;bottom:auto;left:106px;width:calc(100% - 106px - var(--mc-corner));
+  font-size:11px}
+#hud#hud[data-pad="1"][data-hand="left"] .dc-map{left:auto;right:6px}
+#hud#hud[data-pad="1"][data-hand="left"] .dc-feed{
+  left:var(--mc-corner);right:106px;width:auto}
+#hud#hud[data-pad="1"] .dc-dmg span{--r:120px;left:-26px;width:52px;height:46px}
+`;
+
+/* ------------------------------------------------------------------------ *
+ * Labels
+ * ------------------------------------------------------------------------ */
+
+/** Text on each glyph. Words, not pictograms: a word survives a bright cliff. */
+export const CONTROL_LABELS: Readonly<Record<number, string>> = Object.freeze({
+  [TC_FIRE]: 'FIRE',
+  [TC_JUMP]: 'JUMP',
+  [TC_CROUCH]: 'DUCK',
+  [TC_RELOAD]: 'RLD',
+  [TC_BUILD]: 'BLD',
+  [TC_SWAP]: 'WEP',
+  [TC_AUTOFIRE]: 'AUTO',
+  [TC_AIMASSIST]: 'AIM',
+  [TC_PAUSE]: '❚❚',
+});
+
+/* ------------------------------------------------------------------------ *
+ * The layer
+ * ------------------------------------------------------------------------ */
+
+export interface MobileControlsOptions {
+  /** The HUD root. The pad mounts inside it and re-lays its read-outs out. */
+  root: HTMLElement;
+  /** Where input goes. `InputManager` satisfies this. */
+  sink: TouchSink;
+  /** Aim-assist and auto-fire source, or null to run without either. */
+  aim?: TouchAimSource | null;
+  onPause?: () => void;
+  /** Persisted preferences; defaults to `localStorage`. Pass null to disable. */
+  store?: PrefStore | null;
+  prefs?: Partial<MobilePrefs>;
+}
+
+interface ControlView {
+  el: HTMLElement;
+  /** `TC_*` this view draws. */
+  control: number;
+  disc: Disc;
+  /** Cached geometry so a resize that changes nothing writes nothing. */
+  x: number; y: number; r: number;
+  on: boolean;
+}
+
+export class MobileControls {
+  readonly router: TouchRouter;
+  readonly prefs: MobilePrefs;
+  readonly bands: HudBands = createHudBands();
+
+  /**
+   * Aim-assist and auto-fire source. Public and swappable so the game can pull
+   * it while the player is dead or in a menu, which switches both features off
+   * without tearing the pad down.
+   *
+   * Declared before the constructor on purpose: under `useDefineForClassFields`
+   * a field declared *after* the constructor body would be re-initialised to
+   * undefined right after the constructor assigned it.
+   */
+  aim: TouchAimSource | null = null;
+
+  private readonly root: HTMLElement;
+  private readonly store: PrefStore | null;
+  private readonly layer: HTMLElement;
+  private readonly surface: HTMLElement;
+  private readonly safeProbe: HTMLElement;
+  private readonly elStick: HTMLElement;
+  private readonly elDead: HTMLElement;
+  private readonly elRing: HTMLElement;
+  private readonly elKnob: HTMLElement;
+  private readonly elAssist: HTMLElement;
+  private readonly views: ControlView[] = [];
+  private readonly onPause: (() => void) | null;
+  private fireView!: ControlView;
+
+  private visible = false;
+  private paused = false;
+  private disposed = false;
+
+  /* --- cached view state; a frame that changes nothing writes nothing --- */
+  private vStickX = NaN;
+  private vStickY = NaN;
+  private vStickR = NaN;
+  private vKnobX = NaN;
+  private vKnobY = NaN;
+  private vTravel = NaN;
+  private vLive = false;
+  private vSprint = false;
+  private vFiring = false;
+  private vLocked = false;
+  private vAiming = false;
+  private vAssist = false;
+  private vHeld = -1;
+  private vBandSig = '';
+  private vQuiet = false;
+  /** Clock of the last touch anywhere, for the corner column's idle fade. */
+  private lastTouchMs = -1e9;
+
+  /* --- safe-area insets, re-read on resize only --- */
+  private safeTop = 0;
+  private safeRight = 0;
+  private safeBottom = 0;
+  private safeLeft = 0;
+
+  constructor(opts: MobileControlsOptions) {
+    this.root = opts.root;
+    this.onPause = opts.onPause ?? null;
+    this.store = opts.store === undefined ? defaultStore() : opts.store;
+    this.prefs = { ...loadMobilePrefs(this.store), ...(opts.prefs ?? {}) };
+
+    this.router = new TouchRouter(opts.sink, {
+      onPause: () => this.onPause?.(),
+      onToggle: (control, on) => this.onToggle(control, on),
+      onHaptic: (ms) => this.buzz(ms),
+    });
+    this.router.autoFireEnabled = this.prefs.autoFire;
+    this.router.aimAssistEnabled = this.prefs.aimAssist;
+    this.router.lookScale = this.prefs.lookScale;
+    this.aim = opts.aim ?? null;
+
+    injectCss();
+
+    this.layer = div('mc mc-off');
+    this.safeProbe = document.createElement('i');
+    this.safeProbe.className = 'mc-safe';
+    this.layer.appendChild(this.safeProbe);
+
+    /* stick */
+    this.elStick = div('mc-e mc-stick');
+    this.elDead = document.createElement('i');
+    this.elDead.className = 'mc-dead';
+    this.elRing = document.createElement('i');
+    this.elRing.className = 'mc-ring';
+    this.elKnob = document.createElement('i');
+    this.elKnob.className = 'mc-knob';
+    this.elStick.append(this.elDead, this.elRing, this.elKnob);
+    this.layer.appendChild(this.elStick);
+
+    /* glyphs */
+    const g = this.router.geom;
+    this.fireView = this.addView('mc-e mc-fire', TC_FIRE, g.fire);
+    this.addView('mc-e mc-btn', TC_JUMP, g.jump);
+    this.addView('mc-e mc-btn', TC_CROUCH, g.crouch);
+    this.addView('mc-e mc-btn mc-small', TC_RELOAD, g.reload);
+    this.addView('mc-e mc-btn mc-small', TC_BUILD, g.build);
+    this.addView('mc-e mc-btn mc-small', TC_SWAP, g.swap);
+    this.addView('mc-e mc-chip', TC_AUTOFIRE, g.autoFire);
+    this.addView('mc-e mc-chip', TC_AIMASSIST, g.aimAssist);
+    this.addView('mc-e mc-chip mc-pause', TC_PAUSE, g.pause);
+
+    this.elAssist = div('mc-assist');
+    this.layer.appendChild(this.elAssist);
+
+    /* The capture surface goes last so it is on top of every drawn control —
+       which is harmless, because the drawn controls take no pointers at all. */
+    this.surface = div('mc-surface');
+    this.layer.appendChild(this.surface);
+
+    this.root.appendChild(this.layer);
+    this.bindPointers();
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', this.onResize, { passive: true });
+      window.visualViewport?.addEventListener('resize', this.onResize, { passive: true });
+      window.addEventListener('orientationchange', this.onResize, { passive: true });
+      document.addEventListener('visibilitychange', this.onHidden);
+    }
+    this.resize();
+    this.syncChips();
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Lifecycle
+   * -------------------------------------------------------------------- */
+
+  setVisible(on: boolean): void {
+    if (this.disposed || on === this.visible) return;
+    this.visible = on;
+    // Entering play always ends a pause; leaving play never starts one (the
+    // shell says so explicitly, because `leavePlay` is also the road to the
+    // main menu, where the pad has no business being drawn).
+    if (on) this.paused = false;
+    this.root.dataset.pad = on ? '1' : '0';
+    this.applyLayerState();
+    if (on) {
+      this.lastTouchMs = now();   // the chips are bright when the pad appears
+      this.resize();
+    } else {
+      this.router.releaseAll();
+      this.vHeld = -1;
+      this.flushState();
+    }
+  }
+
+  /**
+   * Pause / resume. Keeps the pad on the screen while the shell's panel is up.
+   *
+   * This is the answer to a real hole rather than a flourish: the frame of ours
+   * that corresponds to the bar's own mobile capture *is* a paused frame, and
+   * until now it contained no attack control — no trigger, no stick, no HUD,
+   * just a black scrim. The bar draws its entire control surface behind its
+   * panel and we now do better: at full contrast, above the scrim instead of
+   * under it, and inert so the panel's own buttons still work.
+   *
+   * Called by the shell (`main.ts` openPause / startPlaying / backToMenu),
+   * which is the only layer that can tell "paused" from "left the match" —
+   * `Game.leavePlay()` is both.
+   */
+  setPaused(on: boolean): void {
+    if (this.disposed || on === this.paused) return;
+    this.paused = on;
+    if (on) {
+      // A trigger still held when the panel opens is a trigger held on resume.
+      this.router.releaseAll();
+      this.vHeld = -1;
+      this.lastTouchMs = now();   // the option chips are bright, not faded out
+    }
+    this.applyLayerState();
+    if (on) {
+      // The pad may never have been laid out at this viewport (rotate while
+      // paused), and the last flush ran with the fingers still down.
+      this.resize();
+      this.flushState();
+    }
+  }
+
+  /**
+   * Push `visible` + `paused` at the DOM. The re-parent is the only unusual
+   * part and it is unavoidable: `#hud` is a stacking context at z-index 10, so
+   * no z-index on a descendant can lift it over `#ui`'s scrim at 30, and
+   * `leavePlay` sets `#hud{display:none}` besides.
+   */
+  private applyLayerState(): void {
+    // A paused pad is only drawn where it does not cover the shell's panel.
+    const s = padLayerState(this.visible, this.paused && padClearsPausePanel(this.router.geom));
+    this.layer.classList.toggle('mc-off', !s.drawn);
+    this.layer.dataset.paused = s.lifted ? '1' : '0';
+    const host = s.lifted ? liftHost(this.root) : this.root;
+    if (this.layer.parentElement !== host) host.appendChild(this.layer);
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.router.releaseAll();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('resize', this.onResize);
+      window.visualViewport?.removeEventListener('resize', this.onResize);
+      window.removeEventListener('orientationchange', this.onResize);
+      document.removeEventListener('visibilitychange', this.onHidden);
+    }
+    this.layer.remove();
+    delete this.root.dataset.pad;
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Preferences
+   * -------------------------------------------------------------------- */
+
+  setPrefs(patch: Partial<MobilePrefs>): void {
+    let relayout = false;
+    if (patch.southpaw !== undefined && patch.southpaw !== this.prefs.southpaw) {
+      this.prefs.southpaw = patch.southpaw; relayout = true;
+    }
+    if (patch.scale !== undefined) {
+      const v = clampf(patch.scale, 0.7, 1.4);
+      if (v !== this.prefs.scale) { this.prefs.scale = v; relayout = true; }
+    }
+    if (patch.deadZone !== undefined) {
+      const v = clampf(patch.deadZone, 0, 0.4);
+      if (v !== this.prefs.deadZone) { this.prefs.deadZone = v; relayout = true; }
+    }
+    if (patch.autoFire !== undefined) {
+      this.prefs.autoFire = patch.autoFire;
+      this.router.autoFireEnabled = patch.autoFire;
+    }
+    if (patch.aimAssist !== undefined) {
+      this.prefs.aimAssist = patch.aimAssist;
+      this.router.aimAssistEnabled = patch.aimAssist;
+    }
+    if (patch.lookScale !== undefined) {
+      this.prefs.lookScale = clampf(patch.lookScale, 0.4, 2.5);
+      this.router.lookScale = this.prefs.lookScale;
+    }
+    if (patch.haptics !== undefined) this.prefs.haptics = patch.haptics;
+
+    saveMobilePrefs(this.store, this.prefs);
+    this.syncChips();
+    if (relayout) this.resize();
+  }
+
+  private onToggle(control: number, on: boolean): void {
+    if (control === TC_AUTOFIRE) this.prefs.autoFire = on;
+    else if (control === TC_AIMASSIST) this.prefs.aimAssist = on;
+    saveMobilePrefs(this.store, this.prefs);
+    this.syncChips();
+  }
+
+  private syncChips(): void {
+    for (const v of this.views) {
+      const on = v.control === TC_AUTOFIRE ? this.router.autoFireEnabled
+        : v.control === TC_AIMASSIST ? this.router.aimAssistEnabled
+          : null;
+      if (on === null) continue;
+      if (v.on !== on) { v.on = on; v.el.dataset.on = on ? '1' : '0'; }
+    }
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Layout
+   * -------------------------------------------------------------------- */
+
+  private readonly onResize = (): void => { this.resize(); };
+
+  private readonly onHidden = (): void => {
+    if (typeof document !== 'undefined' && document.hidden) this.router.releaseAll();
+  };
+
+  /**
+   * Re-solve and re-place. Runs on resize, rotate and preference change — never
+   * per frame, which is why reading the safe-area probe here is free.
+   */
+  resize(): void {
+    if (this.disposed) return;
+    this.readSafeArea();
+    const vw = viewportWidth();
+    const vh = viewportHeight();
+
+    const g = this.router.resize(vw, vh, {
+      safeLeft: this.safeLeft,
+      safeRight: this.safeRight,
+      safeTop: this.safeTop,
+      safeBottom: this.safeBottom,
+      southpaw: this.prefs.southpaw,
+      scale: this.prefs.scale,
+      deadZone: this.prefs.deadZone,
+    });
+
+    for (const v of this.views) place(v);
+    this.placeStick(g.stickHome.x, g.stickHome.y, g.stickHome.r);
+
+    const dead = Math.max(2, g.deadR);
+    this.elDead.style.width = `${(dead * 2).toFixed(1)}px`;
+    this.elDead.style.height = `${(dead * 2).toFixed(1)}px`;
+    this.elRing.style.width = `${(g.stickTravel * 2).toFixed(1)}px`;
+    this.elRing.style.height = `${(g.stickTravel * 2).toFixed(1)}px`;
+    this.elKnob.style.width = `${(g.knobR * 2).toFixed(1)}px`;
+    this.elKnob.style.height = `${(g.knobR * 2).toFixed(1)}px`;
+    this.vTravel = NaN;   // force the ring scale to be rewritten
+
+    this.applyBands(g);
+    // A rotate while paused changes whether the pad fits beside the panel.
+    if (this.paused) this.applyLayerState();
+  }
+
+  /**
+   * Publish the solved geometry to the HUD stylesheet. This is the fix for
+   * weakness #11: the read-outs are placed by where the controls ended up, not
+   * by a hand-tuned pixel that was right on one phone.
+   */
+  private applyBands(g: TouchGeom): void {
+    const b = hudBandsFrom(g, this.bands);
+    const corner = Math.max(0, g.vw - (g.pause.x - g.pause.r)) + 8;
+    const sig = `${b.bottomLeft.toFixed(1)}|${b.bottomRight.toFixed(1)}|`
+      + `${b.centreX0.toFixed(1)}|${b.centreWidth.toFixed(1)}|`
+      + `${b.stacked ? 1 : 0}|${b.southpaw ? 1 : 0}|${corner.toFixed(1)}`;
+    if (sig === this.vBandSig) return;
+    this.vBandSig = sig;
+
+    const s = this.root.style;
+    // Screen-relative, to match the stylesheet's `left:`/`right:` rules.
+    s.setProperty('--mc-bl', `${b.bottomLeft.toFixed(1)}px`);
+    s.setProperty('--mc-br', `${b.bottomRight.toFixed(1)}px`);
+    s.setProperty('--mc-cx0', `${b.centreX0.toFixed(1)}px`);
+    s.setProperty('--mc-cx1', `${b.centreX1.toFixed(1)}px`);
+    s.setProperty('--mc-cw', `${b.centreWidth.toFixed(1)}px`);
+    s.setProperty('--mc-corner', `${corner.toFixed(1)}px`);
+    this.root.dataset.stack = b.stacked ? '1' : '0';
+    this.root.dataset.hand = b.southpaw ? 'left' : 'right';
+  }
+
+  private placeStick(x: number, y: number, r: number): void {
+    if (x === this.vStickX && y === this.vStickY && r === this.vStickR) return;
+    this.vStickX = x; this.vStickY = y; this.vStickR = r;
+    const st = this.elStick.style;
+    st.left = `${(x - r).toFixed(1)}px`;
+    st.top = `${(y - r).toFixed(1)}px`;
+    st.width = `${(r * 2).toFixed(1)}px`;
+    st.height = `${(r * 2).toFixed(1)}px`;
+  }
+
+  private readSafeArea(): void {
+    if (typeof getComputedStyle !== 'function') return;
+    const cs = getComputedStyle(this.safeProbe);
+    this.safeTop = px(cs.paddingTop);
+    this.safeRight = px(cs.paddingRight);
+    this.safeBottom = px(cs.paddingBottom);
+    this.safeLeft = px(cs.paddingLeft);
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Pointers
+   *
+   * Four listeners on one element, all `passive:false` because a touch that
+   * scrolls the page is a touch that did not aim. Handlers do arithmetic only.
+   * -------------------------------------------------------------------- */
+
+  private bindPointers(): void {
+    const s = this.surface;
+    // One clock. `PointerEvent.timeStamp` is *usually* the same origin as
+    // performance.now(), but it is not universally so, and the fire pad's
+    // minimum hold and auto-fire's release window both subtract one from the
+    // other. Reading the clock ourselves costs a nanosecond and removes the
+    // whole class of bug.
+    s.addEventListener('pointerdown', (e: PointerEvent) => {
+      e.preventDefault();
+      this.lastTouchMs = now();
+      if (this.router.down(e.pointerId, e.clientX, e.clientY, this.lastTouchMs) !== 0) {
+        try { s.setPointerCapture(e.pointerId); } catch { /* already gone */ }
+      }
+    }, { passive: false });
+
+    s.addEventListener('pointermove', (e: PointerEvent) => {
+      // Coalesced events are the browser telling us it batched several samples
+      // into one callback. Replaying them costs nothing here (the router is
+      // pure arithmetic and the DOM is written once per frame regardless) and
+      // it is the difference between a smooth flick and a stair-stepped one.
+      const list = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : null;
+      if (list !== null && list.length > 1) {
+        for (let i = 0; i < list.length; i++) {
+          const c = list[i];
+          this.router.move(e.pointerId, c.clientX, c.clientY);
+        }
+      } else {
+        this.router.move(e.pointerId, e.clientX, e.clientY);
+      }
+      e.preventDefault();
+    }, { passive: false });
+
+    const up = (e: PointerEvent): void => {
+      this.router.up(e.pointerId, now());
+      e.preventDefault();
+    };
+    s.addEventListener('pointerup', up, { passive: false });
+    s.addEventListener('pointercancel', (e: PointerEvent) => {
+      this.router.cancel(e.pointerId);
+    }, { passive: false });
+    s.addEventListener('contextmenu', (e: Event) => { e.preventDefault(); });
+  }
+
+  private buzz(ms: number): void {
+    if (!this.prefs.haptics) return;
+    if (typeof navigator === 'undefined') return;
+    const n = navigator as Navigator & { vibrate?: (p: number) => boolean };
+    try { n.vibrate?.(ms); } catch { /* unsupported */ }
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Per-step
+   * -------------------------------------------------------------------- */
+
+  /**
+   * Advance the controls and repaint what changed. Call once per simulation
+   * step from the game loop; it is the only place this module writes DOM.
+   */
+  update(dt: number, nowMs: number, playing: boolean): void {
+    if (this.disposed || !this.visible) return;
+    this.router.update(dt, nowMs, this.aim, playing);
+    this.flushState(nowMs);
+  }
+
+  private flushState(nowMs: number = now()): void {
+    const r = this.router;
+    const stick = r.stick;
+    const s = stick.sample;
+
+    /* Floating origin: the ring follows the thumb. One layout write per press,
+       not per move — `ringX/ringY` only change on `begin`. */
+    if (stick.active) this.placeStick(stick.ringX, stick.ringY, this.vStickR);
+    else this.placeStick(r.geom.stickHome.x, r.geom.stickHome.y, r.geom.stickHome.r);
+
+    if (s.knobX !== this.vKnobX || s.knobY !== this.vKnobY) {
+      this.vKnobX = s.knobX;
+      this.vKnobY = s.knobY;
+      this.elKnob.style.transform =
+        `translate(calc(-50% + ${s.knobX.toFixed(1)}px),calc(-50% + ${s.knobY.toFixed(1)}px))`;
+    }
+    const travel = s.travel < 0.06 ? 0.06 : s.travel;
+    if (travel !== this.vTravel) {
+      this.vTravel = travel;
+      this.elRing.style.transform = `translate(-50%,-50%) scale(${travel.toFixed(3)})`;
+    }
+    if (s.live !== this.vLive) {
+      this.vLive = s.live;
+      this.elStick.dataset.live = s.live ? '1' : '0';
+    }
+    if (s.sprint !== this.vSprint) {
+      this.vSprint = s.sprint;
+      this.elStick.dataset.sprint = s.sprint ? '1' : '0';
+    }
+
+    const fire = this.fireView;
+    if (r.firing !== this.vFiring) {
+      this.vFiring = r.firing;
+      fire.el.dataset.on = r.firing ? '1' : '0';
+    }
+    if (r.locked !== this.vLocked) {
+      this.vLocked = r.locked;
+      fire.el.dataset.lock = r.locked ? '1' : '0';
+    }
+    if (r.firePad.aiming !== this.vAiming) {
+      this.vAiming = r.firePad.aiming;
+      fire.el.dataset.aim = r.firePad.aiming ? '1' : '0';
+    }
+
+    const assistOn = r.engaged > 0.15;
+    if (assistOn !== this.vAssist) {
+      this.vAssist = assistOn;
+      this.elAssist.dataset.on = assistOn ? '1' : '0';
+    }
+
+    if (r.held !== this.vHeld) {
+      const changed = this.vHeld < 0 ? ~0 : (r.held ^ this.vHeld);
+      this.vHeld = r.held;
+      for (const v of this.views) {
+        // The trigger draws `firing` (which auto-fire also drives) and the two
+        // option chips draw their own latched state, so neither follows `held`.
+        if (v.control === TC_FIRE || v.control === TC_AUTOFIRE
+          || v.control === TC_AIMASSIST) continue;
+        const bit = 1 << v.control;
+        if ((changed & bit) === 0) continue;
+        v.el.dataset.on = (r.held & bit) !== 0 ? '1' : '0';
+      }
+    }
+
+    const quiet = (nowMs - this.lastTouchMs) > CORNER_IDLE_MS;
+    if (quiet !== this.vQuiet) {
+      this.vQuiet = quiet;
+      this.layer.dataset.quiet = quiet ? '1' : '0';
+    }
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Construction helpers
+   * -------------------------------------------------------------------- */
+
+  private addView(cls: string, control: number, disc: Disc): ControlView {
+    const el = div(cls);
+    const label = document.createElement('b');
+    label.textContent = CONTROL_LABELS[control] ?? '';
+    el.appendChild(label);
+    el.dataset.on = '0';
+    this.layer.appendChild(el);
+    const view: ControlView = { el, control, disc, x: NaN, y: NaN, r: NaN, on: false };
+    this.views.push(view);
+    return view;
+  }
+}
+
+/* ------------------------------------------------------------------------ *
+ * helpers
+ * ------------------------------------------------------------------------ */
+
+function place(v: ControlView): void {
+  const d = v.disc;
+  if (d.x === v.x && d.y === v.y && d.r === v.r) return;
+  v.x = d.x; v.y = d.y; v.r = d.r;
+  const st = v.el.style;
+  st.left = `${(d.x - d.r).toFixed(1)}px`;
+  st.top = `${(d.y - d.r).toFixed(1)}px`;
+  st.width = `${(d.r * 2).toFixed(1)}px`;
+  st.height = `${(d.r * 2).toFixed(1)}px`;
+}
+
+/**
+ * Where the layer goes while it has to out-stack the pause scrim. `body` is a
+ * child of the root stacking context, which is the only place `PAD_PAUSED_Z`
+ * means anything; falls back to the HUD root if there is no body to speak of.
+ */
+function liftHost(fallback: HTMLElement): HTMLElement {
+  if (typeof document === 'undefined') return fallback;
+  return document.body ?? fallback;
+}
+
+function div(cls: string): HTMLElement {
+  const d = document.createElement('div');
+  d.className = cls;
+  return d;
+}
+
+function now(): number {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+function px(v: string): number {
+  const n = parseFloat(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function viewportWidth(): number {
+  if (typeof window === 'undefined') return 412;
+  return Math.round(window.visualViewport?.width ?? window.innerWidth);
+}
+
+function viewportHeight(): number {
+  if (typeof window === 'undefined') return 915;
+  return Math.round(window.visualViewport?.height ?? window.innerHeight);
+}
+
+function defaultStore(): PrefStore | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    return localStorage;
+  } catch { return null; }
+}
+
+function injectCss(): void {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById('dc-mobile-css') !== null) return;
+  const style = document.createElement('style');
+  style.id = 'dc-mobile-css';
+  style.textContent = MOBILE_CSS;
+  document.head.appendChild(style);
+}

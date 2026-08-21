@@ -19,7 +19,7 @@ import {
   CHUNK_HEIGHT, clamp01,
 } from '@shared/constants';
 import {
-  BlockId, BLOCK_HARDNESS, BLOCK_SOLID, Face,
+  BlockId, BLOCK_COUNT, BLOCK_HARDNESS, BLOCK_SOLID, Face,
   isReplaceable, isPlaceable, isBreakable, blockBreakMs, blockFaceColor,
 } from '@shared/blocks';
 import { WEAPONS } from '@shared/weapons';
@@ -288,6 +288,58 @@ const CARVE_JITTER_SPAN = 0.54;
 /** Upper bound on debris bursts per explosion, whatever the radius. */
 const MAX_DEBRIS_BURSTS = 40;
 
+/* ------------------------------------------------------------------------ *
+ * Scorching
+ *
+ * A crater you cannot see from across the arena has not changed the level, it
+ * has only changed the collision. Removing voxels leaves a hole whose rim is
+ * the same colour as the wall it was cut out of, so from twenty metres a
+ * breached keep still reads as an intact keep and the player never learns that
+ * shooting the wall was worth doing.
+ *
+ * So the blast also CONVERTS the surviving skin of the crater to slag. The
+ * target is HELLSTONE for almost everything, and that is not a colour choice:
+ * hellstone is the darkest breakable rock in the palette (luminance 59 against
+ * stone's 141) AND it emits light level 5, so a fresh crater is a dark red
+ * scar that glows for two blocks in the mesher's block-light channel. In a dark
+ * room a rocket leaves something that is still hot. Metals go to rusted metal
+ * instead, which is the same trick in the other direction — a blue-grey wall
+ * turns orange-brown where it was hit.
+ *
+ * Nothing maps to air, so the removal count `carveSphere` returns stays exactly
+ * the number of voxels it deleted, and every target is well under a rocket's
+ * blast strength (hellstone resists 3.3, rusted metal 3.7, against 9.6 at the
+ * centre) so sustained fire on one wall keeps widening the hole.
+ * ------------------------------------------------------------------------ */
+
+/** Target id per source id; 0 means "this material does not scorch". */
+const SCORCHED = new Uint8Array(BLOCK_COUNT);
+for (const id of [
+  BlockId.GRASS, BlockId.DIRT, BlockId.SAND, BlockId.SNOW, BlockId.STONE,
+  BlockId.COBBLESTONE, BlockId.GRAVEL, BlockId.BRICK, BlockId.PLANKS,
+  BlockId.WOOD, BlockId.BONE,
+]) SCORCHED[id] = BlockId.HELLSTONE;
+SCORCHED[BlockId.METAL] = BlockId.RUSTED_METAL;
+SCORCHED[BlockId.TECH_PANEL] = BlockId.RUSTED_METAL;
+// Hellstone, obsidian, bedrock, glass, ice, leaves, slime, neon and the liquids
+// all stay as they are: already slag, blast-proof, or not a surface anybody
+// reads a crater off.
+
+/** Fraction of eligible rim voxels that actually char. Ragged beats uniform. */
+const SCORCH_CHANCE = 0.55;
+/**
+ * Hard ceiling on scorch marks per blast, and a share of the removal count so a
+ * small blast leaves a small mark.
+ *
+ * Both exist for the wire, not for looks: `MAX_BLOCK_DELTAS_PER_MESSAGE` is 512
+ * and a BFG already spends all of that on the hole itself. `scorchCrater` also
+ * stops the moment the sink refuses a push, so a blast can never turn a full
+ * delta buffer into a silent desync.
+ */
+const SCORCH_MAX = 72;
+/** One scorch mark per this many voxels removed. */
+const SCORCH_PER_REMOVED = 4;
+
 /**
  * Delete a sphere of voxels.
  *
@@ -353,8 +405,71 @@ export function carveSphere(
       }
     }
   }
+  if (removed > 0) scorchCrater(world, cx, cy, cz, radius, removed, seed, sink);
   world.endBatch();
   return removed;
+}
+
+/**
+ * Char the surviving skin of a crater. Returns how many voxels changed.
+ *
+ * "Skin" is any solid voxel inside `radius + 1` with at least one air neighbour,
+ * which after a carve is the crater wall plus the ring of ground the blast
+ * washed over — both of which is what you want blackened. Iteration order is
+ * fixed and the gate is a position hash, so the client's predicted scorch and
+ * the server's authoritative one are the same voxels.
+ */
+function scorchCrater(
+  world: VoxelWorld,
+  cx: number, cy: number, cz: number,
+  radius: number, removed: number, seed: number,
+  sink?: BlockChangeSink,
+): number {
+  const rr = radius + 1;
+  const r2 = rr * rr;
+  const budget = Math.min(SCORCH_MAX, Math.floor(removed / SCORCH_PER_REMOVED));
+  if (budget <= 0) return 0;
+
+  const x0 = Math.floor(cx - rr), x1 = Math.floor(cx + rr);
+  const y0 = Math.max(0, Math.floor(cy - rr)), y1 = Math.min(CHUNK_HEIGHT - 1, Math.floor(cy + rr));
+  const z0 = Math.floor(cz - rr), z1 = Math.floor(cz + rr);
+  const hseed = seed ^ 0x5c0acb;
+
+  let n = 0;
+  for (let y = y0; y <= y1; y++) {
+    const dy = y + 0.5 - cy;
+    const dy2 = dy * dy;
+    for (let z = z0; z <= z1; z++) {
+      const dz = z + 0.5 - cz;
+      const dz2 = dz * dz;
+      if (dy2 + dz2 > r2) continue;
+      for (let x = x0; x <= x1; x++) {
+        const dx = x + 0.5 - cx;
+        if (dx * dx + dy2 + dz2 > r2) continue;
+
+        const id = world.rawBlock(x, y, z);
+        const to = SCORCHED[id];
+        if (to === 0) continue;
+        if (hash3f(x, y, z, hseed) >= SCORCH_CHANCE) continue;
+        if (!exposedToAir(world, x, y, z)) continue;
+        if (!world.setBlock(x, y, z, to)) continue;
+        n++;
+        if (sink !== undefined && !sink.push(x, y, z, to)) return n;
+        if (n >= budget) return n;
+      }
+    }
+  }
+  return n;
+}
+
+/** True when any of the six neighbours is air — i.e. the voxel is on a surface. */
+function exposedToAir(world: VoxelWorld, x: number, y: number, z: number): boolean {
+  return world.rawBlock(x + 1, y, z) === BlockId.AIR
+    || world.rawBlock(x - 1, y, z) === BlockId.AIR
+    || world.rawBlock(x, y + 1, z) === BlockId.AIR
+    || world.rawBlock(x, y - 1, z) === BlockId.AIR
+    || world.rawBlock(x, y, z + 1) === BlockId.AIR
+    || world.rawBlock(x, y, z - 1) === BlockId.AIR;
 }
 
 /**

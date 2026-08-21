@@ -151,6 +151,11 @@ that file was measured, not guessed. Reference captures are in ${ROOT}/ref/voxio
 images, they are the point.
 `
 
+function oursWonRaw(verdict, piece, swap) {
+  const ours = piece.barShot ? (swap ? 'B' : 'A') : 'B'
+  return verdict.winner === ours
+}
+
 async function runPiece(pieceId, idx) {
   const piece = ALL[pieceId]
   if (!piece) return null
@@ -211,13 +216,26 @@ piece.kind === 'numbers' ? `2. This piece is judged on numbers. Produce the meas
    (ref/voxiom/*-metrics.json already holds its load and fps numbers).` :
 `2. Pick OUR frame that corresponds to the bar's frame ${piece.barShot} — same viewport, same moment in
    the flow.`}
-${piece.barShot ? `3. Build the blind pair. Run EXACTLY:
+${piece.barShot ? `3. **Write the metrics into the blind directory under NEUTRAL names.** This is the step that
+   makes the comparison honest and the last run failed entirely because it was missing: every critic
+   had to open \`shots/ours-*-metrics.json\` to check the numbers, which told them which side was
+   ours, and all seven verdicts were discarded as contaminated.
+   After building the pair below, write two files — \`${abDir}/A-metrics.json\` and
+   \`${abDir}/B-metrics.json\` — matching the SAME A/B assignment as the images. Each must contain
+   only the comparable measurements (fpsMedian, fps1pctLow, medianMs, timeToInteractiveMs,
+   transferBytes, viewport, cpuThrottle, headed) with **every filename, path and product name
+   stripped**. Do not write a mapping, a note, or any other file into that directory.
+   Where a number does not exist for the bar, write null — do not invent one, and do not omit the key.
+   **Capture ours under the same conditions as the bar** (headed, and the same viewport and throttle),
+   or the measurement half is void and you must say so in \`caveats\`.
+
+4. Build the blind pair. Run EXACTLY:
 
      node ${ROOT}/tools/blind.mjs <OUR_IMAGE> <BAR_IMAGE> ${abDir} ${swap ? '1' : '0'} ${piece.kind === 'still' && /menu/.test(piece.barShot) ? 'menu' : 'game'}
 
    where BAR_IMAGE is ${piece.kind === 'motion' ? 'the contact sheet you made from ' + piece.barShot : ROOT + '/' + piece.barShot}.
    That writes ${abDir}/A.png and ${abDir}/B.png and nothing else. **Do not write the mapping anywhere.**
-   Do not echo it. Do not leave notes in that directory. The critic must not be able to recover it.` : '3. No image pair for this piece — numbers only.'}
+   Do not echo it. Do not leave notes in that directory. The critic must not be able to recover it.` : '3. No image pair for this piece — numbers only. Write the two neutral metrics files described above into ' + abDir + ' anyway.'}
 
 Return the paths and an honest note on any way the capture is not apples-to-apples.`,
       { label: `capture:${pieceId}:r${round}`, phase: 'Capture',
@@ -247,17 +265,23 @@ Judge ONLY the question above. Ignore which looks more "finished" overall.` :
 ${ROOT}/ref/voxiom/desktop-metrics.json for the bar. Decide which is better on the question above.
 Call ours "B" and the bar "A" for the purposes of your verdict.`}
 
-The measurement half, which you must check and which can independently fail us:
-${cap.metrics}
+The measurement half. **Read it from \`${abDir}/A-metrics.json\` and \`${abDir}/B-metrics.json\`** —
+they use the same A/B labels as the images. Do NOT open anything under \`${ROOT}/shots\` or
+\`${ROOT}/ref\`: those paths carry the product name and reading them is what contaminated every
+verdict in the previous run. If a metrics file is missing or a value is null, report the measurement
+as failed rather than going to look for it elsewhere.
 
 The steward's own honesty note about this comparison:
 ${cap.caveats}
 
-Return the fields CRITIC.md specifies. One letter. One gap. No scores.`,
+Return the fields CRITIC.md specifies, plus \`winnersWeakestPoint\`: the biggest remaining weakness in
+whichever side WON. When the winner is a shipped commercial game that is interesting; when the winner
+is the challenger, that sentence is the entire next round of work. One letter. No scores.`,
       { label: `judge:${pieceId}:r${round}`, phase: 'Judge', effort: 'xhigh',
-        schema: { type: 'object', required: ['winner', 'whyOneLine', 'biggestGap', 'wouldFlipIf', 'numbersChecked', 'contaminated'], properties: {
+        schema: { type: 'object', required: ['winner', 'whyOneLine', 'biggestGap', 'winnersWeakestPoint', 'wouldFlipIf', 'numbersChecked', 'contaminated'], properties: {
           winner: { type: 'string', enum: ['A', 'B', 'TIE'] },
           whyOneLine: { type: 'string' }, biggestGap: { type: 'string' },
+          winnersWeakestPoint: { type: 'string', description: 'the biggest remaining weakness in the WINNER — this is what drives the next round when the winner is ours' },
           wouldFlipIf: { type: 'string' }, numbersChecked: { type: 'string' },
           contaminated: { type: 'boolean' },
         } } })
@@ -267,7 +291,7 @@ Return the fields CRITIC.md specifies. One letter. One gap. No scores.`,
     const oursLetter = piece.barShot ? (swap ? 'B' : 'A') : 'B'
     const oursWon = verdict.winner === oursLetter
     history.push(`r${round}: ${oursWon ? 'WON' : verdict.winner === 'TIE' ? 'tied' : 'lost'} — ${verdict.whyOneLine}`)
-    gap = verdict.biggestGap
+    gap = oursWonRaw(verdict, piece, swap) ? (verdict.winnersWeakestPoint || verdict.biggestGap) : verdict.biggestGap
 
     log(`[${piece.name}] round ${round}: ${oursWon ? 'OURS WINS' : verdict.winner === 'TIE' ? 'tie (= a loss)' : 'ours loses'} — ${verdict.whyOneLine}`)
 

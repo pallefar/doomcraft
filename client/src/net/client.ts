@@ -70,6 +70,7 @@ import {
   dequantizeAngle,
   dequantizePitch,
   encodeBlockEdit,
+  encodeAppearance,
   encodeChatC2S,
   encodeHello,
   encodeInput,
@@ -339,7 +340,10 @@ export interface RemotePlayerView {
   active: boolean;
   isLocal: boolean;
   name: string;
+  /** Legacy one-byte appearance; kept for anything still reading it. */
   skin: number;
+  /** Packed avatar — see client/src/characters/avatar.ts. 0 is the default marine. */
+  avatar: number;
   team: number;
   /** Interpolated render transform. */
   x: number; y: number; z: number;
@@ -425,6 +429,8 @@ export interface NetClientOptions {
   createTransport?: () => ClientTransport;
   name: string;
   skin?: number;
+  /** Packed avatar sent in HELLO. Change it later with `setAvatar`. */
+  avatar?: number;
   caps?: number;
   autoReconnect?: boolean;
   events?: NetClientEvents;
@@ -594,7 +600,7 @@ export class NetClient {
   /* --- transport --- */
   private transport: ClientTransport | null = null;
   private readonly makeTransport: () => ClientTransport;
-  private readonly hello: { name: string; skin: number; caps: number };
+  private readonly hello: { name: string; skin: number; caps: number; avatar: number };
   private autoReconnect: boolean;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -687,6 +693,7 @@ export class NetClient {
       name: options.name,
       skin: options.skin ?? 0,
       caps: options.caps ?? 0,
+      avatar: (options.avatar ?? 0) >>> 0,
     };
     this.autoReconnect = options.autoReconnect ?? true;
     this.wallClock = options.wallClock ?? wallNow;
@@ -711,7 +718,7 @@ export class NetClient {
 
     for (let i = 0; i < MAX_PLAYERS; i++) {
       this.players.push({
-        id: 0, active: false, isLocal: false, name: '', skin: 0, team: 0,
+        id: 0, active: false, isLocal: false, name: '', skin: 0, avatar: 0, team: 0,
         x: 0, y: 0, z: 0, yaw: 0, pitch: 0, vx: 0, vy: 0, vz: 0,
         health: 0, armor: 0, weapon: 0, state: 0, kills: 0, deaths: 0,
       });
@@ -847,7 +854,7 @@ export class NetClient {
     this.reconnectAttempts = 0;
     const caps = this.hello.caps | (this.everConnected ? CAP_RETURNING : 0);
     this.everConnected = true;
-    encodeHello(this.writer, this.hello.name, this.hello.skin, caps);
+    encodeHello(this.writer, this.hello.name, this.hello.skin, caps, this.hello.avatar);
     this.rawSend(this.writer.copy());
     this.sendPing();
   }
@@ -1254,6 +1261,7 @@ export class NetClient {
       view.active = true;
       view.name = s.playerName[i];
       view.skin = s.playerSkin[i];
+      view.avatar = s.playerAvatar[i];
       view.team = s.playerTeam[i];
       view.health = s.playerHealth[i];
       view.armor = s.playerArmor[i];
@@ -1668,6 +1676,24 @@ export class NetClient {
   requestRespawn(): void {
     if (!this.connected) return;
     encodeRespawn(this.writer);
+    this.rawSend(this.writer.copy());
+  }
+
+  /**
+   * Change what everyone else sees you wearing, without a reconnect.
+   *
+   * Six bytes, sent only when something actually changed — the editor is a live
+   * preview and would otherwise fire one of these per slider frame. The value
+   * is also written back into the HELLO so a reconnect keeps the new look.
+   */
+  setAvatar(avatar: number, skin: number): void {
+    const a = avatar >>> 0;
+    const k = skin & 0xff;
+    if (this.hello.avatar === a && this.hello.skin === k) return;
+    this.hello.avatar = a;
+    this.hello.skin = k;
+    if (!this.connected) return;
+    encodeAppearance(this.writer, k, a);
     this.rawSend(this.writer.copy());
   }
 

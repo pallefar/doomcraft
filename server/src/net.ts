@@ -51,10 +51,12 @@ import {
   clamp,
   copyPlayerRecord,
   createBlockEditCommand,
+  createAppearanceMessage,
   createHelloMessage,
   createInputCommand,
   decodeBlockEdit,
   decodeChatC2S,
+  decodeAppearance,
   decodeHello,
   decodeInput,
   decodePing,
@@ -175,6 +177,8 @@ export class Connection {
   player: PlayerEntity | null = null;
   name = '';
   skin = 0;
+  /** Packed appearance from HELLO / C2S.APPEARANCE. Opaque to the server. */
+  avatar = 0;
   caps = 0;
   /** True once HELLO has been accepted. */
   ready = false;
@@ -286,6 +290,7 @@ export class NetHub {
   private nextConnId = 1;
 
   private readonly hello = createHelloMessage();
+  private readonly appearance = createAppearanceMessage();
   private readonly modeSelectMsg = createModeSelectMessage();
   private readonly modeActionMsg = createModeActionMessage();
   private readonly input = createInputCommand();
@@ -376,6 +381,7 @@ export class NetHub {
         case C2S.CHAT: this.onChat(conn, bytes); break;
         case C2S.RESPAWN: this.onRespawn(conn); break;
         case C2S.PING: this.onPing(conn, bytes); break;
+        case C2S.APPEARANCE: this.onAppearance(conn, bytes); break;
         case C2S_MODE.SELECT: this.onModeSelect(conn, bytes); break;
         case C2S_MODE.ACTION: this.onModeAction(conn, bytes); break;
         default:
@@ -398,6 +404,7 @@ export class NetHub {
     }
     conn.name = sanitiseName(this.hello.name);
     conn.skin = this.hello.skin & 0xff;
+    conn.avatar = this.hello.avatar >>> 0;
     conn.caps = this.hello.caps;
     conn.helloRecvMs = this.clock();
     conn.clientSimMs = 0;
@@ -410,6 +417,10 @@ export class NetHub {
     }
     conn.playerId = playerId;
     conn.player = this.sim.getPlayer(playerId) ?? null;
+    // `NetHost.onHello` predates the avatar and does not need to know about it:
+    // the body is already built by the time it returns, so the appearance is
+    // stamped on here rather than widening an interface four rooms implement.
+    if (conn.player !== null) conn.player.avatar = conn.avatar;
     conn.ready = true;
     conn.loadingIn = true;
 
@@ -498,6 +509,26 @@ export class NetHub {
   private onRespawn(conn: Connection): void {
     if (!conn.ready) return;
     this.host.onRespawnRequest(conn);
+  }
+
+  /**
+   * A live outfit change. There is nothing to validate — the bits are opaque
+   * here and the client clamps every index against its own roster before it
+   * indexes anything — so this is a store, and the ordinary delta encoder
+   * notices the changed field and ships it to everyone else on the next
+   * snapshot. Rate limiting rides on the existing per-connection violation
+   * budget via the message-rate cap; a client spamming it only spends its own
+   * bandwidth, because an unchanged value produces no delta bit.
+   */
+  private onAppearance(conn: Connection, bytes: Uint8Array): void {
+    if (!conn.ready) return;
+    decodeAppearance(this.reader.reset(bytes), this.appearance);
+    conn.skin = this.appearance.skin & 0xff;
+    conn.avatar = this.appearance.avatar >>> 0;
+    const p = conn.player;
+    if (p === null) return;
+    p.skin = conn.skin;
+    p.avatar = conn.avatar;
   }
 
   private onPing(conn: Connection, bytes: Uint8Array): void {
@@ -786,6 +817,7 @@ export class NetHub {
       s.playerDeaths[slot] = Math.min(65535, p.deaths);
       s.playerTeam[slot] = p.team;
       s.playerSkin[slot] = p.skin;
+      s.playerAvatar[slot] = p.avatar;
       s.playerName[slot] = p.name;
 
       const isLocal = p.id === conn.playerId;

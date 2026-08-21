@@ -28,6 +28,16 @@
  *     banked rim, a rim ledge you reach by a ramp of single-block stairs,
  *     chest-high cover, pillars and (43% of the time) a lava pit you can be
  *     knocked into. That is the room.
+ *   - Every arena wider than KEEP_MIN_RADIUS gets a KEEP: a roofed blockhouse
+ *     on the centre line with four doorways, a clerestory slit you can shoot
+ *     ankles through, glowing corner piers, a lava basin on the floor and a
+ *     parapeted roof deck reached by an external stair or a rocket jump. It is
+ *     the one thing the bar's world does not have anywhere: an INSIDE. A roof
+ *     zeroes the mesher's sky channel, so a keep is not just geometry that
+ *     casts no shadow — its floor is measurably a different key from the arena
+ *     outside its door, and the doorway you are silhouetted in is the whole
+ *     fight. Its panels are breachable and its piers are not, so a rocket opens
+ *     a new sightline into the room without dissolving the room.
  *   - Every arena is joined to its +X and +Z neighbour by a CORRIDOR cut down
  *     to a blended floor. That is the connective tissue, and it guarantees the
  *     whole map is one connected graph even though the terraces are walls.
@@ -54,8 +64,17 @@ import {
   warpedFbm2, ridged2, fbm2,
 } from './math.ts';
 
-/** Any change that moves a voxel must bump this; the server asserts on it. */
-export const TERRAIN_VERSION = 1;
+/**
+ * Any change that moves a voxel must bump this; the server asserts on it.
+ *
+ * v2 — arena keeps. Adds roofed interiors, so a column can now be solid, then
+ * air, then solid again.
+ * v3 — bastions. Paired 4-block masses with an arch through one of them, on a
+ * 24-block lattice over the whole dry plane and not only inside the arenas.
+ * v4 — crags. A second, denser occluder lattice at 12 blocks that fills the
+ * plane between the bastions, so no eye-height sightline runs to the skyline.
+ */
+export const TERRAIN_VERSION = 4;
 
 /* ------------------------------------------------------------------------ *
  * Tunables — the shape of the level
@@ -107,6 +126,181 @@ const LEDGE_RAMP_FRAC = 0.13;
 const COVER_GRID = 5;
 const PILLAR_GRID = 9;
 
+/* --- bastions ------------------------------------------------------------ *
+ *
+ * THE GAP THIS CLOSES. Everything above stood inside an arena and most of it
+ * stood below the eye line: cover is 2-3 blocks (waist to chest), pillars are
+ * 2x2 posts you can see straight past, and outside an arena floor there was
+ * nothing placed at all. So from most points in this world you could see to the
+ * skyline in most directions, and a plane you can see across is scenery however
+ * well it is lit. PLAYER_EYE_HEIGHT is 1.62, so "cover" and "occluder" are two
+ * different jobs and only one of them was being done.
+ *
+ * A BASTION is a PAIR of solid masses on a 24-block lattice, over the whole dry
+ * playable plane and not just inside arenas. Plan view, axis = X, `#` solid:
+ *
+ *            u = -6 -5 -4 -3 -2 -1  0  1  2  3  4  5  6
+ *      v = +5      1  2  3  4  4  4                        <- mass A, heights
+ *      v = +4      1  2  3  4  4  4
+ *      v = +3      1  2  3  4  4  4
+ *      v = +2   . . . . . . . . . . . . . . . . . . . .
+ *      v = +1   .            the lane, 5 blocks          .  <- you fight here
+ *      v =  0   .   nothing in it, and it runs through   .
+ *      v = -1   .                                        .
+ *      v = -2   . . . . . . . . . . . . . . . . . . . . .
+ *      v = -3                        4  A  A  4  3  2  1    <- mass B
+ *      v = -4                        4  A  A  4  3  2  1
+ *      v = -5                        4  A  A  4  3  2  1
+ *
+ * Three things are deliberate:
+ *
+ *  - **The masses top out at 4 blocks**, which is over the eye line by 2.4 m.
+ *    They are occluders, not cover: a body behind one is gone, and the frame
+ *    stops running to the skyline.
+ *  - **They are staggered along the lane as well as offset across it**, so the
+ *    pair reads as a lane with a gap and not as a wall with a door. You can run
+ *    the lane, cut the diagonal, or take either roof.
+ *  - **Each mass is a STAIR on its outer end** — 1, 2, 3, then 4 — so the roof
+ *    is reachable on foot (JUMP_VELOCITY clears one block, never two) and the
+ *    outer columns double as the chest-high cover the brief asks for. The steps
+ *    are also why a terrace beside one reads as something you mount rather than
+ *    as a painted ramp: there is a countable staircase next to it for scale.
+ *
+ * `A` marks the ARCH: a 2-wide, 2-tall hole cut clean through mass B, floor to
+ * lintel. It is a sightline that exists only through the hole — the one shot
+ * down the lane that the geometry allows — and it is the seed a rocket widens,
+ * because the lintel over it is two blocks of breachable wall material and
+ * nothing else is holding it up.
+ *
+ * Cost is one hash per column and no neighbour scan: the pair's bounding box is
+ * 13 x 11 and the jitter is +/-5, so 6 + 5 + 5 < 24 and a pair can never leave
+ * its own cell. Roughly 122 voxels and ~40 merged quads per 576 columns.
+ */
+export const BASTION_CELL = 24;
+const BASTION_CELL_HALF = 12;
+/** Max displacement of a pair centre from its cell centre. Keeps 6 + 5 < 12. */
+const BASTION_JITTER = 5;
+/** Out of 256. High, because "two masses within 20 m" is the whole point. */
+const BASTION_CHANCE = 224;
+/** Half-length along the lane. Each mass is 6 long. */
+const BASTION_U = 6;
+/** The mass occupies |v| in [BASTION_V_IN, BASTION_V_OUT]; the lane is inside. */
+const BASTION_V_IN = 3;
+const BASTION_V_OUT = 5;
+/** Top of the tall part, above the ground under it. */
+const BASTION_TOP = 4;
+/** The arch tunnel, in |u|. Two wide, so a body fits and a rocket fits. */
+const BASTION_ARCH_U0 = 2;
+const BASTION_ARCH_U1 = 3;
+/** Clear air inside the arch: PLAYER_HEIGHT is 1.8, so two blocks. */
+const BASTION_ARCH_CLEAR = 2;
+
+/* --- crags ---------------------------------------------------------------- *
+ *
+ * THE GAP THIS CLOSES, measured rather than argued. `tools/`-free probe: stand
+ * at every standable dry column on a 4-block grid over 7x7 chunks, put the eye
+ * at PLAYER_EYE_HEIGHT over the feet plane, and cast 24 rays out to 40 m.
+ * Against the v3 world:
+ *
+ *     median sightline   13.2 m
+ *     rays reaching 40 m 29.4%          <- nearly a third of the horizon is open
+ *     directions per point still open past 15 m:  median 11 of 24, p90 21 of 24
+ *
+ * So one point in ten could see past 15 m down 21 of its 24 directions. The
+ * bastions are real occluders but they sit one per 24 m cell and cover a
+ * quarter of their cell, and everything else — the corridor lanes, the banked
+ * rim band around every arena, the terrace shelves between arenas — was bare
+ * ground you could see straight across. A frame with a wall on the left and
+ * open ground to the horizon on the right is still scenery on the right.
+ *
+ * A CRAG is a rock outcrop on a 12-block lattice, jittered +/-3, over
+ * everything the bastions do not already own. Section along its long axis,
+ * `#` solid, ground at the bottom:
+ *
+ *      s = -3  -2  -1   0  +1  +2  +3
+ *                       #   #   #   #     <- top, 4 / 5 / 6 by hash
+ *               .   #   #   #   #   #
+ *           .   #   #   #   #   #   #
+ *           #   #   #   #   #   #   #
+ *      ===========================        <- the ground under it, unlevelled
+ *
+ * Three blocks wide across `v`, seven long, so 21 columns of a 144-column cell.
+ * The design rules behind those numbers:
+ *
+ *  - **Pitch 12, not 24.** The critic's number was "mass that breaks line of
+ *    sight at roughly 10-15 m intervals". 12 with +/-3 of jitter puts the
+ *    nearest crag centre 6-18 m away from wherever you are standing and the
+ *    next one behind it, so a ray that misses the first meets the second.
+ *  - **Top 4 to 6 blocks, never 2 or 3.** PLAYER_EYE_HEIGHT is 1.62: three
+ *    blocks is the first height that hides a standing body, four is the first
+ *    that hides one standing on the step below you. The tapered end columns
+ *    come out at 1-3 blocks, which is the chest-high cover the same object owes
+ *    the player at its edges.
+ *  - **The taper is one-sided.** The low end steps 1, 2, 3 into the mass, so a
+ *    top-4 crag is walk-up high ground and the taller ones are rocket-jump
+ *    high ground. A symmetric lump would be neither.
+ *
+ * The ground under a crag is NOT levelled, unlike a bastion pad: a crag is rock
+ * that grew where it stands, it wants to sit on the terrace riser rather than
+ * cut it, and skipping the pad also skips the cache and the second `baseHeight`
+ * evaluation. Cost is one hash per column, no neighbour scan, and a crag can
+ * never leave its own cell (3 of half-length + 3 of jitter == the 6-block half
+ * cell), which is what keeps chunk generation seam-free and order-independent.
+ *
+ * Materials are the natural rocks, one value step apart and NOT the bastions'
+ * built brick/metal, so at a glance you can tell the thing that was quarried
+ * from the thing that was placed. All three bodies are breachable — cobble
+ * resists 2.2, rusted metal 3.7, hellstone 3.3, against a rocket's 9.6 at the
+ * centre — so a rocket into a crag is the cheapest new sightline in the game.
+ */
+export const CRAG_CELL = 12;
+const CRAG_CELL_HALF = 6;
+/** Max displacement of a crag centre from its cell centre. Keeps 3 + 3 <= 6. */
+const CRAG_JITTER = 3;
+/** Out of 256. 74% leaves enough empty cells that the lattice never reads as a grid. */
+const CRAG_CHANCE = 190;
+/** Half-length along the long axis: 7 columns. */
+const CRAG_U = 3;
+/** Half-width across it: 3 columns. */
+const CRAG_V = 1;
+/** Height of the plateau over the ground under it. 4 is 2.4 m — over the eye line. */
+const CRAG_TOP_MIN = 4;
+const CRAG_TOP_SPAN = 3;
+/** Keep-out ring around a keep, in blocks past its half-extent. Its stair is 5 long. */
+const CRAG_KEEP_CLEAR = 6;
+
+/* --- the keep ------------------------------------------------------------ *
+ *
+ * Heights are all relative to the arena floor:
+ *
+ *      +7  ####        ####          parapet, chest high on the roof deck
+ *      +6  ####        ####
+ *      +5  ##################        roof slab  (deck surface is +6)
+ *      +4  ##            ##          clerestory slit; piers only, glowing cap
+ *      +3  ####        ####
+ *      +2  ####  door  ####          wall panels
+ *      +1  ####        ####
+ *       0  ==================        arena floor, lava basin at the middle
+ *
+ * The slit is the design: it is the one place a defender inside can see and
+ * shoot a pair of legs outside, and the one place an attacker outside can see
+ * the fire inside moving. Everything else about the box is a silhouette.
+ */
+
+/** Arenas narrower than this stay open — a keep would eat the whole floor. */
+export const KEEP_MIN_RADIUS = 20;
+/** Half-extent of the square footprint, so a keep is 9 or 11 blocks across. */
+const KEEP_HALF_MIN = 4;
+const KEEP_HALF_SPAN = 2;
+/** Top of the corner piers, above the floor. The roof slab sits one higher. */
+const KEEP_WALL_H = 4;
+/** Wall panels stop here, leaving the clerestory slit at KEEP_WALL_H. */
+const KEEP_PANEL_H = 3;
+/** Length of the external stair, in steps. Its top step is level with the deck. */
+const KEEP_STAIR_LEN = 5;
+/** Half-width of a doorway: 1 gives a three-block opening. */
+const KEEP_DOOR_HALF = 1;
+
 /** Lava fills hell basins to here. Below SEA_LEVEL so lava and water never meet. */
 export const LAVA_LEVEL = 22;
 const SNOW_LEVEL = 46;
@@ -144,6 +338,70 @@ function pillarCap(theme: Theme): number {
 }
 function plinthMaterial(theme: Theme): number {
   return theme === Theme.HELL ? BlockId.HELLSTONE : theme === Theme.TECH ? BlockId.METAL : BlockId.BRICK;
+}
+/**
+ * Keep wall panels. All three are BREACHABLE by a rocket
+ * (`destruction.blastResist`: hellstone 3.3, brick 2.8, metal 5.2 against a
+ * rocket's 9.6 at the centre), which is the point — a rocket into a panel opens
+ * a new sightline into the room.
+ */
+function keepWallMaterial(theme: Theme): number {
+  return theme === Theme.HELL ? BlockId.HELLSTONE : theme === Theme.TECH ? BlockId.METAL : BlockId.BRICK;
+}
+/**
+ * Keep roof and parapet, deliberately a different VALUE from the walls rather
+ * than a different hue: a bone-white cap on a blood-red hell keep is visible
+ * across the whole arena and tells you where the high ground is from anywhere.
+ * Also breachable, so a BFG can drop the roof in on whoever is under it.
+ */
+function keepRoofMaterial(theme: Theme): number {
+  return theme === Theme.HELL ? BlockId.BONE : theme === Theme.TECH ? BlockId.TECH_PANEL : BlockId.COBBLESTONE;
+}
+/**
+ * Corner piers. Obsidian in every theme, and obsidian is blast-proof at every
+ * radius in the weapon table: the keep can be shot to pieces but it always
+ * keeps its four legs and its roof, so the arena never loses its landmark.
+ */
+function keepPierMaterial(): number {
+  return BlockId.OBSIDIAN;
+}
+/**
+ * Bastion walls. Same three materials as the keep panels and breachable for the
+ * same reason: `destruction.blastResist` puts brick at 2.8, metal at 5.2 and
+ * hellstone at 3.3 against a rocket's 9.6 at the centre, so one rocket into a
+ * mass opens a hole and a second one joins it to the arch.
+ */
+function bastionWallMaterial(theme: Theme): number {
+  return theme === Theme.HELL ? BlockId.HELLSTONE : theme === Theme.TECH ? BlockId.METAL : BlockId.BRICK;
+}
+/**
+ * The cap course, one block deep on every top face. A different VALUE from the
+ * wall rather than a different hue — the same trick as the keep roof — so each
+ * step of the stair is drawn as a line at a glance and the mass reads as four
+ * countable blocks instead of one painted slab.
+ */
+function bastionCapMaterial(theme: Theme): number {
+  return theme === Theme.HELL ? BlockId.BONE : theme === Theme.TECH ? BlockId.TECH_PANEL : BlockId.COBBLESTONE;
+}
+/**
+ * Crag bodies. Deliberately the QUARRIED rocks, not the bastions' built
+ * brick/metal/hellstone-wall: cobble against outland's grass, rusted scrap in a
+ * tech zone, hellstone in hell. Every one of them is breachable — cobble
+ * resists 2.2, rusted metal 3.7, hellstone 3.3 against a rocket's 9.6 at the
+ * centre — because a crag is the occluder you are most often nose-to-nose with
+ * and the whole point of the piece is that a rocket opens a new sightline.
+ */
+function cragMaterial(theme: Theme): number {
+  return theme === Theme.HELL ? BlockId.HELLSTONE : theme === Theme.TECH ? BlockId.RUSTED_METAL : BlockId.COBBLESTONE;
+}
+/**
+ * The cap course, one block on the top face. A LIGHTER value than the body in
+ * all three themes (stone 0x8b8d92 over cobble 0x807f7c, metal 0xa3a9b1 over
+ * rust 0x9a5730, bone 0xeae4d0 over hellstone 0x7d2422) so the top edge draws
+ * itself and a crag silhouettes as a shape with a lit rim instead of a blob.
+ */
+function cragCapMaterial(theme: Theme): number {
+  return theme === Theme.HELL ? BlockId.BONE : theme === Theme.TECH ? BlockId.METAL : BlockId.STONE;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -188,13 +446,14 @@ export function baseHeight(seed: number, x: number, z: number): number {
  * Arena lattice
  * ------------------------------------------------------------------------ *
  *
- * A cache slot is 10 doubles:
+ * A cache slot is 12 doubles:
  *   0 centreX  1 centreZ  2 radius  3 floorY  4 theme
  *   5 pitX     6 pitZ     7 pitRadius (0 = none)
  *   8 ledgePhase (0..1)   9 structure seed
+ *  10 keepHalf (0 = no keep)         11 keep orientation, 0..3
  */
 
-const ARENA_STRIDE = 10;
+const ARENA_STRIDE = 12;
 /** A chunk spans at most 2 cells per axis; +1 ring each side = 4. */
 const CACHE_A_SPAN = 4;
 /** A point query needs the 3x3 cells around its own. */
@@ -220,9 +479,18 @@ function writeArena(seed: number, cellX: number, cellZ: number, data: Float64Arr
   const floorMax = TERRAIN_MAX_HEIGHT - 10;
   floorY = clamp(floorY, floorMin, floorMax);
 
+  // A wide arena gets a keep; a narrow one stays an open pit fight. The rule is
+  // radius alone and not a coin flip, so the map reads as designed: you learn
+  // that a big room has a building in it and a small one does not.
+  const kh = hash2i(cellX, cellZ, s ^ 0x3d81c7);
+  const keepHalf = radius >= KEEP_MIN_RADIUS ? KEEP_HALF_MIN + (kh % KEEP_HALF_SPAN) : 0;
+  const keepOrient = (kh >>> 8) & 3;
+
   const ph = hash2i(cellX, cellZ, s ^ 0x51ed21);
   let pitR = 0, pitX = 0, pitZ = 0;
-  if ((ph & 255) < 110) {
+  // A keep brings its own lava with it, and an open pit under the footprint
+  // would punch a hole through the floor of the room. One or the other.
+  if (keepHalf === 0 && (ph & 255) < 110) {
     pitR = 3 + ((ph >>> 8) % 4);
     const ang = (((ph >>> 12) & 1023) / 1024) * TAU;
     const dist = radius * 0.36;
@@ -241,6 +509,8 @@ function writeArena(seed: number, cellX: number, cellZ: number, data: Float64Arr
   data[o + 7] = pitR;
   data[o + 8] = ((h >>> 22) & 511) / 512;
   data[o + 9] = hash2i(cellX, cellZ, s ^ 0x2f6a11) >>> 0;
+  data[o + 10] = keepHalf;
+  data[o + 11] = keepOrient;
 }
 
 function buildCache(
@@ -381,12 +651,23 @@ const mStructCap = new Uint8Array(MAP_AREA);   // 0 = no cap block
 const mLiquidTop = new Int16Array(MAP_AREA);   // -1 when dry
 const mLiquidId = new Uint8Array(MAP_AREA);
 const mFlags = new Uint8Array(MAP_AREA);
+/**
+ * A SECOND solid span, above an air gap: roof slabs and parapets.
+ *
+ * One extra span is all an interior needs and all the column model gains — the
+ * generator stays a per-column function with no global pass, and a chunk still
+ * generates identically whether or not its neighbours exist.
+ */
+const mRoofBase = new Int16Array(MAP_AREA);
+const mRoofTop = new Int16Array(MAP_AREA);
+const mRoofMat = new Uint8Array(MAP_AREA);     // 0 = no roof over this column
 /** Snapshot of mHeight taken before the vent pass so a vent never reads a vented root. */
 const mHeight0 = new Int16Array(MAP_AREA);
 
 const MF_SITE = 1 << 0;      // inside an arena or corridor
 const MF_ARENA = 1 << 1;     // inside an arena specifically
 const MF_PIT = 1 << 2;       // inside a lava pit
+const MF_BUILT = 1 << 3;     // a bastion owns this column (or is one block off it)
 
 function mapIndex(lx: number, lz: number): number {
   return (lx + MAP_PAD) + (lz + MAP_PAD) * MAP_SIZE;
@@ -414,6 +695,267 @@ function ledgeHeight(d: number, radius: number, x: number, z: number, ax: number
   return LEDGE_HEIGHT;
 }
 
+/* --- the keep ------------------------------------------------------------ */
+
+/**
+ * Outputs of the last `stampKeep`. Module scope for the same reason
+ * `evaluateSite`'s are: this runs once per column of every generated chunk and
+ * a returned object would be an allocation per voxel column.
+ */
+let kGround = -1;        // ground-top override, -1 = leave the site height alone
+let kStructTop = 0;
+let kStructMat = 0;
+let kStructCap = 0;
+let kRoofBase = 0;
+let kRoofTop = 0;
+let kRoofMat = 0;
+let kLiquidTop = -1;
+let kLiquidId = 0;
+
+/**
+ * Stamp the keep at (ax, az) into the module outputs for world column (x, z).
+ *
+ * Returns true when the keep owns this column, in which case the caller must
+ * skip the cover lattice, the pillars and the centre plinth — a crate half
+ * inside a wall is the single most common way a stamped structure stops
+ * reading as architecture.
+ */
+function stampKeep(
+  x: number, z: number, ax: number, az: number,
+  floorY: number, half: number, orient: number, theme: Theme,
+): boolean {
+  kGround = -1;
+  kStructTop = 0; kStructMat = 0; kStructCap = 0;
+  kRoofBase = 0; kRoofTop = 0; kRoofMat = 0;
+  kLiquidTop = -1; kLiquidId = 0;
+
+  const dx = x - Math.round(ax);
+  const dz = z - Math.round(az);
+  // The box is four-fold symmetric, so the orientation only decides which side
+  // the stair climbs.
+  let u: number, v: number;
+  if (orient === 0) { u = dx; v = dz; }
+  else if (orient === 1) { u = dz; v = -dx; }
+  else if (orient === 2) { u = -dx; v = -dz; }
+  else { u = -dz; v = dx; }
+
+  const eu = u < 0 ? -u : u;
+  const ev = v < 0 ? -v : v;
+  const m = eu > ev ? eu : ev;
+
+  // External stair, three wide, offset off the doorway so it does not seal it.
+  // Its top step's surface is exactly the roof deck, so the climb is five
+  // one-block steps and never needs a jump — the rocket jump is the fast way
+  // up, not the only way up.
+  const onStair = v >= 2 && v <= 4;
+  if (onStair && u > half && u <= half + KEEP_STAIR_LEN) {
+    kStructTop = floorY + KEEP_WALL_H + 1 - (u - half - 1);
+    kStructMat = keepWallMaterial(theme);
+    return true;
+  }
+  if (m > half) return false;
+
+  // Roof over the whole footprint, plus a one-block parapet on the ring: chest
+  // high from the deck, so the roof is cover and not a diving board.
+  kRoofMat = keepRoofMaterial(theme);
+  kRoofBase = floorY + KEEP_WALL_H + 1;
+  kRoofTop = kRoofBase;
+
+  if (m === half) {
+    // The stair arrives here; leave a gap in the parapet or it arrives at a wall.
+    if (!(u === half && onStair)) kRoofTop = kRoofBase + 1;
+
+    const pier = eu >= half - 1 && ev >= half - 1;
+    const door = (eu === half && ev <= KEEP_DOOR_HALF) || (ev === half && eu <= KEEP_DOOR_HALF);
+    if (pier) {
+      kStructTop = floorY + KEEP_WALL_H;
+      kStructMat = keepPierMaterial();
+      kStructCap = pillarCap(theme);
+    } else if (!door) {
+      kStructTop = floorY + KEEP_PANEL_H;
+      kStructMat = keepWallMaterial(theme);
+    }
+    return true;
+  }
+
+  // Interior. A lava basin flush with the floor: the light source that makes
+  // the room worth having a roof over, and a hazard in the one place everybody
+  // has to walk through.
+  const basinHalf = theme === Theme.HELL ? 1 : 0;
+  if (eu <= basinHalf && ev <= basinHalf) {
+    kGround = floorY - 1;
+    kLiquidTop = floorY;
+    kLiquidId = BlockId.LAVA;
+    return true;
+  }
+
+  // Four chest-high crates on the interior diagonals. An empty box with a pool
+  // in it is a killbox; four blocks of cover make it a room two people can
+  // fight over, and they break the sightline straight through from one doorway
+  // to the opposite one.
+  if (eu === half - 2 && ev === half - 2) {
+    kStructTop = floorY + 2;
+    kStructMat = coverMaterial(theme);
+  }
+  return true;
+}
+
+/* --- bastions ------------------------------------------------------------ */
+
+/** Outputs of the last `stampBastion`. Module scope: this runs per column. */
+let baHeight = 0;      // solid blocks above the ground, for a mass column
+let baArchLo = 0;      // arch lintel, relative to the ground under it
+let baArchHi = 0;
+let baMat = 0;
+let baCap = 0;
+let baAnchorX = 0;     // the pair's centre column; the whole pad levels to it
+let baAnchorZ = 0;
+let baCellX = 0;
+let baCellZ = 0;
+
+/**
+ * The pad height of one bastion cell, cached.
+ *
+ * A bastion needs LEVEL GROUND or it is not a bastion: a lane with a 3-block
+ * terrace riser across it is not a lane, and a tunnel whose far end is filled in
+ * by the hillside is a decoration. So the pair's whole 13x11 footprint — masses,
+ * arch and the lane between them — is cut to the height of its own centre
+ * column, which turns the terrace it sits on into a plinth.
+ *
+ * `baseHeight` is pure in (seed, x, z) with nothing cached behind it, so every
+ * chunk that touches a pad computes the same number and no seam can open. The
+ * cache here is only about cost: a padded chunk patch spans at most 3x3 bastion
+ * cells, so 9 evaluations replace ~120.
+ */
+const BA_PAD_SLOTS = 16;
+const baPadX = new Int32Array(BA_PAD_SLOTS);
+const baPadZ = new Int32Array(BA_PAD_SLOTS);
+const baPadSeed = new Float64Array(BA_PAD_SLOTS);
+const baPadY = new Int32Array(BA_PAD_SLOTS);
+const baPadOk = new Uint8Array(BA_PAD_SLOTS);
+
+function bastionPadY(seed: number, cellX: number, cellZ: number, px: number, pz: number): number {
+  const slot = (cellX * 5 + cellZ * 11) & (BA_PAD_SLOTS - 1);
+  if (baPadOk[slot] === 1 && baPadSeed[slot] === seed && baPadX[slot] === cellX && baPadZ[slot] === cellZ) {
+    return baPadY[slot];
+  }
+  const y = Math.round(baseHeight(seed, px, pz));
+  baPadOk[slot] = 1; baPadSeed[slot] = seed; baPadX[slot] = cellX; baPadZ[slot] = cellZ; baPadY[slot] = y;
+  return y;
+}
+
+/** What a bastion does to one column. */
+const BA_NONE = 0;
+const BA_LANE = 1;     // inside the pair's box but in the lane or the gap
+const BA_MASS = 2;     // solid, `baHeight` blocks of it
+const BA_ARCH = 3;     // the tunnel: ground, two of air, then the lintel
+
+/**
+ * Stamp the bastion pair of (x, z)'s own 24-block cell into the outputs above.
+ *
+ * Pure in (seed, x, z) like everything else here, and deliberately arranged so
+ * a pair can never cross a cell boundary — that is what lets this be one hash
+ * and no neighbour scan on the hottest loop in worldgen. See the diagram at
+ * BASTION_CELL for what it builds and why.
+ */
+function stampBastion(x: number, z: number, bseed: number, theme: Theme): number {
+  baHeight = 0; baArchLo = 0; baArchHi = 0; baMat = 0; baCap = 0;
+
+  const cellX = Math.floor(x / BASTION_CELL);
+  const cellZ = Math.floor(z / BASTION_CELL);
+  const hh = hash2i(cellX, cellZ, bseed);
+  if ((hh & 255) >= BASTION_CHANCE) return BA_NONE;
+
+  const span = BASTION_JITTER * 2 + 1;
+  const px = cellX * BASTION_CELL + BASTION_CELL_HALF + (((hh >>> 8) % span) - BASTION_JITTER);
+  const pz = cellZ * BASTION_CELL + BASTION_CELL_HALF + (((hh >>> 14) % span) - BASTION_JITTER);
+  baAnchorX = px;
+  baAnchorZ = pz;
+  baCellX = cellX;
+  baCellZ = cellZ;
+
+  const dx = x - px, dz = z - pz;
+  // The lane runs along +u. Two bits: one turns the pair 90 degrees, one
+  // mirrors it, which is what moves the arch to the other side of the lane.
+  let u: number, v: number;
+  if (((hh >>> 20) & 1) === 0) { u = dx; v = dz; } else { u = dz; v = -dx; }
+  if (((hh >>> 21) & 1) === 1) { u = -u; v = -v; }
+
+  const au = u < 0 ? -u : u;
+  const av = v < 0 ? -v : v;
+  if (au > BASTION_U || av > BASTION_V_OUT) return BA_NONE;
+
+  // Inside the pair's box. Everything from here is either a mass or the lane,
+  // and the lane still reports back so nothing plants a tree in it.
+  const onA = v >= BASTION_V_IN && u <= -1;
+  const onB = v <= -BASTION_V_IN && u >= 1;
+  if (!onA && !onB) return BA_LANE;
+
+  baMat = bastionWallMaterial(theme);
+  baCap = bastionCapMaterial(theme);
+
+  // The arch, through mass B only, at |u| in [2, 3].
+  if (onB && au >= BASTION_ARCH_U0 && au <= BASTION_ARCH_U1) {
+    baArchLo = BASTION_ARCH_CLEAR + 1;
+    baArchHi = BASTION_TOP;
+    return BA_ARCH;
+  }
+
+  // 1, 2, 3, 4 outward-in: a stair you can walk up one block at a time.
+  const th = BASTION_U + 1 - au;
+  baHeight = th > BASTION_TOP ? BASTION_TOP : th;
+  return BA_MASS;
+}
+
+/* --- crags ---------------------------------------------------------------- */
+
+/** Outputs of the last `stampCrag`. Module scope: this runs per column. */
+let crHeight = 0;      // solid blocks above the ground under this column
+let crMat = 0;
+let crCap = 0;
+
+/**
+ * Stamp the crag of (x, z)'s own 12-block cell. Returns its height in blocks,
+ * 0 for "no crag here".
+ *
+ * Pure in (seed, x, z), one hash, no neighbour scan and no cache — see the
+ * diagram at CRAG_CELL for the shape and for why the pitch is 12.
+ */
+function stampCrag(x: number, z: number, cseed: number, theme: Theme): number {
+  crHeight = 0; crMat = 0; crCap = 0;
+
+  const cellX = Math.floor(x / CRAG_CELL);
+  const cellZ = Math.floor(z / CRAG_CELL);
+  const hh = hash2i(cellX, cellZ, cseed);
+  if ((hh & 255) >= CRAG_CHANCE) return 0;
+
+  const span = CRAG_JITTER * 2 + 1;
+  const px = cellX * CRAG_CELL + CRAG_CELL_HALF + (((hh >>> 8) % span) - CRAG_JITTER);
+  const pz = cellZ * CRAG_CELL + CRAG_CELL_HALF + (((hh >>> 11) % span) - CRAG_JITTER);
+
+  const dx = x - px, dz = z - pz;
+  // Two bits again: one lays the long axis along Z instead of X, the other
+  // flips which end the walk-up taper is on. Without them a whole region of
+  // crags points the same way and the field reads as corduroy.
+  let u: number, v: number;
+  if (((hh >>> 14) & 1) === 0) { u = dx; v = dz; } else { u = dz; v = dx; }
+  if (((hh >>> 15) & 1) === 1) u = -u;
+
+  const au = u < 0 ? -u : u;
+  const av = v < 0 ? -v : v;
+  if (au > CRAG_U || av > CRAG_V) return 0;
+
+  const top = CRAG_TOP_MIN + ((hh >>> 16) % CRAG_TOP_SPAN);
+  // One-sided taper: 1, 2, 3 climbing in from u = -3, then the plateau. A
+  // top-4 crag is therefore walk-up high ground and a top-6 one is a wall with
+  // a chest-high shoulder — both are over the eye line where it matters.
+  const h = u < 0 ? top + u : top;
+  crHeight = h < 1 ? 1 : h;
+  crMat = cragMaterial(theme);
+  crCap = cragCapMaterial(theme);
+  return crHeight;
+}
+
 /* --- pass 1: height, theme, structures, liquid --------------------------- */
 
 function buildColumnMaps(seed: number, cx: number, cz: number): void {
@@ -428,6 +970,8 @@ function buildColumnMaps(seed: number, cx: number, cz: number): void {
   }
 
   const structSeed = seedChannel(seed, 4);
+  const bastionSeed = seedChannel(seed, 9);
+  const cragSeed = seedChannel(seed, 10);
 
   for (let lz = -MAP_PAD; lz < CHUNK_SIZE_Z + MAP_PAD; lz++) {
     const z = baseZ + lz;
@@ -441,6 +985,7 @@ function buildColumnMaps(seed: number, cx: number, cz: number): void {
       let h = Math.round(siteHeight);
       const arena = siteArena;
       const w = siteWeight;
+      const corridor = siteCorridor;
       let flags = 0;
       if (w > 0.25) flags |= MF_SITE;
 
@@ -453,6 +998,15 @@ function buildColumnMaps(seed: number, cx: number, cz: number): void {
       let structCap = 0;
       let liquidTop = -1;
       let liquidId = 0;
+      let roofBase = 0;
+      let roofTop = 0;
+      let roofMat = 0;
+      // Hoisted out of the arena branch: the bastion pass below runs on every
+      // column, arena or not, and a keep owns its footprint against all comers.
+      let ownedByKeep = false;
+      // Wider than the footprint: a crag parked against a keep would seal a
+      // doorway or the foot of the external stair, and the doorway is the fight.
+      let nearKeep = false;
 
       if (arena >= 0 && w > 0.88) {
         flags |= MF_ARENA;
@@ -482,7 +1036,29 @@ function buildColumnMaps(seed: number, cx: number, cz: number): void {
           }
         }
 
-        if (!inPit) {
+        // The keep owns its footprint outright. It runs before the furniture
+        // and short-circuits it: a cover crate half inside a wall is the fastest
+        // way to make a stamped building stop reading as a building.
+        let inKeep = false;
+        const keepHalf = cacheA[arena + 10];
+        if (!inPit && keepHalf > 0) {
+          const kdx = Math.abs(x - Math.round(ax)), kdz = Math.abs(z - Math.round(az));
+          nearKeep = (kdx > kdz ? kdx : kdz) <= keepHalf + CRAG_KEEP_CLEAR;
+          inKeep = stampKeep(x, z, ax, az, floorY, keepHalf, cacheA[arena + 11], theme);
+          ownedByKeep = inKeep;
+          if (inKeep) {
+            if (kGround >= 0) h = kGround;
+            structTop = kStructMat !== 0 ? kStructTop : h;
+            structMat = kStructMat;
+            structCap = kStructCap;
+            roofBase = kRoofBase;
+            roofTop = kRoofTop;
+            roofMat = kRoofMat;
+            if (kLiquidTop >= 0) { liquidTop = kLiquidTop; liquidId = kLiquidId; }
+          }
+        }
+
+        if (!inPit && !inKeep) {
           // Rim ledge with two stair ramps.
           const lh = ledgeHeight(d, radius, x, z, ax, az, phase);
           if (lh >= 0 && floorY + lh > structTop) {
@@ -542,6 +1118,80 @@ function buildColumnMaps(seed: number, cx: number, cz: number): void {
         }
       }
 
+      // Bastions. The one pass that runs OUTSIDE the arenas as well as inside
+      // them, because the open plane between the arenas was the part of this
+      // world you could see across to the skyline.
+      //
+      // Four things it stays off, in order of how badly it would break them:
+      // a keep footprint (a mass half inside a wall stops both reading as
+      // architecture), a lava pit, a corridor lane (that is the connective
+      // tissue and it has to stay walkable end to end), and anything the sea or
+      // the lava has already claimed.
+      //
+      // A bastion also needs a ground it can stand on level: `w > 0.88` is a
+      // flat arena floor and `w == 0` is untouched terrain, but the rim band
+      // between them is a blend, and a mass stamped across a blend is a lump.
+      const flatSite = w > 0.88;
+      if ((flatSite || w <= 0) && !ownedByKeep && (flags & MF_PIT) === 0 && !corridor) {
+        const ba = stampBastion(x, z, bastionSeed, theme);
+        if (ba !== BA_NONE) {
+          const pad = flatSite ? h : bastionPadY(seed, baCellX, baCellZ, baAnchorX, baAnchorZ);
+          const floor = theme === Theme.HELL ? LAVA_LEVEL : SEA_LEVEL;
+          if (pad >= floor && pad <= TERRAIN_MAX_HEIGHT - BASTION_TOP - 2) {
+            // The whole footprint, lane included, is BUILT and LEVEL: a tree in
+            // the lane, or a terrace riser across it, would each undo the one
+            // thing the lane is for.
+            flags |= MF_BUILT;
+            h = pad;
+            if (structMat === 0) structTop = h;
+            else if (structTop < h) structTop = h;
+
+            if (ba === BA_MASS) {
+              const top = h + baHeight;
+              if (top > structTop) {
+                structTop = top;
+                structMat = baMat;
+                structCap = baCap;
+              }
+            } else if (ba === BA_ARCH && roofMat === 0) {
+              // Ground, two blocks of air, then a two-block lintel carried on
+              // the second solid span. The tunnel is the sightline; the lintel
+              // is what a rocket takes out to widen it.
+              roofBase = h + baArchLo;
+              roofTop = h + baArchHi;
+              roofMat = baCap;
+            }
+          }
+        }
+      }
+
+      // Crags. Everything above this line put mass either inside an arena or
+      // inside a 24-block bastion cell; this is the pass that says no eye-height
+      // ray anywhere on the dry plane gets to run to the skyline. It stays off
+      // exactly four things — a bastion footprint (MF_BUILT, lane included, so a
+      // rock never plugs the lane or the arch), a keep and the ring around its
+      // doorways, a lava pit, and anything the sea has already drowned — and
+      // takes everything else, including the two places nothing was reaching
+      // before: the banked rim band around every arena, and the corridors.
+      //
+      // No pad and no height clamp: a crag stacks on whatever ground it lands
+      // on, and `structTop` is a running max, so a crag over a cover crate just
+      // swallows the crate instead of fighting it for the column.
+      if ((flags & MF_BUILT) === 0 && !ownedByKeep && !nearKeep && (flags & MF_PIT) === 0) {
+        const drown = theme === Theme.HELL ? LAVA_LEVEL : SEA_LEVEL;
+        if (h >= drown - 1) {
+          const ch = stampCrag(x, z, cragSeed, theme);
+          if (ch > 0) {
+            const top = h + ch;
+            if (top > structTop) {
+              structTop = top;
+              structMat = crMat;
+              structCap = crCap;
+            }
+          }
+        }
+      }
+
       // Standing liquid, when nothing has claimed the column yet.
       if (liquidTop < 0) {
         if (theme === Theme.HELL) {
@@ -559,6 +1209,9 @@ function buildColumnMaps(seed: number, cx: number, cz: number): void {
       mLiquidTop[mi] = liquidTop;
       mLiquidId[mi] = liquidId;
       mFlags[mi] = flags;
+      mRoofBase[mi] = roofBase;
+      mRoofTop[mi] = roofTop;
+      mRoofMat[mi] = roofMat;
     }
   }
 }
@@ -657,6 +1310,9 @@ function treeRootValid(mi: number, treeSeed: number, rx: number, rz: number): bo
   if (mi < 0 || mi >= MAP_AREA) return false;
   if (mTheme[mi] !== Theme.OUTLAND) return false;
   if ((mFlags[mi] & MF_SITE) !== 0) return false;
+  // A bastion's lane has no structure in it, so without this a trunk plants
+  // itself in the middle of the gap the pair exists to create.
+  if ((mFlags[mi] & MF_BUILT) !== 0) return false;
   if (mHeight[mi] <= SEA_LEVEL + 1) return false;
   if (mHeight[mi] >= SNOW_LEVEL) return false;
   if (mStructTop[mi] !== mHeight[mi]) return false;
@@ -765,6 +1421,16 @@ export function generateChunkInto(seed: number, cx: number, cz: number, out: Uin
         const end = liquidTop > maxY ? maxY : liquidTop;
         const id = mLiquidId[mi];
         for (let y = start; y <= end; y++) out[voxelIndex(lx, y, lz)] = id;
+      }
+
+      // The second span: roof slab and parapet, above the air the room is made
+      // of. Always higher than everything written above it, so nothing here can
+      // overwrite a wall.
+      const roofMat = mRoofMat[mi];
+      if (roofMat !== 0) {
+        const rb = mRoofBase[mi];
+        const rt = mRoofTop[mi] > maxY ? maxY : mRoofTop[mi];
+        for (let y = rb; y <= rt; y++) out[voxelIndex(lx, y, lz)] = roofMat;
       }
     }
   }
@@ -876,4 +1542,5 @@ export function nearestArena(seed: number, x: number, z: number, out: Float64Arr
 export function resetTerrainCaches(): void {
   cacheAValid = false;
   cacheBValid = false;
+  baPadOk.fill(0);
 }

@@ -384,6 +384,12 @@ export class PlayerEntity implements MoveState {
   id = 0;
   name = '';
   skin = 0;
+  /**
+   * Packed appearance, uint32. The server is deliberately incurious about what
+   * the bits mean — it clamps, stores and mirrors — so growing the outfit
+   * roster is a client-only change.
+   */
+  avatar = 0;
   team = 0;
   isBot = false;
   /** False once the socket is gone but the body has not been reaped yet. */
@@ -732,6 +738,9 @@ export class Simulation {
     p.id = id;
     p.name = name;
     p.skin = skin;
+    // Pooled bodies are reused; a recycled one must not wear the last
+    // occupant's outfit until its owner's HELLO lands.
+    p.avatar = 0;
     p.isBot = isBot;
     p.active = true;
     p.kills = 0; p.deaths = 0; p.streak = 0; p.bestStreak = 0;
@@ -926,7 +935,13 @@ export class Simulation {
     p.firePressed = wantFire || meleePunch;
     p.firing = fired || (wantFire && now < p.nextFireMs && p.mag[p.weapon] > 0);
 
-    if (!fired) {
+    // The cone recovers only while the trigger is UP. Recovering on every tick
+    // that did not itself fire (the old `!fired`) recovered on five ticks out
+    // of six during sustained fire, which is faster than any weapon accumulates
+    // — so the cone never opened at all. Kept identical to the condition in
+    // client/src/game/weapons.ts: the client predicts its own cone and this
+    // reproduces it, so the two rules must not drift apart.
+    if (!wantFire || p.reloading || now < p.switchEndMs) {
       p.heatSpread = recoverSpread(p.weapon, p.heatSpread, dtMs / 1000);
     }
   }

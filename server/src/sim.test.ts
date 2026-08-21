@@ -167,13 +167,21 @@ function findRunway(room: Room, length: number): { x: number; y: number; z: numb
       if (centre < 0) continue;
       for (const d of dirs) {
         let ok = true;
+        // Against the PREVIOUS step, not against the start. Measuring from the
+        // start accepted a two-block crate eight metres down the lane — its
+        // standable surface is +1 from the floor either side of it, so the
+        // window was satisfied by a wall the runner cannot step over.
+        let prev = centre;
         for (let i = 1; i <= length && ok; i++) {
+          let mid = prev;
           for (let w = -1; w <= 1 && ok; w++) {
             const px = x + d.dx * i + (d.dx === 0 ? w : 0);
             const pz = z + d.dz * i + (d.dz === 0 ? w : 0);
             const y = world.standableY(px, pz);
-            if (y < 0 || Math.abs(y - centre) > 1) ok = false;
+            if (y < 0 || Math.abs(y - prev) > 1) ok = false;
+            if (w === 0) mid = y;
           }
+          prev = mid;
         }
         if (ok) return { x: x + 0.5, y: centre, z: z + 0.5, yaw: d.yaw };
       }

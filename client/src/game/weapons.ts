@@ -26,13 +26,13 @@ import {
 import {
   WEAPONS, WeaponId, FireKind, AmmoType, AMMO_TYPE_COUNT, AMMO_MAX, AMMO_START,
   WEAPON_COUNT, WEAPON_KIND, WEAPON_AMMO, WEAPON_MAG_SIZE,
-  WEAPON_FIRE_INTERVAL_MS, WEAPON_PELLETS,
+  WEAPON_FIRE_INTERVAL_MS, WEAPON_PELLETS, WEAPON_DAMAGE,
   getWeapon, isAutomatic, ammoTypeOf,
   damageAtDistance, currentSpread, applyShotSpread, recoverSpread, spreadFraction,
   knockbackImpulse, ownsWeapon, grantWeapon, nextWeapon,
   STARTING_WEAPON_MASK, DEFAULT_WEAPON, weaponFromSlot,
 } from '@shared/weapons';
-import { BLOCK_SOLID } from '@shared/blocks';
+import { BLOCK_SOLID, blockHardness } from '@shared/blocks';
 import {
   coneSpread, rayAABB, createVoxelHit, hash2i, Rng, clampf,
   type VoxelHit,
@@ -111,6 +111,18 @@ export interface WeaponFx {
     x: number, y: number, z: number,
     nx: number, ny: number, nz: number,
     damage: number, headshot: boolean, killed: boolean,
+    /**
+     * How much of the shot landed and how far away it landed.
+     *
+     * A shotgun that puts one pellet of seven into a demon at 30 m and one that
+     * puts all seven into it at 2 m carry the same `killed === false` and very
+     * different `damage`, but damage alone cannot separate "I clipped it" from
+     * "I am too far away for this gun" — the first should feel like a miss you
+     * got away with and the second should feel like a solid hit that the range
+     * falloff ate. `hits/pellets` is the coverage and `distance` is the excuse,
+     * and the effects layer needs both to grade the burst honestly.
+     */
+    hits?: number, pellets?: number, distance?: number,
   ): void;
   /** Viewmodel impulse, view space: +x right, +y up, +z toward the player. */
   viewKick?(
@@ -131,6 +143,21 @@ export interface WeaponFx {
   spin?(weaponId: number, value: number): void;
   /** Melee swing connected with nothing. */
   meleeMiss?(weaponId: number): void;
+  /**
+   * A melee swing or a tool bit the WORLD rather than a body.
+   *
+   * The gun path has had a wall hook since day one (`impact`); melee had none,
+   * so a saw held against a stone wall produced a swinging viewmodel and an
+   * entirely unchanged wall — the exact failure this piece is judged on. The
+   * normal is the outward normal of the struck FACE, the point is on that face,
+   * and `power` is 0..1 of how much of the block the strike took, which is what
+   * lets the effects layer grade the dust and advance the crack.
+   */
+  blockStrike?(
+    x: number, y: number, z: number,
+    nx: number, ny: number, nz: number,
+    blockId: number, weaponId: number, power: number,
+  ): void;
 }
 
 /** The camera-side feedback surface. `PlayerCamera` satisfies this structurally. */
@@ -278,6 +305,12 @@ export interface ShotReport {
   bestX: number; bestY: number; bestZ: number;
   /** Unit normal pointing back at the shooter from that hit. */
   bestNx: number; bestNy: number; bestNz: number;
+  /**
+   * Range of that heaviest pellet, in metres. The effects layer sizes hit
+   * feedback in SCREEN space, and screen space is a function of distance — a
+   * flash that is right at 3 m is a sub-pixel dot at 40 m.
+   */
+  bestDistance: number;
   readonly kind: Uint8Array;
   readonly targetId: Uint16Array;
   readonly damage: Float32Array;
@@ -297,7 +330,7 @@ export function createShotReport(): ShotReport {
     totalDamage: 0, connected: false,
     kills: 0, lethalId: 0,
     bestDamage: 0, bestX: 0, bestY: 0, bestZ: 0,
-    bestNx: 0, bestNy: 0, bestNz: 1,
+    bestNx: 0, bestNy: 0, bestNz: 1, bestDistance: 0,
     kind: new Uint8Array(MAX_PELLETS),
     targetId: new Uint16Array(MAX_PELLETS),
     damage: new Float32Array(MAX_PELLETS),
@@ -378,6 +411,24 @@ export class WeaponRuntime {
 
   /** Chaingun barrel spin, 0..1. */
   spin = 0;
+
+  /**
+   * TRAUMA — 0..1, the accumulated violence of what you are doing right now.
+   *
+   * A per-shot shake table alone makes the two-hundredth chaingun round land
+   * exactly like the first, which is the one thing sustained fire should never
+   * feel like. Trauma is the standard fix: every shot ADDS to a scalar that
+   * bleeds off at a fixed rate, and the shake amplitude actually sent to the
+   * camera is scaled by trauma SQUARED. Squared is what keeps it honest — a
+   * single pistol shot is a tick, a held chaingun burst climbs to a rumble
+   * over about a second, and the frame you stop it starts falling away again.
+   *
+   * It multiplies the weapon's own amplitude rather than replacing it, so the
+   * relative weight of the seven weapons is untouched and the ceiling is
+   * bounded at `1 + TRAUMA_SHAKE_GAIN` — see the tuning note on the constants.
+   */
+  trauma = 0;
+
   /** Milliseconds until the next shot is allowed. */
   private cooldownMs = 0;
   /** Set while the trigger has been held since the last shot (semi-auto gate). */
@@ -439,6 +490,7 @@ export class WeaponRuntime {
     this.current = ownsWeapon(mask, DEFAULT_WEAPON) ? DEFAULT_WEAPON : firstOwned(mask);
     this.pending = -1;
     this.spin = 0;
+    this.trauma = 0;
     this.cooldownMs = 0;
     this.reloading = false;
     this.reloadRemainingMs = 0;
@@ -476,6 +528,24 @@ export class WeaponRuntime {
   }
   /** 0..1 of the HEAT alone. Prefer `liveSpreadFraction` for the crosshair. */
   get spreadFraction(): number { return spreadFraction(this.current, this.heat[this.current]); }
+
+  /** 0..1 accumulated trauma. Read by the HUD and by tests. */
+  get traumaLevel(): number { return this.trauma; }
+
+  /** Add trauma from something that is not a shot — taking a hit, a near blast. */
+  addTrauma(v: number): number {
+    const t = this.trauma + v;
+    this.trauma = t > 1 ? 1 : t < 0 ? 0 : t;
+    return this.trauma;
+  }
+
+  /**
+   * Multiplier this frame's shake amplitude is scaled by. Squared response, so
+   * low trauma is nearly transparent and a sustained burst is a real ramp.
+   */
+  get shakeGain(): number {
+    return 1 + TRAUMA_SHAKE_GAIN * this.trauma * this.trauma;
+  }
   /** Live cone half-angle in radians, including airborne and crouch modifiers. */
   liveSpread(airborne: boolean, crouched: boolean): number {
     return currentSpread(this.current, this.heat[this.current], airborne, crouched);
@@ -657,9 +727,47 @@ export class WeaponRuntime {
       this.spin = ctx.firing ? 1 : 0;
     }
 
-    /* --- spread recovery: only while not shooting --- */
-    if (!ctx.firing || this.cooldownMs > 0) {
+    /* --- spread recovery: only while the trigger is UP ---
+     *
+     * This condition used to read `!ctx.firing || this.cooldownMs > 0`, and
+     * that second clause is a measured bug, not a nuance. A weapon spends
+     * almost every frame of sustained fire inside its own cooldown — the
+     * chaingun's interval is 85.7 ms and a frame is 16.7 ms — so recovery ran
+     * on roughly five frames out of every six while the trigger was held.
+     * Compare the two rates: the chaingun adds 0.0038 rad per shot at 11.67
+     * shots/second (+0.044 rad/s) and recovers 0.085 rad/s, and the pistol adds
+     * 0.006 at 7/s (+0.042) against 0.10 rad/s. Both are net NEGATIVE, so the
+     * accumulated cone never left its floor and the dynamic crosshair — the
+     * thing built specifically to beat the bar's dead static plus — never
+     * bloomed from firing at all. Only the airborne penalty ever moved it.
+     *
+     * The rule is now the one every shooter uses: the cone opens while you
+     * hold the trigger and closes when you let go. Reloading and switching
+     * count as letting go, because the gun is not cycling.
+     *
+     * `server/src/sim.ts` carries the identical condition. These two must stay
+     * in lockstep: the client predicts its own cone and the server reproduces
+     * it from (ownerId, shotSeq), so a divergence here is a divergence in
+     * where the pellets went.
+     */
+    if (!ctx.firing || this.reloading || this.switchPhase !== SWITCH_NONE) {
       this.heat[id] = recoverSpread(id, this.heat[id], dt);
+    }
+
+    /* --- trauma bleed-off ---
+     * Before the trigger is read, so a shot fired this frame is not immediately
+     * decayed by the same frame's dt.
+     */
+    if (this.trauma > 0) {
+      // Proportional plus a constant floor. Pure proportional decay has a tail
+      // that never reaches zero, so the screen keeps a residual twitch minutes
+      // after the last shot; pure constant decay makes the equilibrium a knife
+      // edge — a weapon whose input rate is a hair under the decay rate banks
+      // nothing at all and one a hair over it saturates. The two together give
+      // a real equilibrium per weapon AND a hard finish about a second and a
+      // half after you let go.
+      this.trauma -= (TRAUMA_DECAY_PER_S * this.trauma + TRAUMA_DECAY_FLOOR) * dt;
+      if (this.trauma < 1e-3) this.trauma = 0;
     }
 
     /* --- trigger --- */
@@ -732,6 +840,7 @@ export class WeaponRuntime {
     report.kills = 0;
     report.lethalId = 0;
     report.bestDamage = 0;
+    report.bestDistance = 0;
     this.tallyCount = 0;
 
     const spread = currentSpread(id, this.heat[id], ctx.airborne, ctx.crouched);
@@ -788,13 +897,14 @@ export class WeaponRuntime {
   /** Keep the heaviest pellet of the shot — the hit burst is anchored there. */
   private noteBestHit(
     damage: number, x: number, y: number, z: number,
-    nx: number, ny: number, nz: number,
+    nx: number, ny: number, nz: number, distance: number,
   ): void {
     const r = this.report;
     if (damage < r.bestDamage) return;
     r.bestDamage = damage;
     r.bestX = x; r.bestY = y; r.bestZ = z;
     r.bestNx = nx; r.bestNy = ny; r.bestNz = nz;
+    r.bestDistance = distance;
   }
 
   private emitFeedback(ctx: FireContext, id: number, report: ShotReport): void {
@@ -825,15 +935,22 @@ export class WeaponRuntime {
             report.bestX, report.bestY, report.bestZ,
             report.bestNx, report.bestNy, report.bestNz,
             report.totalDamage, headshot, killed,
+            report.hits, report.pellets, report.bestDistance,
           );
         }
       }
     }
+    // Trauma is banked BEFORE the shake is sent, so the shot that raised it is
+    // also the shot that feels it. Adding it afterwards costs one whole shot of
+    // lag on a ramp and the first round of a burst then reads as the loudest.
+    this.addTrauma(TRAUMA_PER_SHOT_BASE + def.shakeAmplitude * TRAUMA_PER_SHOT_AMP);
+
     const cam = this.camera;
     if (cam) {
       cam.addRecoil(def.recoilPitch, def.recoilYaw, def.recoilRecovery);
-      cam.addShake(def.shakeAmplitude, def.shakeMs, def.shakeFrequency);
-      if (def.shakeAmplitude >= 0.3) cam.addFovPunch(-def.shakeAmplitude * 3.0, 7);
+      const gain = this.shakeGain;
+      cam.addShake(def.shakeAmplitude * gain, def.shakeMs, def.shakeFrequency);
+      if (def.shakeAmplitude >= 0.3) cam.addFovPunch(-def.shakeAmplitude * 3.0 * gain, 7);
       // A KILL shakes; a hit does not. That asymmetry is the whole point — if
       // every connecting pellet nudged the camera, a chaingun burst would be
       // one continuous rumble and the kill would vanish inside it. The camera's
@@ -841,6 +958,9 @@ export class WeaponRuntime {
       // weapon's shake on heavy guns.
       if (report.kills > 0) cam.addShake(KILL_SHAKE_AMPLITUDE, KILL_SHAKE_MS, KILL_SHAKE_HZ);
     }
+    // A kill banks trauma too, so finishing something in the middle of a burst
+    // is the peak of that burst rather than an event that vanished inside it.
+    if (report.kills > 0) this.addTrauma(TRAUMA_PER_KILL);
   }
 
   /* --- hitscan --- */
@@ -899,7 +1019,7 @@ export class WeaponRuntime {
         report.totalDamage += dmg;
         report.connected = true;
         this.tally(scratchTargetId, dmg, scratchTargetHealth);
-        this.noteBestHit(dmg, hx, hy, hz, -dir[0], -dir[1], -dir[2]);
+        this.noteBestHit(dmg, hx, hy, hz, -dir[0], -dir[1], -dir[2], dist);
         if (this.fx?.tracer) this.fx.tracer(id, ctx.ox, ctx.oy, ctx.oz, hx, hy, hz, getWeapon(id).projectileColor);
         if (this.fx?.fleshImpact) {
           this.fx.fleshImpact(hx, hy, hz, -dir[0], -dir[1], -dir[2], scratchTargetId, head, id);
@@ -1022,6 +1142,17 @@ export class WeaponRuntime {
     const range = def.meleeRange;
     const dist = this.traceTargets(ctx, ctx.dx, ctx.dy, ctx.dz, range);
     if (dist < 0) {
+      /* NOTHING SOFT IN RANGE — but the swing still has to land somewhere.
+       *
+       * A saw held against a wall used to resolve as a clean miss: no report,
+       * no hook, nothing at the point of contact, and the only evidence of
+       * contact anywhere on screen was the viewmodel's own animation. That is
+       * the same nothing the bar ships. So the melee trace falls through to the
+       * WORLD, and a face inside reach is a hit on that face.
+       *
+       * It is presentation only: no damage is scored, `connected` stays false,
+       * and the hit marker still does not fire — a wall is not a kill. */
+      if (this.worldStrike(ctx, id, range, report)) return;
       report.kind[0] = HIT_NONE;
       report.distance[0] = range;
       if (this.fx?.meleeMiss) this.fx.meleeMiss(id);
@@ -1044,10 +1175,51 @@ export class WeaponRuntime {
     const hz = ctx.oz + ctx.dz * dist;
     report.hitX[0] = hx; report.hitY[0] = hy; report.hitZ[0] = hz;
     this.tally(scratchTargetId, dmg, scratchTargetHealth);
-    this.noteBestHit(dmg, hx, hy, hz, -ctx.dx, -ctx.dy, -ctx.dz);
+    this.noteBestHit(dmg, hx, hy, hz, -ctx.dx, -ctx.dy, -ctx.dz, dist);
     if (this.fx?.fleshImpact) {
       this.fx.fleshImpact(hx, hy, hz, -ctx.dx, -ctx.dy, -ctx.dz, scratchTargetId, head, id);
     }
+  }
+
+  /**
+   * Bite the world with a melee weapon. True when a face was inside reach.
+   *
+   * `power` is the fraction of a block this one swing is worth, from the
+   * weapon's damage against the block's hardness — a chainsaw takes a wooden
+   * plank apart visibly faster than it does stone, which is the cue that tells
+   * a player what a surface is made of without a single word of UI.
+   */
+  private worldStrike(
+    ctx: FireContext, id: number, range: number, report: ShotReport,
+  ): boolean {
+    const world = ctx.world;
+    if (world === null) return false;
+    if (!world.raycast(
+      ctx.ox, ctx.oy, ctx.oz, ctx.dx, ctx.dy, ctx.dz, range, this.hit, hitscanBlocking,
+    )) return false;
+
+    const d = this.hit.distance;
+    const hx = ctx.ox + ctx.dx * d;
+    const hy = ctx.oy + ctx.dy * d;
+    const hz = ctx.oz + ctx.dz * d;
+    report.kind[0] = HIT_WORLD;
+    report.targetId[0] = 0;
+    report.damage[0] = 0;
+    report.distance[0] = d;
+    report.hitX[0] = hx; report.hitY[0] = hy; report.hitZ[0] = hz;
+
+    if (this.fx?.blockStrike) {
+      const hardness = blockHardness(this.hit.block);
+      const power = clampf(
+        (WEAPON_DAMAGE[id] * MELEE_TERRAIN_BITE) / (hardness > 0.1 ? hardness : 0.1),
+        0.16, 1,
+      );
+      this.fx.blockStrike(
+        hx, hy, hz, this.hit.nx, this.hit.ny, this.hit.nz,
+        this.hit.block, id, power,
+      );
+    }
+    return true;
   }
 
   /* -------------------------------------------------------------------- *
@@ -1067,6 +1239,49 @@ export class WeaponRuntime {
 let scratchTargetId = 0;
 let scratchHeadshot = false;
 let scratchTargetHealth = 0;
+
+/* ------------------------------------------------------------------------ *
+ * Trauma
+ * ------------------------------------------------------------------------ *
+ *
+ * Five numbers, chosen by solving for the equilibrium each weapon reaches
+ * under sustained fire rather than by feel. Trauma settles where the input
+ * (shots per second x trauma per shot) balances the bleed
+ * (TRAUMA_DECAY_PER_S x trauma + TRAUMA_DECAY_FLOOR), i.e. at
+ * (input - floor) / rate:
+ *
+ *   chaingun  11.67/s x (0.055 + 0.07 x 0.30) = 0.887/s -> 0.67 -> gain 1.41
+ *   pistol     7.00/s x (0.055 + 0.05 x 0.30) = 0.490/s -> 0.30 -> gain 1.08
+ *   shotgun     1.25/s x (0.055 + 0.30 x 0.30) = 0.181/s -> 0.00 -> gain 1.00
+ *   BFG        one shot of                      0.325   -> spike, gone in ~0.9 s
+ *
+ * which is exactly the ordering wanted. The chaingun is the weapon with no
+ * per-shot weight at all — 0.07 m of shake is a tick — so it is the one that
+ * has to earn its violence by accumulation, and it climbs to a 1.4x rumble in
+ * about a second of held trigger. The shotgun already hits like a shotgun on
+ * round one and must NOT be doubled: its 1.25 rounds per second put it below
+ * the decay floor, so it banks nothing and stays exactly as the table wrote it.
+ *
+ * The ceiling is hard: gain can never exceed 1 + TRAUMA_SHAKE_GAIN = 1.9, so
+ * no amount of held trigger turns the screen into a blur.
+ */
+/**
+ * Metres of block a melee weapon takes per point of damage, per unit hardness.
+ *
+ * Solved, not guessed: the chainsaw does 26 and stone is hardness 1.5, so
+ * 0.02 puts one swing at 0.35 of a block face — three swings from clean to
+ * shattered at 8 swings a second, i.e. the wall visibly degrades inside half a
+ * second of held trigger. Softer materials go faster on the same constant,
+ * which is the read we want.
+ */
+const MELEE_TERRAIN_BITE = 0.02;
+
+const TRAUMA_PER_SHOT_BASE = 0.055;
+const TRAUMA_PER_SHOT_AMP = 0.30;
+const TRAUMA_PER_KILL = 0.22;
+const TRAUMA_DECAY_PER_S = 1.05;
+const TRAUMA_DECAY_FLOOR = 0.18;
+const TRAUMA_SHAKE_GAIN = 0.90;
 
 /**
  * The kill shake. Small in metres and short in time — this rides ON TOP of the

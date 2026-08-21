@@ -26,6 +26,7 @@
  */
 
 import { clampf, saturate, smoothstep, DEG2RAD } from '@shared/math';
+import { InputAction } from '@shared/constants';
 
 /* ------------------------------------------------------------------------ *
  * Thumb stick
@@ -136,6 +137,15 @@ export class ThumbStick {
   /** Origin the knob measures from, in client coordinates. */
   originX = 0;
   originY = 0;
+  /**
+   * Where the base ring is *drawn*. Identical to the origin except when the
+   * thumb lands in a corner: then the ring slides inboard to stay on screen
+   * while the origin stays under the finger, so the press itself still reads
+   * as zero deflection. Clamping the origin instead would make a corner press
+   * sprint the player sideways the instant it lands.
+   */
+  ringX = 0;
+  ringY = 0;
 
   /** When true the origin moves to the press point; otherwise it stays at home. */
   floating = true;
@@ -159,17 +169,24 @@ export class ThumbStick {
     this.homeX = x; this.homeY = y;
     this.minX = minX; this.minY = minY;
     this.maxX = maxX; this.maxY = maxY;
-    if (!this.active) { this.originX = x; this.originY = y; }
+    if (!this.active) {
+      this.originX = x; this.originY = y;
+      this.ringX = x; this.ringY = y;
+    }
   }
 
   begin(pointerId: number, x: number, y: number): StickSample {
     this.pointerId = pointerId;
     if (this.floating) {
-      this.originX = clampf(x, this.minX, this.maxX);
-      this.originY = clampf(y, this.minY, this.maxY);
+      this.originX = x;
+      this.originY = y;
+      this.ringX = clampf(x, this.minX, this.maxX);
+      this.ringY = clampf(y, this.minY, this.maxY);
     } else {
       this.originX = this.homeX;
       this.originY = this.homeY;
+      this.ringX = this.homeX;
+      this.ringY = this.homeY;
     }
     return this.move(x, y);
   }
@@ -182,6 +199,8 @@ export class ThumbStick {
     this.pointerId = -1;
     this.originX = this.homeX;
     this.originY = this.homeY;
+    this.ringX = this.homeX;
+    this.ringY = this.homeY;
     resetStickSample(this.sample);
     return this.sample;
   }
@@ -454,5 +473,1159 @@ export class AutoFire {
       this.firing = false;
     }
     return this.firing;
+  }
+}
+
+/* ------------------------------------------------------------------------ *
+ * Fire pad
+ * ------------------------------------------------------------------------ */
+
+export interface FirePadConfig {
+  /**
+   * A press is held for at least this long even if the finger lifts sooner. A
+   * 60 fps frame is 16.7 ms and a fast tap can land press+release inside one,
+   * which on the bar's tap-to-shoot surface simply eats the shot.
+   */
+  minHoldMs: number;
+  /** Travel from the press point, in px, after which the finger also aims. */
+  slidePx: number;
+}
+
+export const DEFAULT_FIRE_PAD: Readonly<FirePadConfig> = Object.freeze({
+  minHoldMs: 90,
+  slidePx: 10,
+});
+
+/**
+ * The dedicated trigger the bar does not have (ref/BAR.md weakness #9), with
+ * the one refinement that makes a separate trigger playable: **slide-off**.
+ *
+ * Press the pad and the trigger holds. Keep sliding and the same thumb starts
+ * feeding look deltas without ever letting go, so a player can open fire and
+ * track a strafing target with one thumb. The bar forces that combination by
+ * making them the same gesture and so cannot offer either one cleanly; here
+ * you get the tap, the hold and the tracked burst, and aiming never fires by
+ * accident.
+ */
+export class FirePad {
+  pointerId = -1;
+  /** True while the trigger is held. */
+  firing = false;
+  /** True once the finger slid far enough to also be aiming. */
+  aiming = false;
+  /** Look delta from the last `move`, CSS pixels. Zero until `aiming`. */
+  dx = 0;
+  dy = 0;
+
+  private readonly cfg: FirePadConfig;
+  private lastX = 0;
+  private lastY = 0;
+  private startX = 0;
+  private startY = 0;
+  private downMs = 0;
+  private releasedMs = -1;
+
+  constructor(cfg: Partial<FirePadConfig> = {}) {
+    this.cfg = { ...DEFAULT_FIRE_PAD, ...cfg };
+  }
+
+  get active(): boolean { return this.pointerId >= 0; }
+
+  begin(pointerId: number, x: number, y: number, nowMs: number): void {
+    this.pointerId = pointerId;
+    this.startX = x; this.startY = y;
+    this.lastX = x; this.lastY = y;
+    this.downMs = nowMs;
+    this.releasedMs = -1;
+    this.firing = true;
+    this.aiming = false;
+    this.dx = 0;
+    this.dy = 0;
+  }
+
+  /** Feed a move. Returns true when it produced a look delta. */
+  move(x: number, y: number): boolean {
+    this.dx = 0;
+    this.dy = 0;
+    if (this.pointerId < 0) return false;
+    if (!this.aiming) {
+      const travel = Math.hypot(x - this.startX, y - this.startY);
+      if (travel < this.cfg.slidePx) { this.lastX = x; this.lastY = y; return false; }
+      this.aiming = true;
+      // Swallow the slide threshold itself so the view does not jump.
+      this.lastX = x; this.lastY = y;
+      return false;
+    }
+    this.dx = x - this.lastX;
+    this.dy = y - this.lastY;
+    this.lastX = x;
+    this.lastY = y;
+    return this.dx !== 0 || this.dy !== 0;
+  }
+
+  end(nowMs: number): void {
+    if (this.pointerId < 0) return;
+    this.pointerId = -1;
+    this.aiming = false;
+    this.dx = 0;
+    this.dy = 0;
+    this.releasedMs = nowMs;
+    this.tick(nowMs);
+  }
+
+  cancel(): void {
+    this.pointerId = -1;
+    this.firing = false;
+    this.aiming = false;
+    this.dx = 0;
+    this.dy = 0;
+    this.releasedMs = -1;
+  }
+
+  /** Poll once per frame: drops the trigger after the minimum hold expires. */
+  tick(nowMs: number): void {
+    if (this.releasedMs < 0 || !this.firing) return;
+    if (nowMs - this.downMs >= this.cfg.minHoldMs) {
+      this.firing = false;
+      this.releasedMs = -1;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------------ *
+ * Layout
+ *
+ * The bar ships one fixed low-contrast puck plus four 40 px glyphs and calls it
+ * a phone build, and it ships its DESKTOP hud on top (weakness #11). Solving
+ * the layout as numbers instead of hand-placed CSS is what makes the claim
+ * testable: `touch.test.ts` sweeps eight viewports and asserts that no two
+ * controls overlap, that nothing leaves the screen, that every target clears
+ * the 44 px minimum, and that the read-out band the HUD is given is genuinely
+ * free of thumbs.
+ * ------------------------------------------------------------------------ */
+
+/** Control ids returned by `hitTest`. */
+export const TC_NONE = 0;
+export const TC_LOOK = 1;
+export const TC_STICK = 2;
+export const TC_FIRE = 3;
+export const TC_JUMP = 4;
+export const TC_CROUCH = 5;
+export const TC_RELOAD = 6;
+export const TC_BUILD = 7;
+export const TC_AUTOFIRE = 8;
+export const TC_AIMASSIST = 9;
+export const TC_PAUSE = 10;
+/**
+ * Cycle to the next weapon. The bar puts weapon choice on a six-slot hotbar it
+ * draws at the bottom centre and then never wires to a touch handler; with
+ * seven weapons and one free thumb, one big cycle button beats seven 32 px
+ * slots you cannot hit.
+ */
+export const TC_SWAP = 11;
+
+export interface Disc { x: number; y: number; r: number }
+export interface Rect { x0: number; y0: number; x1: number; y1: number }
+export interface Pt { x: number; y: number }
+
+export interface TouchGeom {
+  vw: number;
+  vh: number;
+  portrait: boolean;
+  southpaw: boolean;
+
+  /** Resting stick position; `r` is the drawn base radius. */
+  stickHome: Disc;
+  /** Deflection that reads as full tilt, px. */
+  stickTravel: number;
+  /** Drawn knob radius, px. */
+  knobR: number;
+  /** Drawn dead-zone radius, px. */
+  deadR: number;
+  /** A press inside this rect grabs (or floats) the stick. */
+  stickZone: Rect;
+  /** Box the floating stick origin is clamped into. */
+  stickBounds: Rect;
+
+  /**
+   * Where the hand holding the device rests its trigger thumb, in client px.
+   * Published rather than assumed so `attackReach` — the one number that says
+   * whether you can shoot without moving your grip — is a measurement of the
+   * solved layout instead of an opinion about it.
+   */
+  thumbPivot: Pt;
+
+  fire: Disc;
+  jump: Disc;
+  crouch: Disc;
+  reload: Disc;
+  build: Disc;
+  swap: Disc;
+  autoFire: Disc;
+  aimAssist: Disc;
+  pause: Disc;
+
+  /** Height of the bottom band each thumb cluster owns, px. */
+  padBottomLeft: number;
+  padBottomRight: number;
+  /** Horizontal band at the bottom that no thumb covers. */
+  centreX0: number;
+  centreX1: number;
+}
+
+export interface TouchLayoutOptions {
+  safeLeft: number;
+  safeRight: number;
+  safeTop: number;
+  safeBottom: number;
+  /** Mirror the whole layout for a left-handed player. */
+  southpaw: boolean;
+  /** User control-size multiplier. */
+  scale: number;
+  /** Dead zone as a fraction of travel, mirrored from `StickConfig`. */
+  deadZone: number;
+}
+
+export const DEFAULT_TOUCH_LAYOUT: Readonly<TouchLayoutOptions> = Object.freeze({
+  safeLeft: 0, safeRight: 0, safeTop: 0, safeBottom: 0,
+  southpaw: false,
+  scale: 1,
+  deadZone: DEFAULT_STICK.deadZone,
+});
+
+/** Apple/Google both put the minimum comfortable target at 44 CSS px across. */
+export const MIN_TOUCH_TARGET = 44;
+
+/**
+ * Hard floor on the ATTACK pad's diameter, in CSS pixels, at every viewport
+ * and every user control-size setting.
+ *
+ * The trigger is not just another button. The bar's answer to "how do I shoot"
+ * is a tap on the look surface — no control at all — so the one thing our right
+ * thumb must never have to hunt for is this disc. Everything else in the
+ * cluster scales freely with `scale`; the trigger scales up from here and never
+ * down. At 915x412 and 412x915 the solver lands it at ~119 px unaided, so this
+ * floor only ever bites at the smallest control-size setting, where the
+ * movement glyphs may shrink but the attack pad may not.
+ */
+export const MIN_ATTACK_PAD_D = 104;
+
+/**
+ * Ceiling on the attack pad's diameter, px.
+ *
+ * A trigger can be too big. Past about this size the disc stops being easier
+ * to hit — the thumb already cannot miss it — and starts doing two harmful
+ * things: eating the viewport the bar already wastes (weakness #11), and
+ * pushing its own centre *away* from the corner the thumb pivots around, since
+ * a disc pinned to the bottom-right corner has its centre one radius in from
+ * both edges. Capping the radius is what keeps `attackReach` under
+ * `MAX_ATTACK_REACH` at every viewport and every control-size setting.
+ */
+export const MAX_ATTACK_PAD_D = 128;
+
+/* --- the thumb pivot -----------------------------------------------------
+   Hold a phone in landscape and the right thumb's knuckle sits just inboard of
+   the bottom-right corner; everything it can press without regripping is an
+   arc swept from there. On the bar's own 915x412 capture that point is
+   (855, 400) — 60 px in from the right edge, 12 px up from the bottom — and
+   the bar puts its dig glyph, the only thing on its screen that attacks, 199 px
+   away at (712, 262), out in the middle of the world where the thumb has to
+   leave the grip to reach it. These two constants are that measurement,
+   generalised to any viewport and offset by whatever the notch/home-bar takes.
+
+   Everything else about the trigger is downstream of this: the pad is placed
+   at the corner and sized so the pivot lands on it. */
+export const THUMB_PIVOT_INSET_X = 60;
+export const THUMB_PIVOT_INSET_Y = 12;
+
+/**
+ * Hard ceiling on how far the trigger's centre may sit from the thumb pivot,
+ * px. Under this and the pad is a control you press; over it and it is a
+ * control you *reach for*, which in a firefight is a control you do not press.
+ */
+export const MAX_ATTACK_REACH = 90;
+
+/** Gap kept between neighbouring controls, px. */
+const GAP = 10;
+
+/**
+ * Screen-edge margin for the trigger specifically, px. Tighter than the 16/14
+ * the rest of the cluster uses, because every pixel the disc is inset from the
+ * corner is a pixel its centre moves away from the thumb pivot.
+ */
+const TRIGGER_EDGE = 10;
+
+function disc(): Disc { return { x: 0, y: 0, r: 0 }; }
+function rect(): Rect { return { x0: 0, y0: 0, x1: 0, y1: 0 }; }
+
+export function createTouchGeom(): TouchGeom {
+  return {
+    vw: 0, vh: 0, portrait: false, southpaw: false,
+    stickHome: disc(), stickTravel: 0, knobR: 0, deadR: 0,
+    stickZone: rect(), stickBounds: rect(),
+    thumbPivot: { x: 0, y: 0 },
+    fire: disc(), jump: disc(), crouch: disc(), reload: disc(),
+    build: disc(), swap: disc(), autoFire: disc(), aimAssist: disc(), pause: disc(),
+    padBottomLeft: 0, padBottomRight: 0, centreX0: 0, centreX1: 0,
+  };
+}
+
+/**
+ * Distance from the trigger thumb's pivot to the centre of the attack pad, px.
+ * The one number that answers "can you shoot without looking at your hands".
+ */
+export function attackReach(g: TouchGeom): number {
+  return Math.hypot(g.fire.x - g.thumbPivot.x, g.fire.y - g.thumbPivot.y);
+}
+
+/**
+ * Place every control for a viewport. Pure arithmetic — no DOM, no measuring,
+ * which is also why the pad never calls `getBoundingClientRect()` in a pointer
+ * handler. A layout read inside a move event is a forced synchronous reflow,
+ * and at 4x CPU throttle that is exactly how a 1 % low gets lost.
+ */
+export function solveTouchLayout(
+  vw: number, vh: number,
+  opts: Partial<TouchLayoutOptions>,
+  out: TouchGeom,
+): TouchGeom {
+  const o: TouchLayoutOptions = { ...DEFAULT_TOUCH_LAYOUT, ...opts };
+  const w = Math.max(240, vw);
+  const h = Math.max(240, vh);
+  const short = Math.min(w, h);
+  const scale = clampf(o.scale, 0.7, 1.4);
+
+  out.vw = w;
+  out.vh = h;
+  out.portrait = h >= w;
+  out.southpaw = o.southpaw;
+
+  /* --- sizes -----------------------------------------------------------
+     Nothing here is allowed below `MIN_TOUCH_TARGET` across, at any viewport
+     or any user scale. The bar's four glyph buttons measure ~40 px, which is
+     under both Apple's and Google's floor, and they are the buttons you
+     mis-hit. */
+  const unit = clampf(short * 0.145, 42, 64) * scale;
+  const btnR = clampf(unit * 0.5, MIN_TOUCH_TARGET / 2, 32);
+  const smallR = clampf(unit * 0.42, MIN_TOUCH_TARGET / 2, 26);
+  const chipR = clampf(unit * 0.46, MIN_TOUCH_TARGET / 2, 28);
+  const rim = clampf(unit * 0.24, 10, 16);
+  /* The trigger is the exception to the size slider: it may grow with it but
+     never shrink past `MIN_ATTACK_PAD_D`, and never grow past
+     `MAX_ATTACK_PAD_D` either. A player who has dialled the controls down to
+     keep the screen clear has still got to be able to shoot; a player who has
+     dialled them up must not end up with a trigger so fat that its centre —
+     one radius in from each edge — walks out of the thumb's arc. */
+  const fireR = clampf(Math.max(unit, MIN_ATTACK_PAD_D / 2),
+    MIN_ATTACK_PAD_D / 2, MAX_ATTACK_PAD_D / 2);
+  let travel = clampf(short * 0.14, 40, 62) * scale;
+  let baseR = travel + rim;
+
+  const ml = 16 + Math.max(0, o.safeLeft);
+  const mr = 16 + Math.max(0, o.safeRight);
+  const mt = 12 + Math.max(0, o.safeTop);
+  const mb = 14 + Math.max(0, o.safeBottom);
+
+  /* --- right-hand combat cluster --------------------------------------
+     Exactly TWO buttons stack beside the trigger. Every extra button in that
+     column pushes the ammo read-out further up the screen, and the bar's own
+     mistake was letting the chrome eat the viewport (weakness #11).
+
+     The trigger itself is placed against the corner using its own tighter
+     margin, and then the thumb pivot is recorded so `attackReach` can be
+     asserted rather than eyeballed. At 915x412 that lands the pad's centre
+     58.9 px from the pivot with a 59.9 px radius — i.e. the resting thumb is
+     already *inside* the attack pad, which is the strongest form of "you can
+     shoot without looking". The bar's equivalent reach is 199 px. */
+  const trigMR = TRIGGER_EDGE + Math.max(0, o.safeRight);
+  const trigMB = TRIGGER_EDGE + Math.max(0, o.safeBottom);
+  const fx = w - trigMR - fireR;
+  const fy = h - trigMB - fireR;
+  out.fire.x = fx; out.fire.y = fy; out.fire.r = fireR;
+  out.thumbPivot.x = w - Math.max(0, o.safeRight) - THUMB_PIVOT_INSET_X;
+  out.thumbPivot.y = h - Math.max(0, o.safeBottom) - THUMB_PIVOT_INSET_Y;
+
+  const colX = fx - fireR - GAP - btnR;
+  const crouchY = h - mb - btnR;
+  const jumpY = crouchY - btnR - GAP - btnR;
+
+  out.crouch.x = colX; out.crouch.y = crouchY; out.crouch.r = btnR;
+  out.jump.x = colX;   out.jump.y = jumpY;     out.jump.r = btnR;
+
+  /* --- left-hand stick ------------------------------------------------
+     The stick may never reach the button column. On a narrow portrait phone
+     with the control-size slider pushed up, the honest answer is a smaller
+     stick, not two controls under one thumb. */
+  const maxBase = (colX - btnR - 12 - ml) * 0.5;
+  if (baseR > maxBase) {
+    baseR = Math.max(MIN_TOUCH_TARGET, maxBase);
+    travel = Math.max(30, baseR - rim);
+  }
+  const knobR = clampf(travel * 0.46, 18, 30);
+  const sx = ml + baseR;
+  const sy = h - mb - baseR;
+  const stickTop = sy - baseR;
+  out.stickHome.x = sx; out.stickHome.y = sy; out.stickHome.r = baseR;
+  out.stickTravel = travel;
+  out.knobR = knobR;
+  out.deadR = travel * clampf(o.deadZone, 0, 0.9);
+
+  /* Reload, build and weapon-swap are utility, not combat. On a wide screen
+     they take a second column inboard of jump/crouch; on a 412 px-wide portrait
+     phone there is no room for that, so they move to a row above the stick
+     where the idle left thumb reaches them. Either way the trigger column stays
+     two buttons tall. */
+  const stickRight = sx + baseR;
+  const col2X = colX - btnR - GAP - smallR;
+  const twoColumns = (col2X - smallR) >= stickRight + 14;
+  let utilTop: number;
+  if (twoColumns) {
+    out.reload.x = col2X; out.reload.y = crouchY; out.reload.r = smallR;
+    out.build.x = col2X;  out.build.y = jumpY;    out.build.r = smallR;
+    out.swap.x = col2X;   out.swap.y = jumpY - smallR - GAP - smallR; out.swap.r = smallR;
+    utilTop = out.swap.y - smallR;
+  } else {
+    /* The row clears the STICK by construction — it is placed above it. It does
+       not automatically clear the trigger column, and on a short phone with the
+       size slider up (360x640 at 1.2x is the case that finds it) the rightmost
+       chip runs straight into JUMP: one thumb, two controls, which is the whole
+       failure this solver exists to prevent. When the row is wide enough to
+       reach the column, lift it clear of the column too. */
+    const rowRight = ml + smallR * 6 + GAP * 2;
+    const clearsColumn = rowRight <= colX - btnR - GAP;
+    let uy = stickTop - 8 - smallR;
+    if (!clearsColumn) uy = Math.min(uy, jumpY - btnR - GAP - smallR);
+    uy = Math.max(uy, mt + smallR);
+    out.reload.x = ml + smallR;                        out.reload.y = uy; out.reload.r = smallR;
+    out.build.x = ml + smallR * 3 + GAP;               out.build.y = uy;  out.build.r = smallR;
+    out.swap.x = ml + smallR * 5 + GAP * 2;            out.swap.y = uy;   out.swap.r = smallR;
+    utilTop = uy - smallR;
+  }
+
+  /* --- option chips ----------------------------------------------------
+     Auto-fire and aim-assist are comfort toggles, pressed between fights and
+     never during one, so they hang off the pause button in the far corner
+     rather than crowding the thumb. Keeping them ON SCREEN and labelled is
+     still the point: the bar ships neither feature and no way to ask for it. */
+  const pauseR = clampf(smallR * 0.9, MIN_TOUCH_TARGET / 2, 24);
+  out.pause.x = w - mr - pauseR;
+  out.pause.y = mt + pauseR;
+  out.pause.r = pauseR;
+
+  out.autoFire.x = out.pause.x;
+  out.autoFire.y = out.pause.y + pauseR + 8 + chipR;
+  out.autoFire.r = chipR;
+  out.aimAssist.x = out.pause.x;
+  out.aimAssist.y = out.autoFire.y + chipR * 2 + 6;
+  out.aimAssist.r = chipR;
+
+  /* --- zones ---------------------------------------------------------- */
+  const zoneRight = Math.min(w * 0.5, colX - btnR - GAP);
+  const zoneHeight = Math.min(h * 0.62, baseR * 2 + 76);
+  const zoneTop = Math.max(h - zoneHeight, twoColumns ? 0 : utilTop + smallR * 2 + 6);
+  out.stickZone.x0 = 0;
+  out.stickZone.y0 = zoneTop;
+  out.stickZone.x1 = zoneRight;
+  out.stickZone.y1 = h;
+
+  out.stickBounds.x0 = ml + baseR * 0.7;
+  out.stickBounds.y0 = Math.min(sy, zoneTop + baseR * 0.7);
+  out.stickBounds.x1 = Math.max(out.stickBounds.x0, zoneRight - baseR * 0.7);
+  out.stickBounds.y1 = Math.max(out.stickBounds.y0, h - mb - baseR * 0.7);
+
+  /* --- the band the HUD may draw read-outs in ------------------------- */
+  const leftBottomBand = h - Math.min(stickTop, twoColumns ? stickTop : utilTop);
+  const rightBottomBand = h - Math.min(fy - fireR, jumpY - btnR,
+    twoColumns ? utilTop : Infinity);
+  const leftClusterRight = twoColumns
+    ? stickRight
+    : Math.max(stickRight, out.swap.x + smallR);
+  const rightClusterLeft = twoColumns ? col2X - smallR : colX - btnR;
+
+  if (o.southpaw) {
+    mirrorDisc(out.fire, w);
+    mirrorDisc(out.jump, w);
+    mirrorDisc(out.crouch, w);
+    mirrorDisc(out.reload, w);
+    mirrorDisc(out.build, w);
+    mirrorDisc(out.swap, w);
+    mirrorDisc(out.autoFire, w);
+    mirrorDisc(out.aimAssist, w);
+    mirrorDisc(out.stickHome, w);
+    mirrorDisc(out.pause, w);
+    // The pivot is a property of the hand, so it mirrors with the hand.
+    out.thumbPivot.x = w - out.thumbPivot.x;
+    const zx0 = w - out.stickZone.x1;
+    out.stickZone.x0 = zx0;
+    out.stickZone.x1 = w;
+    const bx0 = w - out.stickBounds.x1;
+    const bx1 = w - out.stickBounds.x0;
+    out.stickBounds.x0 = bx0;
+    out.stickBounds.x1 = bx1;
+    out.padBottomLeft = rightBottomBand;
+    out.padBottomRight = leftBottomBand;
+    out.centreX0 = w - rightClusterLeft + 10;
+    out.centreX1 = w - leftClusterRight - 10;
+  } else {
+    out.padBottomLeft = leftBottomBand;
+    out.padBottomRight = rightBottomBand;
+    out.centreX0 = leftClusterRight + 10;
+    out.centreX1 = rightClusterLeft - 10;
+  }
+  // A narrow portrait phone has no free centre column at all. Report that
+  // honestly as a zero-width band rather than an inside-out one, so the HUD
+  // switches to its stacked layout instead of drawing into a negative box.
+  if (out.centreX1 < out.centreX0) {
+    const mid = (out.centreX0 + out.centreX1) * 0.5;
+    out.centreX0 = mid;
+    out.centreX1 = mid;
+  }
+  return out;
+}
+
+function mirrorDisc(d: Disc, w: number): void { d.x = w - d.x; }
+
+function inDisc(d: Disc, x: number, y: number, slop: number): boolean {
+  const r = d.r + slop;
+  const dx = x - d.x;
+  const dy = y - d.y;
+  return dx * dx + dy * dy <= r * r;
+}
+
+function inRect(r: Rect, x: number, y: number): boolean {
+  return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
+}
+
+/**
+ * Which control a press at (x, y) belongs to.
+ *
+ * Order matters and is deliberate: buttons win over the trigger, the trigger
+ * wins over the stick zone, and everything left over is look. `slop` grows the
+ * hit area past the drawn circle — a 60 px glyph that only answers inside its
+ * own 60 px is a glyph you miss in a firefight, and the bar's 40 px ones are
+ * exactly that.
+ */
+export function hitTest(g: TouchGeom, x: number, y: number, slop: number = 6): number {
+  if (inDisc(g.pause, x, y, slop)) return TC_PAUSE;
+  if (inDisc(g.autoFire, x, y, slop)) return TC_AUTOFIRE;
+  if (inDisc(g.aimAssist, x, y, slop)) return TC_AIMASSIST;
+  if (inDisc(g.jump, x, y, slop)) return TC_JUMP;
+  if (inDisc(g.crouch, x, y, slop)) return TC_CROUCH;
+  if (inDisc(g.reload, x, y, slop)) return TC_RELOAD;
+  if (inDisc(g.build, x, y, slop)) return TC_BUILD;
+  if (inDisc(g.swap, x, y, slop)) return TC_SWAP;
+  if (inDisc(g.fire, x, y, slop)) return TC_FIRE;
+  if (inRect(g.stickZone, x, y)) return TC_STICK;
+  return TC_LOOK;
+}
+
+/** Every disc the layout draws, in hit-test order. For tests and for drawing. */
+export function touchDiscs(g: TouchGeom): Disc[] {
+  return [
+    g.pause, g.autoFire, g.aimAssist, g.jump, g.crouch,
+    g.reload, g.build, g.swap, g.fire, g.stickHome,
+  ];
+}
+
+/* ------------------------------------------------------------------------ *
+ * Contrast
+ *
+ * Weakness #10 measured rather than asserted. Sampled off the bar's own
+ * landscape capture (ref/voxiom/mobileland-08-combat.png), its joystick's base
+ * ring is rgb(116,126,97) against rgb(101,112,69) of grass — a contrast ratio
+ * of **1.24:1**, i.e. invisible — and its knob is rgb(178,178,178) on the same
+ * grass, **2.39:1**, under the 3:1 WCAG floor for a non-text control.
+ *
+ * Its own glyph edges measure the same way. Sampled as annuli either side of
+ * each rim on that capture: the dig disc — the only attack affordance it has —
+ * reads 1.37:1 against the grass behind it, crouch 1.35:1, and the two glyphs
+ * that sit on the dark tree trunk read 1.73:1 and 1.32:1. So it does not
+ * recover on a dark backdrop either: the fill is a translucent white wash with
+ * no stroke at all, so whatever is behind it drags it along.
+ *
+ * The fix is not "use a brighter colour", because no single colour survives
+ * both a sunlit sand cliff and a black corridor. It is a two-tone edge, drawn
+ * in FULLY OPAQUE ink: every control is stroked light AND dark. Whatever the
+ * background does, one of the two strokes is in contrast with it, and the
+ * guaranteed worst case over the entire RGB cube is 4.58:1. That is a theorem
+ * about the palette, and `touch.test.ts` proves it by sweeping the cube.
+ * ------------------------------------------------------------------------ */
+
+export function srgbToLinear(c: number): number {
+  const v = c / 255;
+  return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+}
+
+export function relativeLuminance(r: number, g: number, b: number): number {
+  return 0.2126 * srgbToLinear(r) + 0.7152 * srgbToLinear(g) + 0.0722 * srgbToLinear(b);
+}
+
+export function contrastRatio(
+  r1: number, g1: number, b1: number,
+  r2: number, g2: number, b2: number,
+): number {
+  const l1 = relativeLuminance(r1, g1, b1);
+  const l2 = relativeLuminance(r2, g2, b2);
+  return l1 > l2 ? (l1 + 0.05) / (l2 + 0.05) : (l2 + 0.05) / (l1 + 0.05);
+}
+
+/** Source-over of a straight-alpha colour on an opaque background, one channel. */
+function over(fg: number, a: number, bg: number): number {
+  return fg * a + bg * (1 - a);
+}
+
+export interface EdgePalette {
+  lightR: number; lightG: number; lightB: number; lightA: number;
+  darkR: number; darkG: number; darkB: number; darkA: number;
+}
+
+/**
+ * The exact strokes `hud/mobile.ts` draws: **fully opaque**, both of them.
+ *
+ * The alphas used to be 0.96 and 0.90, which was already twenty times better
+ * than the bar and still the wrong answer. A stroke's whole job is to be the
+ * boundary, and a boundary that lets 4 % of the terrain through is a boundary
+ * whose measured contrast depends on the terrain. Opaque means the light
+ * stroke is *exactly* white at relative luminance 1.0 and the dark stroke is
+ * exactly black at 0.0, on every frame, so the numbers below are properties of
+ * the palette rather than of the level:
+ *
+ *   - on the bar's own bright grass (the pixels its crouch glyph sits on,
+ *     rgb(107,114,59), L = 0.155) the white stroke alone measures **5.13:1** —
+ *     clear of the 3:1 WCAG floor for a non-text control, and 3.8x the 1.35:1
+ *     that same glyph's own edge measures;
+ *   - on the bar's dark tree trunk (rgb(54,35,24), L = 0.021) it measures
+ *     **14.9:1**;
+ *   - and against *any* background whatsoever, the light/dark pair measures at
+ *     least **4.58:1** (`worstEdgeContrast`), because the worst case is the
+ *     luminance where white and black are equally bad and opaque ink puts that
+ *     crossover at (L+0.05)^2 = 0.0525.
+ *
+ * Raising the alphas to 1 is worth 4.40 -> 4.58 on the guaranteed floor and,
+ * more importantly, it makes the floor a *guarantee* instead of an average.
+ */
+export const TOUCH_EDGE: Readonly<EdgePalette> = Object.freeze({
+  lightR: 255, lightG: 255, lightB: 255, lightA: 1,
+  darkR: 0, darkG: 0, darkB: 0, darkA: 1,
+});
+
+/**
+ * Stroke widths, in CSS px, shared with the stylesheet so the two cannot drift.
+ * 2 px is the floor named by the work order; the light stroke is drawn at 2.5
+ * and the trigger's at `TRIGGER_STROKE_PX`, because the primary verb should
+ * read as the primary verb from the corner of the eye.
+ */
+export const MIN_EDGE_STROKE_PX = 2;
+export const EDGE_STROKE_PX = 2.5;
+export const EDGE_HALO_PX = 2;
+export const TRIGGER_STROKE_PX = 3;
+
+/** Contrast of the light stroke alone against one background. */
+export function lightStrokeContrast(
+  bgR: number, bgG: number, bgB: number,
+  pal: EdgePalette = TOUCH_EDGE,
+): number {
+  return contrastRatio(
+    over(pal.lightR, pal.lightA, bgR),
+    over(pal.lightG, pal.lightA, bgG),
+    over(pal.lightB, pal.lightA, bgB),
+    bgR, bgG, bgB,
+  );
+}
+
+/** Contrast of the dark stroke alone against one background. */
+export function darkStrokeContrast(
+  bgR: number, bgG: number, bgB: number,
+  pal: EdgePalette = TOUCH_EDGE,
+): number {
+  return contrastRatio(
+    over(pal.darkR, pal.darkA, bgR),
+    over(pal.darkG, pal.darkA, bgG),
+    over(pal.darkB, pal.darkA, bgB),
+    bgR, bgG, bgB,
+  );
+}
+
+/**
+ * Contrast of the better of the two strokes against one background. This is
+ * the number that decides whether a control is visible, because a control the
+ * player can see the outline of is a control they can hit.
+ */
+export function edgeContrast(
+  bgR: number, bgG: number, bgB: number,
+  pal: EdgePalette = TOUCH_EDGE,
+): number {
+  const a = lightStrokeContrast(bgR, bgG, bgB, pal);
+  const b = darkStrokeContrast(bgR, bgG, bgB, pal);
+  return a > b ? a : b;
+}
+
+/**
+ * Worst `edgeContrast` over an evenly sampled RGB cube. `step` of 17 gives
+ * 16^3 = 4096 backgrounds, which is plenty to catch the mid-luminance valley
+ * where a single-tone outline dies.
+ */
+export function worstEdgeContrast(pal: EdgePalette = TOUCH_EDGE, step: number = 17): number {
+  let worst = Infinity;
+  for (let r = 0; r <= 255; r += step) {
+    for (let g = 0; g <= 255; g += step) {
+      for (let b = 0; b <= 255; b += step) {
+        const c = edgeContrast(r, g, b, pal);
+        if (c < worst) worst = c;
+      }
+    }
+  }
+  return worst;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Router
+ *
+ * One surface, many fingers. Every pointer that lands anywhere on the screen
+ * comes through here, is classified once by `hitTest` against the solved
+ * geometry, and is then owned by exactly one control until it lifts.
+ *
+ * That is the whole answer to "can you aim and shoot with one thumb per side".
+ * The bar cannot answer it: it has no fire button, so the right thumb's single
+ * gesture has to mean *both* look and shoot, and the two cancel out. Here the
+ * right thumb has three separable gestures on one surface —
+ *
+ *   tap the look area            one shot, no view movement
+ *   drag the look area           aim, and never fire by accident
+ *   press the pad, keep sliding  trigger held AND aiming, same thumb
+ *
+ * — while the left thumb keeps the stick, and neither thumb has to leave the
+ * glass. It is deliberately DOM-free: `hud/mobile.ts` feeds it plain numbers,
+ * so `touch.test.ts` can replay a two-thumb firefight in node.
+ * ------------------------------------------------------------------------ */
+
+/** Everything the router pushes input into. `InputManager` satisfies it. */
+export interface TouchSink {
+  setMove(x: number, z: number): void;
+  addLook(dxPx: number, dyPx: number): void;
+  setButton(action: InputAction, down: boolean): void;
+  tap(action: InputAction): void;
+  reset(): void;
+}
+
+export interface TouchAimTarget { yaw: number; pitch: number; dist: number }
+
+/**
+ * The three things aim assist needs from the game. `Game` already exposes all
+ * of them publicly (`nearestEnemyAim`, `viewClearance`, `camera.addLook`), so
+ * the mobile layer needs no new engine surface to be wired in.
+ */
+export interface TouchAimSource {
+  /** Signed angles from the view to the nearest live enemy. False if none. */
+  nearestEnemyAim(out: TouchAimTarget): boolean;
+  /** Metres of clear line straight ahead, saturating at some finite probe range. */
+  viewClearance(): number;
+  /** Apply an assist correction, in radians. */
+  addLookRadians(yaw: number, pitch: number): void;
+}
+
+export interface TouchRouterHooks {
+  onPause?(): void;
+  /** `control` is TC_AUTOFIRE or TC_AIMASSIST. */
+  onToggle?(control: number, on: boolean): void;
+  /** Milliseconds of haptic buzz. The view decides whether to honour it. */
+  onHaptic?(ms: number): void;
+}
+
+/**
+ * Beyond this the clearance probe has saturated and cannot prove occlusion, so
+ * a target further away is treated as visible rather than never shootable.
+ */
+const CLEARANCE_PROBE_M = 23.5;
+
+/** Slack allowed between the clearance probe and the target distance, metres. */
+const CLEARANCE_SLACK_M = 0.6;
+
+/** Simultaneous fingers tracked. Ten is more than any hand will produce. */
+const MAX_POINTERS = 10;
+
+/** A held button that slides more than this off its centre is let go. */
+const BUTTON_SLIDE_OFF = 1.9;
+
+function actionForControl(control: number): InputAction | null {
+  switch (control) {
+    case TC_JUMP: return InputAction.Jump;
+    case TC_CROUCH: return InputAction.Crouch;
+    case TC_RELOAD: return InputAction.Reload;
+    default: return null;
+  }
+}
+
+function discForControl(g: TouchGeom, control: number): Disc | null {
+  switch (control) {
+    case TC_JUMP: return g.jump;
+    case TC_CROUCH: return g.crouch;
+    case TC_RELOAD: return g.reload;
+    case TC_BUILD: return g.build;
+    case TC_SWAP: return g.swap;
+    case TC_AUTOFIRE: return g.autoFire;
+    case TC_AIMASSIST: return g.aimAssist;
+    case TC_PAUSE: return g.pause;
+    default: return null;
+  }
+}
+
+export class TouchRouter {
+  readonly geom: TouchGeom = createTouchGeom();
+  readonly stick = new ThumbStick();
+  readonly look = new DragTracker();
+  readonly firePad = new FirePad();
+  readonly autoFire = new AutoFire();
+  readonly assistCfg: AimAssistConfig = { ...DEFAULT_AIM_ASSIST };
+  readonly assistOut: AimAssistOut = createAimAssistOut();
+  readonly target: TouchAimTarget = { yaw: 0, pitch: 0, dist: 0 };
+
+  /** Aim assist on/off. On by default: it is the point of the piece. */
+  aimAssistEnabled = true;
+  /** Extra multiplier on every look delta, from the settings slider. */
+  lookScale = 1;
+
+  /* ---- read by the view; never written from outside ---- */
+  /** True while the trigger is pulled, by the pad or by auto-fire. */
+  firing = false;
+  /** 0..1 assist engagement — the reticle draws this. */
+  engaged = 0;
+  /** True while auto-fire holds a genuine lock. */
+  locked = false;
+  /** Bitmask of `1 << TC_*` for every control currently held. */
+  held = 0;
+  /** Look multiplier currently applied by assist friction, 0..1. */
+  friction = 1;
+  /** Shots the look surface answered with a tap, for the view's flash. */
+  tapShots = 0;
+
+  private readonly sink: TouchSink;
+  private readonly hooks: TouchRouterHooks;
+  private readonly ptrId = new Int32Array(MAX_POINTERS).fill(-1);
+  private readonly ptrCtl = new Uint8Array(MAX_POINTERS);
+  private dragPx = 0;
+  private lastFiring = false;
+
+  constructor(sink: TouchSink, hooks: TouchRouterHooks = {}) {
+    this.sink = sink;
+    this.hooks = hooks;
+    this.stick.config.radius = this.geom.stickTravel || DEFAULT_STICK.radius;
+  }
+
+  get autoFireEnabled(): boolean { return this.autoFire.enabled; }
+  set autoFireEnabled(on: boolean) {
+    this.autoFire.enabled = on;
+    if (!on) this.autoFire.reset();
+    this.syncFire();
+  }
+
+  /** Re-solve the layout for a viewport. Call on resize/rotate only. */
+  resize(vw: number, vh: number, opts: Partial<TouchLayoutOptions> = {}): TouchGeom {
+    const g = solveTouchLayout(vw, vh, opts, this.geom);
+    this.stick.config.radius = g.stickTravel;
+    this.stick.config.deadZone = opts.deadZone ?? DEFAULT_STICK.deadZone;
+    this.stick.setHome(
+      g.stickHome.x, g.stickHome.y,
+      g.stickBounds.x0, g.stickBounds.y0, g.stickBounds.x1, g.stickBounds.y1,
+    );
+    return g;
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Pointers
+   * -------------------------------------------------------------------- */
+
+  /**
+   * Route a press. Returns the control it was given to, or `TC_NONE` when the
+   * press was refused (a second finger in a zone that is already owned — on
+   * glass that is a palm, not an intent).
+   */
+  down(pointerId: number, x: number, y: number, nowMs: number): number {
+    if (this.slotOf(pointerId) >= 0) return TC_NONE;
+    let control = hitTest(this.geom, x, y);
+
+    if (control === TC_STICK && this.stick.active) return TC_NONE;
+    if (control === TC_LOOK && this.look.active) return TC_NONE;
+    if (control === TC_FIRE && this.firePad.active) return TC_NONE;
+
+    switch (control) {
+      case TC_STICK:
+        this.stick.begin(pointerId, x, y);
+        this.pushStick();
+        break;
+      case TC_FIRE:
+        this.firePad.begin(pointerId, x, y, nowMs);
+        this.hooks.onHaptic?.(8);
+        this.syncFire();
+        break;
+      case TC_LOOK:
+        this.look.begin(pointerId, x, y, nowMs);
+        break;
+      case TC_PAUSE:
+        this.hooks.onPause?.();
+        break;
+      case TC_AUTOFIRE:
+        this.autoFireEnabled = !this.autoFire.enabled;
+        this.hooks.onToggle?.(TC_AUTOFIRE, this.autoFire.enabled);
+        this.hooks.onHaptic?.(12);
+        break;
+      case TC_AIMASSIST:
+        this.aimAssistEnabled = !this.aimAssistEnabled;
+        if (!this.aimAssistEnabled) { this.friction = 1; this.engaged = 0; }
+        this.hooks.onToggle?.(TC_AIMASSIST, this.aimAssistEnabled);
+        this.hooks.onHaptic?.(12);
+        break;
+      case TC_BUILD:
+        this.sink.tap(InputAction.BuildMode);
+        this.hooks.onHaptic?.(8);
+        break;
+      case TC_SWAP:
+        this.sink.tap(InputAction.NextWeapon);
+        this.hooks.onHaptic?.(8);
+        break;
+      default: {
+        const action = actionForControl(control);
+        if (action !== null) {
+          this.sink.setButton(action, true);
+          this.hooks.onHaptic?.(6);
+        } else {
+          control = TC_NONE;
+        }
+        break;
+      }
+    }
+
+    if (control !== TC_NONE) {
+      this.claim(pointerId, control);
+      if (control !== TC_LOOK && control !== TC_STICK) this.held |= 1 << control;
+    }
+    return control;
+  }
+
+  /** Route a move. Returns the control that consumed it. */
+  move(pointerId: number, x: number, y: number): number {
+    const slot = this.slotOf(pointerId);
+    if (slot < 0) return TC_NONE;
+    const control = this.ptrCtl[slot];
+
+    switch (control) {
+      case TC_STICK:
+        this.stick.move(x, y);
+        this.pushStick();
+        break;
+      case TC_FIRE:
+        if (this.firePad.move(x, y)) {
+          this.dragPx += Math.hypot(this.firePad.dx, this.firePad.dy);
+          this.pushLook(this.firePad.dx, this.firePad.dy);
+        }
+        break;
+      case TC_LOOK:
+        if (this.look.move(x, y)) {
+          this.dragPx += this.look.speed;
+          this.pushLook(this.look.dx, this.look.dy);
+        }
+        break;
+      default: {
+        // A held glyph the thumb has rolled off. Letting go beats a stuck
+        // crouch, which is the classic phone-shooter bug.
+        const disc = discForControl(this.geom, control);
+        if (disc !== null) {
+          const r = disc.r * BUTTON_SLIDE_OFF;
+          if (Math.hypot(x - disc.x, y - disc.y) > r) this.release(slot);
+        }
+        break;
+      }
+    }
+    return control;
+  }
+
+  /** Route a lift. Returns the control that owned the pointer. */
+  up(pointerId: number, nowMs: number): number {
+    const slot = this.slotOf(pointerId);
+    if (slot < 0) return TC_NONE;
+    const control = this.ptrCtl[slot];
+
+    switch (control) {
+      case TC_STICK:
+        this.stick.end();
+        this.pushStick();
+        break;
+      case TC_FIRE:
+        this.firePad.end(nowMs);
+        this.syncFire();
+        break;
+      case TC_LOOK:
+        // A short, still press is a shot. A drag never is — which is exactly
+        // the distinction the bar does not draw.
+        if (this.look.end(nowMs)) {
+          this.sink.tap(InputAction.Fire);
+          this.tapShots++;
+          this.hooks.onHaptic?.(8);
+        }
+        break;
+      default:
+        this.releaseAction(control);
+        break;
+    }
+    this.free(slot);
+    if (control !== TC_LOOK && control !== TC_STICK) this.held &= ~(1 << control);
+    return control;
+  }
+
+  /** A cancelled pointer (a system gesture stole it). Never fires anything. */
+  cancel(pointerId: number): void {
+    const slot = this.slotOf(pointerId);
+    if (slot < 0) return;
+    const control = this.ptrCtl[slot];
+    switch (control) {
+      case TC_STICK: this.stick.end(); this.pushStick(); break;
+      case TC_FIRE: this.firePad.cancel(); this.syncFire(); break;
+      case TC_LOOK: this.look.cancel(); break;
+      default: this.releaseAction(control); break;
+    }
+    this.free(slot);
+    if (control !== TC_LOOK && control !== TC_STICK) this.held &= ~(1 << control);
+  }
+
+  /** Drop every finger and every held action. Blur, pause, unmount. */
+  releaseAll(): void {
+    for (let i = 0; i < MAX_POINTERS; i++) {
+      if (this.ptrId[i] < 0) continue;
+      this.releaseAction(this.ptrCtl[i]);
+      this.ptrId[i] = -1;
+      this.ptrCtl[i] = TC_NONE;
+    }
+    this.stick.end();
+    this.look.cancel();
+    this.firePad.cancel();
+    this.autoFire.reset();
+    this.held = 0;
+    this.engaged = 0;
+    this.friction = 1;
+    this.dragPx = 0;
+    this.firing = false;
+    this.lastFiring = false;
+    // Fire and Sprint are not owned by any pointer — the trigger can be held by
+    // auto-fire and sprint by the stick detent — so releasing the fingers is
+    // not enough. Drop them by hand rather than trusting the sink's `reset` to
+    // mean the same thing this class does.
+    this.sink.setButton(InputAction.Fire, false);
+    this.sink.setButton(InputAction.Sprint, false);
+    this.sink.setMove(0, 0);
+    this.sink.reset();
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Per-step
+   * -------------------------------------------------------------------- */
+
+  /**
+   * One simulation step. `aim` may be null (menu, dead, no world yet), in which
+   * case nothing assists and auto-fire lets go.
+   *
+   * Cost: one `nearestEnemyAim` and at most one clearance raycast per step, and
+   * both are skipped unless a thumb is actually engaged. No allocation.
+   */
+  update(dt: number, nowMs: number, aim: TouchAimSource | null, playing: boolean): void {
+    this.firePad.tick(nowMs);
+
+    const engagedThumb = this.look.active || this.firePad.active;
+    const wantAssist = playing && aim !== null && this.aimAssistEnabled && engagedThumb;
+    const wantAuto = playing && aim !== null && this.autoFire.enabled;
+
+    this.assistOut.yaw = 0;
+    this.assistOut.pitch = 0;
+    this.assistOut.friction = 1;
+    this.assistOut.engaged = 0;
+
+    if (aim !== null && playing && (wantAssist || wantAuto)) {
+      const has = aim.nearestEnemyAim(this.target);
+      if (has) {
+        const err = Math.hypot(this.target.yaw, this.target.pitch);
+        if (wantAssist) {
+          aimAssist(
+            this.target.yaw, this.target.pitch, this.target.dist,
+            this.dragPx, dt, this.assistCfg, this.assistOut,
+          );
+          if (this.assistOut.yaw !== 0 || this.assistOut.pitch !== 0) {
+            aim.addLookRadians(this.assistOut.yaw, this.assistOut.pitch);
+          }
+        }
+        if (wantAuto) {
+          // The clearance probe saturates; past that it cannot prove occlusion,
+          // so a distant target counts as visible rather than never shootable.
+          const clear = aim.viewClearance();
+          const need = Math.min(this.target.dist, CLEARANCE_PROBE_M);
+          const los = clear + CLEARANCE_SLACK_M >= need;
+          this.autoFire.update(true, err, this.target.dist, los, nowMs);
+        }
+      } else if (wantAuto) {
+        this.autoFire.update(false, Math.PI, Infinity, false, nowMs);
+      }
+    } else if (!wantAuto) {
+      this.autoFire.reset();
+    }
+
+    this.engaged = this.assistOut.engaged;
+    this.friction = this.assistOut.friction;
+    this.locked = this.autoFire.locked;
+    this.dragPx = 0;
+    this.syncFire();
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Internals
+   * -------------------------------------------------------------------- */
+
+  private pushStick(): void {
+    const s = this.stick.sample;
+    this.sink.setMove(s.x, s.z);
+    this.sink.setButton(InputAction.Sprint, s.sprint);
+  }
+
+  private pushLook(dx: number, dy: number): void {
+    const k = this.friction * this.lookScale;
+    if (k === 0) return;
+    this.sink.addLook(dx * k, dy * k);
+  }
+
+  private syncFire(): void {
+    const on = this.firePad.firing || this.autoFire.firing;
+    // Re-assert every step while the trigger is DOWN, and write once when it
+    // goes up. A window blur makes `InputManager.releaseAll()` clear the held
+    // state behind this class's back; a purely change-gated write would then
+    // never put it back and the player would be holding a dead trigger. The
+    // up edge stays gated, so a still frame writes nothing.
+    if (on || on !== this.lastFiring) this.sink.setButton(InputAction.Fire, on);
+    this.firing = on;
+    this.lastFiring = on;
+  }
+
+  private releaseAction(control: number): void {
+    const action = actionForControl(control);
+    if (action !== null) this.sink.setButton(action, false);
+  }
+
+  private release(slot: number): void {
+    const control = this.ptrCtl[slot];
+    this.releaseAction(control);
+    this.held &= ~(1 << control);
+    this.free(slot);
+  }
+
+  private slotOf(pointerId: number): number {
+    for (let i = 0; i < MAX_POINTERS; i++) if (this.ptrId[i] === pointerId) return i;
+    return -1;
+  }
+
+  private claim(pointerId: number, control: number): void {
+    for (let i = 0; i < MAX_POINTERS; i++) {
+      if (this.ptrId[i] < 0) { this.ptrId[i] = pointerId; this.ptrCtl[i] = control; return; }
+    }
+  }
+
+  private free(slot: number): void {
+    this.ptrId[slot] = -1;
+    this.ptrCtl[slot] = TC_NONE;
   }
 }

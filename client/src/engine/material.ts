@@ -13,7 +13,15 @@
  *    -X are NOT the same value. The bar's four values have no azimuth term at
  *    all, so its cubes have no facing.
  *  - **Baked AO** from the mesher, remapped through a 4-entry lookup so the
- *    strength is a uniform, not a shader edit.
+ *    strength is a uniform, not a shader edit. The ramp is SUPER-LINEAR — see
+ *    `AO_FALLOFF` — because a linear one put the commonest case at a dip nobody
+ *    could see and AO is the whole point.
+ *  - **Sky exposure and coloured block light**, both baked per face by the
+ *    mesher (see its header). Sky is what makes a roofed room read as indoors:
+ *    the sun term is nearly gone under a roof and the ambient term is cut, so
+ *    walking through a doorway is a change of key and not just of geometry.
+ *    Block light is coloured by hue class, so a lava pit turns its room orange
+ *    instead of merely turning it up.
  *  - **Exponential-squared distance fog in a dark palette.** The bar has none;
  *    everything is the same value at 10 m and 200 m and depth reads as flat.
  *  - **Dynamic point lights.** Muzzle flashes and explosions light the walls.
@@ -31,6 +39,21 @@
  * flat-coloured"). The bar's stone is a running bond, its sand a chevron dither,
  * and every merged run of blocks still has a countable grid. Ours was one
  * unbroken field of colour, and ground plus walls are ~70% of every frame.
+ *
+ * SIDE-FACE SEPARATION, MEASURED — do not re-litigate this from a screenshot.
+ * A round-2 critic asked for side faces at "0.72 / 0.55 of the top face, so the
+ * terraces read as steps you can mount instead of a texture". Sampled off the
+ * actual frames with 11x11 patches, in Rec.709 luma:
+ *
+ *   BAR sand top 229.7 / side 224.2   ->  0.98   (no side shading at all)
+ *   BAR grass top 152.2 / side 128.4  ->  0.84
+ *   OURS mass top 59.6  / side 30.7   ->  0.52
+ *   OURS mass top 56.1  / side 33.6   ->  0.60
+ *
+ * So the ask describes the BAR's beach, and this ramp already sits past it on
+ * both numbers. `FACE_SHADE` is [0.78, 0.78, 1.0, 0.5, 0.66, 0.66] and the sun
+ * azimuth term below drives the rendered ratio lower still, because -X and -Z
+ * get ambient only. Deepening it further would only crush the dark end.
  *
  * The fix is entirely fragment-side, which matters because `game.medianMs`
  * tracks CPU and the real budget is draw calls (~120 before the frame cost
@@ -99,6 +122,7 @@ import {
   createAtlasTexture,
   createSurfaceLutTexture,
 } from './textureAtlas';
+import { LIGHT_HUE_COUNT, LIGHT_MAX } from './mesher';
 
 /* ------------------------------------------------------------------------ *
  * Palette
@@ -132,6 +156,71 @@ export const DOOM_SKY_GROUND = 0x120d0c;
  * the remaining 72% — and buys back the entire near and mid field.
  */
 const FOG_START_FRAC = 0.28;
+
+/* ------------------------------------------------------------------------ *
+ * Ambient occlusion ramp
+ *
+ * `aoStrength` is a slider in 0..1, and the four baked AO levels are
+ * `1 - strength * AO_FALLOFF[level]`. The falloff is deliberately super-linear
+ * at the top: with the old evenly-spaced ramp, level 2 — a floor tile with one
+ * wall beside it, by far the commonest occluded case in a voxel world — came
+ * out as a 12-14% dip at the strength the game actually ships (0.36), which is
+ * about one JND on a dark Doom palette. Measured off shots/ours-deathmatch-08:
+ * a pillar met the floor with no readable contact darkening at all, i.e. we had
+ * AO in the maths and none on the screen, which is exactly the bar's failure.
+ *
+ * At the shipped 0.36 the ramp is now [0.478, 0.658, 0.838, 1.0]: a 16% step at
+ * the single-wall case, a 34% step at the double, and a 52% well in the corner.
+ * ------------------------------------------------------------------------ */
+const AO_FALLOFF = [1.45, 0.95, 0.45, 0];
+/** Nothing goes fully black on AO alone; the darkest corner keeps this much. */
+const AO_FLOOR = 0.06;
+
+/* ------------------------------------------------------------------------ *
+ * Interior light
+ *
+ * How much of the outdoor light survives under a roof, per component. The
+ * mesher's sky channel interpolates between these and 1.0.
+ *
+ * The sun is nearly gone indoors because there is no sun indoors; the ambient
+ * is only trimmed because a voxel room with no ambient is a black rectangle and
+ * Doom's rooms were never unlit — they were a different, flatter key with their
+ * own light sources in them. Net effect on a top face: ~36% darker inside than
+ * out. On a side wall: ~20%. That asymmetry is deliberate — it is what makes an
+ * interior read as flat and enclosed rather than merely dim.
+ * ------------------------------------------------------------------------ */
+const INTERIOR_AMBIENT = 0.80;
+const INTERIOR_SUN = 0.35;
+
+/* ------------------------------------------------------------------------ *
+ * Block-light colours, indexed by the mesher's hue class.
+ *
+ * The point of colouring them at all: a grey wall beside lava that merely gets
+ * BRIGHTER reads as a lighting bug. A grey wall beside lava that goes orange
+ * reads as a room with a fire in it. Same instruction count.
+ * ------------------------------------------------------------------------ */
+/**
+ * Exponent on the baked light level before it becomes light.
+ *
+ * Not a taste knob. The palette gives HELLSTONE emissive 5 and hellstone is the
+ * surface stratum of the whole HELL biome, so on a linear ramp every hell arena
+ * renders as one saturated orange field with its own lava pit invisible inside
+ * it — the bar's "reads as one mass" failure, in a hotter key. A gamma keeps the
+ * strong sources strong and pushes ambient rock back down to a tint.
+ */
+const EMISSIVE_GAMMA = 1.9;
+/**
+ * How much an already-lit surface ignores block light. A torch outdoors is worth
+ * almost nothing and indoors is worth everything, which is both what happens and
+ * the reason building interiors pays.
+ */
+const EMISSIVE_DAMP = 0.72;
+
+const LIGHT_HUE_RGB: readonly number[] = [
+  0xff7a2a,   // fire   — lava, hellstone
+  0x4bff9a,   // toxic  — neon, slime
+  0x86b8ff,   // cold   — tech panel
+];
 
 /* ------------------------------------------------------------------------ *
  * Uniform plumbing
@@ -226,9 +315,15 @@ uniform mat4 modelMatrix;
 uniform mat4 modelViewMatrix;
 uniform mat4 projectionMatrix;
 
-uniform float uFaceLight[6];
+// Ambient (sky dome) and direct-sun shares of each face's light, kept apart so
+// the sky-exposure term can attenuate them by different amounts.
+uniform float uFaceAmbient[6];
+uniform float uFaceSun[6];
 uniform vec3  uFaceNormal[6];
 uniform float uAoLevels[4];
+uniform vec3  uLightHue[${LIGHT_HUE_COUNT}];
+/** x = ambient share indoors, y = sun share indoors. */
+uniform vec2  uInterior;
 uniform float uTime;
 uniform float uWaveAmp;
 uniform float uWaveSpeed;
@@ -238,12 +333,12 @@ uniform sampler2D uSurfaceLut;
 #endif
 
 in vec4 aPosFace;   // x, y, z (chunk-local integers), face 0..5
-in vec4 aData;      // ao 0..3, light 0..15, alpha 0..255, flags
-in vec4 aColor;     // rgb, normalized
+in vec4 aData;      // ao 0..3, light (level | hue<<4), alpha 0..255, flags
+in vec4 aColor;     // rgb normalized, a = sky exposure normalized
 
 out vec3  vColor;
 out float vLightBase;
-out float vEmissive;
+flat out vec3 vEmissive;
 out float vAlpha;
 out float vFogDepth;
 out highp vec3 vWorldPos;
@@ -285,8 +380,30 @@ void main() {
 
   vNormal = uFaceNormal[face];
   vColor = aColor.rgb;
-  vLightBase = uFaceLight[face] * uAoLevels[int(aData.x + 0.5)];
-  vEmissive = (aData.y / 15.0) * uEmissiveGain;
+
+  // Sky exposure: 0 under a roof, 1 under open air. It attenuates the sun hard
+  // and the ambient gently, so an interior loses its modelling before it loses
+  // its visibility.
+  float sky = aColor.a;
+  float ambientMix = mix(uInterior.x, 1.0, sky);
+  float sunMix = mix(uInterior.y, 1.0, sky);
+  vLightBase = (uFaceAmbient[face] * ambientMix + uFaceSun[face] * sunMix)
+             * uAoLevels[int(aData.x + 0.5)];
+
+  // aData.y packs the block-light level in bits 0..3 and its hue class in
+  // bits 4..5, so one byte carries both and the vertex format did not grow.
+  float packed = aData.y;
+  float hue = floor(packed / 16.0);
+  float level = packed - hue * 16.0;
+  // Gamma on the level, not a straight ramp. HELLSTONE emits 5 and floors the
+  // entire HELL biome, so a linear response paints every square metre of a hell
+  // arena the same hot orange and the lava pit in the middle of it stops being
+  // brighter than the ground it sits in. See EMISSIVE_GAMMA: a level-5 ambient
+  // rock is worth 12% and a level-15 lava pool is worth 100%.
+  vEmissive = uLightHue[int(hue + 0.5)]
+            * pow(level / ${LIGHT_MAX}.0, ${EMISSIVE_GAMMA.toFixed(2)})
+            * uEmissiveGain;
+
   vAlpha = aData.z / 255.0;
 
 #ifdef USE_TEXTURE
@@ -338,7 +455,7 @@ uniform float uLightRadius[MAX_LIGHTS];
 
 in vec3  vColor;
 in float vLightBase;
-in float vEmissive;
+flat in vec3 vEmissive;
 in float vAlpha;
 in float vFogDepth;
 in highp vec3 vWorldPos;
@@ -353,7 +470,7 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
   vec3 base = vColor * uTint;
-  float lit = max(vLightBase, vEmissive);
+  float lit = vLightBase;
 
 #ifdef USE_TEXTURE
   // ---- surface detail -----------------------------------------------------
@@ -448,7 +565,12 @@ void main() {
     lit *= 1.0 + rip * uRipple;
   }
 
-  vec3 c = base * lit;
+  // Block light is ADDED to the sky/sun term, not maxed against it, so a lava
+  // pit lights the room it is in instead of merely flattening it to one value.
+  // The damping term keeps an already-sunlit face from blowing out: a torch
+  // outdoors is worth almost nothing, indoors it is worth everything, which is
+  // both physically right and the reason interiors are worth building.
+  vec3 c = base * (vec3(lit) + vEmissive * (1.0 - min(lit, 1.0) * ${EMISSIVE_DAMP.toFixed(2)}));
 
 #if MAX_LIGHTS > 0
   vec3 add = vec3(0.0);
@@ -534,9 +656,11 @@ export class VoxelMaterials {
   /** Shared uniform block. Mutate through the setters, not directly. */
   readonly uniforms: Record<string, THREE.IUniform>;
 
-  private readonly faceLight = new Float32Array(6);
+  private readonly faceAmbient = new Float32Array(6);
+  private readonly faceSun = new Float32Array(6);
   private readonly faceNormal = new Float32Array(18);
   private readonly aoLevels = new Float32Array(4);
+  private readonly lightHue = new Float32Array(LIGHT_HUE_COUNT * 3);
   private readonly lightPos = new Float32Array(MAX_DYNAMIC_LIGHTS * 3);
   private readonly lightColor = new Float32Array(MAX_DYNAMIC_LIGHTS * 3);
   private readonly lightRadius = new Float32Array(MAX_DYNAMIC_LIGHTS);
@@ -580,9 +704,12 @@ export class VoxelMaterials {
     this.lutTexture = this.textureEnabled ? createSurfaceLutTexture() : null;
 
     this.uniforms = {
-      uFaceLight: { value: this.faceLight },
+      uFaceAmbient: { value: this.faceAmbient },
+      uFaceSun: { value: this.faceSun },
       uFaceNormal: { value: this.faceNormal },
       uAoLevels: { value: this.aoLevels },
+      uLightHue: { value: this.lightHue },
+      uInterior: { value: new THREE.Vector2(INTERIOR_AMBIENT, INTERIOR_SUN) },
       uTime: { value: 0 },
       uWaveAmp: { value: 0.05 },
       uWaveSpeed: { value: 1.7 },
@@ -610,6 +737,12 @@ export class VoxelMaterials {
 
     // Face normals, in shared `Face` order: PX NX PY NY PZ NZ.
     this.faceNormal.set([1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1]);
+    for (let i = 0; i < LIGHT_HUE_COUNT; i++) {
+      const hex = LIGHT_HUE_RGB[i];
+      this.lightHue[i * 3 + 0] = ((hex >>> 16) & 0xff) / 255;
+      this.lightHue[i * 3 + 1] = ((hex >>> 8) & 0xff) / 255;
+      this.lightHue[i * 3 + 2] = (hex & 0xff) / 255;
+    }
     this.rebuildFaceLight();
     this.rebuildAo();
     this.setFogFar(this.fogFar);
@@ -670,7 +803,9 @@ export class VoxelMaterials {
   private rebuildFaceLight(): void {
     // FACE_SHADE is the shared top/side/bottom ramp; the dot term adds the sun
     // azimuth the bar does not have, so opposite walls of the same building are
-    // different values.
+    // different values. Ambient and sun stay in separate arrays because the
+    // mesher's sky channel attenuates them by different amounts (see
+    // INTERIOR_AMBIENT / INTERIOR_SUN).
     const nx = [1, -1, 0, 0, 0, 0];
     const ny = [0, 0, 1, -1, 0, 0];
     const nz = [0, 0, 0, 0, 1, -1];
@@ -679,19 +814,19 @@ export class VoxelMaterials {
     const lx = this.sunX / len, ly = this.sunY / len, lz = this.sunZ / len;
     for (let f = 0; f < 6; f++) {
       const ndl = Math.max(0, nx[f] * lx + ny[f] * ly + nz[f] * lz);
-      this.faceLight[f] = FACE_SHADE[f] * (this.skyAmbient + this.sunStrength * ndl);
+      this.faceAmbient[f] = FACE_SHADE[f] * this.skyAmbient;
+      this.faceSun[f] = FACE_SHADE[f] * this.sunStrength * ndl;
     }
     this.flagUniforms();
   }
 
   private rebuildAo(): void {
-    // Four exact levels beat a pow() in the vertex shader and let AO be a slider.
-    // The ramp is linear on purpose: a convex ramp makes level 2 -- the single
-    // most common case, a floor tile beside a wall -- a 9% dip nobody can see,
-    // and AO is the whole point (ref/BAR.md weakness #4).
-    const min = 1 - this.aoStrength;
-    const curve = [0, 1 / 3, 2 / 3, 1];
-    for (let i = 0; i < 4; i++) this.aoLevels[i] = min + (1 - min) * curve[i];
+    // Four exact levels beat a pow() in the vertex shader and let AO be a
+    // slider. See AO_FALLOFF for why the ramp is not evenly spaced.
+    for (let i = 0; i < 4; i++) {
+      const v = 1 - this.aoStrength * AO_FALLOFF[i];
+      this.aoLevels[i] = v < AO_FLOOR ? AO_FLOOR : v;
+    }
     this.flagUniforms();
   }
 
@@ -715,6 +850,36 @@ export class VoxelMaterials {
 
   setAoEnabled(on: boolean): void {
     this.setAoStrength(on ? AO_STRENGTH : 0);
+  }
+
+  /* -- interior light ----------------------------------------------------- */
+
+  /**
+   * How much of the outdoor light reaches a face the mesher marked as roofed.
+   * `ambient` and `sun` are both 0..1; 1/1 disables the interior/exterior split
+   * entirely and gives back the pre-sky-channel look.
+   *
+   * A mode with no interiors at all can leave this alone — every face outdoors
+   * has sky 15 and the term is exactly 1.
+   */
+  setInteriorLight(ambient: number, sun: number): void {
+    (this.uniforms.uInterior.value as THREE.Vector2)
+      .set(clamp(ambient, 0, 1), clamp(sun, 0, 1));
+    this.flagUniforms();
+  }
+
+  /** Current interior shares as [ambient, sun]. */
+  get interiorLight(): THREE.Vector2 {
+    return this.uniforms.uInterior.value as THREE.Vector2;
+  }
+
+  /**
+   * Global multiplier on baked block light. 0 turns lava and neon into plain
+   * coloured blocks that light nothing.
+   */
+  setEmissiveGain(v: number): void {
+    this.uniforms.uEmissiveGain.value = Math.max(0, v);
+    this.flagUniforms();
   }
 
   /* -- fog --------------------------------------------------------------- */

@@ -268,14 +268,20 @@ const SHELL_CSS = `
      "Remove ads" button, so this row is the last thing worth 40 px. */
   #ui[data-screen="menu"] .dc-row{display:none}
 }
-/* The bar puts "Loading Terrain (100.00%)..." dead centre; so do we, and it is
-   the one thing a mode is allowed to write into the middle of the screen. */
-.dc-status{position:absolute;left:50%;top:calc(50% - 96px);transform:translateX(-50%);
-  padding:5px 14px;border-radius:2px;background:rgba(8,8,11,.78);color:#e8e6e3;
-  border:1px solid rgba(255,255,255,.13);white-space:nowrap;pointer-events:none;
-  font:12px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
-  letter-spacing:.06em;z-index:6}
-.dc-status[hidden]{display:none}
+/* The bar puts "Loading Terrain (100.00%)..." 180 px ABOVE its crosshair, on
+   the aim line. This is the same fact 120 px BELOW it, matching the HUD's own
+   --dc-drop (client/src/hud/hud.ts, the sightline budget): small, plated,
+   letterspaced, and never over the pixels the player is aiming through.
+   Renamed off .dc-status because that selector is unscoped and the HUD owns
+   a .dc-status of its own — an unscoped rule reaching into #hud is exactly
+   how a banner grows back onto the sightline by accident. */
+.dc-boot-line{position:absolute;left:50%;top:calc(50% + 120px);transform:translateX(-50%);
+  padding:4px 11px 5px;border-radius:2px;background:#08080b;color:#cfc9c3;
+  border:1px solid rgba(255,255,255,.22);white-space:nowrap;pointer-events:none;
+  font:700 11px/1.1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  text-transform:uppercase;letter-spacing:.22em;
+  box-shadow:0 2px 10px rgba(0,0,0,.55);z-index:6}
+.dc-boot-line[hidden]{display:none}
 .dc-fault{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);
   max-width:min(680px,92vw);padding:8px 14px;border-radius:2px;
   background:rgba(30,6,4,.92);border:1px solid rgba(224,60,28,.65);color:#ffcabb;
@@ -562,6 +568,31 @@ addToggle('Ambient occlusion', () => settings.ao, (v) => { settings.ao = v; });
 addToggle('Fog', () => settings.fog, (v) => { settings.fog = v; });
 addToggle('FPS counter', () => settings.fpsCounter, (v) => { settings.fpsCounter = v; });
 
+/* Touch controls.
+ *
+ * Only built when the pad exists, so a desktop settings screen does not grow a
+ * section about thumbs. The bar's mobile pause menu is three plain buttons —
+ * Resume / Settings / Leave — with nothing about the controls in it at all
+ * (ref/BAR.md), and it has no handedness, no control size and no dead zone to
+ * offer in the first place. Each of these writes through
+ * `MobileControls.setPrefs`, which persists on its own key and re-solves the
+ * layout immediately, so the change is visible behind the pause panel. */
+if (game.mobile !== null) {
+  const pad = game.mobile;
+  addSection('Touch controls');
+  addToggle('Left-handed', () => pad.prefs.southpaw, (v) => pad.setPrefs({ southpaw: v }));
+  addSlider('Control size', 0.7, 1.4, 0.05,
+    () => pad.prefs.scale, (v) => pad.setPrefs({ scale: v }), (v) => `${Math.round(v * 100)}%`);
+  addSlider('Stick dead zone', 0, 0.4, 0.02,
+    () => pad.prefs.deadZone, (v) => pad.setPrefs({ deadZone: v }),
+    (v) => `${Math.round(v * 100)}%`);
+  addSlider('Look speed', 0.4, 2.5, 0.05,
+    () => pad.prefs.lookScale, (v) => pad.setPrefs({ lookScale: v }), (v) => `${v.toFixed(2)}x`);
+  addToggle('Aim assist', () => pad.prefs.aimAssist, (v) => pad.setPrefs({ aimAssist: v }));
+  addToggle('Auto fire', () => pad.prefs.autoFire, (v) => pad.setPrefs({ autoFire: v }));
+  addToggle('Vibration', () => pad.prefs.haptics, (v) => pad.setPrefs({ haptics: v }));
+}
+
 addSection('Feel');
 addSlider('Screen shake', 0, 1.5, 0.05,
   () => settings.screenShake, (v) => { settings.screenShake = v; }, (v) => `${Math.round(v * 100)}%`);
@@ -593,7 +624,7 @@ function applySettings(): void {
  * ------------------------------------------------------------------------ */
 
 /** Centre-screen status line — the surface the bar uses for "Loading Terrain". */
-const statusLine = el('div', 'dc-status');
+const statusLine = el('div', 'dc-boot-line');
 statusLine.hidden = true;
 hudRoot.appendChild(statusLine);
 
@@ -793,6 +824,9 @@ async function startMode(p: ModeEnterParams): Promise<void> {
 
 /** Resume the mode that is already active, or start the pending one. */
 function startPlaying(): void {
+  // The touch pad stays drawn behind the pause panel (see MobileControls.
+  // setPaused); hand it back to the HUD before the match takes it live again.
+  game.mobile?.setPaused(false);
   if (registry.activeId >= 0) {
     setScreen('playing');
     game.enterPlay();
@@ -805,6 +839,12 @@ function startPlaying(): void {
 function openPause(): void {
   if (!game.playing) return;
   game.leavePlay();
+  // `leavePlay` is also the road to the main menu, so it hides the pad
+  // unconditionally. Only the shell knows this particular exit is a pause, and
+  // on a phone the controls must survive it — the bar keeps its whole control
+  // surface drawn behind its own pause panel, and a frame of ours with no
+  // trigger in it cannot answer "which can you aim and shoot with".
+  game.mobile?.setPaused(true);
   registry.setPaused(true);
   panelTitle.textContent = 'Paused';
   panelSub.textContent = `${registry.activeId >= 0 ? getMode(registry.activeId).name : 'The match'} keeps running`;
@@ -835,6 +875,7 @@ function openSettings(from: 'menu' | 'game'): void {
  */
 async function backToMenu(): Promise<void> {
   game.leavePlay();
+  game.mobile?.setPaused(false);   // no thumbs on the main menu
   host.setStatus('');
   await registry.deactivate();
   // The world keeps rendering behind the menu, so it must not keep the last

@@ -21,7 +21,14 @@ import {
   CHUNK_VOLUME,
 } from './constants.ts';
 
-export const PROTOCOL_VERSION = 1;
+/**
+ * 1 -> 2: player appearance grew from one `skin` byte to a 4-byte packed avatar
+ * (see client/src/characters/avatar.ts). It travels as a new player field bit,
+ * PF_AVATAR, plus a trailing uint32 on HELLO and a new C2S.APPEARANCE message.
+ * The spawn record is byte-identical to v1, but a v1 decoder cannot skip an
+ * unknown field bit, so the version still had to move.
+ */
+export const PROTOCOL_VERSION = 2;
 
 /* ------------------------------------------------------------------------ *
  * Message ids
@@ -35,6 +42,12 @@ export enum C2S {
   CHAT = 4,
   RESPAWN = 5,
   PING = 6,
+  /**
+   * A live appearance change. The avatar editor is reachable from the pause
+   * menu while the match is already connected, so the alternative would be
+   * forcing a reconnect to change a colour.
+   */
+  APPEARANCE = 7,
 }
 
 /** Server -> client. */
@@ -96,6 +109,13 @@ export const PF_AMMO = 1 << 10;    // u16 mag, u16 reserve  (local player only)
 export const PF_SCORE = 1 << 11;   // u16 kills, u16 deaths
 export const PF_TEAM = 1 << 12;    // u8
 export const PF_LOCAL = 1 << 13;   // no payload: this record is the receiving client
+/**
+ * u32 packed avatar — four outfit indices and two palette indices. It rides the
+ * ordinary delta machinery rather than PF_SPAWN, which is what lets a player
+ * change outfit mid-session without a reconnect and without an interpolation
+ * reset. 4 bytes, sent on join and then only when it actually changes.
+ */
+export const PF_AVATAR = 1 << 14; // u32
 
 /** Entity record field mask bits. */
 export const EF_SPAWN = 1 << 0;    // u8 type, u8 variant
@@ -430,19 +450,29 @@ export function rleDecode(src: Uint8Array, srcOffset: number, srcLength: number,
 export interface HelloMessage {
   protocolVersion: number;
   name: string;
+  /** Legacy one-byte appearance. Superseded by `avatar`; still sent. */
   skin: number;
   caps: number;
+  /**
+   * Packed appearance: four outfit indices and two palette indices in one
+   * uint32. The server never interprets it — it clamps it, stores it and mirrors
+   * it back out in PF_SPAWN — so the roster can grow without a server change.
+   */
+  avatar: number;
 }
 export function createHelloMessage(): HelloMessage {
-  return { protocolVersion: PROTOCOL_VERSION, name: '', skin: 0, caps: 0 };
+  return { protocolVersion: PROTOCOL_VERSION, name: '', skin: 0, caps: 0, avatar: 0 };
 }
-export function encodeHello(w: PacketWriter, name: string, skin: number, caps: number): PacketWriter {
+export function encodeHello(
+  w: PacketWriter, name: string, skin: number, caps: number, avatar = 0,
+): PacketWriter {
   w.reset();
   w.u8(C2S.HELLO);
   w.u8(PROTOCOL_VERSION);
   w.str(name, MAX_NAME_LENGTH * 4);
   w.u8(skin & 0xff);
   w.u16(caps & 0xffff);
+  w.u32(avatar >>> 0);
   return w;
 }
 export function decodeHello(r: PacketReader, out: HelloMessage): HelloMessage {
@@ -451,6 +481,9 @@ export function decodeHello(r: PacketReader, out: HelloMessage): HelloMessage {
   out.name = r.str();
   out.skin = r.u8();
   out.caps = r.u16();
+  // Trailing field: a HELLO written by anything that predates the avatar still
+  // decodes, it just arrives wearing the default marine.
+  out.avatar = r.remaining >= 4 ? r.u32() : 0;
   return out;
 }
 
@@ -548,6 +581,23 @@ export function encodeChatC2S(w: PacketWriter, text: string): PacketWriter {
 export function decodeChatC2S(r: PacketReader): string {
   r.u8();
   return r.str();
+}
+
+/** 6 bytes: the whole appearance, and the only message that ever carries it. */
+export function encodeAppearance(w: PacketWriter, skin: number, avatar: number): PacketWriter {
+  w.reset();
+  w.u8(C2S.APPEARANCE);
+  w.u8(skin & 0xff);
+  w.u32(avatar >>> 0);
+  return w;
+}
+export interface AppearanceMessage { skin: number; avatar: number; }
+export function createAppearanceMessage(): AppearanceMessage { return { skin: 0, avatar: 0 }; }
+export function decodeAppearance(r: PacketReader, out: AppearanceMessage): AppearanceMessage {
+  r.u8();
+  out.skin = r.u8();
+  out.avatar = r.u32();
+  return out;
 }
 
 export function encodeRespawn(w: PacketWriter): PacketWriter {
@@ -890,6 +940,8 @@ export class SnapshotBuffer {
   readonly playerDeaths: Uint16Array;
   readonly playerTeam: Uint8Array;
   readonly playerSkin: Uint8Array;
+  /** Packed avatar, sent once per player with PF_SPAWN. 4 bytes, not a blob. */
+  readonly playerAvatar: Uint32Array;
   readonly playerName: string[];
 
   entityCount = 0;
@@ -950,6 +1002,7 @@ export class SnapshotBuffer {
     this.playerDeaths = new Uint16Array(maxPlayers);
     this.playerTeam = new Uint8Array(maxPlayers);
     this.playerSkin = new Uint8Array(maxPlayers);
+    this.playerAvatar = new Uint32Array(maxPlayers);
     this.playerName = new Array<string>(maxPlayers).fill('');
 
     this.entityId = new Uint16Array(maxEntities);
@@ -1052,12 +1105,13 @@ export function playerDeltaMask(base: SnapshotBuffer, bi: number, next: Snapshot
   if (base.playerMag[bi] !== next.playerMag[ni] || base.playerReserve[bi] !== next.playerReserve[ni]) mask |= PF_AMMO;
   if (base.playerKills[bi] !== next.playerKills[ni] || base.playerDeaths[bi] !== next.playerDeaths[ni]) mask |= PF_SCORE;
   if (base.playerTeam[bi] !== next.playerTeam[ni]) mask |= PF_TEAM;
+  if (base.playerAvatar[bi] !== next.playerAvatar[ni]) mask |= PF_AVATAR;
   return mask;
 }
 
 /** Every field bit a full (baseline-free) player record must carry. */
 export const PF_ALL = PF_POS | PF_YAW | PF_PITCH | PF_VEL | PF_HEALTH | PF_ARMOR |
-  PF_WEAPON | PF_STATE | PF_SCORE | PF_TEAM;
+  PF_WEAPON | PF_STATE | PF_SCORE | PF_TEAM | PF_AVATAR;
 export const EF_ALL = EF_POS | EF_YAW | EF_HEALTH | EF_STATE | EF_VEL;
 export const RF_ALL = RF_POS | RF_VEL;
 
@@ -1082,6 +1136,7 @@ export function copyPlayerRecord(src: SnapshotBuffer, si: number, dst: SnapshotB
   dst.playerDeaths[di] = src.playerDeaths[si];
   dst.playerTeam[di] = src.playerTeam[si];
   dst.playerSkin[di] = src.playerSkin[si];
+  dst.playerAvatar[di] = src.playerAvatar[si];
   dst.playerName[di] = src.playerName[si];
 }
 
@@ -1123,6 +1178,7 @@ export function encodeSnapshot(w: PacketWriter, s: SnapshotBuffer): PacketWriter
     if (m & PF_AMMO) { w.u16(s.playerMag[i]); w.u16(s.playerReserve[i]); }
     if (m & PF_SCORE) { w.u16(s.playerKills[i]); w.u16(s.playerDeaths[i]); }
     if (m & PF_TEAM) w.u8(s.playerTeam[i]);
+    if (m & PF_AVATAR) w.u32(s.playerAvatar[i]);
   }
 
   w.u16(s.entityCount);
@@ -1213,6 +1269,7 @@ export function decodeSnapshot(r: PacketReader, out: SnapshotBuffer): SnapshotBu
     if (m & PF_AMMO) { out.playerMag[k] = r.u16(); out.playerReserve[k] = r.u16(); }
     if (m & PF_SCORE) { out.playerKills[k] = r.u16(); out.playerDeaths[k] = r.u16(); }
     if (m & PF_TEAM) out.playerTeam[k] = r.u8();
+    if (m & PF_AVATAR) out.playerAvatar[k] = r.u32();
   }
 
   const ec = r.u16();

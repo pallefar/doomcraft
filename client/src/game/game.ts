@@ -40,7 +40,7 @@ import {
   BlockId, BLOCK_SOLID, BLOCK_LIQUID, minimapColor, PLACEABLE_BLOCKS,
 } from '@shared/blocks';
 import {
-  WeaponId, WEAPON_COUNT, getWeapon, ammoTypeOf, weaponFromSlot,
+  WeaponId, WEAPON_COUNT, AMMO_TYPE_COUNT, getWeapon, ammoTypeOf, weaponFromSlot,
 } from '@shared/weapons';
 import {
   raycastVoxels, createVoxelHit, clampf, type VoxelHit,
@@ -68,12 +68,14 @@ import {
 } from '@/game/weapons';
 
 import { NetClient, type NetStatus } from '@/net/client';
+import { ThirdPersonRenderer, loadCharacterAtlas } from '@/characters/thirdPerson';
 import { createLocalServer, type LocalServer } from '@/net/localServer';
 
 import {
   Hud, createHudState, BLIP_ENEMY, BLIP_PLAYER, BLIP_PICKUP, MAX_BLIPS, MAX_BOARD_ROWS,
   type HudState,
 } from '@/hud/hud';
+import { MobileControls } from '@/hud/mobile';
 
 /* ------------------------------------------------------------------------ *
  * Constants
@@ -153,6 +155,8 @@ export interface GameOptions {
   hudRoot: HTMLElement;
   settings: GameSettings;
   name?: string;
+  /** Packed avatar (client/src/characters/avatar.ts). 0 is the default marine. */
+  avatar?: number;
   seed?: number;
   mode?: number;
   bots?: number;
@@ -177,6 +181,8 @@ export class Game {
   readonly input: InputManager;
   readonly weapons: WeaponRuntime;
   readonly hud: Hud;
+  /** The touch pad, or null on a mouse-and-keyboard device. */
+  readonly mobile: MobileControls | null;
   readonly net: NetClient;
   readonly server: LocalServer;
 
@@ -210,6 +216,27 @@ export class Game {
 
   /* actor rendering */
   private readonly actors: ActorRenderer;
+  /**
+   * Every remote player's body, in ONE instanced draw call. Separate from
+   * `actors` because that batch is untextured boxes (monsters, pickups,
+   * projectiles) and this one is the Kenney character rig with its own atlas.
+   * Two draw calls total for everything that moves.
+   */
+  readonly characters: ThirdPersonRenderer;
+
+  /* ---- projectile watch ------------------------------------------------ *
+   * The server owns projectiles, so the client learns a rocket detonated by
+   * watching one disappear out of the snapshot. Before this, it did not watch:
+   * a rocket flew across the room as an unlit grey cube and then simply
+   * stopped existing, with no fireball, no shockwave, no light and no shake —
+   * three of the seven weapons had no impact feedback of any kind. These four
+   * arrays are one frame of memory per projectile slot, which is all it takes
+   * to turn "gone" into "went off, THERE".
+   * ---------------------------------------------------------------------- */
+  private projWatchLen = 0;
+  private projWatchId = new Uint16Array(0);
+  private projWatchWeapon = new Uint8Array(0);
+  private projWatchPos = new Float32Array(0);
 
   /* loop */
   private accumulator = 0;
@@ -289,6 +316,11 @@ export class Game {
     this.fx = new Fx(this.renderer.scene, { materials: this.materials });
     // One shake owner. PlayerCamera has it; Fx must not add a second.
     this.fx.setShakeScale(0);
+    // Debris bounces off the world instead of sinking through it, and a crack
+    // drawn on a face whose block has since been removed by anything at all —
+    // a rocket, a server delta, another player — retires itself instead of
+    // hanging in the air as an unanchored square.
+    this.fx.setCollider((x, y, z) => BLOCK_SOLID[this.net.world.getBlock(x, y, z)] === 1);
 
     this.viewmodel = new Viewmodel({ fov: 68 });
     this.renderer.addOverlay(this.viewmodel);
@@ -316,10 +348,29 @@ export class Game {
       crosshairColor: this.settings.crosshairColor,
       touchSink: this.input,
       onPause: () => this.events.onPauseRequested?.(),
+      externalPad: this.touchMode,
     });
     this.hud.setTouchVisible(false);
     this.hud.setVisible(false);
     this.hudState.showFps = this.settings.fpsCounter;
+
+    /* ---- mobile controls --------------------------------------------- *
+     * Only built on a touch device, so a desktop player never pays for it and
+     * never has a transparent capture surface over the canvas. The aim source
+     * is assembled from `Game`'s existing public surface — no new engine hooks
+     * were needed to make aim assist and auto-fire work. */
+    this.mobile = this.touchMode
+      ? new MobileControls({
+        root: opts.hudRoot,
+        sink: this.input,
+        aim: {
+          nearestEnemyAim: (out) => this.nearestEnemyAim(out),
+          viewClearance: () => this.viewClearance(),
+          addLookRadians: (yaw, pitch) => this.camera.addLook(yaw, pitch),
+        },
+        onPause: () => this.events.onPauseRequested?.(),
+      })
+      : null;
 
     /* ---- weapons ----------------------------------------------------- */
     this.weapons = new WeaponRuntime(this.buildWeaponFx(), this.camera, undefined);
@@ -327,6 +378,11 @@ export class Game {
 
     /* ---- actors ------------------------------------------------------ */
     this.actors = new ActorRenderer(this.renderer.scene);
+    // Sharing the uniform OBJECTS, not their values: fog range, fog colour,
+    // exposure, contrast, saturation and the mode/hurt tint all reach the
+    // characters with no sync code, so they can never grade a frame behind the
+    // wall behind them.
+    this.characters = new ThirdPersonRenderer(this.renderer.scene, { grade: this.materials });
 
     /* ---- net --------------------------------------------------------- */
     this.server = createLocalServer({
@@ -340,6 +396,7 @@ export class Game {
 
     this.net = new NetClient({
       name: opts.name ?? 'Marine',
+      avatar: opts.avatar ?? 0,
       transport: this.server.transport,
       autoReconnect: false,
       events: {
@@ -370,6 +427,7 @@ export class Game {
     this.hud.setVisible(true);
     this.hud.layout();
     this.hud.setTouchVisible(this.touchMode);
+    this.mobile?.setVisible(this.touchMode);
     if (!this.touchMode) this.input.requestPointerLock();
     this.camera.resetTransients();
   }
@@ -382,6 +440,7 @@ export class Game {
     this.input.releaseAll();
     this.input.exitPointerLock();
     this.hud.setTouchVisible(false);
+    this.mobile?.setVisible(false);
     this.net.setButtons(0);
     this.net.setMove(0, 0);
   }
@@ -400,8 +459,10 @@ export class Game {
     this.net.dispose();
     this.server.stop();
     this.input.detach();
+    this.mobile?.dispose();
     this.hud.dispose();
     this.actors.dispose();
+    this.characters.dispose();
     this.chunks.dispose();
     this.fx.dispose();
     this.viewmodel.dispose();
@@ -550,7 +611,7 @@ export class Game {
       // orange sheet. Rising per hit is right; reaching a lens filter is not.
       this.hurtFlash = Math.min(HURT_MAX, this.hurtFlash + 0.14 + e.amount / 260);
     } else if (e.attackerId === me) {
-      this.hud.hitMarker((e.flags & DMG_HEADSHOT) !== 0, (e.flags & DMG_FATAL) !== 0);
+      this.hud.hitMarker((e.flags & DMG_HEADSHOT) !== 0, (e.flags & DMG_FATAL) !== 0, e.amount);
     }
   }
 
@@ -608,22 +669,128 @@ export class Game {
         }
       },
       impact: (x, y, z, nx, ny, nz, blockId): void => {
-        this.fx.impact(x, y, z, nx, ny, nz, minimapColor(blockId), 1);
+        // The blockId goes through as well as the colour: Fx uses it to bite a
+        // crack out of the struck face, so a wall that has been shot at looks
+        // shot at rather than merely marked.
+        this.fx.impact(x, y, z, nx, ny, nz, minimapColor(blockId), 1, blockId);
+      },
+      blockStrike: (x, y, z, nx, ny, nz, blockId, _weaponId, power): void => {
+        this.fx.blockStrike(x, y, z, nx, ny, nz, blockId, power);
+        this.viewmodel.bite(0.35 + 0.5 * power);
       },
       fleshImpact: (x, y, z, nx, ny, nz, _targetId, headshot): void => {
         this.fx.blood(x, y, z, -nx, -ny, -nz, headshot ? 1.6 : 1);
       },
-      hitMarker: (_damage, headshot, killed): void => {
-        if (this.settings.hitMarkers) this.hud.hitMarker(headshot, killed);
+      hitMarker: (damage, headshot, killed): void => {
+        // The marker scales with damage, so a graze and a slug do not read the
+        // same. `hud.hitMarker` treats the third argument as optional.
+        if (this.settings.hitMarkers) this.hud.hitMarker(headshot, killed, damage);
       },
       hitConfirm: (x, y, z, nx, ny, nz, damage, headshot, killed): void => {
         this.fx.hitConfirm(x, y, z, nx, ny, nz, damage, headshot, killed);
-        this.viewmodel.hitConfirm(killed ? 1 : clampf(0.22 + damage / 90, 0, 1));
+        // A kill is a different jolt, not a bigger one — see Viewmodel.hitConfirm.
+        this.viewmodel.hitConfirm(killed ? 1 : clampf(0.22 + damage / 90, 0, 1), killed);
       },
       dryFire: (): void => { /* the click is audio-only; no visual */ },
       reloadStart: (weaponId, ms): void => { this.viewmodel.reload(ms); void weaponId; },
       switchStart: (_from, to): void => { this.viewmodel.setWeapon(to); },
     };
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Projectiles in flight, and the moment they stop being in flight
+   * -------------------------------------------------------------------- */
+
+  /**
+   * Give every live projectile its trail and its light, and detonate the ones
+   * that vanished since last frame.
+   *
+   * The server never sends "this rocket exploded" — it just stops including the
+   * projectile in the snapshot and sends the block deltas and damage events the
+   * blast produced. So the detonation point is the LAST position we saw, which
+   * is accurate to one snapshot of dead reckoning and is the difference between
+   * a fireball at the wall and no fireball at all.
+   *
+   * A slot can also be recycled by a different projectile in the same frame, so
+   * the id is compared as well as the active flag — otherwise a busy Horde wave
+   * silently swallows detonations.
+   */
+  private trackProjectiles(dt: number): void {
+    const list = this.net.projectiles;
+    if (list.length !== this.projWatchLen) {
+      this.projWatchLen = list.length;
+      this.projWatchId = new Uint16Array(list.length);
+      this.projWatchWeapon = new Uint8Array(list.length);
+      this.projWatchPos = new Float32Array(list.length * 3);
+    }
+
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      const had = this.projWatchId[i];
+      const gone = had !== 0 && (!p.active || p.id !== had);
+      if (gone) {
+        this.detonateAt(
+          this.projWatchWeapon[i],
+          this.projWatchPos[i * 3], this.projWatchPos[i * 3 + 1], this.projWatchPos[i * 3 + 2],
+        );
+      }
+
+      if (!p.active) {
+        this.projWatchId[i] = 0;
+        continue;
+      }
+
+      const speed = Math.hypot(p.vx, p.vy, p.vz);
+      if (speed > 1e-3) {
+        this.fx.projectileTrail(
+          p.x, p.y, p.z, p.vx / speed, p.vy / speed, p.vz / speed, p.weapon, dt,
+        );
+      }
+      this.projWatchId[i] = p.id;
+      this.projWatchWeapon[i] = p.weapon;
+      this.projWatchPos[i * 3] = p.x;
+      this.projWatchPos[i * 3 + 1] = p.y;
+      this.projWatchPos[i * 3 + 2] = p.z;
+    }
+  }
+
+  /**
+   * The blast, and the camera's share of it.
+   *
+   * Shake is scaled by distance because a rocket going off across the arena and
+   * one going off at your feet are the same event to the server and very much
+   * not the same event to you. `PlayerCamera` owns shake (Fx's own is disabled),
+   * so the amplitude is routed there rather than through `Fx.addShake`.
+   */
+  private detonateAt(weaponId: number, x: number, y: number, z: number): void {
+    const def = getWeapon(weaponId);
+    const radius = def.splashRadius > 0 ? def.splashRadius : 1.2;
+
+    // Lay the scorch against the ground under the burst unless there is a wall
+    // right beside it — a mark floating in mid-air is worse than no mark.
+    let nx = 0, ny = 1, nz = 0;
+    if (raycastVoxels(
+      x, y, z, 0, -1, 0, radius * 0.9, this.sampleBlock, blockingSolid, this.hit,
+    )) {
+      nx = this.hit.nx; ny = this.hit.ny; nz = this.hit.nz;
+    }
+    this.fx.explosionFor(weaponId, x, y, z, nx, ny, nz);
+
+    const dx = x - this.camera.eyeX;
+    const dy = y - this.camera.eyeY;
+    const dz = z - this.camera.eyeZ;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    // Inverse-square would make anything past 10 m produce nothing; a linear
+    // rolloff over three splash radii keeps a distant rocket felt as a thump.
+    const falloff = clampf(1 - dist / (radius * 3 + 8), 0, 1);
+    if (falloff > 0.02) {
+      this.camera.addShake(
+        (0.14 + radius * 0.06) * falloff * falloff,
+        200 + radius * 20,
+        18,
+      );
+      if (falloff > 0.55) this.camera.addFovPunch(-1.6 * falloff, 6);
+    }
   }
 
   /* -------------------------------------------------------------------- *
@@ -663,6 +830,16 @@ export class Game {
   /** One 1/60 s slice: input, weapons, and exactly one command to the server. */
   private fixedStep(dt: number): void {
     const input = this.input;
+
+    /* --- touch controls ------------------------------------------------
+       Before `input.update()`, so a trigger press, an auto-fire lock or a
+       tap-to-shoot pulse produced by the pad is folded into this step's edges
+       rather than the next one's. It is also the only place the pad writes
+       DOM: its pointer handlers do arithmetic and nothing else. */
+    if (this.mobile !== null) {
+      this.mobile.update(dt, performance.now(), this.playing && !this.net.local.dead);
+    }
+
     input.update();
 
     const playing = this.playing && !this.net.local.dead;
@@ -764,9 +941,22 @@ export class Game {
     if (wantBreak) {
       const id = this.hit.block;
       if (id === BlockId.BEDROCK || id === BlockId.AIR) return;
+      // Where the ray actually met the face, so the dust and the light land at
+      // the aim point instead of at the middle of a block that is already gone.
+      const cx = ox + dx * this.hit.distance;
+      const cy = oy + dy * this.hit.distance;
+      const cz = oz + dz * this.hit.distance;
+      // The bite lands BEFORE the break: one frame of cracked face and dust at
+      // the contact point is the difference between a block that was broken and
+      // a block that vanished.
+      this.fx.blockStrike(cx, cy, cz, this.hit.nx, this.hit.ny, this.hit.nz, id, 0.55);
+      this.viewmodel.bite(0.6);
       if (this.net.requestEdit(BlockAction.BREAK, this.hit.x, this.hit.y, this.hit.z, 0)) {
         this.chunks.setBlock(this.hit.x, this.hit.y, this.hit.z, BlockId.AIR);
-        this.fx.blockBreak(this.hit.x, this.hit.y, this.hit.z, id);
+        this.fx.blockBreak(
+          this.hit.x, this.hit.y, this.hit.z, id,
+          cx, cy, cz, this.hit.nx, this.hit.ny, this.hit.nz,
+        );
         this.camera.addShake(0.02, 60, 22);
         this.viewmodel.fire();
       }
@@ -857,12 +1047,14 @@ export class Game {
 
     /* --- fx ------------------------------------------------------------- */
     this.fx.setViewportHeight(gr.drawHeight);
+    this.trackProjectiles(dt);
     this.fx.update(dt, gr.camera);
     this.materials.setTime(this.timeSeconds);
 
     /* --- world + actors -------------------------------------------------- */
     this.chunks.update(gr.camera);
     this.actors.update(net, this.timeSeconds);
+    this.characters.update(net, this.timeSeconds);
 
     gr.render(dt);
 
@@ -885,6 +1077,8 @@ export class Game {
     s.weapon = w.current;
     s.mag = w.magazine;
     s.reserve = w.reserveAmmo;
+    // Per-type reserves so the HUD hotbar can mark the guns you cannot feed.
+    for (let i = 0; i < AMMO_TYPE_COUNT; i++) s.reserveByType[i] = w.reserve[i];
     s.owned = w.owned;
     // The TRUE cone, not just the heat: a crosshair that stays tight while you
     // are airborne is telling the player something that is not so.
@@ -1048,6 +1242,22 @@ export class Game {
     this.hudState.subStatus = '';
     this.events.onProgress?.(1, 'Ready');
     this.events.onReady?.();
+
+    // Outfits, 65 KB, requested here and nowhere earlier: the page is now
+    // interactive and the menu is up, and ref/BAR.md's 0.3 s vs 3.16 s
+    // time-to-interactive advantage is the one thing this feature is not
+    // allowed to spend. Until it lands, characters draw in flat palette colour
+    // with the same silhouette and the same one draw call.
+    void loadCharacterAtlas().catch(() => { /* flat colours are a fine fallback */ });
+  }
+
+  /**
+   * Change the local player's appearance mid-session. Six bytes on the wire,
+   * and only when it actually changed — the avatar editor is a live preview and
+   * calls this on every click.
+   */
+  setAvatar(packedAvatar: number, legacySkin: number): void {
+    this.net.setAvatar(packedAvatar, legacySkin);
   }
 
   /* -------------------------------------------------------------------- *
@@ -1193,6 +1403,8 @@ class ActorRenderer {
     for (let i = 0; i < net.players.length; i++) {
       const p = net.players[i];
       if (!p.active || p.id === net.playerId) continue;
+      // A dead marine drops the gun. The body itself keeps being drawn by the
+      // character rig, which folds it onto the floor.
       if (p.health <= 0) continue;
       this.drawMarine(p.x, p.y, p.z, p.yaw, p.pitch, time, p.skin);
     }
@@ -1234,30 +1446,26 @@ class ActorRenderer {
     this.mesh.setColorAt(i, this.color);
   }
 
-  /** A blocky marine: six boxes, legs swinging with the ground speed. */
+  /**
+   * The weapon a marine is holding, and nothing else.
+   *
+   * The body used to be six coloured boxes drawn here. It is now the Kenney
+   * character rig in `characters/thirdPerson.ts`, which draws every player in
+   * one instanced call with their chosen outfit. What stays here is the gun:
+   * it rides in this batch because this batch is already being drawn, so the
+   * stub is free, and because it is the one part of a marine that is not
+   * customisable.
+   *
+   * It sits in the right hand, which the rig holds forward at ARM_HOLD and
+   * pitches with the owner's aim, so the two agree about where the muzzle is.
+   */
   private drawMarine(
-    x: number, y: number, z: number, yaw: number, pitch: number, time: number, skin: number,
+    x: number, y: number, z: number, yaw: number, pitch: number, _time: number, _skin: number,
   ): void {
-    const body = MARINE_SKINS[skin % MARINE_SKINS.length];
-    const trim = MARINE_TRIM[skin % MARINE_TRIM.length];
-    const s = Math.sin(time * 7 + x) * 0.16;
     const c = Math.cos(yaw), sn = Math.sin(yaw);
-    // Body-local (right, forward) -> world. Matches yawToRight / anglesToForward.
     const o = SCRATCH_OFFSET;
-
-    this.box(x, y + 1.32, z, 0.52, 0.62, 0.34, yaw, body);              // torso
-    this.box(x, y + 1.76, z, 0.36, 0.34, 0.36, yaw, trim);              // head
-    offset(o, c, sn, 0.36, 0);
-    this.box(x + o[0], y + 1.3 - s * 0.4, z + o[1], 0.18, 0.56, 0.2, yaw, body);
-    offset(o, c, sn, -0.36, 0);
-    this.box(x + o[0], y + 1.3 + s * 0.4, z + o[1], 0.18, 0.56, 0.2, yaw, body);
-    offset(o, c, sn, 0.15, 0);
-    this.box(x + o[0], y + 0.5 + s * 0.1, z + o[1], 0.2, 1.0, 0.22 + s * 0.1, yaw, 0x35323a);
-    offset(o, c, sn, -0.15, 0);
-    this.box(x + o[0], y + 0.5 - s * 0.1, z + o[1], 0.2, 1.0, 0.22 - s * 0.1, yaw, 0x35323a);
-    // Muzzle stub, so you can read where a marine is aiming.
-    offset(o, c, sn, 0.3, 0.42);
-    this.box(x + o[0], y + 1.34 - pitch * 0.3, z + o[1], 0.12, 0.12, 0.5, yaw, 0x1c1a20);
+    offset(o, c, sn, 0.34, 0.46);
+    this.box(x + o[0], y + 1.16 + pitch * 0.34, z + o[1], 0.11, 0.11, 0.52, yaw, 0x1c1a20);
   }
 
   private drawMonster(
@@ -1329,8 +1537,6 @@ function offset(out: Float64Array, cosYaw: number, sinYaw: number, right: number
   out[1] = -right * sinYaw - fwd * cosYaw;
 }
 
-const MARINE_SKINS = [0x3f6f42, 0x6a4b8f, 0x8f5a2a, 0x2f5f8f, 0x8f2f3f, 0x59606b];
-const MARINE_TRIM = [0xd8c8a8, 0xc8a8d8, 0xe0c090, 0xa8c8e0, 0xe0a0a8, 0xc8cdd4];
 
 /* ------------------------------------------------------------------------ *
  * helpers
