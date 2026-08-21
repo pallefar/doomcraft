@@ -26,6 +26,59 @@
  * Vertex format is mesher.ts's: three uint8x4 attributes, stride 12, one
  * interleaved buffer. Colour arrives UNSHADED; the face shade is applied here,
  * exactly once.
+ *
+ * SURFACE DETAIL (ref/BAR.md weakness: "blocks **are textured**, not
+ * flat-coloured"). The bar's stone is a running bond, its sand a chevron dither,
+ * and every merged run of blocks still has a countable grid. Ours was one
+ * unbroken field of colour, and ground plus walls are ~70% of every frame.
+ *
+ * The fix is entirely fragment-side, which matters because `game.medianMs`
+ * tracks CPU and the real budget is draw calls (~120 before the frame cost
+ * moves). This adds ZERO draw calls and ZERO vertex bytes:
+ *
+ *  - **UV is derived from `vWorldPos` and `vNormal`**, both already varyings.
+ *    +/-Y takes `worldPos.xz`, +/-X takes `worldPos.zy`, +/-Z takes
+ *    `worldPos.xy`, so it tiles per block across a greedy quad of any size.
+ *  - **The tile comes from `aColor`**, which the mesher already writes as the
+ *    unshaded `BLOCK_FACE_COLOR` — a unique key per block-face. One
+ *    `texelFetch` in the VERTEX stage turns it into {tile, detail, seam} and
+ *    flats it down, so the fragment stage pays one atlas fetch and no lookup.
+ *  - **The seam** is a `fract()` edge-distance darken in pixel space, which is
+ *    what gives three adjacent stone blocks their grid back without splitting a
+ *    single quad. It fades out below ~9 px per block so distance never moires.
+ *
+ * The atlas never replaces the palette: the baked face shade in the vertex
+ * colour, AO, fog and the dynamic lights all still apply on top.
+ *
+ * WHY THE DETAIL TERM IS TWO TERMS. The first version modulated albedo purely
+ * MULTIPLICATIVELY — `base *= 1 + m * amp`. Measured, its Weber contrast was
+ * competitive with the bar (1.6-4.7% against 1.6-2.9%) and it was still
+ * invisible on half the palette, because a percentage of a dark albedo is not
+ * a quantity the framebuffer can hold: on a wall sitting at luminance 30 the
+ * entire modulation landed under one 8-bit grey level. High-pass 3x3 residual
+ * RMS on matched flat patches, in absolute levels:
+ *
+ *     BAR sand mid-near 3.32   BAR grass top 4.39      <- the target band
+ *     DM stone wall, nose      0.66 -> 2.72
+ *     builder red wall         0.88 -> 3.39
+ *     quest brick              1.27 -> 2.57
+ *     quest tile floor         0.98 -> 2.56
+ *
+ * The fix is an ADDITIVE term beside the multiplicative one, in linear albedo
+ * units, so what the detail is worth in grey levels no longer depends on how
+ * dark the material is — plus denser tiles (textureAtlas.ts) and a per-block
+ * position hash, because a merged forty-block wall repeating one tile reads as
+ * one painted mass however good the tile is. Re-measure with
+ * `node tools/surface-probe.mjs`.
+ *
+ * None of it is free but all of it is close to it. Measured on ANGLE/Metal with
+ * EXT_disjoint_timer_query_webgl2, a pinned camera and a scissor sweep over
+ * pixel count, per-pixel fragment cost sits at 0.117-0.140 ms/Mpx where the old
+ * atlas sat at 0.127-0.146, against a 0.024 ms/Mpx flat-shader floor: no
+ * measurable increase, and the run-to-run spread is larger than the change.
+ * `game.medianMs` cannot see any of this either way — it times CPU submission
+ * inside `renderer.render()` and is structurally blind to a fragment-shader
+ * change, which is why it must never be used to gate one.
  */
 
 import * as THREE from 'three';
@@ -40,6 +93,12 @@ import {
   SUN_DIR_Y,
   SUN_DIR_Z,
 } from '@doomcraft/shared';
+import {
+  ATLAS_COLS,
+  ATLAS_ROWS,
+  createAtlasTexture,
+  createSurfaceLutTexture,
+} from './textureAtlas';
 
 /* ------------------------------------------------------------------------ *
  * Palette
@@ -61,6 +120,19 @@ export const DOOM_SKY_EMBER = 0xd0561e;
 /** Below the horizon. */
 export const DOOM_SKY_GROUND = 0x120d0c;
 
+/**
+ * Where fog is allowed to start, as a fraction of the distance at which it is
+ * closed. Everything nearer than this is rendered with no fog at all.
+ *
+ * Fog measured from the eye is the reason distant surfaces read as flat: exp2
+ * fog to 188 m had already mixed 9% of the fog colour into a wall at 30 m and
+ * 33% into one at 60 m, and 33% of the contrast is most of what a 1-3 grey
+ * level surface residual has to give. Holding the first ~28% of the range
+ * completely clear costs the horizon nothing — the ramp is simply steeper over
+ * the remaining 72% — and buys back the entire near and mid field.
+ */
+const FOG_START_FRAC = 0.28;
+
 /* ------------------------------------------------------------------------ *
  * Uniform plumbing
  * ------------------------------------------------------------------------ */
@@ -75,6 +147,64 @@ const QUALITY_LIGHTS: Readonly<Record<VoxelQuality, number>> = {
   high: MAX_DYNAMIC_LIGHTS,
 };
 
+/* ------------------------------------------------------------------------ *
+ * Surface-detail tuning
+ *
+ * Four numbers, all measured rather than eyeballed, by
+ * `node tools/surface-probe.mjs` — high-pass 3x3 residual RMS in absolute 8-bit
+ * grey levels on matched flat patches, against the bar's own sand (3.32 levels
+ * on mean luminance 205) and grass (4.39 on 152) measured with the same
+ * operator off ref/voxiom.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Scale on each material's authored RELATIVE detail strength (0.07 .. 0.23).
+ * This is the percentage-of-albedo term. It is what bright materials live on.
+ */
+const DETAIL_REL = 1.0;
+
+/**
+ * Scale on the same authored strength, applied as an ABSOLUTE albedo offset.
+ * A typical material (authored 0.17-0.20) therefore modulates albedo by roughly
+ * +/-0.08 on top of its percentage term, which is worth ~3 grey levels after
+ * lighting and the grade on a surface sitting at luminance 30-40 — inside the
+ * band the bar's own surfaces occupy — and under 1% on a sand-bright one.
+ */
+const DETAIL_ABS = 0.46;
+
+/** Per-block value jitter, relative. +/-4%, which is the brief's 3-5%. */
+const BLOCK_JITTER_REL = 0.040;
+
+/**
+ * Per-block value jitter, absolute, in the same linear albedo units as
+ * DETAIL_ABS and for the same reason: 4% of a dark block is not a grey level,
+ * and a wall of identically-dark blocks is the thing this exists to break.
+ */
+const BLOCK_JITTER_ABS = 0.013;
+
+/**
+ * How dark the per-block groove goes. Was 0.17 when it was the only thing
+ * separating one block from the next; now that the tiles and the hash both
+ * carry that load it can go back to reading as a joint rather than a lattice.
+ */
+const SEAM_STRENGTH = 0.12;
+
+/**
+ * What each quality tier does to the surface term.
+ *
+ * This is half of the escape hatch the atlas shipped without: `setQuality` used
+ * to change MAX_LIGHTS and nothing else, so a phone that picked "low" still
+ * paid for every texture fetch. `low` still keeps a little, because a flat
+ * untextured world is the failure this whole module exists to fix; a device
+ * that cannot afford even that turns the atlas off outright with
+ * `setTextureEnabled(false)`, which drops the define and the fetch with it.
+ */
+const QUALITY_DETAIL: Readonly<Record<VoxelQuality, number>> = {
+  low: 0.6,
+  medium: 0.85,
+  high: 1.0,
+};
+
 function hexToVec3(hex: number, out: THREE.Vector3): THREE.Vector3 {
   return out.set(((hex >>> 16) & 0xff) / 255, ((hex >>> 8) & 0xff) / 255, (hex & 0xff) / 255);
 }
@@ -83,9 +213,14 @@ function hexToVec3(hex: number, out: THREE.Vector3): THREE.Vector3 {
  * Shaders
  * ------------------------------------------------------------------------ */
 
+/** Width / height of one atlas tile in UV, as GLSL float literals. */
+const TILE_U = (1 / ATLAS_COLS).toFixed(8);
+const TILE_V = (1 / ATLAS_ROWS).toFixed(8);
+
 const VERT = /* glsl */ `
 precision highp float;
 precision highp int;
+precision highp sampler2D;
 
 uniform mat4 modelMatrix;
 uniform mat4 modelViewMatrix;
@@ -98,6 +233,9 @@ uniform float uTime;
 uniform float uWaveAmp;
 uniform float uWaveSpeed;
 uniform float uEmissiveGain;
+#ifdef USE_TEXTURE
+uniform sampler2D uSurfaceLut;
+#endif
 
 in vec4 aPosFace;   // x, y, z (chunk-local integers), face 0..5
 in vec4 aData;      // ao 0..3, light 0..15, alpha 0..255, flags
@@ -111,6 +249,12 @@ out float vFogDepth;
 out highp vec3 vWorldPos;
 flat out vec3 vNormal;
 flat out float vLiquid;
+#ifdef USE_TEXTURE
+// xy = atlas tile origin in UV, z = detail strength, w = seam strength.
+flat out vec4 vSurf;
+// 1 = mirror the tile per block so a big wall is not wallpaper, 0 = keep aligned.
+flat out float vVary;
+#endif
 
 void main() {
   int face = int(aPosFace.w + 0.5);
@@ -144,15 +288,32 @@ void main() {
   vLightBase = uFaceLight[face] * uAoLevels[int(aData.x + 0.5)];
   vEmissive = (aData.y / 15.0) * uEmissiveGain;
   vAlpha = aData.z / 255.0;
+
+#ifdef USE_TEXTURE
+  // aColor is the mesher's UNSHADED BLOCK_FACE_COLOR, which is a unique key per
+  // block face. One exact integer fetch per vertex — no hash, no new attribute.
+  ivec2 key = ivec2(int(aColor.r * 255.0 + 0.5), int(aColor.g * 255.0 + 0.5));
+  vec4 surf = texelFetch(uSurfaceLut, key, 0);
+  float tile = floor(surf.r * 255.0 + 0.5);
+  vSurf = vec4(
+    mod(tile, ${ATLAS_COLS}.0) * ${TILE_U},
+    floor(tile / ${ATLAS_COLS}.0) * ${TILE_V},
+    surf.g,
+    surf.b);
+  vVary = surf.a;
+#endif
 }
 `;
 
 const FRAG = /* glsl */ `
 precision mediump float;
 precision mediump int;
+precision mediump sampler2D;
 
 uniform vec3  uFogColor;
 uniform float uFogDensity;
+/** Metres of completely clear air in front of the camera. See setFogRange. */
+uniform float uFogStart;
 uniform vec3  uTint;
 uniform float uContrast;
 uniform float uSaturation;
@@ -161,6 +322,13 @@ uniform float uExposure;
 // must carry the same precision in both or the program fails to validate.
 uniform highp float uTime;
 uniform float uRipple;
+#ifdef USE_TEXTURE
+uniform sampler2D uSurfaceAtlas;
+uniform float uDetail;    // global scale on the RELATIVE (percentage) detail term
+uniform float uDetailAbs; // global scale on the ABSOLUTE (albedo-offset) detail term
+uniform vec2  uBlockJitter; // per-block value jitter: x relative, y absolute
+uniform float uSeam;      // how dark the per-block groove goes, 0 .. 1
+#endif
 #if MAX_LIGHTS > 0
 uniform int   uLightCount;
 uniform vec3  uLightPos[MAX_LIGHTS];
@@ -176,12 +344,102 @@ in float vFogDepth;
 in highp vec3 vWorldPos;
 flat in vec3 vNormal;
 flat in float vLiquid;
+#ifdef USE_TEXTURE
+flat in vec4 vSurf;
+flat in float vVary;
+#endif
 
 layout(location = 0) out vec4 fragColor;
 
 void main() {
   vec3 base = vColor * uTint;
   float lit = max(vLightBase, vEmissive);
+
+#ifdef USE_TEXTURE
+  // ---- surface detail -----------------------------------------------------
+  // Derivatives first, at top level: they must not sit inside the face branch.
+  highp vec3 ddx = dFdx(vWorldPos);
+  highp vec3 ddy = dFdy(vWorldPos);
+  // highp all the way down. These are world metres, and an fp16 mediump float
+  // quantises to 0.125 by the time the world coordinate reaches 128 — which
+  // would turn fract() into staircase garbage on any GPU that honours mediump.
+  highp vec2 uv, dux, duy;
+  vec3 an = abs(vNormal);
+  if (an.y > 0.5)      { uv = vWorldPos.xz; dux = ddx.xz; duy = ddy.xz; }
+  else if (an.x > 0.5) { uv = vWorldPos.zy; dux = ddx.zy; duy = ddy.zy; }
+  else                 { uv = vWorldPos.xy; dux = ddx.xy; duy = ddy.xy; }
+
+  // One block == one tile, whatever size the greedy quad ended up.
+  highp vec2 cell = fract(uv);
+  vec2 tileSize = vec2(${TILE_U}, ${TILE_V});
+
+  float amp = vSurf.z * uDetail;
+  float absAmp = vSurf.z * uDetailAbs;
+  // One gate for the whole surface term, so uDetail == uDetailAbs == 0 really
+  // is a flat untextured world and not a cheaper-looking textured one.
+  if (amp + absAmp > 0.0) {
+    // Four orientations, chosen by a hash of the block's own coordinates, so
+    // rock and dirt do not tile visibly across a big face. Bonded and panelled
+    // materials opt out (vVary == 0) because their lines must line up.
+    highp float h = fract(sin(dot(floor(uv), vec2(127.1, 311.7))) * 43758.5453);
+    cell = mix(cell, 1.0 - cell, step(0.5, vec2(h, fract(h * 97.13))) * vVary);
+    // Explicit gradients: the atlas is addressed by hand, so the hardware must
+    // be told the real footprint or every tile edge picks the wrong mip.
+    float d = textureGrad(
+      uSurfaceAtlas, vSurf.xy + cell * tileSize, dux * tileSize, duy * tileSize).r;
+
+    // The tile's signed deviation from neutral, -1 .. 1.
+    float m = (d - 0.5) * 2.0;
+
+    // TWO terms, and the second one is the entire fix.
+    //
+    // A pure MULTIPLICATIVE modulation is a percentage of the albedo, so its
+    // Weber contrast is constant and its absolute size is not. Measured, ours
+    // sat at 1.6-4.7% against the bar's 1.6-2.9% — competitive — and still
+    // vanished, because on a Doom palette a percentage of a small number is a
+    // small number: at mean luminance 30 the whole modulation landed under one
+    // grey level and fell through 8-bit quantisation. The texture was present
+    // in the maths and absent on the screen.
+    //
+    // The ADDITIVE term is an albedo offset in linear units, so what it is
+    // worth in grey levels does not depend on how dark the material is. It
+    // still rides the lighting (it is added to albedo, not to the final pixel),
+    // so a wall in shadow is still a wall in shadow — but a dark wall now has
+    // texture and a bright wall barely notices, because relative to a 0.9
+    // albedo the same offset is a few percent.
+    base = base * (1.0 + m * amp) + m * absAmp;
+
+    // ---- per-block value jitter -----------------------------------------
+    // Greedy meshing merges forty blocks of the same material into one quad and
+    // the tile repeats identically across all of them, so a big wall reads as
+    // one painted mass however good the tile is. Hash the block's own integer
+    // world position into a small value offset and the wall becomes countable
+    // blocks again. Stepping half a block back along the face normal turns the
+    // face plane's exact integer into the cell behind it, so every fragment of
+    // one face agrees on the hash and two adjacent blocks never do.
+    highp vec3 bp = floor(vWorldPos - vNormal * 0.5);
+    float j = fract(sin(dot(bp, vec3(12.9898, 78.233, 37.719))) * 43758.5453) * 2.0 - 1.0;
+    base = base * (1.0 + j * uBlockJitter.x) + j * uBlockJitter.y;
+
+    base = max(base, vec3(0.0));
+  }
+
+  // ---- per-block seam -----------------------------------------------------
+  // Edge distance measured in PIXELS, so the groove is the same weight at one
+  // metre and at thirty, then faded out once a block is too small to hold it.
+  //
+  // Deliberately quieter than it was. When the tiles were invisible this groove
+  // was the only thing breaking up a wall, so it had to be strong enough to do
+  // that job alone — and a lattice drawn over flat colour is what it looked
+  // like. With the tiles carrying the surface and the hash carrying the
+  // block-to-block step, the seam goes back to being the shadow in a joint: it
+  // finishes the grid instead of being the grid.
+  highp vec2 w = max(abs(dux) + abs(duy), vec2(1e-6));
+  highp vec2 edge = min(cell, 1.0 - cell) / w;
+  highp float pxPerBlock = 1.0 / max(max(w.x, w.y), 1e-6);
+  float groove = 1.0 - smoothstep(0.0, 1.6, min(edge.x, edge.y));
+  base *= 1.0 - groove * groove * vSurf.w * uSeam * smoothstep(3.0, 9.0, pxPerBlock);
+#endif
 
   // Greedy meshing merges a still lake into a handful of enormous quads, so a
   // vertex ripple has nothing to ripple. Do the shimmer per fragment instead.
@@ -216,7 +474,14 @@ void main() {
   c = mix(vec3(lum), c, uSaturation);
   c = mix(c, c * c * (3.0 - 2.0 * c), uContrast);
 
-  float fd = vFogDepth * uFogDensity;
+  // Fog is atmosphere, not a filter on the lens. exp2 fog measured from the eye
+  // starts eating contrast the moment anything is more than a few metres away:
+  // at the old density it took a third of the contrast out of a wall at 60 m,
+  // which is the range you fight at. Everything inside uFogStart is therefore
+  // left completely alone, and the exp2 ramp runs from there to the render
+  // distance so the world edge still dissolves into the horizon.
+  // Two extra instructions: one subtract, one max.
+  float fd = max(vFogDepth - uFogStart, 0.0) * uFogDensity;
   float fog = 1.0 - exp(-fd * fd);
   fog = clamp(fog, 0.0, 1.0);
   c = mix(c, uFogColor, fog);
@@ -249,6 +514,8 @@ export interface VoxelMaterialOptions {
   ao?: boolean;
   fog?: boolean;
   dither?: boolean;
+  /** Procedural surface detail + per-block seam. On by default; it is GPU-only. */
+  texture?: boolean;
   /** Metres at which fog is effectively total. Defaults to render distance x 32. */
   fogFar?: number;
   fogColor?: number;
@@ -284,14 +551,33 @@ export class VoxelMaterials {
   private quality: VoxelQuality;
   private fogEnabled: boolean;
   private ditherEnabled: boolean;
+  private textureEnabled: boolean;
   private fogFar: number;
+  private fogStart: number;
+
+  /** User multiplier on the surface term, composed with the quality tier. */
+  private detailScale = 1;
+
+  /** Greyscale detail atlas and the face-colour -> surface lookup. Owned here. */
+  private atlasTexture: THREE.DataTexture | null;
+  private lutTexture: THREE.DataTexture | null;
 
   constructor(opts: VoxelMaterialOptions = {}) {
     this.quality = opts.quality ?? 'high';
     this.aoStrength = opts.ao === false ? 0 : AO_STRENGTH;
     this.fogEnabled = opts.fog !== false;
     this.ditherEnabled = opts.dither !== false;
+    this.textureEnabled = opts.texture !== false;
     this.fogFar = opts.fogFar ?? 6 * 32;
+    this.fogStart = this.fogFar * FOG_START_FRAC;
+
+    // Both are generated into typed arrays: no asset file, no fetch, no canvas,
+    // and nothing added to the bundle payload. ~13 ms at boot on an M3 Pro for
+    // the 512x512 atlas plus the 256x256 LUT, off the render path and skipped
+    // entirely when the surface-detail setting is 'off' (the textures are then
+    // built on first enable, not at construction).
+    this.atlasTexture = this.textureEnabled ? createAtlasTexture() : null;
+    this.lutTexture = this.textureEnabled ? createSurfaceLutTexture() : null;
 
     this.uniforms = {
       uFaceLight: { value: this.faceLight },
@@ -303,11 +589,19 @@ export class VoxelMaterials {
       uEmissiveGain: { value: 1.15 },
       uFogColor: { value: hexToVec3(opts.fogColor ?? DOOM_FOG, new THREE.Vector3()) },
       uFogDensity: { value: 0 },
+      uFogStart: { value: 0 },
       uTint: { value: new THREE.Vector3(1, 1, 1) },
       uContrast: { value: 0.26 },
       uSaturation: { value: 0.80 },
       uExposure: { value: 1.0 },
       uRipple: { value: 0.085 },
+      uSurfaceAtlas: { value: this.atlasTexture },
+      uSurfaceLut: { value: this.lutTexture },
+      // Written by applyDetail(); see DETAIL_REL / DETAIL_ABS / BLOCK_JITTER.
+      uDetail: { value: DETAIL_REL },
+      uDetailAbs: { value: DETAIL_ABS },
+      uBlockJitter: { value: new THREE.Vector2(BLOCK_JITTER_REL, BLOCK_JITTER_ABS) },
+      uSeam: { value: SEAM_STRENGTH },
       uLightCount: { value: 0 },
       uLightPos: { value: this.lightPos },
       uLightColor: { value: this.lightColor },
@@ -319,6 +613,7 @@ export class VoxelMaterials {
     this.rebuildFaceLight();
     this.rebuildAo();
     this.setFogFar(this.fogFar);
+    this.applyDetail();
 
     const lights = QUALITY_LIGHTS[this.quality];
     this.opaque = this.make('LAYER_OPAQUE', lights, {
@@ -343,6 +638,7 @@ export class VoxelMaterials {
     const defines: Record<string, number> = { MAX_LIGHTS: lights };
     defines[layerDefine] = 1;
     if (this.ditherEnabled) defines.USE_DITHER = 1;
+    if (this.textureEnabled) defines.USE_TEXTURE = 1;
 
     const m = new THREE.RawShaderMaterial({
       glslVersion: THREE.GLSL3,
@@ -425,13 +721,37 @@ export class VoxelMaterials {
 
   /**
    * Distance in metres at which fog is 98% closed. exp2 fog needs a density,
-   * and a density is not a number anybody can reason about.
+   * and a density is not a number anybody can reason about. The clear-air
+   * distance in front of it comes along at FOG_START_FRAC of the same number,
+   * so every existing caller gets the near field back without being changed.
    */
   setFogFar(metres: number): void {
-    this.fogFar = Math.max(8, metres);
-    this.uniforms.uFogDensity.value = this.fogEnabled ? 1.978 / this.fogFar : 0;
+    this.setFogRange(Math.max(8, metres) * FOG_START_FRAC, metres);
+  }
+
+  /**
+   * Both ends of the fog, explicitly: clear air out to `startMetres`, then an
+   * exp2 ramp that is 98% closed at `farMetres`. A mode that wants thick air
+   * moves the start in; one that wants the bar's crisp distance moves it out.
+   */
+  setFogRange(startMetres: number, farMetres: number): void {
+    this.fogFar = Math.max(8, farMetres);
+    // Leave at least a quarter of the range for the ramp itself: a start that
+    // crowds the far plane turns fog into a wall at the render distance, which
+    // is the popping this is supposed to hide.
+    this.fogStart = clamp(startMetres, 0, this.fogFar * 0.75);
+    this.uniforms.uFogStart.value = this.fogStart;
+    this.uniforms.uFogDensity.value = this.fogEnabled
+      ? 1.978 / Math.max(1, this.fogFar - this.fogStart)
+      : 0;
     this.flagUniforms();
   }
+
+  /** Metres of clear air in front of the camera. */
+  get fogStartDistance(): number { return this.fogStart; }
+
+  /** Metres at which fog is 98% closed. */
+  get fogFarDistance(): number { return this.fogFar; }
 
   /**
    * The correct way to set fog: it must close just inside the render distance
@@ -443,7 +763,9 @@ export class VoxelMaterials {
 
   setFogEnabled(on: boolean): void {
     this.fogEnabled = on;
-    this.setFogFar(this.fogFar);
+    // Re-apply the range that is actually set, not the default fraction of it:
+    // toggling fog in the settings must not silently undo a mode's palette.
+    this.setFogRange(this.fogStart, this.fogFar);
   }
 
   setFogColor(hex: number): void {
@@ -540,6 +862,73 @@ export class VoxelMaterials {
       m.defines.MAX_LIGHTS = lights;
       m.needsUpdate = true;
     }
+    // The tier owns the surface term too, not just the light count.
+    this.applyDetail();
+  }
+
+  /**
+   * Global multiplier on every material's authored detail strength, composed
+   * with the quality tier. 0 is a flat untextured world, 1 is as authored.
+   * Anything past ~1.4 starts fighting the flat-shaded voxel read, which is
+   * worse than no texture at all.
+   *
+   * Scales the relative term, the absolute term and the per-block jitter
+   * together, so "half the detail" means half of all of it and not a surface
+   * that loses its percentage modulation and keeps its offset.
+   */
+  setSurfaceDetail(scale: number): void {
+    this.detailScale = clamp(scale, 0, 2);
+    this.applyDetail();
+  }
+
+  /** The effective detail multiplier: the quality tier times the user's scale. */
+  get surfaceDetail(): number {
+    return QUALITY_DETAIL[this.quality] * this.detailScale;
+  }
+
+  private applyDetail(): void {
+    const k = this.surfaceDetail;
+    this.uniforms.uDetail.value = DETAIL_REL * k;
+    this.uniforms.uDetailAbs.value = DETAIL_ABS * k;
+    (this.uniforms.uBlockJitter.value as THREE.Vector2)
+      .set(BLOCK_JITTER_REL * k, BLOCK_JITTER_ABS * k);
+    this.flagUniforms();
+  }
+
+  /** How dark the per-block groove goes, 0 .. 1. Default 0.12. */
+  setSeamStrength(v: number): void {
+    this.uniforms.uSeam.value = clamp(v, 0, 1);
+    this.flagUniforms();
+  }
+
+  /**
+   * Turn the whole atlas path off — the define, the two fetches and the
+   * derivatives with it, not just its amplitude. This is the setting a low-end
+   * phone actually needs; `setSurfaceDetail(0)` leaves a shader that still
+   * samples and then multiplies by zero.
+   *
+   * The atlas and LUT are built on first enable, so a session that never turns
+   * it on never pays the boot cost or the texture memory.
+   */
+  setTextureEnabled(on: boolean): void {
+    if (on === this.textureEnabled) return;
+    this.textureEnabled = on;
+    if (on && this.atlasTexture === null) {
+      this.atlasTexture = createAtlasTexture();
+      this.lutTexture = createSurfaceLutTexture();
+      this.uniforms.uSurfaceAtlas.value = this.atlasTexture;
+      this.uniforms.uSurfaceLut.value = this.lutTexture;
+    }
+    for (const m of this.all) {
+      if (on) m.defines.USE_TEXTURE = 1;
+      else delete m.defines.USE_TEXTURE;
+      m.needsUpdate = true;
+    }
+    this.flagUniforms();
+  }
+
+  get textureOn(): boolean {
+    return this.textureEnabled;
   }
 
   setDither(on: boolean): void {
@@ -573,5 +962,7 @@ export class VoxelMaterials {
 
   dispose(): void {
     for (const m of this.all) m.dispose();
+    this.atlasTexture?.dispose();
+    this.lutTexture?.dispose();
   }
 }

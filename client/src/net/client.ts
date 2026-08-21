@@ -9,7 +9,10 @@
  *   - reconciliation that replays unacked inputs and then bleeds the visual
  *     error away over ~120 ms, so a misprediction never snaps the camera,
  *   - entity interpolation at a 100 ms render delay with bounded extrapolation,
- *   - predicted block edits that roll back when the server disagrees.
+ *   - predicted block edits that roll back when the server disagrees,
+ *   - a KEEPALIVE driven by a clock outside `requestAnimationFrame`, because a
+ *     background tab stops rAF and the server drops a silent client after
+ *     `CLIENT_TIMEOUT_MS`. See the "Keepalive" block below.
  *
  * The renderer reads `renderPos`, `players`, `entities` and `projectiles`; it
  * never talks to the socket.
@@ -24,6 +27,7 @@ import {
   CHUNK_HEIGHT,
   CHUNK_SIZE_MASK,
   CHUNK_VOLUME,
+  CLIENT_TIMEOUT_MS,
   HEARTBEAT_MS,
   INPUT_SEND_MS,
   INTERP_DELAY_MS,
@@ -139,6 +143,119 @@ export function webSocketTransport(url: string): ClientTransport {
 export function defaultServerUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${location.host}/ws`;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Keepalive — the pump that does NOT live in requestAnimationFrame
+ *
+ * The server drops any connection it has not heard from for
+ * `CLIENT_TIMEOUT_MS` (15 s, `server/src/net.ts` reapTimeouts). Everything the
+ * client normally sends — 60 Hz input, the 1 Hz `C2S.PING` — is driven from
+ * `update()`, which is driven from `requestAnimationFrame`. A hidden tab
+ * throttles rAF to ~1 Hz and stops it completely when the tab is occluded, so
+ * fifteen seconds behind another window used to end the match.
+ *
+ * The fix is a clock that rAF cannot take away:
+ *
+ *   1. a dedicated Worker timer (`keepalive.worker.ts`) — worker timers are
+ *      exempt from Chrome's *intensive* throttling, which clamps a hidden
+ *      page's own timers to one wake-up per MINUTE. At one per minute a
+ *      `setInterval` keepalive would still lose the match.
+ *   2. a plain `setInterval` on the page, running alongside as the fallback
+ *      for anything that cannot spawn a Worker.
+ *   3. an immediate send on `visibilitychange`, wired up by the caller, so the
+ *      timeout window starts fresh the moment the tab goes away.
+ *
+ * A keepalive is one `C2S.PING`: ~5 bytes, already implemented on both ends,
+ * and it refreshes `conn.lastRecvMs` exactly like input does. Nothing is
+ * simulated and no input is queued while hidden — see `resumeFromBackground`.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * How often the keepalive clock wakes. Cheap: a wake-up that finds recent
+ * traffic on the socket does nothing at all.
+ */
+export const KEEPALIVE_TICK_MS = 1000;
+
+/**
+ * Send a keepalive when the socket has been silent this long. A fifth of
+ * `CLIENT_TIMEOUT_MS`, so four consecutive keepalives can be lost — to
+ * throttling, to packet loss, to a stalled worker — before the server reaps us.
+ */
+export const KEEPALIVE_SILENCE_MS = Math.floor(CLIENT_TIMEOUT_MS / 5);
+
+/**
+ * A frame loop that has been stopped longer than this is treated as a real
+ * absence by `resumeFromBackground()`. Below it, nothing on screen has gone
+ * stale enough to be worth a re-sync: 250 ms is one clamped `update()` step
+ * (`update` caps dt at 250 ms) and well under `MAX_EXTRAPOLATE_MS` of
+ * dead-reckoning, so the interpolators can simply carry on.
+ */
+export const RESUME_RESYNC_MS = 250;
+
+/**
+ * `clientTimeMs` stamped on a keepalive ping. The server echoes it back; the
+ * client uses the sentinel to keep these pongs out of the RTT estimate, since
+ * a hidden tab's clock is frozen and would otherwise report a 0 ms ping.
+ */
+const KEEPALIVE_PING_STAMP = 0xffffffff;
+
+/** A clock the net pump can rely on. `start` is idempotent. */
+export interface KeepaliveClock {
+  start(intervalMs: number, onTick: () => void): void;
+  stop(): void;
+}
+
+/** Wall-clock milliseconds. Unlike `NetClient.nowMs` this advances while hidden. */
+function wallNow(): number {
+  const perf = (globalThis as unknown as { performance?: { now(): number } }).performance;
+  return perf ? perf.now() : Date.now();
+}
+
+/**
+ * Worker timer first, page interval alongside it. Both are started; whichever
+ * the browser lets run keeps the match alive, and a tick that arrives while the
+ * socket is already busy costs one subtraction.
+ */
+export function createKeepaliveClock(): KeepaliveClock {
+  let worker: Worker | null = null;
+  let interval: ReturnType<typeof setInterval> | null = null;
+  let tick: (() => void) | null = null;
+
+  return {
+    start(intervalMs: number, onTick: () => void): void {
+      if (tick !== null) return;
+      tick = onTick;
+
+      if (typeof Worker !== 'undefined') {
+        try {
+          worker = new Worker(new URL('./keepalive.worker.ts', import.meta.url), {
+            type: 'module',
+            name: 'doomcraft-keepalive',
+          });
+          worker.onmessage = (): void => { tick?.(); };
+          // A worker that cannot start must not cost the player the match.
+          worker.onerror = (): void => { worker?.terminate(); worker = null; };
+          worker.postMessage({ t: 'start', ms: intervalMs });
+        } catch {
+          worker = null;
+        }
+      }
+
+      if (typeof setInterval === 'function') {
+        interval = setInterval(() => { tick?.(); }, intervalMs);
+      }
+    },
+    stop(): void {
+      tick = null;
+      if (worker !== null) {
+        try { worker.postMessage({ t: 'stop' }); } catch { /* already gone */ }
+        worker.terminate();
+        worker = null;
+      }
+      if (interval !== null) { clearInterval(interval); interval = null; }
+    },
+  };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -311,6 +428,14 @@ export interface NetClientOptions {
   caps?: number;
   autoReconnect?: boolean;
   events?: NetClientEvents;
+  /**
+   * The clock that keeps the socket alive while `requestAnimationFrame` is
+   * throttled or stopped. Defaults to `createKeepaliveClock()` (Worker timer +
+   * page interval). Pass `null` to opt out, or a fake to drive it from a test.
+   */
+  keepalive?: KeepaliveClock | null;
+  /** Wall-clock source, in ms. Injected by tests; defaults to performance.now. */
+  wallClock?: () => number;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -476,6 +601,21 @@ export class NetClient {
   private everConnected = false;
   private disposed = false;
 
+  /* --- keepalive (independent of requestAnimationFrame) --- */
+  private readonly keepalive: KeepaliveClock | null;
+  private readonly wallClock: () => number;
+  /** Wall clock at the last byte we put on the wire. Drives the keepalive. */
+  private lastSendWallMs = 0;
+  /**
+   * Wall clock at the last `update()`. The frame loop is the only caller, so
+   * this is literally "when did this client last render", which is the signal
+   * `resumeFromBackground()` needs — the visibility flag is not.
+   */
+  private lastUpdateWallMs = 0;
+  private keepaliveRunning = false;
+  /** Keepalives sent because the render loop had stopped. Asserted by tests. */
+  keepalivesSent = 0;
+
   /* --- protocol scratch (allocated once) --- */
   private readonly writer = new PacketWriter(2048);
   private readonly reader = new PacketReader();
@@ -549,6 +689,10 @@ export class NetClient {
       caps: options.caps ?? 0,
     };
     this.autoReconnect = options.autoReconnect ?? true;
+    this.wallClock = options.wallClock ?? wallNow;
+    this.keepalive = options.keepalive === undefined ? createKeepaliveClock() : options.keepalive;
+    this.lastSendWallMs = this.wallClock();
+    this.lastUpdateWallMs = this.lastSendWallMs;
     const url = options.url;
     if (options.createTransport) {
       this.makeTransport = options.createTransport;
@@ -588,6 +732,7 @@ export class NetClient {
 
   connect(): void {
     if (this.disposed || this.transport) return;
+    this.startKeepalive();
     this.setStatus('connecting');
     const t = this.makeTransport();
     this.transport = t;
@@ -603,6 +748,7 @@ export class NetClient {
 
   disconnect(): void {
     this.autoReconnect = false;
+    this.stopKeepalive();
     if (this.reconnectTimer !== null) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     const t = this.transport;
     this.transport = null;
@@ -616,6 +762,84 @@ export class NetClient {
   dispose(): void {
     this.disposed = true;
     this.disconnect();
+  }
+
+  /* -------------------------------------------------------------- *
+   * Keepalive
+   *
+   * The one part of the net path that is NOT driven by the frame loop.
+   * -------------------------------------------------------------- */
+
+  private startKeepalive(): void {
+    if (this.keepaliveRunning || this.keepalive === null) return;
+    this.keepaliveRunning = true;
+    this.keepalive.start(KEEPALIVE_TICK_MS, () => { this.keepaliveTick(); });
+  }
+
+  private stopKeepalive(): void {
+    if (!this.keepaliveRunning || this.keepalive === null) return;
+    this.keepaliveRunning = false;
+    this.keepalive.stop();
+  }
+
+  /**
+   * One wake-up of the independent clock. Sends a ping only if the socket has
+   * genuinely gone quiet, so a tab that is still rendering never pays for this.
+   *
+   * `force` skips the silence check — that is the `visibilitychange` path,
+   * where the point is to restart the server's 15 s window at the exact moment
+   * the tab is hidden rather than up to `KEEPALIVE_SILENCE_MS` later.
+   *
+   * Returns true if a keepalive went out.
+   */
+  keepaliveTick(force = false): boolean {
+    if (this.disposed || !this.connected) return false;
+    const now = this.wallClock();
+    if (!force && now - this.lastSendWallMs < KEEPALIVE_SILENCE_MS) return false;
+    this.keepalivesSent++;
+    this.sendPing(true);
+    return true;
+  }
+
+  /**
+   * The tab is back. Re-sync instead of replaying the gap.
+   *
+   * Everything time-based in this client is driven by `nowMs`, which only
+   * advances inside `update()`. After a spell in the background `update()` is
+   * called again with a dt the frame loop has already clamped, so there is no
+   * spiral — but there IS stale state that must not be believed:
+   *
+   *   - the input accumulator, which would otherwise burn `MAX_PREDICT_STEPS`
+   *     of commands the player never gave,
+   *   - the clock offset, which is now minutes wrong; dropping `clockReady`
+   *     makes the next snapshot snap it instead of easing 5% per frame,
+   *   - the interpolation rings, whose newest sample is older than
+   *     `MAX_EXTRAPOLATE_MS` and would dead-reckon every remote player across
+   *     the whole gap on the first frame back,
+   *   - the visual correction offset, which is about to be recomputed against
+   *     an authoritative position we have not seen yet.
+   *
+   * The world, the socket and the pending block edits all survive: nothing here
+   * touches the session.
+   *
+   * The re-sync is gated on `renderGapMs` — how long the frame loop was
+   * actually stopped — and NOT on the visibility flag that triggered it.
+   * `visibilitychange` also fires for a tab flick the compositor never even
+   * throttled, and there the re-sync would be pure harm: wiping the
+   * interpolation rings freezes every remote player until two fresh snapshots
+   * land. The keepalive is unconditional; the surgery is not.
+   */
+  resumeFromBackground(): void {
+    this.keepaliveTick(true);
+    if (this.renderGapMs < RESUME_RESYNC_MS) return;
+    this.accumulatorMs = 0;
+    this.pingTimer = 0;
+    this.clockReady = false;
+    this.correction[0] = 0;
+    this.correction[1] = 0;
+    this.correction[2] = 0;
+    for (let i = 0; i < this.tracks.length; i++) this.tracks[i].reset();
+    for (let i = 0; i < this.entityTracks.length; i++) this.entityTracks[i].reset();
   }
 
   private onOpen(): void {
@@ -632,6 +856,8 @@ export class NetClient {
     this.transport = null;
     this.resetSession();
     if (!this.autoReconnect || this.disposed) {
+      // The session is over; nothing left to keep alive.
+      this.stopKeepalive();
       this.setStatus('closed', reason || String(code));
       return;
     }
@@ -679,6 +905,11 @@ export class NetClient {
   private rawSend(bytes: Uint8Array): void {
     const t = this.transport;
     if (!t || t.readyState !== 1) return;
+    // The keepalive is armed off the last byte that actually left, so a healthy
+    // 60 Hz frame loop keeps it permanently disarmed and it costs one clock
+    // read per packet. `nowMs` cannot be used here: it is frame time, and frame
+    // time is exactly what stops in a background tab.
+    this.lastSendWallMs = this.wallClock();
     t.send(bytes);
   }
 
@@ -690,6 +921,7 @@ export class NetClient {
   send(bytes: Uint8Array): boolean {
     const t = this.transport;
     if (!t || t.readyState !== 1) return false;
+    this.lastSendWallMs = this.wallClock();
     t.send(bytes);
     return true;
   }
@@ -733,6 +965,9 @@ export class NetClient {
    * clock for everyone else.
    */
   update(dtSeconds: number): void {
+    // One wall-clock read per frame, so `renderGapMs` can tell a tab flick from
+    // a real absence without the caller having to time anything.
+    this.lastUpdateWallMs = this.wallClock();
     const dtMs = Math.min(250, Math.max(0, dtSeconds * 1000));
     this.nowMs += dtMs;
 
@@ -823,9 +1058,16 @@ export class NetClient {
     if (this.hCount < PREDICTION_HISTORY) this.hCount++;
   }
 
-  private sendPing(): void {
-    this.lastPingSentMs = this.nowMs;
-    encodePing(this.writer, Math.round(this.nowMs) >>> 0);
+  /**
+   * `keepalive` marks a ping sent by the independent clock rather than by the
+   * frame loop. A hidden tab's `nowMs` is frozen, so its round trip would
+   * measure as 0 ms and drag the displayed ping to zero; the sentinel stamp
+   * lets `onPong` recognise the echo and leave the RTT estimate alone.
+   */
+  private sendPing(keepalive = false): void {
+    const stamp = keepalive ? KEEPALIVE_PING_STAMP : (Math.round(this.nowMs) >>> 0);
+    if (!keepalive) this.lastPingSentMs = this.nowMs;
+    encodePing(this.writer, stamp);
     this.rawSend(this.writer.copy());
   }
 
@@ -944,9 +1186,10 @@ export class NetClient {
 
   private onPong(r: PacketReader): void {
     const p = decodePong(r, this.pong);
+    this.serverTick = p.tick;
+    if (p.clientTimeMs === KEEPALIVE_PING_STAMP) return;   // keepalive echo, not a sample
     const rtt = Math.max(0, this.nowMs - p.clientTimeMs);
     this.rttMs = this.rttMs === 0 ? rtt : this.rttMs * 0.8 + rtt * 0.2;
-    this.serverTick = p.tick;
   }
 
   /* -------------------------------------------------------------- *
@@ -1453,4 +1696,11 @@ export class NetClient {
   get lastAckedInput(): number { return this.ackedInputSeq; }
   get lastAckedEdit(): number { return this.ackedEditSeq; }
   get lastPingAgeMs(): number { return this.nowMs - this.lastPingSentMs; }
+  /** Wall-clock ms since the last byte left. What the keepalive is armed off. */
+  get socketSilenceMs(): number { return this.wallClock() - this.lastSendWallMs; }
+  /** Wall-clock ms since the frame loop last called `update()`. */
+  get renderGapMs(): number { return this.wallClock() - this.lastUpdateWallMs; }
+  /** Interpolation clock state. Exposed so the resume path can be asserted. */
+  get debugClockReady(): boolean { return this.clockReady; }
+  get debugClockOffsetMs(): number { return this.clockOffsetMs; }
 }

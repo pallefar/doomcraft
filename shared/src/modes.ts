@@ -727,8 +727,19 @@ export enum ModeAction {
    * this and spawns its own roster.
    */
   SPAWN_ENEMY = 10,
+  /**
+   * Quest only: "the level starts HERE". `x`/`y`/`z` is the authored player
+   * start in world space, `a` is the yaw in whole degrees.
+   *
+   * Without it a campaign death drops you wherever the arena's spawn picker
+   * felt like — which, for a level the client relocated onto you, is somewhere
+   * out on the generated terrain with the objective HUD still up. Doom restarts
+   * the level at the level's start; this is the one fact the room needs to do
+   * the same.
+   */
+  SET_SPAWN = 11,
 }
-export const MODE_ACTION_COUNT = 11;
+export const MODE_ACTION_COUNT = 12;
 
 export interface ModeActionMessage {
   action: ModeAction;

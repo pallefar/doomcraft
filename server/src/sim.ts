@@ -708,6 +708,12 @@ export class Simulation {
   private readonly hit2: VoxelHit = createVoxelHit();
   private readonly avoidScratch = new Float64Array(3 * 64);
   private readonly spawnPoint = { x: 0, y: 0, z: 0, yaw: 0 };
+  /**
+   * When set, every respawn happens exactly here instead of on an arena floor
+   * chosen by `world.pickSpawn`. An authored campaign has one player start and
+   * a death has to put you back on it; a generated arena does not and must not.
+   */
+  spawnAnchor: { x: number; y: number; z: number; yaw: number } | null = null;
 
   constructor(world: ServerWorld, seed: number) {
     this.world = world;
@@ -774,7 +780,8 @@ export class Simulation {
       this.avoidScratch[n * 3 + 2] = this.entZ[e];
       n++;
     }
-    const sp = this.world.pickSpawn(this.spawnPoint, this.avoidScratch, n, hash3i(p.id, this.tick, this.seed, 0x5eed));
+    const sp = this.spawnAnchor
+      ?? this.world.pickSpawn(this.spawnPoint, this.avoidScratch, n, hash3i(p.id, this.tick, this.seed, 0x5eed));
     p.pos[0] = sp.x; p.pos[1] = sp.y; p.pos[2] = sp.z;
     p.vel[0] = 0; p.vel[1] = 0; p.vel[2] = 0;
     p.yaw = sp.yaw;

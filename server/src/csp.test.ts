@@ -1,0 +1,292 @@
+/**
+ * DOOMCRAFT — the Content-Security-Policy is real, strict, and on everything.
+ *
+ * docs/BUGS-FOUND.md §2: the server shipped with no CSP at all. That stops
+ * being hygiene the moment third-party sponsor creative is served, because the
+ * CSP is the only thing that keeps a hostile tag out of the game's origin.
+ *
+ * These tests run the ACTUAL server binary — spawned, over real HTTP — rather
+ * than unit-testing a string builder, because the claim being defended is
+ * "every served response carries it", and that claim is about routing, not
+ * about a function. The static root is a fixture, so the test does not need a
+ * built bundle and cannot pass or fail on what happens to be in dist/.
+ */
+
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer } from 'node:net';
+import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const serverEntry = join(here, 'index.ts');
+
+/**
+ * A stand-in for the built client. It carries every inline shape the real
+ * index.html has — an inline stylesheet, an inline bootstrap script, a module
+ * script with a src, a `<noscript>`, and a closing `</script>` — so the nonce
+ * rewriting is exercised on the same edges.
+ */
+const FIXTURE_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DOOMCRAFT</title>
+<style>body{margin:0;background:#0a0a0d}</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<noscript><div id="nojs">DOOMCRAFT needs JavaScript.</div></noscript>
+<script>window.__DC_T0__ = performance.now();</script>
+<script type="module" crossorigin src="./a/index-abc.js"></script>
+</body>
+</html>
+`;
+
+async function freePort(): Promise<number> {
+  return new Promise((done, fail) => {
+    const probe = createServer();
+    probe.on('error', fail);
+    probe.listen(0, '127.0.0.1', () => {
+      const addr = probe.address();
+      const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+      probe.close(() => done(port));
+    });
+  });
+}
+
+interface Booted {
+  child: ChildProcess;
+  origin: string;
+}
+
+async function boot(env: Record<string, string> = {}): Promise<Booted> {
+  const port = await freePort();
+  const staticRoot = mkdtempSync(join(tmpdir(), 'dc-csp-static-'));
+  const dataRoot = mkdtempSync(join(tmpdir(), 'dc-csp-data-'));
+  writeFileSync(join(staticRoot, 'index.html'), FIXTURE_HTML, 'utf8');
+  mkdirSync(join(staticRoot, 'a'), { recursive: true });
+  writeFileSync(join(staticRoot, 'a', 'index-abc.js'), 'export const ok = 1;\n', 'utf8');
+
+  const child = spawn(process.execPath, ['--import', 'tsx', serverEntry], {
+    cwd: join(here, '..', '..'),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      DOOMCRAFT_STATIC: staticRoot,
+      DOOMCRAFT_DATA: dataRoot,
+      DOOMCRAFT_BOTS: '0',
+      ...env,
+    },
+  });
+
+  const origin = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 40_000;
+  for (;;) {
+    if (child.exitCode !== null) throw new Error(`server exited ${child.exitCode}`);
+    try {
+      const res = await fetch(`${origin}/health`);
+      if (res.ok) { await res.text(); break; }
+    } catch { /* not up yet */ }
+    if (Date.now() > deadline) throw new Error('server did not start');
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return { child, origin };
+}
+
+function directive(csp: string, name: string): string | null {
+  for (const part of csp.split(';')) {
+    const t = part.trim();
+    if (t === name || t.startsWith(`${name} `)) return t;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------------ *
+ * The shipping policy
+ * ------------------------------------------------------------------------ */
+
+describe('Content-Security-Policy', () => {
+  let server: Booted;
+  beforeAll(async () => { server = await boot(); }, 60_000);
+  afterAll(() => { server?.child.kill('SIGKILL'); });
+
+  it('is on every served response, not just the document', async () => {
+    const paths = [
+      '/',                       // the document
+      '/index.html',
+      '/a/index-abc.js',         // a hashed immutable asset
+      '/health',                 // JSON
+      '/api/status',             // JSON
+      '/api/profile?device=x',   // a 400 from the API
+      '/deep/link/that/does/not/exist',  // the SPA fallback
+    ];
+    for (const p of paths) {
+      const res = await fetch(server.origin + p);
+      const csp = res.headers.get('content-security-policy');
+      expect(csp, `no CSP on ${p}`).toBeTruthy();
+      expect(directive(csp ?? '', 'default-src'), p).toBe("default-src 'self'");
+    }
+  });
+
+  it('is on the error paths too — 403, 405 and HEAD', async () => {
+    const forbidden = await fetch(`${server.origin}/%2e%2e%2f%2e%2e%2fetc%2fpasswd`);
+    expect(forbidden.headers.get('content-security-policy')).toBeTruthy();
+
+    const wrongMethod = await fetch(`${server.origin}/`, { method: 'DELETE' });
+    expect(wrongMethod.status).toBe(405);
+    expect(wrongMethod.headers.get('content-security-policy')).toBeTruthy();
+
+    const head = await fetch(`${server.origin}/`, { method: 'HEAD' });
+    expect(head.headers.get('content-security-policy')).toBeTruthy();
+  });
+
+  it('refuses inline and eval script — the control that stops an ad tag', async () => {
+    const csp = (await fetch(`${server.origin}/`)).headers.get('content-security-policy') ?? '';
+    const script = directive(csp, 'script-src') ?? '';
+    expect(script).toContain("'self'");
+    expect(script).toContain("'nonce-");
+    expect(script).not.toContain("'unsafe-inline'");
+    expect(script).not.toContain("'unsafe-eval'");
+    expect(script).not.toContain('*');
+    expect(script).not.toContain('http:');
+    expect(script).not.toContain('data:');
+    expect(directive(csp, 'script-src-attr')).toBe("script-src-attr 'none'");
+  });
+
+  it('does not blanket-allow inline styles: elements are nonce-gated', async () => {
+    const csp = (await fetch(`${server.origin}/`)).headers.get('content-security-policy') ?? '';
+    const style = directive(csp, 'style-src') ?? '';
+    expect(style).toContain("'nonce-");
+    // The relaxation is scoped to attributes. A style attribute cannot load a
+    // script or reach the network; a <style> element can carry an exfiltration
+    // payload, so that one stays behind the nonce.
+    expect(style).not.toContain("'unsafe-inline'");
+    expect(directive(csp, 'style-src-attr')).toBe("style-src-attr 'unsafe-inline'");
+  });
+
+  it('locks the framing, base, object and form knobs', async () => {
+    const res = await fetch(`${server.origin}/`);
+    const csp = res.headers.get('content-security-policy') ?? '';
+    expect(directive(csp, 'frame-ancestors')).toBe("frame-ancestors 'self'");
+    expect(directive(csp, 'base-uri')).toBe("base-uri 'none'");
+    expect(directive(csp, 'object-src')).toBe("object-src 'none'");
+    expect(directive(csp, 'form-action')).toBe("form-action 'none'");
+    expect(directive(csp, 'frame-src')).toBe("frame-src 'none'");
+    expect(directive(csp, 'connect-src')).toBe("connect-src 'self'");
+    expect(res.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('keeps the workers loadable — a CSP that breaks the mesher gets deleted', async () => {
+    const csp = (await fetch(`${server.origin}/`)).headers.get('content-security-policy') ?? '';
+    const worker = directive(csp, 'worker-src') ?? '';
+    expect(worker).toContain("'self'");
+    expect(worker).toContain('blob:');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The nonce
+ * ------------------------------------------------------------------------ */
+
+describe('per-response nonce', () => {
+  let server: Booted;
+  beforeAll(async () => { server = await boot(); }, 60_000);
+  afterAll(() => { server?.child.kill('SIGKILL'); });
+
+  async function document(): Promise<{ html: string; nonce: string }> {
+    const res = await fetch(`${server.origin}/`);
+    const csp = res.headers.get('content-security-policy') ?? '';
+    const m = /'nonce-([^']+)'/.exec(csp);
+    expect(m, 'header carries no nonce').not.toBeNull();
+    return { html: await res.text(), nonce: (m as RegExpExecArray)[1] };
+  }
+
+  it('stamps the header nonce onto every inline block in the document', async () => {
+    const { html, nonce } = await document();
+    expect(html).toContain(`<style nonce="${nonce}">`);
+    expect(html).toContain(`<script nonce="${nonce}">window.__DC_T0__`);
+    expect(html).toContain(`<script nonce="${nonce}" type="module"`);
+    // Every script and style tag in the document, no exceptions.
+    const tags = html.match(/<(script|style)(?=[\s>])[^>]*>/gi) ?? [];
+    expect(tags.length).toBeGreaterThanOrEqual(4);
+    for (const tag of tags) expect(tag, tag).toContain(`nonce="${nonce}"`);
+  });
+
+  it('ships the runtime-style shim, nonced, before anything can create a style', async () => {
+    const { html, nonce } = await document();
+    const shim = html.indexOf('Document.prototype.createElement');
+    expect(shim).toBeGreaterThan(0);
+    expect(html.slice(0, shim)).toContain(`<script nonce="${nonce}">`);
+    // Before the page's own inline style block, and before the module script.
+    expect(shim).toBeLessThan(html.indexOf('<style'));
+    expect(shim).toBeLessThan(html.indexOf('type="module"'));
+  });
+
+  it('does not maul <noscript> or the closing tags', async () => {
+    const { html } = await document();
+    expect(html).toContain('<noscript><div id="nojs">');
+    expect(html).not.toContain('<noscript nonce');
+    expect(html.match(/<\/script>/g)?.length).toBe(3);   // shim + inline + module
+  });
+
+  it('is different on every response, and the document is never stored', async () => {
+    const a = await document();
+    const b = await document();
+    expect(a.nonce).not.toBe(b.nonce);
+    expect(a.nonce.length).toBeGreaterThanOrEqual(16);
+    const res = await fetch(`${server.origin}/`);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('leaves hashed assets immutable and unrewritten', async () => {
+    const res = await fetch(`${server.origin}/a/index-abc.js`);
+    expect(res.headers.get('cache-control')).toContain('immutable');
+    expect(await res.text()).toBe('export const ok = 1;\n');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The escape hatches, which must not be escapable
+ * ------------------------------------------------------------------------ */
+
+describe('sponsor origins and report-uri are validated, not trusted', () => {
+  let server: Booted;
+  beforeAll(async () => {
+    server = await boot({
+      DOOMCRAFT_SPONSOR_ORIGIN:
+        'https://ads.example.com, javascript:alert(1), *, http://evil.example, https://a.example:8443/path',
+      // A value that would smuggle a second header if it were pasted through.
+      DOOMCRAFT_CSP_REPORT_URI: '/csp-report\r\nx-injected: yes',
+    });
+  }, 60_000);
+  afterAll(() => { server?.child.kill('SIGKILL'); });
+
+  it('admits only plain https origins, and only to img-src and frame-src', async () => {
+    const res = await fetch(`${server.origin}/`);
+    const csp = res.headers.get('content-security-policy') ?? '';
+
+    expect(directive(csp, 'frame-src')).toBe('frame-src https://ads.example.com');
+    expect(directive(csp, 'img-src')).toContain('https://ads.example.com');
+
+    // Everything malformed is dropped rather than passed through.
+    expect(csp).not.toContain('javascript:');
+    expect(csp).not.toContain('http://evil.example');
+    expect(csp).not.toContain('a.example:8443');
+    expect(csp).not.toMatch(/(^|[\s;])\*/);
+
+    // A sponsor origin never reaches the directive that can execute code.
+    expect(directive(csp, 'script-src')).not.toContain('example.com');
+  });
+
+  it('drops a report-uri that carries a header separator', async () => {
+    const res = await fetch(`${server.origin}/`);
+    expect(res.headers.get('x-injected')).toBeNull();
+    expect(res.headers.get('content-security-policy')).not.toContain('report-uri');
+  });
+});

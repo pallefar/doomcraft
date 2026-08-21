@@ -348,7 +348,26 @@ export class Room implements NetHost {
     if (st !== undefined) st.ackActionSeq = msg.seq;
 
     if (msg.action === ModeAction.SPAWN_ENEMY) { this.spawnAuthoredEnemy(msg); return; }
-    if (msg.action === ModeAction.RESTART && this.plan.runRoundTimer) this.beginRound(true);
+    if (msg.action === ModeAction.SET_SPAWN) { this.setAuthoredSpawn(msg); return; }
+
+    if (msg.action === ModeAction.RESTART) {
+      // A Quest restart is the level going back to how it was authored, and the
+      // client has already re-armed every trigger — so the demons it asked for
+      // last life have to go, or the second run starts with two of each.
+      if (this.plan.modeId === ModeId.QUEST) { this.clearMonsters(); return; }
+      if (this.plan.runRoundTimer) this.beginRound(true);
+    }
+  }
+
+  /** `ModeAction.SET_SPAWN` — where an authored level says the player starts. */
+  private setAuthoredSpawn(msg: ModeActionMessage): void {
+    if (this.plan.modeId !== ModeId.QUEST) return;
+    const x = msg.x + 0.5;
+    const y = msg.y;
+    const z = msg.z + 0.5;
+    if (x < WORLD_MIN_BLOCK_X || z < WORLD_MIN_BLOCK_Z) return;
+    if (x > WORLD_MIN_BLOCK_X + WORLD_SIZE_BLOCKS || z > WORLD_MIN_BLOCK_Z + WORLD_SIZE_BLOCKS) return;
+    this.sim.spawnAnchor = { x, y, z, yaw: ((msg.a % 360) * Math.PI) / 180 };
   }
 
   /**
@@ -432,6 +451,9 @@ export class Room implements NetHost {
      * mode with no monsters at all in its definition — still let a zombieman
      * shoot you dead while you were placing your third block.
      * -------------------------------------------------------------------- */
+    // Only an authored level pins the spawn. Everything else spawns on the
+    // arena, so a Quest run must not leave its start behind for Deathmatch.
+    if (plan.modeId !== ModeId.QUEST) this.sim.spawnAnchor = null;
     this.sim.fallDamageEnabled = plan.fallDamage;
     this.sim.hazardsEnabled = plan.hazards;
     this.sanctuary = !plan.runMonsters && !plan.allowPvp;

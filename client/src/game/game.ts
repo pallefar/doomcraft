@@ -33,6 +33,7 @@ import {
   MAX_FRAME_DT, InputAction, REACH_BREAK, REACH_PLACE,
   GameMode, CHUNK_SIZE_X, CHUNK_SIZE_Z, chunkKey, blockToChunk,
   chunkKeyCX, chunkKeyCZ,
+  SURFACE_DETAIL_SCALE, SURFACE_SEAM_SCALE,
   type GameSettings,
 } from '@shared/constants';
 import {
@@ -90,6 +91,22 @@ const EDIT_INTERVAL_MS = 140;
 
 /** Metres in front of the eye where the world-space muzzle plume is spawned. */
 const MUZZLE_STANDOFF = 0.7;
+
+/* ---- damage feedback ---------------------------------------------------- *
+ * The full-screen part of "I am being hit" belongs to hud.hurt() — a radial
+ * vignette that is transparent across the middle of the frame, so the thing you
+ * are shooting at stays visible while the edges go red. These three numbers are
+ * only the world's echo of it, and they are deliberately small: at HURT_MAX the
+ * albedo multiplier is (1.14, 0.88, 0.83), a warm push of about a tenth of a
+ * stop, not a colour filter. Sustained fire saturates at that value instead of
+ * at a red sheet.
+ * ------------------------------------------------------------------------- */
+const HURT_MAX = 0.85;
+const HURT_FADE_PER_SEC = 4.2;
+/** Per-channel gain at hurtFlash == 1, as a delta from neutral. */
+const HURT_WORLD = [0.165, -0.14, -0.20] as const;
+/** The gun is closer to the eye, so it carries a little more of the flash. */
+const HURT_VIEWMODEL = [0.22, -0.20, -0.27] as const;
 
 /* Monster look-up: size and colour per EntityType, so the client never imports
  * the bot AI module (which would drag the whole server into the main bundle). */
@@ -205,6 +222,8 @@ export class Game {
   private renderDistance: number;
   private matchSeconds = 0;
   private hurtFlash = 0;
+  /** The live mode's standing grade, which the hurt flash rides on top of. */
+  private readonly modeTint = new Float32Array([1, 1, 1]);
   private lastSlotSent = 0;
   private slotMismatchMs = 0;
   private wasDead = false;
@@ -235,6 +254,9 @@ export class Game {
       quality: this.settings.quality,
       ao: this.settings.ao,
       fog: this.settings.fog,
+      // 'off' skips building the atlas at all, so a phone that never wants it
+      // never pays the boot cost or the texture memory.
+      texture: this.settings.surfaceDetail !== 'off',
     });
     // Doom is dark, but "dark" and "unreadable" are different things. The
     // shipped defaults render an obsidian wall at roughly #0e0c16, which is
@@ -246,6 +268,7 @@ export class Game {
     this.materials.setContrast(0.14);
     this.materials.setSaturation(0.88);
     this.materials.setAoStrength(0.36);
+    this.applySurfaceDetail(this.settings);
 
     this.sky = new Skybox();
     this.sky.addTo(this.renderer.scene);
@@ -404,6 +427,7 @@ export class Game {
 
     this.renderer.setRenderScale(s.renderScale);
     this.materials.setQuality(s.quality);
+    this.applySurfaceDetail(s);
     this.materials.setAoEnabled(s.ao);
     this.materials.setFogEnabled(s.fog);
     this.viewmodel.setBobEnabled(s.viewBob);
@@ -417,6 +441,22 @@ export class Game {
 
     this.hud.setCrosshair(s.crosshair, s.crosshairColor);
     this.hudState.showFps = s.fpsCounter;
+  }
+
+  /**
+   * The surface atlas escape hatch, in one place.
+   *
+   * `setSurfaceDetail`, `setSeamStrength` and the `texture:` option all existed
+   * and nothing called any of them, so `setQuality` moved MAX_LIGHTS and left a
+   * low-end phone paying full price for the texture path. This is the wiring:
+   * the preset picks a global scale, and `off` drops the shader define outright
+   * rather than multiplying a fetch by zero.
+   */
+  private applySurfaceDetail(s: GameSettings): void {
+    const preset = s.surfaceDetail;
+    this.materials.setTextureEnabled(preset !== 'off');
+    this.materials.setSurfaceDetail(SURFACE_DETAIL_SCALE[preset]);
+    this.materials.setSeamStrength(0.12 * SURFACE_SEAM_SCALE[preset]);
   }
 
   /* -------------------------------------------------------------------- *
@@ -457,17 +497,58 @@ export class Game {
     }
   }
 
+  /* -------------------------------------------------------------------- *
+   * Grade
+   * -------------------------------------------------------------------- */
+
+  /**
+   * The live mode's standing colour grade, as an albedo multiplier. This is the
+   * ONLY thing besides the hurt flash that is allowed to touch uTint, and the
+   * two compose rather than overwrite each other — a mode that set a warm grade
+   * used to have it wiped the first time the player was hit, and restored to
+   * neutral (not to its own value) when the flash ran out.
+   *
+   * Keep it near 1. uTint multiplies the albedo before exposure and the clamp,
+   * so a channel much above 1 clips the bright end and collapses hue, and a
+   * channel much below 1 takes a dark palette under 8-bit quantisation.
+   */
+  setModeTint(r: number, g: number, b: number): void {
+    this.modeTint[0] = clampf(r, 0.5, 1.5);
+    this.modeTint[1] = clampf(g, 0.5, 1.5);
+    this.modeTint[2] = clampf(b, 0.5, 1.5);
+    this.applyTint();
+  }
+
+  private applyTint(): void {
+    const f = this.hurtFlash;
+    const t = this.modeTint;
+    this.materials.setTint(
+      t[0] * (1 + f * HURT_WORLD[0]),
+      t[1] * (1 + f * HURT_WORLD[1]),
+      t[2] * (1 + f * HURT_WORLD[2]),
+    );
+    this.viewmodel.setTint(
+      t[0] * (1 + f * HURT_VIEWMODEL[0]),
+      t[1] * (1 + f * HURT_VIEWMODEL[1]),
+      t[2] * (1 + f * HURT_VIEWMODEL[2]),
+    );
+  }
+
   private onDamage(e: DamageEvent): void {
     const me = this.net.playerId;
     if (e.victimId === me) {
       // dir points attacker -> victim, so the arrow points back along it.
       const yaw = Math.atan2(e.dirX, e.dirZ);
       this.hud.hurt(e.amount, yaw, this.camera.viewYaw);
-      // uTint MULTIPLIES the albedo, so the rest value is (1,1,1) and a hurt
-      // flash pushes red up and the other channels down. Setting it toward
-      // zero paints the entire world black — which is exactly what a naive
-      // "clear the tint" does, and it is not recoverable without a reset.
-      this.hurtFlash = Math.min(1, this.hurtFlash + 0.35 + e.amount / 120);
+      // The damage READ is hud.hurt(): a radial vignette that is fully
+      // transparent across the middle 42% of the frame plus a directional
+      // arrow. This is only the world's share of it — a warm push, not a
+      // filter. It used to add 0.35 per hit against a 3.4/s fade, so anything
+      // hitting more often than every 300 ms pinned it at full and multiplied
+      // the whole albedo by (1.55, 0.34, 0.28): red clipped, green and blue
+      // were cut to a third, and a Horde wave turned the screen into one flat
+      // orange sheet. Rising per hit is right; reaching a lens filter is not.
+      this.hurtFlash = Math.min(HURT_MAX, this.hurtFlash + 0.14 + e.amount / 260);
     } else if (e.attackerId === me) {
       this.hud.hitMarker((e.flags & DMG_HEADSHOT) !== 0, (e.flags & DMG_FATAL) !== 0);
     }
@@ -766,14 +847,8 @@ export class Game {
 
     /* --- hurt flash ------------------------------------------------------ */
     if (this.hurtFlash > 0) {
-      this.hurtFlash = Math.max(0, this.hurtFlash - dt * 3.4);
-      const f = this.hurtFlash;
-      this.materials.setTint(1 + f * 0.55, 1 - f * 0.66, 1 - f * 0.72);
-      this.viewmodel.setTint(1 + f * 0.45, 1 - f * 0.5, 1 - f * 0.55);
-      if (this.hurtFlash === 0) {
-        this.materials.setTint(1, 1, 1);
-        this.viewmodel.setTint(1, 1, 1);
-      }
+      this.hurtFlash = Math.max(0, this.hurtFlash - dt * HURT_FADE_PER_SEC);
+      this.applyTint();
     }
 
     /* --- fx ------------------------------------------------------------- */

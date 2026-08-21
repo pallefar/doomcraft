@@ -27,6 +27,7 @@ import {
   RENDER_DISTANCE_MIN, RENDER_DISTANCE_MAX,
   SENSITIVITY_MIN, SENSITIVITY_MAX,
   type GameSettings, type SaveProgress, type QualityPreset, type CrosshairStyle,
+  type SurfaceDetailPreset,
 } from '@shared/constants';
 
 import {
@@ -50,6 +51,7 @@ import {
 } from '@shared/saves';
 
 import { Game } from '@/game/game';
+import { DEFAULT_PALETTE, applyModePalette, applyPalette } from '@/engine/palette';
 import {
   ModeRegistry,
   createEnterParams,
@@ -185,9 +187,87 @@ const SHELL_CSS = `
 .dc-ad-house u{display:inline-block;margin-top:5px;color:#e8e6e3;text-decoration:none;
   border:1px solid rgba(255,255,255,.28);padding:3px 9px;border-radius:2px;cursor:pointer}
 
-/* --- the mode layer ------------------------------------------------------ */
-.dc-menu-inner{width:min(1080px,96vw)}
-.dc-select{margin-top:14px}
+/* --- the mode layer ------------------------------------------------------ *
+ * The ad slots are LAYOUT, not overlay (ref/BAR.md: "the ads are part of the
+ * layout... the page does not reflow when they fill" — that is the bar's one
+ * clear win and the thing we are matching). The #ads root sits under #ui, so the
+ * menu has to leave their gutters alone rather than paint over them: 728x90 top
+ * and bottom, 300x250 on the right above 900px. The reservation is
+ * unconditional — it is there whether a creative loads or not, which is what
+ * makes filling a slot cost zero layout shift.
+ * ------------------------------------------------------------------------ */
+.dc-menu{padding:calc(106px + var(--safe-t,0px)) 20px calc(106px + var(--safe-b,0px));
+  place-items:safe center}
+@media (min-width:901px){ .dc-menu{padding-right:calc(326px + var(--safe-r,0px))} }
+@media (max-width:900px){
+  .dc-menu{padding-top:calc(66px + var(--safe-t,0px));
+    padding-bottom:calc(116px + var(--safe-b,0px))}
+}
+/* The picker is the headline on this screen; the wordmark yields to it. */
+#ui[data-screen="menu"] .dc-mark{font-size:clamp(30px,4.6vw,52px)}
+#ui[data-screen="menu"] .dc-tag{margin:6px 0 10px}
+.dc-menu-inner{width:min(1080px,100%);padding:0 0 calc(106px + var(--safe-b,0px))}
+.dc-select{margin-top:6px}
+.dc-stats{margin-top:14px}
+.dc-row{margin-top:12px}
+
+/* A 900 px-tall laptop, minus 212 px of reserved ad gutter, leaves 688 px. The
+   picker is designed for more than that, so on a short viewport it goes compact
+   rather than pushing Play below the fold — the one thing a menu may never do.
+   Higher specificity than the .dcm- rules on purpose: modeSelect injects its sheet
+   after this one, so equal specificity would lose. */
+@media (min-width:901px) and (max-height:1000px){
+  #ui[data-screen="menu"] .dc-mark{font-size:clamp(26px,3.2vw,34px)}
+  #ui[data-screen="menu"] .dc-tag{display:none}
+  #ui .dcm-head h2{font-size:17px}
+  #ui .dcm-head p{display:none}
+  #ui .dcm-art{height:78px}
+  #ui .dcm-art svg{width:96px;height:70px}
+  #ui .dcm-tile{min-height:176px}
+  #ui .dcm-tag{min-height:2.2em}
+  #ui .dcm-panel-body{max-height:min(29vh,232px);min-height:110px}
+  #ui .dcm-blurb{margin-bottom:8px}
+  #ui .dcm{gap:10px}
+  /* The shell's own strip below the picker gives up its height first: the
+     control hints are printed in-game anyway, and the counters read fine small. */
+  #ui[data-screen="menu"] .dc-note{display:none}
+  #ui[data-screen="menu"] .dc-stats{margin-top:10px;gap:18px;font-size:10px}
+  #ui[data-screen="menu"] .dc-stats b{font-size:15px}
+  #ui[data-screen="menu"] .dc-row{margin-top:8px}
+  #ui[data-screen="menu"] .dc-ghost{padding:6px 14px;font-size:12px}
+}
+
+/* A landscape phone: 412 px tall, one 320x50 banner reserved at the bottom and
+   nothing else (see index.html). The picker already has a row-shaped tile
+   layout for narrow screens; a short-and-wide screen wants the same shape for
+   the opposite reason, so it borrows it. */
+@media (max-height:560px){
+  .dc-menu{padding:8px 16px 0;place-items:safe center}
+  #ui[data-screen="menu"] .dc-note{display:none}
+  .dc-menu-inner{padding-bottom:calc(62px + var(--safe-b,0px))}
+  #ui[data-screen="menu"] .dc-mark,
+  #ui[data-screen="menu"] .dc-tag,
+  #ui[data-screen="menu"] .dc-stats,
+  #ui .dcm-head{display:none}
+  #ui .dcm{gap:8px}
+  #ui .dcm-tile{flex-direction:row;min-height:0}
+  #ui .dcm-art{height:auto;width:66px;flex:0 0 66px;border-bottom:0;
+    border-right:1px solid rgba(255,255,255,.13)}
+  #ui .dcm-art svg{width:52px;height:42px}
+  #ui .dcm-body{padding:6px 8px;gap:2px}
+  #ui .dcm-name{font-size:12px}
+  #ui .dcm-tag{min-height:0;font-size:10px;line-height:1.25}
+  #ui .dcm-save{padding-top:4px}
+  #ui .dcm-save b{font-size:11px}
+  #ui .dcm-save span{font-size:9.5px}
+  #ui .dcm-panel-body{max-height:132px;min-height:52px}
+  /* No room for the pitch, and the badge lands on top of the mode's own name
+     once the tile is a row. Both are decoration here; the picker is not. */
+  #ui .dcm-blurb,#ui .dcm-badge{display:none}
+  /* Settings lives in the pause menu and the ad creative carries its own
+     "Remove ads" button, so this row is the last thing worth 40 px. */
+  #ui[data-screen="menu"] .dc-row{display:none}
+}
 /* The bar puts "Loading Terrain (100.00%)..." dead centre; so do we, and it is
    the one thing a mode is allowed to write into the middle of the screen. */
 .dc-status{position:absolute;left:50%;top:calc(50% - 96px);transform:translateX(-50%);
@@ -476,6 +556,8 @@ addSlider('Render scale', 0.5, 1.25, 0.05,
   () => settings.renderScale, (v) => { settings.renderScale = v; }, (v) => `${Math.round(v * 100)}%`);
 addSelect('Quality', ['low', 'medium', 'high'],
   () => settings.quality, (v) => { settings.quality = v as QualityPreset; });
+addSelect('Surface detail', ['off', 'low', 'full'],
+  () => settings.surfaceDetail, (v) => { settings.surfaceDetail = v as SurfaceDetailPreset; });
 addToggle('Ambient occlusion', () => settings.ao, (v) => { settings.ao = v; });
 addToggle('Fog', () => settings.fog, (v) => { settings.fog = v; });
 addToggle('FPS counter', () => settings.fpsCounter, (v) => { settings.fpsCounter = v; });
@@ -701,6 +783,11 @@ async function startMode(p: ModeEnterParams): Promise<void> {
   } finally {
     modeSelect.setBusy(false);
   }
+  // After activate, never before: activate() tears the previous mode down
+  // first, and a teardown that restores the shared palette would otherwise
+  // land on top of the incoming mode's. Quest is skipped here — it sets sky,
+  // fog and ambient per level from its own LevelMeta during activate.
+  applyModePalette(game, MODE_KEYS[pendingParams.modeId] ?? '');
   registry.resize(canvas!.clientWidth, canvas!.clientHeight);
 }
 
@@ -750,6 +837,9 @@ async function backToMenu(): Promise<void> {
   game.leavePlay();
   host.setStatus('');
   await registry.deactivate();
+  // The world keeps rendering behind the menu, so it must not keep the last
+  // mode's grade — including whatever the hurt flash was holding when we left.
+  applyPalette(game, DEFAULT_PALETTE);
   progress.level = levelForXp(progress.xp);
   saveJson(STORAGE_KEYS.progress, progress);
   save = loadSave(saveStorage, Date.now());
@@ -967,8 +1057,48 @@ function frame(now: number): void {
 }
 raf = requestAnimationFrame(frame);
 
+/* ------------------------------------------------------------------------ *
+ * The net pump is NOT the frame loop
+ *
+ * `frame()` above is the only thing that calls `game.tick`, and `game.tick` is
+ * the only thing that calls `net.update` — so every packet this client sends
+ * used to be paced by `requestAnimationFrame`. A hidden tab throttles rAF to
+ * ~1 Hz and stops it outright when the tab is occluded, and the server drops a
+ * connection it has not heard from for CLIENT_TIMEOUT_MS (15 s). Alt-tab for
+ * fifteen seconds and you lost the match.
+ *
+ * The keepalive now runs on a clock the frame loop does not own — a Worker
+ * timer with a page interval beside it, started by `NetClient.connect()` (see
+ * `client/src/net/client.ts`, "Keepalive"). The frame loop is untouched.
+ *
+ * The two edges are wired here because only the page can see them:
+ *
+ *   hidden   send a keepalive NOW, so the server's 15 s window restarts at the
+ *            moment the tab goes away rather than up to a second later.
+ *   visible  re-sync before the first frame back. Without this the client
+ *            would come back holding a stale clock offset and interpolation
+ *            rings older than MAX_EXTRAPOLATE_MS, and would spend its first
+ *            frames replaying accumulated input the player never gave.
+ * ------------------------------------------------------------------------ */
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    game.net.keepaliveTick(true);
+    return;
+  }
+  game.net.resumeFromBackground();
+  // The frame clock must not see the whole absence as one delta.
+  lastFrameMs = 0;
+  modeAccumulator = 0;
+  // Some browsers cancel a pending rAF callback when a tab is occluded rather
+  // than merely throttling it. Re-arm on the way back, or the loop is dead.
+  cancelAnimationFrame(raf);
+  raf = requestAnimationFrame(frame);
+});
+
 window.addEventListener('pagehide', () => {
   cancelAnimationFrame(raf);
+  game.net.keepaliveTick(true);
   saveJson(STORAGE_KEYS.settings, settings);
   saveJson(STORAGE_KEYS.progress, progress);
 });

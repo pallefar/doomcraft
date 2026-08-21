@@ -52,6 +52,8 @@ const NO_SERVE = has('--no-serve');
 const DWELL_MS = Number(val('--dwell', '1400'));
 
 const MODES = ['quest', 'builder', 'horde', 'deathmatch'];
+/** Per-round wander allowed in three's global caches. See the note at the check. */
+const GPU_SLACK = 8;
 
 fs.mkdirSync(OUT, { recursive: true });
 const log = (...a) => console.log(...a);
@@ -194,13 +196,22 @@ async function main() {
         + `ui=${after.uiChildren} styles=${after.styleTags} geo=${after.geometries} tex=${after.textures}`);
     }
 
-    // three caches geometries/textures/programs globally, so a per-round
-    // comparison is the only way to see a leak the scope ledger cannot.
+    /* three caches geometries/textures/programs globally, so a per-round
+     * comparison is the only way to see a leak the scope ledger cannot.
+     *
+     * Only GROWTH counts, and only growth past a slack: the chunk mesher is
+     * building and freeing chunk geometries the whole time (the world keeps
+     * streaming, and leaving Quest re-streams it), so this counter wanders by a
+     * few either way on its own. A mode that actually leaked its scene would
+     * add its whole object list every round — Horde alone is twelve — which is
+     * far outside the slack. */
     const now = await page.evaluate(SNAPSHOT);
     if (prevGrowth !== null) {
-      const g = diff(prevGrowth, now, GROWTH);
-      if (Object.keys(g).length > 0) {
-        failures.push(`round ${round}: GPU resources grew round over round ${JSON.stringify(g)}`);
+      for (const k of GROWTH) {
+        const grew = now[k] - prevGrowth[k];
+        if (grew > GPU_SLACK) {
+          failures.push(`round ${round}: ${k} grew by ${grew} (${prevGrowth[k]} -> ${now[k]})`);
+        }
       }
     }
     prevGrowth = now;

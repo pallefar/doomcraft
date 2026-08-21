@@ -48,6 +48,15 @@ canvas{display:block}
     --ad-bot-w:320px;  --ad-bot-h:100px;
   }
 }
+/* A landscape phone is 412 px tall. Two 90 px banners plus a 250 px box is 430 px
+   of reserved layout in a 412 px window — there would be no menu left to put
+   between them. So a short viewport carries ONE 320x50 banner and nothing else.
+   Reserving less is honest; overlaying the menu on a slot would not be
+   (ref/BAR.md: the ads are layout, and the layout must not shift when they fill). */
+@media (max-height:560px){
+  :root{ --ad-bot-w:320px; --ad-bot-h:50px; }
+  #ad-slot-top,#ad-slot-side{display:none}
+}
 
 /* ---- layers ------------------------------------------------------------ */
 #game{position:fixed;inset:0;width:100%;height:100%;z-index:0;background:#6ea9e0;outline:none}

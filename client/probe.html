@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Doomcraft surface probe</title>
+<!--
+  DEV-ONLY measurement rig. Vite's production build takes `index.html` as its
+  only input, so this page ships nowhere; it exists so the surface-detail claim
+  is a measurement someone else can re-run rather than a screenshot argument.
+
+  It renders the REAL VoxelMaterials shader over the REAL generated atlas, with
+  the exact grade game.ts applies, into a 1440x900 backbuffer, then reads the
+  pixels back and scores them with the same 3x3 high-pass residual RMS that
+  tools/hprms.mjs runs on ref/voxiom captures. Nothing here re-implements the
+  shader, so a number moves only when the shipping shader moves.
+
+  Two things it controls that a screenshot cannot:
+
+   - **Operating point.** The recorded before-table was taken off real scenes at
+     specific mean luminances (26, 30, 41, 56, 58). Absolute grey levels are the
+     whole question, so the rig calibrates exposure per material until the patch
+     sits at the recorded mean luminance, and measures there. Same surface, same
+     brightness, same 8-bit quantisation as the capture it is compared against.
+   - **Fragment cost in isolation.** A pinned camera, a full-screen wall and
+     EXT_disjoint_timer_query_webgl2 across a pixel-count sweep give ms per
+     megapixel as a slope, which is the only figure that can see a fragment
+     shader change at all — game.medianMs times CPU submission and is
+     structurally blind to it.
+
+  Driven by tools/surface-probe.mjs.
+-->
+<style>
+  html, body { margin: 0; background: #000; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { VoxelMaterials } from '/src/engine/material.ts';
+import { ATLAS_TILE, ATLAS_COLS, ATLAS_W, ATLAS_TILE_COUNT, Tile, buildAtlasData }
+  from '/src/engine/textureAtlas.ts';
+import {
+  BLOCK_FACE_COLOR,
+  BLOCK_LIGHT,
+  BlockId,
+  FAR_PLANE,
+  FOV_DEFAULT,
+  NEAR_PLANE,
+  PLAYER_EYE_HEIGHT,
+} from '@doomcraft/shared';
+
+const VERTEX_STRIDE = 12;
+const Face = { PX: 0, NX: 1, PY: 2, NY: 3, PZ: 4, NZ: 5 };
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({
+  canvas, antialias: false, alpha: false, stencil: false, depth: true,
+  powerPreference: 'high-performance', preserveDrawingBuffer: false,
+});
+renderer.setPixelRatio(1);
+renderer.setClearColor(0x000000, 1);
+const gl = renderer.getContext();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(FOV_DEFAULT, 16 / 10, NEAR_PLANE, FAR_PLANE);
+
+/* ------------------------------------------------------------------ *
+ * Geometry in the mesher's exact vertex format
+ *
+ * One greedy-style quad spanning SPAN x SPAN blocks — the same thing the
+ * mesher emits for a flat wall, so fract(worldPos) tiling and the seam are
+ * exercised the way they are in a real chunk.
+ * ------------------------------------------------------------------ */
+
+const SPAN = 32;
+
+function buildQuad(block, face) {
+  const colour = BLOCK_FACE_COLOR[block * 6 + face];
+  const r = (colour >>> 16) & 0xff, g = (colour >>> 8) & 0xff, b = colour & 0xff;
+  const light = BLOCK_LIGHT[block];
+
+  // Corners in world/local metres. The mesh sits at the origin, so world
+  // position == local position and one block == one texture tile.
+  let corners;
+  if (face === Face.PY) {
+    corners = [[0, 0, 0], [0, 0, SPAN], [SPAN, 0, SPAN], [SPAN, 0, 0]];
+  } else {
+    corners = [[0, 0, 0], [SPAN, 0, 0], [SPAN, SPAN, 0], [0, SPAN, 0]];
+  }
+
+  const bytes = new Uint8Array(4 * VERTEX_STRIDE);
+  for (let i = 0; i < 4; i++) {
+    const o = i * VERTEX_STRIDE;
+    bytes[o + 0] = corners[i][0];
+    bytes[o + 1] = corners[i][1];
+    bytes[o + 2] = corners[i][2];
+    bytes[o + 3] = face;
+    bytes[o + 4] = 3;          // ao level 3 == unoccluded, the flat middle of a face
+    bytes[o + 5] = light;
+    bytes[o + 6] = 255;        // alpha
+    bytes[o + 7] = 0;          // flags: not a liquid
+    bytes[o + 8] = r;
+    bytes[o + 9] = g;
+    bytes[o + 10] = b;
+    bytes[o + 11] = 255;
+  }
+
+  const ib = new THREE.InterleavedBuffer(bytes, VERTEX_STRIDE);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('aPosFace', new THREE.InterleavedBufferAttribute(ib, 4, 0, false));
+  geo.setAttribute('aData', new THREE.InterleavedBufferAttribute(ib, 4, 4, false));
+  geo.setAttribute('aColor', new THREE.InterleavedBufferAttribute(ib, 4, 8, true));
+  geo.setIndex([0, 1, 2, 0, 2, 3]);
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(SPAN / 2, SPAN / 2, 0), SPAN * 2);
+  return geo;
+}
+
+/* ------------------------------------------------------------------ *
+ * Materials — exactly what game.ts builds and then tunes
+ * ------------------------------------------------------------------ */
+
+function makeMaterials(texture) {
+  const m = new VoxelMaterials({ quality: 'high', ao: true, fog: true, texture });
+  m.setLightBalance(0.60, 0.40);
+  m.setExposure(1.12);
+  m.setContrast(0.14);
+  m.setSaturation(0.88);
+  m.setAoStrength(0.36);
+  m.setFogFromRenderDistance(6);
+  m.beginLights();
+  m.endLights();
+  return m;
+}
+
+let materials = makeMaterials(true);
+let mesh = null;
+
+function setSurface(block, face) {
+  if (mesh !== null) { scene.remove(mesh); mesh.geometry.dispose(); }
+  mesh = new THREE.Mesh(buildQuad(block, face), materials.opaque);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+}
+
+/**
+ * A wall straight ahead at `dist` metres, or a floor seen from eye height at
+ * `pitch` degrees down — the two ways a player ever meets a surface.
+ */
+function placeCamera(face, dist, pitchDeg) {
+  if (face === Face.PY) {
+    const pitch = (pitchDeg * Math.PI) / 180;
+    const ground = PLAYER_EYE_HEIGHT / Math.tan(pitch);
+    camera.position.set(SPAN / 2, PLAYER_EYE_HEIGHT, SPAN / 2 + ground);
+    camera.lookAt(SPAN / 2, 0, SPAN / 2);
+  } else {
+    camera.position.set(SPAN / 2, SPAN / 2, dist);
+    camera.lookAt(SPAN / 2, SPAN / 2, 0);
+  }
+  camera.updateMatrixWorld(true);
+}
+
+/* ------------------------------------------------------------------ *
+ * The metric — the same operator as tools/hprms.mjs
+ * ------------------------------------------------------------------ */
+
+function readLuma(w, h) {
+  const px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  // readPixels is bottom-up; the metric does not care about orientation, but
+  // patch rectangles are quoted top-down so flip once and be done.
+  const l = new Float64Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const src = (h - 1 - y) * w;
+    for (let x = 0; x < w; x++) {
+      const i = (src + x) * 4;
+      l[y * w + x] = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+    }
+  }
+  return l;
+}
+
+function patchStats(l, w, h, x0, y0, size) {
+  let sq = 0, mean = 0, n = 0;
+  for (let y = y0; y < y0 + size; y++) {
+    for (let x = x0; x < x0 + size; x++) {
+      let acc = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const row = (y + dy) * w + x;
+        acc += l[row - 1] + l[row] + l[row + 1];
+      }
+      const r = l[y * w + x] - acc / 9;
+      sq += r * r; mean += l[y * w + x]; n++;
+    }
+  }
+  return { rms: Math.sqrt(sq / n), mean: mean / n };
+}
+
+const PATCH = 48;
+
+/**
+ * Median over a 5x5 grid of 48x48 patches spread across the middle of the
+ * frame. One hand-placed rectangle can be argued with; a median over the
+ * surface cannot be aimed at a seam or away from one.
+ */
+function scoreFrame(w, h) {
+  const l = readLuma(w, h);
+  const rmss = [];
+  let mean = 0;
+  for (let gy = 0; gy < 5; gy++) {
+    for (let gx = 0; gx < 5; gx++) {
+      const x0 = Math.round(w * 0.18 + (w * 0.64 - PATCH) * (gx / 4));
+      const y0 = Math.round(h * 0.18 + (h * 0.64 - PATCH) * (gy / 4));
+      const s = patchStats(l, w, h, x0, y0, PATCH);
+      rmss.push(s.rms);
+      mean += s.mean;
+    }
+  }
+  rmss.sort((a, b) => a - b);
+  return { rms: rmss[12], rmsLo: rmss[4], rmsHi: rmss[20], mean: mean / 25 };
+}
+
+function renderOnce(w, h) {
+  if (renderer.domElement.width !== w || renderer.domElement.height !== h) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  materials.setTime(0);
+  renderer.clear(true, true, false);
+  renderer.render(scene, camera);
+}
+
+/**
+ * Shade a horizontal band of the SAME frame. Resizing the framebuffer would
+ * change how many texels land on a pixel, and the atlas path's cost depends on
+ * that (mip level, texture-cache locality) — which is exactly how a resolution
+ * sweep produces a non-monotonic "slope". A scissor keeps the projection, the
+ * magnification and the mip chain identical and varies nothing but the number
+ * of fragments that survive, so the fitted line is per-pixel cost and nothing
+ * else.
+ */
+function renderBand(w, h, rows) {
+  if (renderer.domElement.width !== w || renderer.domElement.height !== h) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  renderer.setScissorTest(true);
+  renderer.setScissor(0, (h - rows) >> 1, w, rows);
+  materials.setTime(0);
+  renderer.clear(true, true, false);
+  renderer.render(scene, camera);
+  renderer.setScissorTest(false);
+}
+
+/* ------------------------------------------------------------------ *
+ * Public surface
+ * ------------------------------------------------------------------ */
+
+const W = 1440, H = 900;
+
+/**
+ * Measure one material at the luminance the real capture recorded, by solving
+ * for the exposure that puts the patch mean there. Reported alongside the
+ * number so the operating point is never implicit.
+ */
+function measure(spec) {
+  setSurface(spec.block, spec.face);
+  placeCamera(spec.face, spec.dist ?? 2.2, spec.pitch ?? 45);
+
+  let lo = 0.02, hi = 12, exposure = 1.12;
+  if (spec.targetLum > 0) {
+    for (let i = 0; i < 24; i++) {
+      exposure = (lo + hi) / 2;
+      materials.setExposure(exposure);
+      renderOnce(W, H);
+      const s = scoreFrame(W, H);
+      if (s.mean > spec.targetLum) hi = exposure; else lo = exposure;
+      if (Math.abs(s.mean - spec.targetLum) < 0.15) break;
+    }
+  } else {
+    materials.setExposure(exposure);
+  }
+  renderOnce(W, H);
+  const s = scoreFrame(W, H);
+  materials.setExposure(1.12);
+  return { key: spec.key, exposure, ...s };
+}
+
+function measureAll(specs) {
+  return specs.map(measure);
+}
+
+/* ---- GPU cost ---------------------------------------------------- */
+
+const timerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+
+/**
+ * One timer query around a BATCH of frames, not one per frame. ANGLE splits the
+ * Metal command buffer at every query boundary, so a per-frame query measures
+ * mostly its own bookkeeping — batching amortises that to nothing and is what
+ * turns a noisy r2 of 0.8 into a straight line.
+ */
+function gpuBatchMs(w, h, rows, frames) {
+  const q = gl.createQuery();
+  gl.beginQuery(timerExt.TIME_ELAPSED_EXT, q);
+  for (let i = 0; i < frames; i++) renderBand(w, h, rows);
+  gl.endQuery(timerExt.TIME_ELAPSED_EXT);
+  gl.flush();
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (!gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) { setTimeout(poll, 2); return; }
+      const disjoint = gl.getParameter(timerExt.GPU_DISJOINT_EXT);
+      const ns = gl.getQueryParameter(q, gl.QUERY_RESULT);
+      gl.deleteQuery(q);
+      resolve(disjoint ? null : ns / 1e6 / frames);
+    };
+    poll();
+  });
+}
+
+async function gpuFrameMs(w, h, rows, batches, frames) {
+  const ms = [];
+  for (let i = 0; i < batches; i++) {
+    const v = await gpuBatchMs(w, h, rows, frames);
+    if (v === null) return null;
+    ms.push(v);
+  }
+  ms.sort((a, b) => a - b);
+  // Minimum, not median: every contaminant a batch can pick up (scheduling,
+  // another tab, thermal) only ever ADDS time, so the floor across repeats is
+  // the least-biased estimate of what the shader actually costs.
+  return ms[0];
+}
+
+/**
+ * Per-pixel fragment cost as a SLOPE, not a frame time: the same scene at five
+ * resolutions, least-squares fitted against megapixels. The intercept absorbs
+ * everything that is not per-pixel (submission, clear, vertex work), which is
+ * exactly the confound that makes a single frame time useless here.
+ */
+async function gpuSweep(spec) {
+  if (timerExt === null) return { error: 'EXT_disjoint_timer_query_webgl2 unavailable' };
+  setSurface(spec.block, spec.face);
+  placeCamera(spec.face, spec.dist ?? 1.2, spec.pitch ?? 45);
+  materials.setExposure(1.12);
+
+  const W2 = 1920, H2 = 1200;
+  const points = [];
+  for (const frac of [0.30, 0.44, 0.58, 0.72, 0.86, 1.0]) {
+    const rows = Math.round(H2 * frac) & ~1;
+    const mpx = (W2 * rows) / 1e6;
+    // Equal SHADED WORK per batch, not equal frame count: a small band with the
+    // same number of frames is a much lighter load, the GPU clocks down for it,
+    // and the sweep measures the power manager instead of the shader.
+    const frames = Math.max(24, Math.round(96 / mpx));
+    await gpuFrameMs(W2, H2, rows, 2, frames);       // warm the pipeline
+    const ms = await gpuFrameMs(W2, H2, rows, 10, frames);
+    if (ms === null) return { error: 'GPU_DISJOINT during sweep' };
+    points.push({ mpx, ms });
+  }
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const p of points) { sx += p.mpx; sy += p.ms; sxx += p.mpx * p.mpx; sxy += p.mpx * p.ms; }
+  const n = points.length;
+  const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+  const intercept = (sy - slope * sx) / n;
+  let ssTot = 0, ssRes = 0;
+  const my = sy / n;
+  for (const p of points) {
+    ssTot += (p.ms - my) ** 2;
+    ssRes += (p.ms - (slope * p.mpx + intercept)) ** 2;
+  }
+  return { msPerMpx: slope, interceptMs: intercept, r2: 1 - ssRes / Math.max(ssTot, 1e-12), points };
+}
+
+function setTexture(on) {
+  materials.dispose();
+  materials = makeMaterials(on);
+  if (mesh !== null) mesh.material = materials.opaque;
+}
+
+/** Raw framebuffer for an eyeball check, at whatever detail scale is asked. */
+function shot(spec, detailScale) {
+  setSurface(spec.block, spec.face);
+  placeCamera(spec.face, spec.dist ?? 2.2, spec.pitch ?? 45);
+  materials.setExposure(spec.exposure ?? 1.12);
+  if (detailScale !== undefined) materials.setSurfaceDetail(detailScale);
+  renderOnce(W, H);
+  const url = canvas.toDataURL('image/png');
+  materials.setSurfaceDetail(1);
+  materials.setExposure(1.12);
+  return url;
+}
+
+/**
+ * Per-tile feature density, straight off the generated atlas.
+ *
+ * `mad` is the mean absolute difference between horizontally and vertically
+ * adjacent texels — the highest-frequency content the tile owns, and the only
+ * part of it that survives a block filling half the screen. `edges` counts
+ * texel-to-texel steps above 3% per row, i.e. countable features PER BLOCK,
+ * because one tile is exactly one block. The brief's target is the brick tile's
+ * ~8 courses; this is the number that has to clear it.
+ */
+function tileStats() {
+  const data = buildAtlasData();
+  const names = Object.fromEntries(Object.entries(Tile).map(([k, v]) => [v, k]));
+  const out = [];
+  for (let t = 0; t < ATLAS_TILE_COUNT; t++) {
+    const ox = (t % ATLAS_COLS) * ATLAS_TILE;
+    const oy = Math.floor(t / ATLAS_COLS) * ATLAS_TILE;
+    let mad = 0, n = 0, span = 0;
+    for (let y = 0; y < ATLAS_TILE; y++) {
+      for (let x = 0; x < ATLAS_TILE; x++) {
+        const v = data[(oy + y) * ATLAS_W + ox + x];
+        const rx = data[(oy + y) * ATLAS_W + ox + ((x + 1) % ATLAS_TILE)];
+        const dy = data[(oy + (y + 1) % ATLAS_TILE) * ATLAS_W + ox + x];
+        mad += Math.abs(v - rx) + Math.abs(v - dy);
+        n += 2;
+        span += v;
+      }
+    }
+    // Countable STRUCTURE, separately from speckle: low-pass each row and each
+    // column with an 8-texel box so the grain averages out, then count the
+    // turning points. That is the "how many courses does this block show"
+    // number, and the brick tile's ~8 is the bar to clear.
+    const w = 8;
+    let feat = 0, lines = 0;
+    for (let pass = 0; pass < 2; pass++) {
+      for (let a = 0; a < ATLAS_TILE; a += 4) {
+        const sm = new Float64Array(ATLAS_TILE);
+        for (let b2 = 0; b2 < ATLAS_TILE; b2++) {
+          let acc = 0;
+          for (let k = 0; k < w; k++) {
+            const c = (b2 + k - (w >> 1) + ATLAS_TILE) % ATLAS_TILE;
+            acc += pass === 0
+              ? data[(oy + a) * ATLAS_W + ox + c]
+              : data[(oy + c) * ATLAS_W + ox + a];
+          }
+          sm[b2] = acc / w;
+        }
+        let up = sm[1] > sm[0];
+        let turns = 0;
+        for (let b2 = 1; b2 < ATLAS_TILE; b2++) {
+          const nowUp = sm[(b2 + 1) % ATLAS_TILE] > sm[b2];
+          if (nowUp !== up && Math.abs(sm[(b2 + 1) % ATLAS_TILE] - sm[b2]) > 0.004 * 255) turns++;
+          up = nowUp;
+        }
+        feat += turns / 2; lines++;
+      }
+    }
+    out.push({
+      tile: names[t] ?? String(t),
+      mad: mad / n / 255,
+      featuresPerBlock: feat / lines,
+      mean: span / (ATLAS_TILE * ATLAS_TILE) / 255,
+    });
+  }
+  return out;
+}
+
+window.__PROBE__ = {
+  ready: true,
+  Face,
+  BlockId,
+  hasTimer: timerExt !== null,
+  measure, measureAll, gpuSweep, setTexture, shot, tileStats,
+  setDetail: (v) => materials.setSurfaceDetail(v),
+  setSeam: (v) => materials.setSeamStrength(v),
+  /**
+   * Raw uniform access, added by the verifier. The point of it is the BEFORE
+   * arm: zeroing uDetailAbs and the absolute half of uBlockJitter reproduces
+   * the exact pre-fix shader (pure multiplicative modulation) in the same rig,
+   * at the same operating point, so the delta is measured rather than
+   * remembered from the previous round's table.
+   */
+  uniforms: () => materials.uniforms,
+};
+</script>
+</body>
+</html>

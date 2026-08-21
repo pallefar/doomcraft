@@ -530,6 +530,7 @@ class QuestMode implements ModeInstance {
     // on the level and opening on a wall.
     const spawn = this.runtime.spawn(this.spawnScratch);
     game.camera.setAngles(spawn.yaw, 0);
+    this.sendSpawnAnchor(spawn);
 
     this.applyLoadout();
 
@@ -706,6 +707,10 @@ class QuestMode implements ModeInstance {
     this.applyLoadout();
     const respawn = this.runtime.spawn(this.spawnScratch);
     game.camera.setAngles(respawn.yaw, 0);
+    // `reset()` re-arms every trigger, so every authored enemy will be asked
+    // for again. Tell the room to clear the bodies from the last life first.
+    this.sendAction(ModeAction.RESTART, 0, 0, 0, 0, 0);
+    this.sendSpawnAnchor(respawn);
     this.hud.setKeys(0);
     this.hud.setExitOpen(false);
   }
@@ -927,6 +932,19 @@ class QuestMode implements ModeInstance {
       Math.round(this.enemyScratch[0]),
       Math.round(this.enemyScratch[1]),
       Math.round(this.enemyScratch[2]),
+    );
+  }
+
+  /**
+   * Pin the room's respawn to the authored player start. The level may have
+   * been relocated onto wherever we happened to spawn (`alignSpawnTo`), so this
+   * is sent after `place()` rather than read out of the level file.
+   */
+  private sendSpawnAnchor(spawn: QuestSpawn): void {
+    const deg = Math.round((spawn.yaw * 180) / Math.PI);
+    this.sendAction(
+      ModeAction.SET_SPAWN, ((deg % 360) + 360) % 360, 0,
+      Math.round(spawn.x), Math.round(spawn.y), Math.round(spawn.z),
     );
   }
 

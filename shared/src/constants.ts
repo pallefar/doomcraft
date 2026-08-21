@@ -427,6 +427,30 @@ export const STORAGE_KEYS = Object.freeze({
 export const SAVE_VERSION = 1;
 
 export type QualityPreset = 'low' | 'medium' | 'high';
+
+/**
+ * How much of the procedural surface atlas to draw.
+ *
+ * `off` drops the USE_TEXTURE define entirely — no atlas fetch, no derivatives,
+ * no seam — which is the only version of "turn it down" that actually gives a
+ * weak GPU its fragment budget back. `low` keeps the pattern at roughly half
+ * strength for a mid-range phone; `full` is the authored look.
+ */
+export type SurfaceDetailPreset = 'off' | 'low' | 'full';
+
+/** Multiplier handed to `VoxelMaterials.setSurfaceDetail`. */
+export const SURFACE_DETAIL_SCALE: Readonly<Record<SurfaceDetailPreset, number>> = Object.freeze({
+  off: 0,
+  low: 0.55,
+  full: 1,
+});
+
+/** How dark the per-block groove goes at each preset. */
+export const SURFACE_SEAM_SCALE: Readonly<Record<SurfaceDetailPreset, number>> = Object.freeze({
+  off: 0,
+  low: 0.75,
+  full: 1,
+});
 export type CrosshairStyle = 'cross' | 'dot' | 'doom' | 'dynamic';
 export type TouchLayout = 'right' | 'left';
 
@@ -439,6 +463,8 @@ export interface GameSettings {
   renderDistance: number;
   renderScale: number;
   quality: QualityPreset;
+  /** Procedural surface atlas: off / low / full. */
+  surfaceDetail: SurfaceDetailPreset;
   ao: boolean;
   fog: boolean;
   viewBob: boolean;
@@ -466,6 +492,7 @@ export const DEFAULT_SETTINGS: Readonly<GameSettings> = Object.freeze({
   renderDistance: RENDER_DISTANCE_CHUNKS_DESKTOP,
   renderScale: 1.0,
   quality: 'high' as QualityPreset,
+  surfaceDetail: 'full' as SurfaceDetailPreset,
   ao: true,
   fog: true,
   viewBob: true,
@@ -486,9 +513,9 @@ export const DEFAULT_SETTINGS: Readonly<GameSettings> = Object.freeze({
 
 /** Quality preset -> the settings fields it overrides. */
 export const QUALITY_PRESETS: Readonly<Record<QualityPreset, Partial<GameSettings>>> = Object.freeze({
-  low: { renderDistance: 3, renderScale: 0.7, ao: false, fog: true, viewBob: false },
-  medium: { renderDistance: 4, renderScale: 0.85, ao: true, fog: true, viewBob: true },
-  high: { renderDistance: 6, renderScale: 1.0, ao: true, fog: true, viewBob: true },
+  low: { renderDistance: 3, renderScale: 0.7, ao: false, fog: true, viewBob: false, surfaceDetail: 'low' },
+  medium: { renderDistance: 4, renderScale: 0.85, ao: true, fog: true, viewBob: true, surfaceDetail: 'full' },
+  high: { renderDistance: 6, renderScale: 1.0, ao: true, fog: true, viewBob: true, surfaceDetail: 'full' },
 });
 
 export interface SaveProgress {
