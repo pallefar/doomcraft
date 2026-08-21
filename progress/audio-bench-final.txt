@@ -1,0 +1,7 @@
+TAG                 final
+SAMPLES             22
+MEDIAN_MS           0.500
+MEDIAN_MS_FINAL     0.600
+ONE_PCT_LOW_FPS     833.3333002196431
+DRAW_CALLS          126
+AUDIO               {"state":"running","active":0,"peakActive":0,"cap":24,"started":3,"stolen":0,"droppedByGate":0,"buffers":71,"bakeMs":380.9,"bakeProgress":1}

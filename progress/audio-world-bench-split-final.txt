@@ -1,0 +1,16 @@
+SPLIT_ON_MEDIAN_MS  0.400  (n=24, draws 57)
+SPLIT_OFF_MEDIAN_MS 0.400  (n=24, draws 31)
+SPLIT_DELTA_MS      0.000
+TAG                 split-final
+SAMPLES             48
+MEDIAN_MS           0.400
+MEDIAN_MS_FINAL     0.400
+ONE_PCT_LOW_FPS     1000
+DRAW_CALLS          32
+PEAK_ENTITIES       37
+AUDIO               {"state":"running","active":2,"peakActive":6,"cap":24,"started":74,"stolen":0,"droppedByGate":0,"buffers":96,"bakeMs":375.3,"bakeProgress":1}
+WORLD               {"monsterVoices":0,"monsterPlayed":23,"monsterSuppressed":0,"monsterBakeMs":58.19999997317791,"ambienceBakes":4,"ambienceBakeMs":121.90000000596046,"heat":0.246,"dark":0,"room":1,"musicTrack":"siege","musicTier":0,"musicThreat":0,"musicScheduled":1051,"musicBakeMs":14.400000005960464}
+THREAT_MAX          1.000
+TIER_MAX            3
+MONSTER_VOICES_MAX  3
+TIERS_SEEN          [0,3]

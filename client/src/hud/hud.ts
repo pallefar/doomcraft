@@ -727,18 +727,34 @@ export const DMG_LIFE = 1.15;
 /** Hits within this many radians of a live wedge fold into it. */
 export const DMG_MERGE_RAD = 0.5;
 
+/** Slots and lifetime for the THREAT ring — see `Hud.threat`. */
+export const THREAT_SLOTS = 4;
+/** Seconds a threat bearing lives. Longer than a hit: you have to turn onto it. */
+export const THREAT_LIFE = 2.2;
+
 export class DamageRing {
   /** World-space yaw the damage came FROM, per slot. */
-  readonly yaw = new Float32Array(DMG_SLOTS);
+  readonly yaw: Float32Array;
   /** Seconds of life left. Zero means the slot is free. */
-  readonly life = new Float32Array(DMG_SLOTS);
+  readonly life: Float32Array;
   /** 0..1 loudness, from the accumulated damage folded into the slot. */
-  readonly power = new Float32Array(DMG_SLOTS);
+  readonly power: Float32Array;
+
+  /**
+   * `slots` and `lifetime` are parameters so the THREAT ring can be the same
+   * class rather than a copy of it. They default to the damage values, so every
+   * existing call site is untouched.
+   */
+  constructor(readonly slots = DMG_SLOTS, readonly lifetime = DMG_LIFE) {
+    this.yaw = new Float32Array(slots);
+    this.life = new Float32Array(slots);
+    this.power = new Float32Array(slots);
+  }
 
   /** Record a hit. Returns the slot it landed in. */
   add(amount: number, worldYaw: number): number {
     const p = Math.min(1, 0.28 + Math.max(0, amount) / 65);
-    for (let i = 0; i < DMG_SLOTS; i++) {
+    for (let i = 0; i < this.slots; i++) {
       if (this.life[i] <= 0) continue;
       const d = wrapPi(worldYaw - this.yaw[i]);
       if (Math.abs(d) > DMG_MERGE_RAD) continue;
@@ -746,23 +762,23 @@ export class DamageRing {
       // snapping: a strafing attacker should drag it, not teleport it.
       this.yaw[i] = wrapPi(this.yaw[i] + d * 0.34);
       this.power[i] = Math.min(1, this.power[i] + p * 0.6);
-      this.life[i] = DMG_LIFE;
+      this.life[i] = this.lifetime;
       return i;
     }
     let slot = 0;
     let worst = Infinity;
-    for (let i = 0; i < DMG_SLOTS; i++) {
+    for (let i = 0; i < this.slots; i++) {
       if (this.life[i] <= 0) { slot = i; worst = -1; break; }
       if (this.life[i] < worst) { worst = this.life[i]; slot = i; }
     }
     this.yaw[slot] = wrapPi(worldYaw);
     this.power[slot] = p;
-    this.life[slot] = DMG_LIFE;
+    this.life[slot] = this.lifetime;
     return slot;
   }
 
   step(dt: number): void {
-    for (let i = 0; i < DMG_SLOTS; i++) {
+    for (let i = 0; i < this.slots; i++) {
       const l = this.life[i];
       if (l <= 0) continue;
       this.life[i] = l > dt ? l - dt : 0;
@@ -777,7 +793,7 @@ export class DamageRing {
   /** How many wedges are currently alive. */
   activeCount(): number {
     let n = 0;
-    for (let i = 0; i < DMG_SLOTS; i++) if (this.life[i] > 0) n++;
+    for (let i = 0; i < this.slots; i++) if (this.life[i] > 0) n++;
     return n;
   }
 
@@ -785,7 +801,7 @@ export class DamageRing {
   alpha(i: number): number {
     const l = this.life[i];
     if (l <= 0) return 0;
-    const t = l / DMG_LIFE;
+    const t = l / this.lifetime;
     return (0.42 + 0.58 * this.power[i]) * (t * t * (3 - 2 * t));
   }
 }
@@ -1190,6 +1206,17 @@ export const HUD_CSS = `
     radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.52) 0%,rgba(0,0,0,.34) 40%,
       rgba(0,0,0,.12) 74%,rgba(0,0,0,0) 100%)}
 
+/* A THREAT blade is the same geometry and a deliberately different read: cold
+   instead of hot, a hairline instead of a wedge, and no white core. Being shot
+   is orange and loud; something noticing you is a pale edge-light you catch in
+   peripheral vision and can choose to turn onto. If these two looked alike the
+   HUD would be telling one lie in two colours. */
+#hud .dc-dmg span.thr{width:132px;height:30px;margin-left:-66px;
+  background:
+    radial-gradient(46% 110% at 50% 0%,rgba(214,244,255,.78) 0%,rgba(120,196,232,.52) 26%,
+      rgba(52,132,178,.22) 60%,rgba(24,72,104,0) 100%),
+    radial-gradient(52% 100% at 50% 0%,rgba(0,0,0,.46) 0%,rgba(0,0,0,.26) 46%,rgba(0,0,0,0) 100%)}
+
 /* ---- touch ---- */
 #hud .dc-touch{inset:0;pointer-events:none}
 #hud .dc-stick{position:absolute;left:26px;bottom:26px;width:132px;height:132px;border-radius:50%;
@@ -1402,6 +1429,7 @@ export class Hud {
   private elHurt!: HTMLElement;
   private elDmg!: HTMLElement;
   private readonly dmgWedges: HTMLElement[] = [];
+  private readonly threatWedges: HTMLElement[] = [];
   private elBoard!: HTMLElement;
   private elBoardBody!: HTMLElement;
   private boardSig = '';
@@ -1451,6 +1479,21 @@ export class Hud {
 
   /** Directional damage, world-anchored. */
   private readonly ring = new DamageRing();
+  /**
+   * Directional THREAT, world-anchored, on the same machinery.
+   *
+   * The audio layer locates monsters by ear (`client/src/audio/monsters.ts`),
+   * which is a mechanic a player who cannot hear is simply locked out of. This
+   * is the same information by another route: an alert cry, an attack windup or
+   * a death puts a bearing here, and it is re-projected against the live camera
+   * every frame exactly as the damage ring is, so turning onto it works.
+   *
+   * It is a SEPARATE ring and a separate visual, not a second colour on the
+   * damage blades. "I am being shot from there" and "something noticed me over
+   * there" are two different facts, and this HUD's own rule is that two
+   * different facts must never look the same.
+   */
+  private readonly threatRing = new DamageRing(THREAT_SLOTS, THREAT_LIFE);
   /** Per-slot screen bearing / opacity / width, shared with the crosshair. */
   private readonly foveaRad = new Float32Array(DMG_SLOTS);
   private readonly foveaA = new Float32Array(DMG_SLOTS);
@@ -1464,6 +1507,8 @@ export class Hud {
   private readonly wedgeDeg = new Float32Array(DMG_SLOTS);
   private readonly wedgeWide = new Float32Array(DMG_SLOTS);
   private readonly wedgeAlpha = new Float32Array(DMG_SLOTS);
+  private readonly thrDeg = new Float32Array(THREAT_SLOTS);
+  private readonly thrAlpha = new Float32Array(THREAT_SLOTS);
 
   /* touch */
   private stickId = -1;
@@ -1480,6 +1525,7 @@ export class Hud {
     this.crosshairStyle = opts.crosshair ?? 'dynamic';
     this.crosshairColor = opts.crosshairColor ?? 0xffffff;
     this.wedgeDeg.fill(9999);
+    this.thrDeg.fill(9999);
 
     this.mapImage = document.createElement('canvas');
     this.mapImage.width = WORLD_SIZE_BLOCKS;
@@ -1520,6 +1566,14 @@ export class Hud {
       const a = document.createElement('span');
       hub.appendChild(a);
       this.dmgWedges.push(a);
+    }
+    /* Threat blades are appended AFTER the damage blades so a bearing you are
+       being shot from paints over a bearing something merely growled from. */
+    for (let i = 0; i < THREAT_SLOTS; i++) {
+      const a = document.createElement('span');
+      a.className = 'thr';
+      hub.appendChild(a);
+      this.threatWedges.push(a);
     }
     this.elDmg.appendChild(hub);
     root.appendChild(this.elDmg);
@@ -2170,7 +2224,9 @@ export class Hud {
       this.elHurt.style.opacity = vig.toFixed(2);
     }
     this.ring.step(dt);
+    this.threatRing.step(dt);
     this.renderDamageRing(s.camYaw);
+    this.renderThreatRing(s.camYaw);
 
     /* --- crosshair ------------------------------------------------------ */
     if (this.hitMarkerT > 0) {
@@ -2229,6 +2285,59 @@ export class Hud {
    * crosshair canvas, where the eye already is. Neither ever occupies the
    * mid-field. Writes nothing for a slot whose angle and opacity held still.
    */
+  /**
+   * Something out there announced itself.
+   *
+   * `dirYaw` is the WORLD yaw from the player toward it, the same convention
+   * `hurt()` takes, and `power` is 0..1 — for an audio cue that is the loudness
+   * the ear would have got, so a Baron roaring at 60 m draws a fainter bearing
+   * than a Lost Soul shrieking at 8.
+   *
+   * Whether this is CALLED is `settings.threatCues`' decision, made in
+   * `client/src/audio/settings.ts` by `shouldShowThreat`. The HUD does not have
+   * an opinion about who can hear; it draws what it is told to draw.
+   */
+  threat(dirYaw: number, power = 0.6): void {
+    // DamageRing.add() maps `amount` to power via 0.28 + amount/65; invert it
+    // so a caller working in 0..1 gets the 0..1 it asked for.
+    this.threatRing.add(Math.max(0, (power - 0.28) * 65), dirYaw);
+  }
+
+  /** Drop every threat bearing — a respawn, a level change, a mode exit. */
+  clearThreats(): void { this.threatRing.clear(); }
+
+  /**
+   * Threat blades. Frame only, deliberately.
+   *
+   * Damage gets both the frame blade AND the fovea ticks on the crosshair,
+   * because being shot is the thing you must not have to look for. A threat
+   * bearing gets the frame and stops there: the crosshair is where you are
+   * aiming, and putting a second class of tick on it would trade the clarity of
+   * the damage read for information you have a whole screen edge to show.
+   */
+  private renderThreatRing(camYaw: number): void {
+    const ring = this.threatRing;
+    for (let i = 0; i < THREAT_SLOTS; i++) {
+      const el = this.threatWedges[i];
+      const a = ring.alpha(i) * 0.82;
+      if (a <= 0.004) {
+        if (this.thrAlpha[i] !== 0) { this.thrAlpha[i] = 0; el.style.opacity = '0'; }
+        continue;
+      }
+      const rad = -wrapPi(ring.yaw[i] - camYaw);
+      const deg = rad * 180 / Math.PI;
+      if (Math.abs(deg - this.thrDeg[i]) > 0.6) {
+        this.thrDeg[i] = deg;
+        const r = frameRadius(rad, this.halfW, this.halfH, DMG_FRAME_INSET + 6);
+        el.style.transform = `rotate(${deg.toFixed(1)}deg) translateY(${(-r).toFixed(0)}px)`;
+      }
+      if (Math.abs(a - this.thrAlpha[i]) > 0.02) {
+        this.thrAlpha[i] = a;
+        el.style.opacity = a.toFixed(2);
+      }
+    }
+  }
+
   private renderDamageRing(camYaw: number): void {
     const ring = this.ring;
     let sig = 0;
@@ -2542,6 +2651,7 @@ export class Hud {
     this.halfW = w / 2;
     this.halfH = h / 2;
     this.wedgeDeg.fill(9999);
+    this.thrDeg.fill(9999);
     /* The keep-out is published as a custom property, not kept private, so a
        mode overlay that wants to celebrate a kill can anchor to the same
        radius instead of guessing a pixel offset and landing on the reticle. */

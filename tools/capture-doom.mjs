@@ -9,6 +9,12 @@
  *   node tools/capture-doom.mjs
  *
  * Output: ref/doom/doom-NN-*.png, ref/doom/doom-gameplay.webm, ref/doom/doom-metrics.json
+ *
+ * !! THE .webm HAS NO AUDIO TRACK. `canvas.captureStream()` captures video only,
+ *    by construction — the same reason it captures the canvas without the DOM HUD.
+ *    Do not try to analyse DOOM's sound from it; ffprobe shows one VP9 stream.
+ *    For audio, decode the DMX lumps out of the shareware DOOM1.WAD instead
+ *    (55 sound lumps, 11025 Hz 8-bit unsigned) — see tools/wad2wav.mjs.
  */
 import { chromium } from 'playwright';
 import { recordCanvas } from './reccanvas.mjs';

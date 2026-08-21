@@ -81,6 +81,12 @@ import { MobileControls } from '@/hud/mobile';
 import { AudioEngine } from '@/audio/engine';
 import { SpatialAudio } from '@/audio/spatial';
 import { Sfx } from '@/audio/sfx';
+import { ModeId } from '@shared/modes';
+import { createAudioSave } from '@shared/saves';
+import { Ambience, type LevelPalette } from '@/audio/ambience';
+import { Music, trackFor } from '@/audio/music';
+import { MonsterVoices, type CueEvent, type ListenerPose } from '@/audio/monsters';
+import { shouldShowThreat, type AudioSettings } from '@/audio/settings';
 
 /* ------------------------------------------------------------------------ *
  * Constants
@@ -228,6 +234,12 @@ export class Game {
    * is called from a real user gesture — see `main.ts`.
    */
   readonly audio: AudioEngine;
+  /** Enemy vocalisations. Gameplay information, not decoration — see monsters.ts. */
+  readonly monsters: MonsterVoices;
+  /** Per-mode, per-level atmosphere driven by the level palette. */
+  readonly ambience: Ambience;
+  /** The Doom-idiom sequencer, with combat intensity. */
+  readonly music: Music;
   readonly sfx: Sfx;
   private readonly spatialAudio: SpatialAudio;
   readonly viewmodel: Viewmodel;
@@ -288,6 +300,13 @@ export class Game {
    * chunk is 16.8 KB gzipped; the GLTFLoader behind it is another 29.5 KB.
    */
   private demons: EnemyRenderer | null = null;
+  /** The voxel sampler the ambience probe walks. Bound once, never allocated. */
+  private readonly ambienceWorld = { getBlock: (x: number, y: number, z: number): number => this.sampleBlock(x, y, z) };
+  /** Reused listener record — `listenerPose()` never allocates. */
+  private readonly listener: ListenerPose = { x: 0, y: 0, z: 0, yaw: 0 };
+  private modeId: ModeId = ModeId.DEATHMATCH;
+  private musicCue = '';
+  private audioSettings: AudioSettings = createAudioSave();
 
   /* ---- projectile watch ------------------------------------------------ *
    * The server owns projectiles, so the client learns a rocket detonated by
@@ -483,6 +502,25 @@ export class Game {
     this.sfx = new Sfx(this.audio, this.spatialAudio);
     this.audio.applySettings(this.settings);
 
+    /* The three layers that are ABOUT the world rather than about the player's
+       own actions. All three are constructed here and start nothing: the
+       monster voices bake per archetype when one is first heard, and the bed
+       and the sequencer wait for `unlockAudio()` like everything else.
+
+       `onCue` is the accessibility seam. Every monster cue — including the ones
+       the voice cap refused and the ones that happened while the context was
+       suspended — arrives here with the bearing and whether it was audible, and
+       `shouldShowThreat` decides whether the HUD draws it. A player who cannot
+       hear the alert cry is not locked out of the mechanic that alert cries
+       exist for. */
+    this.monsters = new MonsterVoices(this.audio, {
+      maxVoices: this.touchMode ? 4 : 6,
+      onCue: (e) => this.onMonsterCue(e),
+    });
+    this.monsters.setSpatial(this.spatialAudio);
+    this.ambience = new Ambience(this.audio);
+    this.music = new Music(this.audio);
+
     /* ---- weapons ----------------------------------------------------- */
     this.weapons = new WeaponRuntime(this.buildWeaponFx(), this.camera, undefined);
     this.weapons.resetLoadout(ALL_WEAPONS_MASK);   // the local room grants the same set
@@ -521,7 +559,10 @@ export class Game {
         onChat: (m) => this.onChat(m),
         // A monster is killed and removed in the same server tick, so the only
         // notice the client ever gets that one died is this reason byte.
-        onEntityGone: (v, reason) => this.demons?.entityGone(v, reason),
+        onEntityGone: (v, reason) => {
+          this.demons?.entityGone(v, reason);
+          this.monsters.entityGone(v, reason, this.listenerPose());
+        },
       },
     });
   }
@@ -649,8 +690,109 @@ export class Game {
     if (ok) {
       this.audio.applySettings(this.settings);
       this.sfx.beginBake();
+      /* Both of these schedule against `ctx.currentTime`, so they cannot start
+         before the clock is running — a bed started against a suspended context
+         arrives all at once the instant it resumes. */
+      this.ambience.start();
+      this.music.setTrack(trackFor(this.modeId, this.musicCue));
+      this.music.start();
     }
     return ok;
+  }
+
+  /**
+   * Point the world-audio layers at a level.
+   *
+   * The palette has been on `LevelMeta` since the level format was written and
+   * `musicCue` is documented there as "key the audio layer looks up"; nothing
+   * read either until now.
+   */
+  setLevelAudio(palette: LevelPalette, mode: ModeId, musicCue: string): void {
+    this.modeId = mode;
+    this.musicCue = musicCue;
+    this.ambience.setLevel(palette, mode);
+    this.music.setTrack(trackFor(mode, musicCue));
+    this.monsters.stopAll();
+    this.hud.clearThreats();
+  }
+
+  /**
+   * Master switch for the three WORLD audio layers.
+   *
+   * Exists so `tools/audio-world-bench.mjs` can measure a control run in which
+   * every other system is bit-for-bit identical and only this feature is off.
+   * A bench that compares two different builds is comparing two different
+   * builds, which is how a frame cost gets attributed to the wrong thing.
+   */
+  worldAudioEnabled = true;
+
+  /** The audio mix and the accessibility rule. Owned by main.ts, read here. */
+  setAudioSettings(a: AudioSettings): void { this.audioSettings = a; }
+
+  /**
+   * Where the fog goes total, metres.
+   *
+   * The ambience bed uses it as the size of the room, which is the same number
+   * the renderer uses to decide you cannot see across it. A level you cannot
+   * see across and a level that sounds enormous would be two different rooms.
+   */
+  get fogFarMetres(): number { return this.materials.fogFarDistance; }
+
+  /** Eye and view yaw — the same listener `spatial.ts` gets. */
+  private listenerPose(): ListenerPose {
+    const p = this.listener;
+    p.x = this.camera.eyeX; p.y = this.camera.eyeY; p.z = this.camera.eyeZ;
+    p.yaw = this.camera.viewYaw;
+    return p;
+  }
+
+  /**
+   * A monster made a noise. Draw it when the player would not have heard it.
+   *
+   * The threat ring is world-anchored and re-projected every frame by the HUD,
+   * so the bearing stays true while the player turns onto it — which is the
+   * entire point, and the reason this is a bearing rather than an icon.
+   */
+  private onMonsterCue(e: CueEvent): void {
+    if (!shouldShowThreat(this.audioSettings, e.heard)) return;
+    // Loudness is zero for a cue that never sounded, so fall back to distance:
+    // the visual must not be invisible precisely when it is the only channel.
+    const power = e.heard
+      ? Math.min(1, 0.3 + e.loudness * 0.7)
+      : Math.min(1, 0.3 + 0.7 * Math.max(0, 1 - e.distance / 70));
+    this.hud.threat(e.yaw, power);
+  }
+
+  /**
+   * How much trouble the player is in, 0..1, for the music.
+   *
+   * Deliberately crude and deliberately cheap: the count of living monsters
+   * inside the fog, weighted by how close the nearest one is, plus a large
+   * term for being hurt. A threat model with more opinions in it would need
+   * tuning per mode; this one only has to be monotone in "am I in a fight",
+   * because `music.ts` quantises it to four tiers with hysteresis and only
+   * looks at it on a bar line.
+   */
+  private computeThreat(): number {
+    const net = this.net;
+    let near = 0;
+    let nearest = Infinity;
+    const ex = this.camera.eyeX; const ez = this.camera.eyeZ;
+    for (let i = 0; i < net.entities.length; i++) {
+      const e = net.entities[i];
+      if (!e.active || e.type >= EntityType.PICKUP_HEALTH) continue;
+      const dx = e.x - ex; const dz = e.z - ez;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > 90 * 90) continue;
+      near++;
+      if (d2 < nearest) nearest = d2;
+    }
+    if (near === 0) return 0;
+    const dist = Math.sqrt(nearest);
+    const proximity = Math.max(0, 1 - dist / 60);
+    const crowd = Math.min(1, near / 8);
+    const hurt = 1 - Math.max(0, Math.min(1, net.local.health / 100));
+    return Math.min(1, 0.18 + 0.42 * proximity + 0.34 * crowd + 0.28 * hurt);
   }
 
   /** Tab visibility. Suspends the context so a hidden tab costs nothing. */
@@ -1270,6 +1412,10 @@ export class Game {
     if (this.audio.ready) {
       // A slice of synthesis, not the whole catalogue. See `Sfx.bakeStep`.
       if (!this.sfx.bakeComplete) this.sfx.bakeStep();
+      // One demon species a frame, for the same reason and at the same cost:
+      // the alternative is paying ten milliseconds on the frame the first Imp
+      // of the match arrives, which is a frame that already has an Imp in it.
+      else if (this.worldAudioEnabled && !this.monsters.primeComplete) this.monsters.primeStep();
 
       // The listener is the EYE and the VIEW yaw — not the feet and not the
       // body yaw. Panning off the body would make sounds swing when the
@@ -1279,6 +1425,17 @@ export class Game {
       );
       this.spatialAudio.beginFrame(this.timeSeconds * 1000);
       this.updateMovementAudio(dt, d);
+
+      /* The three world layers, in the one place, after the listener has moved.
+         None of them allocates and none of them schedules a node: the monster
+         pass is a walk over at most 256 flat-array entries, the bed writes four
+         gains only when a target actually moved, and the sequencer runs on its
+         own timer entirely off this thread of control. */
+      if (this.worldAudioEnabled) {
+        this.monsters.update(dt, this.listenerPose(), this.net.entities);
+        this.ambience.update(dt, this.camera.eyeX, this.camera.eyeY, this.camera.eyeZ, this.ambienceWorld);
+        this.music.setThreat(this.computeThreat());
+      }
     }
 
     if (this.ready && this.playing && net.local.dead) {

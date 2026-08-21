@@ -51,7 +51,8 @@ import {
 } from '@shared/saves';
 
 import { Game } from '@/game/game';
-import { DEFAULT_PALETTE, applyModePalette, applyPalette } from '@/engine/palette';
+import { AudioMixer, mountAudioSettings } from '@/audio/settings';
+import { DEFAULT_PALETTE, MODE_PALETTES, applyModePalette, applyPalette } from '@/engine/palette';
 import {
   ModeRegistry,
   createEnterParams,
@@ -349,6 +350,8 @@ let save: SaveFile = loadSave(saveStorage, Date.now());
 
 function flushSave(): void { storeSave(saveStorage, save, Date.now()); }
 
+
+
 /* --- which mode are we booting into? ----------------------------------- *
  * `?mode=` wins (that is how the capture harness enters a mode), then the last
  * mode this device played, then Deathmatch — the instant-start mode, which is
@@ -619,6 +622,33 @@ addToggle('Invert look', () => settings.invertY, (v) => { settings.invertY = v; 
 addToggle('Toggle crouch', () => settings.toggleCrouch, (v) => { settings.toggleCrouch = v; });
 addToggle('Auto sprint', () => settings.autoSprint, (v) => { settings.autoSprint = v; });
 
+/* --- the audio mix ------------------------------------------------------ *
+ * `save.audio` is the versioned home of the five volumes, the mute-on-blur rule
+ * and the threat-indicator setting; the v3 -> v4 migration carried across the
+ * three volume fields `GameSettings` had been storing, unread, since the spine
+ * was written. The mixer pushes them at the engine and owns the focus rule.
+ * --------------------------------------------------------------------- */
+const audioMixer = new AudioMixer(game.audio, save.audio);
+/* One owner for the focus rule. `visibilitychange` below no longer touches the
+   engine: hidden always suspends (battery), blurred-but-visible suspends only
+   when the player left "Mute when unfocused" on, and both decisions live in one
+   place instead of being half here and half in the mixer. */
+audioMixer.attach(window, document);
+
+/* Audio and Accessibility.
+ *
+ * `mountAudioSettings` does not build any DOM: it is handed the four builders
+ * this panel already has and calls them, so the audio rows are the same grid,
+ * the same styling and the same save path as the mouse sensitivity. Building a
+ * second settings surface for audio would be a second place to look and a
+ * second style to drift. */
+mountAudioSettings({
+  section: addSection,
+  slider: addSlider,
+  toggle: addToggle,
+  select: addSelect,
+}, () => save.audio);
+
 addSection('Display');
 addSlider('Field of view', FOV_MIN, FOV_MAX, 1,
   () => settings.fov, (v) => { settings.fov = v; }, (v) => `${v.toFixed(0)}°`);
@@ -667,13 +697,35 @@ addSelect('Crosshair', ['cross', 'dot', 'doom', 'dynamic'],
   () => settings.crosshair, (v) => { settings.crosshair = v as CrosshairStyle; });
 addToggle('Hit markers', () => settings.hitMarkers, (v) => { settings.hitMarkers = v; });
 
+
+
 const resumeBtn = button('Resume', 'dc-primary', () => closePause());
 const menuBtn = button('Leave match', 'dc-ghost', () => backToMenu());
 actions.append(resumeBtn, menuBtn);
 
+/**
+ * Deferred save write.
+ *
+ * A range input fires `input` on every pixel of a drag, and `SaveFile` is the
+ * whole document — profile, six campaign slots, twenty-four builder worlds and
+ * their records. Serialising all of that on every pointer move to persist a
+ * volume slider is a stutter you can feel in the panel. The mix reaches the
+ * ENGINE immediately (five gain writes, free); only the localStorage write
+ * waits for the drag to stop.
+ */
+let saveFlushTimer: ReturnType<typeof setTimeout> | null = null;
+function flushSaveSoon(): void {
+  if (saveFlushTimer !== null) clearTimeout(saveFlushTimer);
+  saveFlushTimer = setTimeout(() => { saveFlushTimer = null; flushSave(); }, 400);
+}
+
 function applySettings(): void {
   game.applySettings(settings);
   saveJson(STORAGE_KEYS.settings, settings);
+  // The mix lives in the versioned save, not in the settings blob.
+  audioMixer.apply(save.audio);
+  game.setAudioSettings(save.audio);
+  flushSaveSoon();
 }
 
 /* ------------------------------------------------------------------------ *
@@ -757,7 +809,28 @@ registry.register(
  * --------------------------------------------------------------------- */
 game.net.events.onModeState = (state) => { registry.dispatchState(state); };
 game.net.events.onModeEvent = (event) => { registry.dispatchEvent(event); };
-game.net.events.onModeContext = (context) => { registry.dispatchContext(context); };
+game.net.events.onModeContext = (context) => {
+  registry.dispatchContext(context);
+  /* Atmosphere for the three modes that do not have an authored level.
+   *
+   * NOT from `ModeContextMessage`. Its skyColor/fogColor/ambient fields read
+   * like the palette and are not one: `server/src/room.ts` fills them with the
+   * mode's UI ACCENT colour and a hard-coded ambient of 0.6, which made every
+   * mode measure as maximally hot and maximally bright. The real look of a
+   * non-Quest mode is `MODE_PALETTES`, which is what the renderer is actually
+   * showing, so that is what the bed is told.
+   *
+   * Quest is excluded on purpose. Its level lives on the client and
+   * `modes/quest/quest.ts` hands the audio layer the authored `LevelMeta`
+   * directly, including the `musicCue` the wire has no field for. */
+  if (context.modeId === ModeId.QUEST) return;
+  const p = MODE_PALETTES[MODE_KEYS[context.modeId]] ?? DEFAULT_PALETTE;
+  game.setLevelAudio(
+    { skyTop: p.skyZenith, fogColor: p.fog, ambient: p.ambient, fogFar: game.fogFarMetres },
+    context.modeId,
+    '',
+  );
+};
 
 /* ------------------------------------------------------------------------ *
  * Quest level discovery for the picker
@@ -1007,7 +1080,13 @@ window.addEventListener('keydown', (e) => {
  * gesture re-assert it is the robust choice rather than a wasteful one.
  * ------------------------------------------------------------------------ */
 
-const unlockAudio = (): void => { game.unlockAudio(); };
+const unlockAudio = (): void => {
+  game.unlockAudio();
+  // Push the saved mix the moment the graph exists; the engine's own defaults
+  // are not the player's.
+  audioMixer.apply(save.audio);
+  game.setAudioSettings(save.audio);
+};
 window.addEventListener('pointerdown', unlockAudio, { capture: true });
 window.addEventListener('touchstart', unlockAudio, { capture: true, passive: true });
 window.addEventListener('keydown', unlockAudio, { capture: true });
@@ -1225,13 +1304,11 @@ raf = requestAnimationFrame(frame);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     game.net.keepaliveTick(true);
-    // A backgrounded tab that keeps an AudioContext running keeps the audio
-    // thread and its timers alive for nothing, and on mobile it is a reason
-    // for the OS to kill the page. Suspend it and cut the live voices.
-    game.setAudioHidden(true);
+    // The audio side of this is `audioMixer`'s: it listens for the same event
+    // and suspends the context, because "hidden" and "unfocused" are two rules
+    // that must not be decided in two places.
     return;
   }
-  game.setAudioHidden(false);
   game.net.resumeFromBackground();
   // The frame clock must not see the whole absence as one delta.
   lastFrameMs = 0;
@@ -1368,6 +1445,28 @@ window.addEventListener('pagehide', () => {
    * cost of the audio thread actually making sound.
    */
   audioSilence(on: boolean): void { game.audio.setSilent(on); },
+  /**
+   * Measure the MAIN-THREAD cost of starting `n` voices through the real
+   * graph — the number the whole engine design turns on.
+   *
+   * Deliberately unthrottled and unspaced, so the pool saturates after the
+   * first `cap` calls and every subsequent call also pays for a steal. That is
+   * the worst case, not the typical one.
+   */
+  audioVoiceCost(n: number): Record<string, number | string> {
+    const t0 = performance.now();
+    for (let i = 0; i < n; i++) game.sfx.weaponFire(1);
+    const ms = performance.now() - t0;
+    const st = game.audio.stats();
+    return {
+      calls: n,
+      totalMs: +ms.toFixed(3),
+      usPerVoice: +((ms * 1000) / n).toFixed(2),
+      stolen: st.stolen,
+      peakActive: st.peakActive,
+      cap: st.cap,
+    };
+  },
   stats(): Record<string, number | string | boolean> {
     return {
       status: game.net.status,
@@ -1390,6 +1489,49 @@ window.addEventListener('pagehide', () => {
       rigReady: game.characterStats().rigReady,
       ready: game.ready,
       playing: game.playing,
+    };
+  },
+  /**
+   * The three world-audio layers, for `tools/audio-world-bench.mjs`.
+   *
+   * Kept separate from `stats()` so the frame-cost numbers stay a flat record
+   * of numbers and the harness that reads them does not have to learn a shape.
+   */
+  /**
+   * Force the accessibility setting from the harness.
+   *
+   * `tools/`-side verification of the threat indicator needs it on regardless
+   * of whether the cue was audible, and a harness that clicks through a
+   * settings panel to get there is a harness that breaks when the panel moves.
+   */
+  setThreatCues(v: 'off' | 'auto' | 'on'): void {
+    save.audio.threatCues = v;
+    game.setAudioSettings(save.audio);
+    flushSaveSoon();
+  },
+  /** Bench control: turn the three world-audio layers off without a rebuild. */
+  audioWorldEnabled(on: boolean): void {
+    game.worldAudioEnabled = on;
+    if (!on) { game.music.stop(); game.ambience.stop(); game.monsters.stopAll(); }
+  },
+  audioWorld(): Record<string, number | string> {
+    const a = game.ambience.atmosphere;
+    return {
+      monsterVoices: game.monsters.voiceCount,
+      monsterPlayed: game.monsters.played,
+      monsterSuppressed: game.monsters.suppressed,
+      monsterBakeMs: game.monsters.bakeMs,
+      ambienceBakes: game.ambience.bakes,
+      ambienceBakeMs: game.ambience.bakeMs,
+      heat: Number(a.heat.toFixed(3)),
+      dark: Number(a.dark.toFixed(3)),
+      room: Number(a.room.toFixed(3)),
+      musicTrack: game.music.currentTrack?.id ?? '-',
+      musicTier: game.music.currentTier,
+      musicThreat: Number(game.music.currentThreat.toFixed(3)),
+      musicScheduled: game.music.scheduled,
+      musicSounded: game.music.sounded,
+      musicBakeMs: game.music.bakeMs,
     };
   },
 };

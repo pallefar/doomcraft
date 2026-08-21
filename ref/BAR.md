@@ -12,6 +12,12 @@ node tools/capture-ref.mjs --mobile              # Pixel 7 portrait 412x915
 node tools/capture-ref.mjs --mobile --landscape  # 915x412
 ```
 
+**Audio: the capture files have none.** `canvas.captureStream()` is video-only, so
+`ref/doom/doom-gameplay.webm` and `ref/voxiom/desktop-gameplay.webm` contain a single VP9 video
+stream and no audio track. To compare against DOOM's actual sounds, decode the DMX lumps from the
+shareware `DOOM1.WAD` (md5 `f0cefca49926d00903cf57551d901abe`) — 55 lumps at 11025 Hz, 8-bit
+unsigned. `tools/wad2wav.mjs` does this.
+
 **Motion.** Playwright's own `recordVideo` does not capture an accelerated WebGL canvas — it writes
 a ~2 KB file with nothing in it. Use `tools/reccanvas.mjs` instead, which runs
 `canvas.captureStream(60)` + `MediaRecorder` inside the page and pulls the blob out as base64. That

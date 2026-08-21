@@ -1,0 +1,8 @@
+[bench] audio scheduling ON, synthesis muted at source
+TAG                 silent
+SAMPLES             22
+MEDIAN_MS           0.500
+MEDIAN_MS_FINAL     0.500
+ONE_PCT_LOW_FPS     666.6666666666666
+DRAW_CALLS          123
+AUDIO               {"state":"running","active":1,"peakActive":6,"cap":24,"started":105,"stolen":0,"droppedByGate":54,"buffers":71,"bakeMs":384.4,"bakeProgress":1}

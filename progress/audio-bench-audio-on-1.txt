@@ -1,0 +1,7 @@
+TAG                 audio-on-1
+SAMPLES             22
+MEDIAN_MS           0.200
+MEDIAN_MS_FINAL     0.200
+ONE_PCT_LOW_FPS     2499.9999627470975
+DRAW_CALLS          25
+AUDIO               {"state":"running","active":1,"peakActive":3,"cap":24,"started":88,"stolen":0,"droppedByGate":3,"buffers":71,"bakeMs":384.3,"bakeProgress":1}

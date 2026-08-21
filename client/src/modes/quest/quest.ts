@@ -398,6 +398,31 @@ class QuestMode implements ModeInstance {
       events: (kind, index, a, text) => { this.onRuntimeEvent(kind, index, a, text); },
     });
 
+    /* The audio half of the same palette.
+     *
+     * `palette` above hands the RENDERER the sky, the fog and the ambient; this
+     * hands the same three numbers to the ambience bed, which turns them into
+     * heat, darkness and room size. It has to be done here and not from the
+     * room's `ModeContextMessage`, because a Quest level lives on the CLIENT —
+     * the server has a manifest, not a level, and its context message fills
+     * skyColor with the mode's UI accent and ambient with a flat 0.6. Driving
+     * the bed off that made every level in the campaign measure as hot, bright
+     * and identical, including e1m4-blackout, which is none of those things.
+     *
+     * `musicCue` comes across too. It has been on `LevelMeta` since the level
+     * format was written, documented there as "key the audio layer looks up",
+     * populated in all six shipped levels and read by nothing until now. */
+    game.setLevelAudio(
+      {
+        skyTop: level.meta.skyTop,
+        fogColor: level.meta.fogColor,
+        ambient: level.meta.ambient,
+        fogFar: level.meta.fogFar,
+      },
+      ModeId.QUEST,
+      level.meta.musicCue,
+    );
+
     /* --- HUD ------------------------------------------------------------- */
     this.hud = new QuestHud({
       root: ctx.host.hudRoot,

@@ -27,8 +27,11 @@ import { WeaponId } from './weapons.ts';
  * Version
  * ------------------------------------------------------------------------ */
 
-/** v1 = the flat SaveProgress. v2 = per-mode slots. v3 = the packed avatar. */
-export const SAVES_VERSION = 3;
+/**
+ * v1 = the flat SaveProgress. v2 = per-mode slots. v3 = the packed avatar.
+ * v4 = the audio mix.
+ */
+export const SAVES_VERSION = 4;
 
 export const SAVE_STORAGE_KEY = `${STORAGE_PREFIX}saves`;
 /** The v1 key, read once during migration and then left alone. */
@@ -180,10 +183,50 @@ export interface DeathmatchSave {
   weaponKills: number[];
 }
 
+/**
+ * The audio mix, and the one accessibility switch that belongs with it.
+ *
+ * This lives in the SAVE rather than alongside the render settings on
+ * `doomcraft:settings` for one reason: the settings key is a naive
+ * `{...defaults, ...parsed}` spread with no migration chain at all, so a field
+ * whose MEANING changes can never be corrected there. The mix has five
+ * interacting numbers and a mute rule; it is exactly the kind of thing that
+ * gets restructured once, and this file is the one that can restructure it
+ * without losing what the player set.
+ *
+ * `GameSettings.masterVolume/sfxVolume/musicVolume` already existed and were
+ * read by nothing. The v3 -> v4 migration carries them across, so a player who
+ * turned the (silent) music down before this shipped comes back to it down.
+ */
+export interface AudioSave {
+  /** 0..1 each. `master` scales all four. */
+  master: number;
+  sfx: number;
+  music: number;
+  ambience: number;
+  ui: number;
+  /** Suspend the context when the tab loses focus. */
+  muteOnBlur: boolean;
+  /**
+   * The visual alternative to a sound you cannot hear.
+   *
+   * 'off'  — never draw it.
+   * 'auto' — draw it for any cue the ear did not get: master or SFX at zero,
+   *          the context suspended by mute-on-blur, or a cue the voice cap
+   *          refused. This is the default, and it costs a hearing player
+   *          nothing because in the ordinary case nothing qualifies.
+   * 'on'   — draw every threat bearing, always. This is the accessibility
+   *          setting: a player who cannot hear the alert cry is not served by
+   *          a heuristic about whether the alert cry was audible.
+   */
+  threatCues: 'off' | 'auto' | 'on';
+}
+
 export interface SaveFile {
   version: number;
   updatedMs: number;
   profile: SaveProfile;
+  audio: AudioSave;
   quest: QuestSave;
   builder: BuilderSave;
   horde: HordeSave;
@@ -230,10 +273,19 @@ export function createBuilderWorld(id: string, name: string, seed: number, nowMs
   };
 }
 
+/** The shipped mix. Music sits under SFX because SFX is the gameplay channel. */
+export function createAudioSave(): AudioSave {
+  return {
+    master: 0.8, sfx: 1.0, music: 0.55, ambience: 0.7, ui: 0.8,
+    muteOnBlur: true, threatCues: 'auto',
+  };
+}
+
 export function createSaveFile(nowMs = 0): SaveFile {
   return {
     version: SAVES_VERSION,
     updatedMs: nowMs,
+    audio: createAudioSave(),
     profile: {
       name: '', skin: 0, avatar: 0, xp: 0, level: 1, secondsPlayed: 0, adsRemoved: false,
       createdMs: nowMs, lastMode: ModeId.QUEST,
@@ -401,6 +453,20 @@ function coerceBuilder(v: unknown, nowMs: number): BuilderSave {
   return { activeWorldId: active, worlds };
 }
 
+function coerceAudio(v: unknown): AudioSave {
+  const r = rec(v);
+  const cue = s(r.threatCues, 'auto', 8);
+  return {
+    master: n(r.master, 0.8, 0, 1),
+    sfx: n(r.sfx, 1.0, 0, 1),
+    music: n(r.music, 0.55, 0, 1),
+    ambience: n(r.ambience, 0.7, 0, 1),
+    ui: n(r.ui, 0.8, 0, 1),
+    muteOnBlur: b(r.muteOnBlur, true),
+    threatCues: cue === 'off' || cue === 'on' ? cue : 'auto',
+  };
+}
+
 function coerceHorde(v: unknown): HordeSave {
   const r = rec(v);
   const maps: HordeMapRecord[] = [];
@@ -537,8 +603,33 @@ const migrateV2toV3: SaveMigration = {
   },
 };
 
-/** Applied in order. A v4 is one more entry here and a bump of SAVES_VERSION. */
-export const SAVE_MIGRATIONS: readonly SaveMigration[] = Object.freeze([migrateV1toV2, migrateV2toV3]);
+/**
+ * v3 -> v4. Adds `audio`.
+ *
+ * The three volume fields that already existed on the legacy settings blob are
+ * carried in when the caller hands them over as `raw.legacySettings`, which is
+ * what `client/src/main.ts` does on the one boot that migrates. Nobody who
+ * turned the music down loses that, even though nothing was playing at the
+ * time.
+ */
+const migrateV3toV4: SaveMigration = {
+  from: 3,
+  to: 4,
+  apply(raw) {
+    const legacy = rec(raw.legacySettings);
+    const audio = rec(raw.audio);
+    if (audio.master === undefined && legacy.masterVolume !== undefined) audio.master = legacy.masterVolume;
+    if (audio.sfx === undefined && legacy.sfxVolume !== undefined) audio.sfx = legacy.sfxVolume;
+    if (audio.music === undefined && legacy.musicVolume !== undefined) audio.music = legacy.musicVolume;
+    raw.audio = audio;
+    delete raw.legacySettings;
+    raw.version = 4;
+    return raw;
+  },
+};
+
+/** Applied in order. A v5 is one more entry here and a bump of SAVES_VERSION. */
+export const SAVE_MIGRATIONS: readonly SaveMigration[] = Object.freeze([migrateV1toV2, migrateV2toV3, migrateV3toV4]);
 
 /** True for a document that at least claims to be a v2+ per-mode save. */
 function looksLikeV2(raw: Record<string, unknown>): boolean {
@@ -580,6 +671,7 @@ export function migrateSave(input: unknown, nowMs = 0): SaveFile {
   const file: SaveFile = {
     version: SAVES_VERSION,
     updatedMs: i(raw.updatedMs, nowMs, 0, 1e15),
+    audio: coerceAudio(raw.audio),
     profile: coerceProfile(raw.profile, nowMs),
     quest: coerceQuest(raw.quest, nowMs),
     builder: coerceBuilder(raw.builder, nowMs),
