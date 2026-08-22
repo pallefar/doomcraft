@@ -30,7 +30,13 @@ import { EditResult } from './sim.js';
 import { LAG_HISTORY, PlayerEntity, createMoveState, moveStep, sampleHistory } from './sim.js';
 import type { NetTransport } from './net.js';
 import { NavField } from './bots.js';
-import { MemoryStore, PERSIST_VERSION, migrateProfile } from './persistence.js';
+import {
+  MemoryStore,
+  PERSIST_VERSION,
+  createProfile,
+  migrateProfile,
+  serialiseProfile,
+} from './persistence.js';
 
 /* ------------------------------------------------------------------------ *
  * Harness
@@ -797,6 +803,129 @@ describe('persistence', () => {
     const p = migrateProfile({ progress: 'nope', settings: 42, stats: null }, 'junk-device-1');
     expect(p.progress.xp).toBe(0);
     expect(p.settings.fov).toBeGreaterThan(0);
+  });
+
+  /*
+   * The two below are the ones that actually police a schema bump. The v1 test
+   * above passes on ANY 3->4 step, including one that drops every field it was
+   * supposed to add, because all it reads is `migrated.version`. A version
+   * number is not evidence that the data survived.
+   */
+
+  it('gives a version 3 record an empty economy section and keeps its xp', () => {
+    const v3 = {
+      version: 3,
+      deviceId: 'v3-device-0001',
+      progress: { name: 'Sarge', xp: 900, kills: 12 },
+      stats: { matches: 4, kills: 12, secondsPlayed: 600 },
+      entitlements: { adsRemoved: false, product: null, receipt: null, purchasedMs: 0 },
+    };
+    const migrated = migrateProfile(v3, 'v3-device-0001');
+
+    expect(migrated.version).toBe(4);
+    expect(migrated.economy.scrap).toBe(0);
+    expect(migrated.economy.lifetimeScrap).toBe(0);
+    expect(migrated.economy.day).toBe('');
+    // Nothing that was already there may be collateral damage of the bump.
+    expect(migrated.progress.xp).toBe(900);
+    expect(migrated.progress.kills).toBe(12);
+    expect(migrated.stats.matches).toBe(4);
+    expect(migrated.stats.secondsPlayed).toBe(600);
+  });
+
+  /**
+   * THE ONE THAT CATCHES THE WHITELIST TRAP.
+   *
+   * `migrateProfile` does not patch the object it is given — it rebuilds a
+   * fresh literal from `createProfile()` defaults and copies across only the
+   * fields that literal names. So adding a `MIGRATIONS` step is a no-op on its
+   * own: the step writes `raw.economy`, the literal never reads it, and every
+   * balance in the fleet is silently zeroed on the next disk read while
+   * `expect(migrated.version).toBe(PERSIST_VERSION)` stays green.
+   *
+   * Two passes, because one pass is what a profile gets on every single load.
+   */
+  it('round-trips a version 4 balance through repeated loads', () => {
+    const v4 = {
+      version: 4,
+      deviceId: 'v4-device-0001',
+      progress: { xp: 1200 },
+      economy: { scrap: 500, lifetimeScrap: 4321, day: '2026-08-22', dayXp: 700, dayScrap: 90, dayMatches: 3 },
+    };
+
+    const once = migrateProfile(v4, 'v4-device-0001');
+    expect(once.economy.scrap).toBe(500);
+    expect(once.economy.lifetimeScrap).toBe(4321);
+    expect(once.economy.day).toBe('2026-08-22');
+    expect(once.economy.dayXp).toBe(700);
+    expect(once.economy.dayScrap).toBe(90);
+    expect(once.economy.dayMatches).toBe(3);
+
+    // A load of what the last save wrote. This is the real shape: the file on
+    // disk is the output of the previous migration, not the fixture above.
+    const twice = migrateProfile(JSON.parse(JSON.stringify(serialiseProfile(once))), 'v4-device-0001');
+    expect(twice.economy.scrap).toBe(500);
+    expect(twice.economy.lifetimeScrap).toBe(4321);
+    expect(twice.progress.xp).toBe(1200);
+    expect(twice.version).toBe(PERSIST_VERSION);
+  });
+
+  it('clamps a stored balance instead of trusting the number on disk', () => {
+    const p = migrateProfile({
+      version: 4,
+      economy: { scrap: -50, lifetimeScrap: Number.NaN, day: '2026-08-22-and-then-some', dayXp: 1e12 },
+    }, 'v4-device-0002');
+    expect(p.economy.scrap).toBe(0);
+    expect(p.economy.lifetimeScrap).toBe(0);
+    expect(p.economy.day).toBe('2026-08-22');
+    expect(p.economy.dayXp).toBeLessThanOrEqual(6_000);
+  });
+
+  /**
+   * The downgrade guard. `migrateProfile` stamps `PERSIST_VERSION` on
+   * everything it reads, which is right for reading and destructive for
+   * writing: without a bag for the fields it does not recognise, a v5 profile
+   * opened once by a rolled-back v4 server comes back as a v4 profile with the
+   * v5 fields gone from the player's account for good. `SaveFile._unknown` has
+   * done this for the browser's local save since it shipped; profiles had
+   * nothing, which is precisely how a rollback would have eaten every Scrap
+   * balance this commit introduces.
+   */
+  it('carries a future version\'s fields through untouched instead of eating them', () => {
+    const fromTheFuture = {
+      version: 99,
+      deviceId: 'future-device-01',
+      progress: { xp: 10 },
+      economy: { scrap: 7 },
+      inventory: { items: ['skin.gold'], slots: 12 },
+      seasonPass: 'season-4',
+    };
+
+    const read = migrateProfile(fromTheFuture, 'future-device-01');
+    expect(read.version).toBe(PERSIST_VERSION);
+    expect(read.economy.scrap).toBe(7);
+    expect(read._unknown).toEqual({ inventory: { items: ['skin.gold'], slots: 12 }, seasonPass: 'season-4' });
+
+    // And back out at the TOP level, where the newer build will look for it —
+    // not nested inside a `_unknown` key it has never heard of.
+    const written = serialiseProfile(read);
+    expect(written.inventory).toEqual({ items: ['skin.gold'], slots: 12 });
+    expect(written.seasonPass).toBe('season-4');
+    expect(written._unknown).toBeUndefined();
+    expect(written.version).toBe(PERSIST_VERSION);
+
+    // Surviving two old builds in a row, which is what a bad week looks like.
+    const again = serialiseProfile(migrateProfile(JSON.parse(JSON.stringify(written)), 'future-device-01'));
+    expect(again.seasonPass).toBe('season-4');
+  });
+
+  it('never lets a carried unknown key overwrite a field this build owns', () => {
+    const p = createProfile('shadow-device-01');
+    p.progress.xp = 4242;
+    p._unknown = { progress: { xp: 0 }, version: 1 };
+    const written = serialiseProfile(p);
+    expect((written.progress as { xp: number }).xp).toBe(4242);
+    expect(written.version).toBe(PERSIST_VERSION);
   });
 
   it('grants the ad-free entitlement and never takes it from the client', async () => {

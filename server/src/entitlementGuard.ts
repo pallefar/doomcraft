@@ -590,6 +590,10 @@ export function toMatchResult(v: GuardVerdict): MatchResult | null {
     blocksBroken: s.blocksBroken,
     seconds: s.seconds,
     xp: v.granted.xp,
+    // Already stripped to 0 by step 8 for any row without the Scrap bit, and
+    // clamped to `MAX_SCRAP_PER_MATCH` for the rows that have it. Nothing
+    // downstream re-decides this.
+    scrap: v.granted.scrap,
     favouriteWeapon: s.favouriteWeapon,
   };
 }

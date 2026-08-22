@@ -615,6 +615,23 @@ export const XP_PER_ASSIST = 8;
 export const XP_PER_WIN = 220;
 export const XP_PER_MINUTE = 12;
 
+/*
+ * Scrap — the spendable currency, as opposed to XP which is only ever a level.
+ *
+ * These are RATES, not permission. Whether a given match may pay any Scrap at
+ * all is decided by one place only, `shared/src/trust.ts`: a row that does not
+ * carry the Scrap bit has it stripped by `reviewSubmission` no matter what
+ * number is handed in. Builder is the worked example — infinite blocks and no
+ * failure state, so it earns XP for time and no currency at all.
+ *
+ * Deliberately NOT in `contentFingerprint()` (`shared/src/version.ts`): two
+ * builds that disagree about what a kill is worth still simulate the same
+ * match, and the server's number is the only one that is ever banked.
+ */
+export const SCRAP_PER_KILL = 3;
+export const SCRAP_PER_WIN = 25;
+export const SCRAP_PER_MINUTE = 2;
+
 /* ------------------------------------------------------------------------ *
  * Small shared numeric helpers used by both sides
  * ------------------------------------------------------------------------ */

@@ -31,9 +31,6 @@ import {
   SPAWN_PROTECTION_MS,
   WEAPON_COUNT,
   getWeapon,
-  XP_PER_KILL,
-  XP_PER_MINUTE,
-  XP_PER_WIN,
   Rng,
   BlockId,
   clamp,
@@ -84,10 +81,10 @@ import type { PersistenceStore } from './persistence.js';
 import { applyMatchResult } from './persistence.js';
 import {
   EntitlementGuard,
-  SubmitterKind,
   toMatchResult,
   type ResultSubmission,
 } from './entitlementGuard.js';
+import { buildSubmission } from './reward.js';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { PlayerEntity, Simulation } from './sim.js';
 import { ServerWorld } from './world.js';
@@ -1447,23 +1444,20 @@ export class Room implements NetHost {
     won: boolean, kills: number, deaths: number, seconds: number,
   ): ResultSubmission {
     const p = member.player;
-    return {
+    // The amounts live in `reward.ts`; the room only reports what it saw.
+    return buildSubmission({
       sessionId: this.sessionId,
       deviceId,
-      submittedBy: SubmitterKind.ROOM_SIM,
-      xp: kills * XP_PER_KILL + (won ? XP_PER_WIN : 0) + (seconds / 60) * XP_PER_MINUTE,
-      stats: {
-        kills,
-        deaths,
-        won,
-        bestStreak: p.bestStreak,
-        damageDealt: p.damageDealt,
-        blocksPlaced: p.blocksPlaced,
-        blocksBroken: p.blocksBroken,
-        seconds,
-        favouriteWeapon: p.weapon,
-      },
-    };
+      won,
+      kills,
+      deaths,
+      seconds,
+      bestStreak: p.bestStreak,
+      damageDealt: p.damageDealt,
+      blocksPlaced: p.blocksPlaced,
+      blocksBroken: p.blocksBroken,
+      favouriteWeapon: p.weapon,
+    });
   }
 
   /**

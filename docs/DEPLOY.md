@@ -114,3 +114,24 @@ Two things about the static host in particular:
 Feature flags are resolved server-side and delivered in-band on `S2C.SESSION_CONFIG`, plus one
 cacheable `GET /api/flags` per boot for the menu. Everything the economy and sponsor work needs to
 land dark is already here; see `docs/PATCHING.md` §5.
+
+## Rolling a room host BACK past a profile schema bump
+
+`PERSIST_VERSION` (`server/src/persistence.ts`) is now **4** — the bump that added the `economy`
+section where Scrap lives. A profile is not patched on load; `migrateProfile` rebuilds it from a
+whitelist literal and stamps the current version on it, which means a rollback is the one moment a
+schema bump can destroy player data.
+
+From v4 forward this is handled: `StoredProfile._unknown` carries every top-level key this build
+does not recognise and `serialiseProfile` puts it back at the top level on the way to disk, so a v5
+profile opened by a v4 host comes back out with its v5 fields intact. `shared/src/saves.ts` has done
+the same for the browser's local save since it shipped; profiles had nothing until now.
+
+**The one case that is NOT covered is v4 → v3**, because a v3 binary has no bag to put anything in.
+A v3 host that reads a v4 profile writes it back as v3 and every Scrap balance on it is gone for
+good. So:
+
+- Rolling the room fleet back to a pre-v4 build is a **data-destroying** operation, not a routing
+  change. Take the profile store out of the path first (or accept the loss deliberately).
+- The rule generalises: a rollback across a `PERSIST_VERSION` boundary is safe **downward from any
+  version that has the `_unknown` guard**, and unsafe from v4 to anything older.

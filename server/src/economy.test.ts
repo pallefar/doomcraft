@@ -20,13 +20,17 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as joinPath } from 'node:path';
 import {
   GameMode,
+  MATCH_DURATION_MS,
   PacketWriter,
   S2C,
+  SCRAP_PER_KILL,
+  SCRAP_PER_MINUTE,
+  SCRAP_PER_WIN,
   TICK_MS,
   XP_PER_KILL,
   XP_PER_MINUTE,
@@ -34,6 +38,7 @@ import {
   encodeHello,
   encodeInput,
 } from '@doomcraft/shared';
+import { ModeId } from '@doomcraft/shared/modes';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 
 import { Room, END_SCREEN_MS } from './room.js';
@@ -42,9 +47,13 @@ import {
   RejectCode,
   SubmitterKind,
   emptyStats,
+  guardProfileWrite,
   toMatchResult,
 } from './entitlementGuard.js';
-import { JsonFileStore, MemoryStore } from './persistence.js';
+import { DEFAULT_JOIN, resolveModePlan } from './modes.js';
+import type { ModeSimPlan } from './modes.js';
+import { JsonFileStore, MemoryStore, applyMatchResult, createProfile } from './persistence.js';
+import { buildSubmission } from './reward.js';
 import type { NetTransport } from './net.js';
 import type { PlayerEntity } from './sim.js';
 
@@ -81,6 +90,18 @@ interface RoomSpec {
   sessionOrigin?: SessionOrigin;
   sessionIntent?: MatchType;
   name?: string;
+  plan?: ModeSimPlan;
+}
+
+/**
+ * A room running a named mode, the way `ModeRouter` builds one.
+ *
+ * The mode is a fact about the ROOM. Nothing downstream of here branches on it:
+ * `reward.ts` computes the same numbers whatever mode this is, and the trust
+ * table decides which of those numbers are allowed to land.
+ */
+function planFor(modeId: ModeId): ModeSimPlan {
+  return resolveModePlan({ ...DEFAULT_JOIN, modeId }, { durationMs: MATCH_DURATION_MS, botFill: 0 });
 }
 
 /**
@@ -101,6 +122,7 @@ function makeRoom(spec: RoomSpec): Room {
     guard: spec.guard,
     sessionOrigin: spec.sessionOrigin,
     sessionIntent: spec.sessionIntent,
+    plan: spec.plan,
   });
 }
 
@@ -165,6 +187,12 @@ async function settled(store: MemoryStore, deviceId: string): Promise<void> {
 function expectedXp(kills: number, won: boolean, ticks: number): number {
   const seconds = (ticks * TICK_MS) / 1000;
   return Math.round(kills * XP_PER_KILL + (won ? XP_PER_WIN : 0) + (seconds / 60) * XP_PER_MINUTE);
+}
+
+/** Ditto for Scrap. Written out longhand so a rate change has to be deliberate. */
+function expectedScrap(kills: number, won: boolean, ticks: number): number {
+  const seconds = (ticks * TICK_MS) / 1000;
+  return Math.round(kills * SCRAP_PER_KILL + (won ? SCRAP_PER_WIN : 0) + (seconds / 60) * SCRAP_PER_MINUTE);
 }
 
 const DEVICE = 'device-aaaa0001';
@@ -386,5 +414,170 @@ describe('a payout landing while somebody reads the profile', () => {
     expect(profile.progress.gamesPlayed).toBe(1);
     expect(profile.progress.xp).toBe(400);
     await store.close();
+  });
+
+  /**
+   * A balance that only survives in memory is not a balance. This is the one
+   * test that goes all the way to the bytes: it reads the JSON file the store
+   * wrote, so it fails if `PERSIST_VERSION`, the migration step, the whitelist
+   * literal and `serialiseProfile` are not all in agreement.
+   */
+  it('survives the round trip to a file and back, unknown keys included', async () => {
+    const dir = mkdtempSync(joinPath(tmpdir(), 'dc-economy-disk-'));
+    const first = new JsonFileStore(dir, 0);
+    await first.update(DEVICE, (p) => {
+      p.economy.scrap = 137;
+      p.economy.lifetimeScrap = 900;
+      // What a NEWER server would have left behind on this profile.
+      p._unknown = { seasonPass: 'season-4' };
+    });
+    await first.close();
+
+    const raw = JSON.parse(readFileSync(joinPath(dir, 'profiles', 'de', `${DEVICE}.json`), 'utf8')) as Record<string, unknown>;
+    expect((raw.economy as Record<string, number>).scrap).toBe(137);
+    expect(raw.version).toBe(4);
+    // TOP level, not nested: the newer build looks for its own field where it
+    // put it, and would never think to open a bag it does not know about.
+    expect(raw.seasonPass).toBe('season-4');
+    expect(raw._unknown).toBeUndefined();
+
+    const second = new JsonFileStore(dir, 0);
+    const reread = await second.ensure(DEVICE);
+    expect(reread.economy.scrap).toBe(137);
+    expect(reread.economy.lifetimeScrap).toBe(900);
+    expect(reread._unknown).toEqual({ seasonPass: 'season-4' });
+    await second.close();
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * 5. Scrap — and who decides whether a round pays any
+ * ------------------------------------------------------------------------ */
+
+describe('Scrap', () => {
+  /**
+   * THE ONE THAT PROVES THE TABLE DRIVES IT.
+   *
+   * Two rooms, one guard, identical play, identical submissions — `reward.ts`
+   * computes the same Scrap figure for both because it has no idea which mode
+   * it is looking at, and there is no `if` anywhere in the payout path that
+   * mentions a mode. The only difference is the row in `shared/src/trust.ts`:
+   * DEATHMATCH/PUBLIC carries the Scrap bit, BUILDER/PUBLIC deliberately does
+   * not, because a mode with infinite blocks and no failure state is an idle
+   * farm the moment it pays a currency.
+   *
+   * Flip `grants` on the Builder row and this test flips with it. That is the
+   * property worth having: the policy is one edit in one file, and it is not
+   * possible to leave the code behind.
+   */
+  it('is paid by a public deathmatch round and not by a public builder round', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+
+    const dm = makeRoom({ store, guard, name: 'dm-public', plan: planFor(ModeId.DEATHMATCH) });
+    const dmClient = join(dm, 'Marine', DEVICE);
+    dmClient.player.kills = KILLS;
+    run(dm, [dmClient], PLAY_TICKS);
+    endRoundNow(dm, [dmClient]);
+    await settled(store, DEVICE);
+
+    const paid = await store.ensure(DEVICE);
+    expect(paid.economy.scrap).toBe(expectedScrap(KILLS, true, PLAY_TICKS + 1));
+    expect(paid.economy.scrap).toBeGreaterThan(0);
+    expect(paid.economy.lifetimeScrap).toBe(paid.economy.scrap);
+    // Deathmatch was clean, so it left no audit line at all.
+    expect(guard.recent()).toEqual([]);
+
+    const builder = makeRoom({ store, guard, name: 'build-public', plan: planFor(ModeId.BUILDER) });
+    const bClient = join(builder, 'Chippy', OTHER_DEVICE);
+    // Same kills, so the room hands the guard the same non-zero Scrap claim.
+    bClient.player.kills = KILLS;
+    run(builder, [bClient], PLAY_TICKS);
+    endRoundNow(builder, [bClient]);
+    await settled(store, OTHER_DEVICE);
+
+    const unpaid = await store.ensure(OTHER_DEVICE);
+    expect(unpaid.economy.scrap).toBe(0);
+    expect(unpaid.economy.lifetimeScrap).toBe(0);
+    // Not "the room paid nothing" — the room asked and was refused. XP still
+    // landed, so this is a strip of one reward kind rather than a dead room.
+    expect(unpaid.progress.xp).toBe(expectedXp(KILLS, true, PLAY_TICKS + 1));
+    expect(unpaid.progress.gamesPlayed).toBe(1);
+
+    const audit = guard.recent();
+    expect(audit).toHaveLength(1);
+    expect(audit[0].deviceId).toBe(OTHER_DEVICE);
+    expect(audit[0].code).toBe(RejectCode.OK);
+    expect(audit[0].stripped).toContain('scrap');
+    expect(audit[0].trust).toContain('grants xp');
+  });
+
+  it('never reaches a balance as a negative or a NaN', () => {
+    const guard = new EntitlementGuard(() => 1_000);
+    const sessionId = 'nonsense#1';
+    guard.open({
+      sessionId,
+      modeId: ModeId.DEATHMATCH,
+      origin: SessionOrigin.SERVER_MATCHMAKER,
+      serverIntent: MatchType.PUBLIC,
+    });
+    guard.ledger.addParticipant(sessionId, DEVICE);
+
+    for (const silly of [-500, Number.NaN, Number.NEGATIVE_INFINITY]) {
+      const profile = createProfile(DEVICE);
+      const verdict = guard.submit({
+        sessionId,
+        deviceId: DEVICE,
+        submittedBy: SubmitterKind.ROOM_SIM,
+        xp: silly,
+        scrap: silly,
+        stats: { ...emptyStats(), kills: 1 },
+      });
+      // The guard accepts the submission — the room is entitled to submit — and
+      // sanitises the number rather than banking it.
+      const result = toMatchResult(verdict);
+      expect(result, `scrap ${String(silly)} was rejected outright`).not.toBeNull();
+      expect(result?.scrap).toBe(0);
+
+      applyMatchResult(profile, result!);
+      expect(profile.economy.scrap).toBe(0);
+      expect(profile.economy.lifetimeScrap).toBe(0);
+      expect(profile.progress.xp).toBe(0);
+
+      // Each loop needs its own settle, or the second one is ALREADY_SETTLED
+      // and proves nothing about the arithmetic.
+      guard.ledger.get(sessionId)?.settled.delete(DEVICE);
+    }
+  });
+
+  it('is computed in one place, off the same tally the stats come from', () => {
+    // `reward.ts` is the whole answer to "how much". If this drifts from the
+    // room, the room is doing arithmetic it has no business doing.
+    const sub = buildSubmission({
+      sessionId: 's#1', deviceId: DEVICE, won: true,
+      kills: 4, deaths: 1, seconds: 120,
+      bestStreak: 3, damageDealt: 900, blocksPlaced: 0, blocksBroken: 0,
+      favouriteWeapon: 1,
+    });
+    expect(sub.scrap).toBe(4 * SCRAP_PER_KILL + SCRAP_PER_WIN + 2 * SCRAP_PER_MINUTE);
+    expect(sub.xp).toBe(4 * XP_PER_KILL + XP_PER_WIN + 2 * XP_PER_MINUTE);
+    expect(sub.submittedBy).toBe(SubmitterKind.ROOM_SIM);
+    // Never omitted: `toMatchResult` returns null without it and the round pays
+    // nothing while still marking the device settled.
+    expect(sub.stats).toBeDefined();
+  });
+
+  it('is not a field the client can post to itself', () => {
+    // `SERVER_OWNED_PROFILE_FIELDS` already names `scrap`, so the filter that
+    // guards `POST /api/profile` drops it one level down as well — which is the
+    // level `economy.scrap` actually lives at.
+    const filtered = guardProfileWrite({
+      deviceId: DEVICE,
+      economy: { scrap: 1_000_000, lifetimeScrap: 1_000_000 },
+      progress: { name: 'Marine' },
+    });
+    expect(filtered.rejectedFields).toContain('economy.scrap');
+    expect((filtered.accepted.economy as Record<string, unknown>).scrap).toBeUndefined();
+    expect(filtered.violation).toBe(true);
   });
 });

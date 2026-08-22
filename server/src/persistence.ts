@@ -26,8 +26,23 @@ import {
 } from '@doomcraft/shared';
 import type { GameSettings, SaveProgress } from '@doomcraft/shared';
 
-/** Bump when the stored shape changes and add a step to MIGRATIONS. */
-export const PERSIST_VERSION = 3;
+/**
+ * Bump when the stored shape changes and add a step to MIGRATIONS.
+ *
+ * FOUR THINGS MOVE TOGETHER or the new field is destroyed on the next disk
+ * read: this number, a step appended to `MIGRATIONS`, the field's block in the
+ * `out` literal inside `migrateProfile`, and `createProfile()`. The literal is
+ * the one people forget — `migrateProfile` rebuilds the profile from a
+ * whitelist, so a migration step that adds a key the literal does not name is a
+ * no-op with a version bump on it.
+ */
+export const PERSIST_VERSION = 4;
+
+/** Hard ceiling on a stored balance. A bug, not a player, is what hits this. */
+export const MAX_SCRAP_BALANCE = 1_000_000_000;
+/** Ceilings on the per-day earn buckets. The metering that fills them lands next. */
+export const DAY_XP_CAP = 6_000;
+export const DAY_SCRAP_CAP = 800;
 
 export interface StoredLoadout {
   /** WeaponId the player spawns holding when the mode allows a choice. */
@@ -61,6 +76,26 @@ export interface StoredStats {
   lastSeenMs: number;
 }
 
+/**
+ * The currency half of a profile, kept off `progress` on purpose.
+ *
+ * `progress` is the merge target of the client-writable `POST /api/profile`
+ * body and it is a *shared* type the browser's own save file also uses. A
+ * balance that lives there is a balance the client has an opinion about. This
+ * section has exactly two writers: `applyMatchResult`, and a future spend path.
+ */
+export interface StoredEconomy {
+  /** Spendable balance. */
+  scrap: number;
+  /** Monotonic lifetime total, for audit and for "you have earned N". */
+  lifetimeScrap: number;
+  /** UTC 'YYYY-MM-DD' the buckets below belong to. */
+  day: string;
+  dayXp: number;
+  dayScrap: number;
+  dayMatches: number;
+}
+
 export interface StoredProfile {
   version: number;
   deviceId: string;
@@ -76,7 +111,36 @@ export interface StoredProfile {
   loadout: StoredLoadout;
   entitlements: StoredEntitlements;
   stats: StoredStats;
+  economy: StoredEconomy;
+  /**
+   * THE DOWNGRADE GUARD. Top-level keys this build does not recognise, carried
+   * through untouched and written back out by `serialiseProfile`.
+   *
+   * `migrateProfile` rebuilds every profile from a whitelist and stamps
+   * `PERSIST_VERSION` on it, which is right for reading and catastrophic for
+   * writing: without this, a v5 profile opened by a rolled-back v4 server is
+   * rewritten as v4 and every v5 field is gone from the player's account
+   * permanently. `SaveFile._unknown` (`shared/src/saves.ts`) does exactly this
+   * for the browser's local save; profiles had no equivalent, so a rollback
+   * would have destroyed Scrap balances the first time one happened.
+   *
+   * Never read from this. It exists to be preserved, not consulted.
+   */
+  _unknown?: Record<string, unknown>;
 }
+
+/**
+ * Top-level profile keys this build owns. Anything else goes to `_unknown` and
+ * comes back out unchanged.
+ *
+ * Add a key here in the SAME change that adds it to `StoredProfile`, or the new
+ * field round-trips through `_unknown` and is written twice.
+ */
+export const KNOWN_PROFILE_KEYS: readonly string[] = Object.freeze([
+  'version', 'deviceId', 'accountId', 'accountSecret', 'createdMs', 'updatedMs',
+  'progress', 'settings', 'bindings', 'loadout', 'entitlements', 'stats',
+  'economy', '_unknown',
+]);
 
 export interface MatchResult {
   kills: number;
@@ -88,7 +152,20 @@ export interface MatchResult {
   blocksBroken: number;
   seconds: number;
   xp: number;
+  /**
+   * REQUIRED, not optional. An optional money field is a field that silently
+   * pays zero the day somebody builds a `MatchResult` and forgets it, and no
+   * type error ever says so. `toMatchResult` is the only producer.
+   */
+  scrap: number;
   favouriteWeapon: number;
+}
+
+/** What actually landed in a profile. `xp`/`scrap` are post-clamp amounts. */
+export interface AppliedRewards {
+  profile: StoredProfile;
+  xp: number;
+  scrap: number;
 }
 
 export interface PersistenceStore {
@@ -133,6 +210,10 @@ export function defaultStats(): StoredStats {
   };
 }
 
+export function defaultEconomy(): StoredEconomy {
+  return { scrap: 0, lifetimeScrap: 0, day: '', dayXp: 0, dayScrap: 0, dayMatches: 0 };
+}
+
 export function createProfile(deviceId: string, nowMs = Date.now()): StoredProfile {
   return {
     version: PERSIST_VERSION,
@@ -147,6 +228,7 @@ export function createProfile(deviceId: string, nowMs = Date.now()): StoredProfi
     loadout: defaultLoadout(),
     entitlements: { adsRemoved: false, product: null, receipt: null, purchasedMs: 0 },
     stats: defaultStats(),
+    economy: defaultEconomy(),
   };
 }
 
@@ -194,6 +276,26 @@ const MIGRATIONS: Array<(raw: AnyRecord) => AnyRecord> = [
     raw.version = 3;
     return raw;
   },
+  // 3 -> 4: the economy section — Scrap and the per-day earn buckets.
+  //
+  // Reads whatever is already there rather than overwriting it, so the step is
+  // idempotent. That matters because of the `_unknown` downgrade guard: a
+  // profile that has been through a newer server and back arrives here with its
+  // v4 fields already populated at the top level, and a step that assumed
+  // "absent" would wipe them on the way forward.
+  (raw) => {
+    const ec = asRecord(raw.economy);
+    raw.economy = {
+      scrap: num(ec.scrap, 0),
+      lifetimeScrap: num(ec.lifetimeScrap, 0),
+      day: str(ec.day, ''),
+      dayXp: num(ec.dayXp, 0),
+      dayScrap: num(ec.dayScrap, 0),
+      dayMatches: num(ec.dayMatches, 0),
+    };
+    raw.version = 4;
+    return raw;
+  },
 ];
 
 /** Bring any stored shape up to the current version and sanity-check it. */
@@ -214,6 +316,7 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
   const loadout = asRecord(raw.loadout);
   const ent = asRecord(raw.entitlements);
   const stats = asRecord(raw.stats);
+  const eco = asRecord(raw.economy);
 
   const out: StoredProfile = {
     version: PERSIST_VERSION,
@@ -267,7 +370,28 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
       weaponKills: intArray(stats.weaponKills, new Array<number>(WEAPON_COUNT).fill(0), 0, 1e9, WEAPON_COUNT),
       lastSeenMs: num(stats.lastSeenMs, 0),
     },
+    /* Read from `eco`, NOT from `base`. The migration step above is a no-op
+     * without these six lines: it writes `raw.economy` and this literal is the
+     * only thing that decides what survives into the profile the server then
+     * saves back over the file. `sim.test.ts`'s "round-trips a version 4
+     * balance" is the test that says so. */
+    economy: {
+      scrap: clampInt(num(eco.scrap, 0), 0, MAX_SCRAP_BALANCE),
+      lifetimeScrap: clampInt(num(eco.lifetimeScrap, 0), 0, MAX_SCRAP_BALANCE),
+      day: str(eco.day, '').slice(0, 10),
+      dayXp: clampInt(num(eco.dayXp, 0), 0, DAY_XP_CAP),
+      dayScrap: clampInt(num(eco.dayScrap, 0), 0, DAY_SCRAP_CAP),
+      dayMatches: clampInt(num(eco.dayMatches, 0), 0, 10_000),
+    },
   };
+
+  /* The downgrade guard. `out.version` has just been stamped DOWN to what this
+   * build understands, which is correct for reading and destructive for
+   * writing: the next flush would overwrite a newer profile with a strictly
+   * smaller one. Anything unrecognised is set aside here and `serialiseProfile`
+   * puts it back verbatim. See `StoredProfile._unknown`. */
+  const carried = collectUnknownProfileKeys(raw);
+  if (carried !== null) out._unknown = carried;
 
   // Derived, never trusted from disk.
   out.progress.level = levelForXp(out.progress.xp);
@@ -310,6 +434,40 @@ function mergeSettings(raw: AnyRecord): GameSettings {
   return out;
 }
 
+/** Top-level keys this build has no idea about, or null when there are none. */
+function collectUnknownProfileKeys(raw: AnyRecord): Record<string, unknown> | null {
+  let out: Record<string, unknown> | null = null;
+  // An older reader may already have set a bag aside; merge it in first so a
+  // field survives being opened by two different old builds in a row.
+  const prior = raw._unknown;
+  if (prior !== null && typeof prior === 'object' && !Array.isArray(prior)) {
+    for (const [k, v] of Object.entries(prior as AnyRecord)) {
+      if (KNOWN_PROFILE_KEYS.includes(k)) continue;
+      (out ??= {})[k] = v;
+    }
+  }
+  for (const [k, v] of Object.entries(raw)) {
+    if (KNOWN_PROFILE_KEYS.includes(k)) continue;
+    if (v === undefined) continue;
+    (out ??= {})[k] = v;
+  }
+  return out;
+}
+
+/**
+ * The profile as it goes to disk: this build's fields, plus every unknown key
+ * put back at the top level exactly where it was found.
+ *
+ * The bag is spread FIRST so a known field always wins — an older build must
+ * never be able to resurrect a stale copy of a field it does own, and the bag
+ * is by definition made of fields it does not.
+ */
+export function serialiseProfile(p: StoredProfile): Record<string, unknown> {
+  const { _unknown, ...known } = p;
+  if (_unknown === undefined) return known as unknown as Record<string, unknown>;
+  return { ..._unknown, ...(known as unknown as Record<string, unknown>) };
+}
+
 function sanitiseBindings(raw: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   const rec = asRecord(raw);
@@ -322,10 +480,22 @@ function sanitiseBindings(raw: unknown): Record<string, string> {
   return out;
 }
 
-/** Fold one match's results into a profile. */
-export function applyMatchResult(profile: StoredProfile, r: MatchResult, nowMs = Date.now()): StoredProfile {
+/**
+ * Fold one match's results into a profile, and say what actually landed.
+ *
+ * The single writer of `progress.xp` and of `economy.scrap`, and it runs inside
+ * `store.update`'s per-device lock — which is why the per-day metering belongs
+ * here rather than in the room: two rooms paying the same device at once are
+ * serialised here and nowhere else.
+ */
+export function applyMatchResult(profile: StoredProfile, r: MatchResult, nowMs = Date.now()): AppliedRewards {
   const p = profile.progress;
   const s = profile.stats;
+  const e = profile.economy;
+  // `Math.max(0, NaN)` is NaN, and a NaN balance serialises to `null` and never
+  // comes back. Both amounts are money; coerce before, not after.
+  const grantedXp = Math.max(0, Math.round(num(r.xp, 0)));
+  const grantedScrap = Math.max(0, Math.round(num(r.scrap, 0)));
   p.kills += r.kills;
   p.deaths += r.deaths;
   p.gamesPlayed += 1;
@@ -334,9 +504,12 @@ export function applyMatchResult(profile: StoredProfile, r: MatchResult, nowMs =
   p.blocksPlaced += r.blocksPlaced;
   p.blocksBroken += r.blocksBroken;
   p.secondsPlayed += r.seconds;
-  p.xp += Math.max(0, Math.round(r.xp));
+  p.xp += grantedXp;
   p.level = levelForXp(p.xp);
   p.favouriteWeapon = r.favouriteWeapon;
+
+  e.scrap = Math.min(e.scrap + grantedScrap, MAX_SCRAP_BALANCE);
+  e.lifetimeScrap = Math.min(e.lifetimeScrap + grantedScrap, MAX_SCRAP_BALANCE);
 
   s.matches += 1;
   if (r.won) s.wins += 1;
@@ -355,7 +528,7 @@ export function applyMatchResult(profile: StoredProfile, r: MatchResult, nowMs =
   }
   s.lastSeenMs = nowMs;
   profile.updatedMs = nowMs;
-  return profile;
+  return { profile, xp: grantedXp, scrap: grantedScrap };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -642,7 +815,9 @@ export class JsonFileStore implements PersistenceStore {
         await fs.mkdir(this.shardPath(id), { recursive: true });
         const path = this.filePath(id);
         const tmp = `${path}.tmp`;
-        await fs.writeFile(tmp, JSON.stringify(p), 'utf8');
+        // `serialiseProfile`, not the profile: the downgrade guard's carried
+        // keys have to go back to the top level or they are lost on this write.
+        await fs.writeFile(tmp, JSON.stringify(serialiseProfile(p)), 'utf8');
         await fs.rename(tmp, path);
       } catch {
         this.degraded = true;
