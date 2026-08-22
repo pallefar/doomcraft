@@ -1194,8 +1194,13 @@ export class Room implements NetHost {
       m.baseDeaths = 0;
       m.joinedMs = this.elapsedMs;
       this.sim.spawnPlayer(m.player);
-      this.addSessionParticipant(m);
     }
+    // A SECOND pass, and it has to be second. `roundStillOpenToJoiners` reads
+    // the top score across the whole room, so enrolling inside the loop above
+    // would ask that question while some players still carried last round's
+    // kills — and the first player in the map would be refused a round they
+    // are plainly in.
+    for (const m of this.members.values()) this.addSessionParticipant(m);
     this.net.broadcastChat(0, ChatChannel.SYSTEM,
       this.round === 1 ? 'Match live. Go.' : `Round ${this.round}. New world.`);
   }
@@ -1404,6 +1409,15 @@ export class Room implements NetHost {
      * throws, that player's round is gone. Logged, not retried — a retry would
      * need a two-phase settle the ledger does not have.
      */
+    // A device this round never enrolled is owed nothing — but ASK THE LEDGER,
+    // do not ask the guard. The guard would answer NOT_A_PARTICIPANT and flag
+    // it `violation: true`, which is exactly right for a forged submission and
+    // exactly wrong for somebody who walked in after the match was decided. The
+    // audit ring is for suspicion; filling it with honest latecomers is how a
+    // security log stops being read.
+    const record = this.guard.ledger.get(this.sessionId);
+    if (record === null || !record.participants.has(deviceId)) return;
+
     const verdict = this.guard.submit(
       this.buildRoundSubmission(member, deviceId, won, kills, deaths, seconds),
     );
@@ -1431,6 +1445,12 @@ export class Room implements NetHost {
    * a line that names a mode and a reward in the same breath, because that is
    * how a policy leaks out of the table one convenient `if` at a time.
    * -------------------------------------------------------------- */
+
+  /**
+   * How much of a round may have run before a newcomer is playing somebody
+   * else's match. Half of it: four minutes of the eight-minute clock.
+   */
+  private static readonly LATE_JOIN_LOCKOUT_MS = MATCH_DURATION_MS * 0.5;
 
   /**
    * One player's claim on the round in progress, as the room tallied it.
@@ -1475,12 +1495,31 @@ export class Room implements NetHost {
   /**
    * May somebody arriving right now still earn anything from this round?
    *
-   * Today the only answer is "not once it is over" — walking in during the end
-   * screen is not playing the match. The real late-join lockout is a separate
-   * change and belongs here when it lands.
+   * The third of the four anti-farm rules in `docs/ECONOMY.md`: no reward from
+   * a match you joined after it was decided. It is a refusal to ENROL rather
+   * than a refusal to pay, because that is the only shape the ledger can hold —
+   * `SessionRecord.participants` is a bare set of device ids with no join time,
+   * so by the time a submission arrives the room is the only thing left that
+   * remembers when the player walked in.
+   *
+   * Refusing the enrolment is also the kinder failure. A device outside the
+   * participant set never reaches `guard.submit` at all (see `persistMember`),
+   * so a latecomer costs the audit ring nothing.
+   *
+   * The player still plays, still appears on the scoreboard, and is enrolled
+   * normally by the next `beginRound`. They just do not get paid for a match
+   * whose result was settled before they arrived.
    */
   private roundStillOpenToJoiners(): boolean {
-    return this.state !== RoundState.ENDED;
+    // Over is over: the eight-second end screen is not the match.
+    if (this.state === RoundState.ENDED) return false;
+    if (this.timeLeftMs <= 0) return false;
+    // Past the halfway mark there is not enough round left to have played it.
+    if (this.elapsedMs - this.roundStartMs > Room.LATE_JOIN_LOCKOUT_MS) return false;
+    // And a match somebody has already won is decided whatever the clock says.
+    let leader = 0;
+    for (const m of this.members.values()) if (m.player.kills > leader) leader = m.player.kills;
+    return leader < SCORE_LIMIT;
   }
 
   /* -------------------------------------------------------------- *

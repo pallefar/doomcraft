@@ -40,7 +40,14 @@ export const PERSIST_VERSION = 4;
 
 /** Hard ceiling on a stored balance. A bug, not a player, is what hits this. */
 export const MAX_SCRAP_BALANCE = 1_000_000_000;
-/** Ceilings on the per-day earn buckets. The metering that fills them lands next. */
+/**
+ * Ceilings on the per-day earn buckets — the second of the four anti-farm rules
+ * in `docs/ECONOMY.md`, filled by `meterReward` below.
+ *
+ * Roughly fifteen honest Deathmatch rounds' worth of XP. A player who reaches
+ * either of these has had a very long day; a script reaches them by lunchtime
+ * and then stops being worth running.
+ */
 export const DAY_XP_CAP = 6_000;
 export const DAY_SCRAP_CAP = 800;
 
@@ -161,7 +168,11 @@ export interface MatchResult {
   favouriteWeapon: number;
 }
 
-/** What actually landed in a profile. `xp`/`scrap` are post-clamp amounts. */
+/**
+ * What actually landed in a profile. `xp`/`scrap` are the amounts AFTER the
+ * per-day cap and the diminishing-returns ladder, so they are what a client
+ * may be told it earned — never what the room asked for.
+ */
 export interface AppliedRewards {
   profile: StoredProfile;
   xp: number;
@@ -480,6 +491,78 @@ function sanitiseBindings(raw: unknown): Record<string, string> {
   return out;
 }
 
+/* ------------------------------------------------------------------------ *
+ * Anti-farm, part two: what a day may be worth
+ *
+ * These run inside `applyMatchResult`, which is the only code in the server
+ * that both holds the profile and runs under `store.update`'s per-device lock.
+ * Anywhere else — in the room, in the guard — two rooms paying the same device
+ * at the same moment would read the same bucket and both write it.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Diminishing returns, by matches already paid for today.
+ *
+ * The index is the count BEFORE this match, so the first five rounds of a day
+ * are worth full price and the eleventh is worth a quarter. The floor is 0.15
+ * and never 0: a player who has been at it all day should still see the number
+ * move, because a reward that silently becomes zero reads as a broken game
+ * rather than as a limit.
+ */
+export const DR_LADDER: readonly number[] = Object.freeze([
+  1, 1, 1, 1, 1, 0.8, 0.8, 0.6, 0.6, 0.4, 0.25, 0.15,
+]);
+
+/**
+ * The day the earn buckets belong to, as UTC 'YYYY-MM-DD'.
+ *
+ * UTC, stated out loud: a local-timezone day is a second clock the server does
+ * not control, and a player who can choose their own timezone can choose their
+ * own midnight. One boundary, the same one for everybody.
+ */
+export function utcDay(nowMs: number): string {
+  return new Date(nowMs).toISOString().slice(0, 10);
+}
+
+/** Start a new day's buckets if this match is the first one after midnight. */
+export function rollDayBucket(e: StoredEconomy, nowMs: number): void {
+  const day = utcDay(nowMs);
+  if (e.day === day) return;
+  e.day = day;
+  e.dayXp = 0;
+  e.dayScrap = 0;
+  e.dayMatches = 0;
+}
+
+/**
+ * Meter one match's reward through today's bucket, and record what it used.
+ *
+ * Returns what may actually be banked. Both amounts are floored at 0 and capped
+ * by whatever is left of the day, so the caller can add the result to a balance
+ * without checking anything.
+ *
+ * A match worth nothing before metering — too short, idle, or a mode the trust
+ * table pays no currency for — does not advance the ladder. Otherwise browsing
+ * three dead rooms would cost a player the front of their day for free, which
+ * is a rule that only ever punishes the honest.
+ */
+export function meterReward(
+  e: StoredEconomy, xp: number, scrap: number, nowMs: number,
+): { xp: number; scrap: number } {
+  rollDayBucket(e, nowMs);
+  const wantXp = Math.max(0, num(xp, 0));
+  const wantScrap = Math.max(0, num(scrap, 0));
+  if (wantXp <= 0 && wantScrap <= 0) return { xp: 0, scrap: 0 };
+
+  const f = DR_LADDER[Math.min(e.dayMatches, DR_LADDER.length - 1)] ?? 1;
+  const gx = Math.min(Math.round(wantXp * f), Math.max(0, DAY_XP_CAP - e.dayXp));
+  const gs = Math.min(Math.round(wantScrap * f), Math.max(0, DAY_SCRAP_CAP - e.dayScrap));
+  e.dayXp += gx;
+  e.dayScrap += gs;
+  e.dayMatches += 1;
+  return { xp: gx, scrap: gs };
+}
+
 /**
  * Fold one match's results into a profile, and say what actually landed.
  *
@@ -494,8 +577,12 @@ export function applyMatchResult(profile: StoredProfile, r: MatchResult, nowMs =
   const e = profile.economy;
   // `Math.max(0, NaN)` is NaN, and a NaN balance serialises to `null` and never
   // comes back. Both amounts are money; coerce before, not after.
-  const grantedXp = Math.max(0, Math.round(num(r.xp, 0)));
-  const grantedScrap = Math.max(0, Math.round(num(r.scrap, 0)));
+  // Per-day caps and diminishing returns, applied here because here is where
+  // the lock is. `meterReward` also coerces: `Math.max(0, NaN)` is NaN, a NaN
+  // balance serialises to `null`, and `null` never comes back as a number.
+  const metered = meterReward(e, num(r.xp, 0), num(r.scrap, 0), nowMs);
+  const grantedXp = Math.max(0, Math.round(metered.xp));
+  const grantedScrap = Math.max(0, Math.round(metered.scrap));
   p.kills += r.kills;
   p.deaths += r.deaths;
   p.gamesPlayed += 1;

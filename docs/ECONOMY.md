@@ -46,6 +46,29 @@ like a paycheck. Two keeps progression legible.
 Anti-farm: per-match and per-day caps, diminishing returns on repeat activity, zero reward from a
 match a player joins after it is decided, and idle detection.
 
+**As built.** Four rules in four files, each one where its facts are — a rule cannot be enforced in
+a place that does not know the answer, and putting them together would mean passing the profile into
+the room or the round state into the store.
+
+| Rule | Numbers | Where |
+|---|---|---|
+| Per-match ceiling | 900 XP, 120 Scrap | `server/src/reward.ts` — the only place that knows what one round did |
+| Minimum paid duration | 30 s | `server/src/reward.ts` — same fact |
+| Idle detection | zero kills **and** deaths **and** damage **and** blocks placed **and** blocks broken pays nothing, whatever the clock says | `server/src/reward.ts` `playedIdle` |
+| Per-day caps + diminishing returns | 6 000 XP / 800 Scrap a day; ladder `1×5 → 0.8 → 0.6 → 0.4 → 0.25 → 0.15`, indexed by matches already paid today, UTC midnight | `server/src/persistence.ts` `meterReward`, inside `applyMatchResult` — the only code that holds the profile **and** runs under the per-device lock |
+| No reward for a match joined after it was decided | after the score limit is reached, past half the round, or once the round is over | `server/src/room.ts` `roundStillOpenToJoiners` — expressed as a refusal to **enrol**, because `SessionRecord.participants` has no join timestamp |
+| One payout per device per round | — | the entitlement ledger's `settled` set |
+
+The floor of the diminishing-returns ladder is 0.15 and never 0: a reward that silently becomes
+nothing reads as a broken game rather than as a limit. A match that was worth nothing before
+metering does not spend a rung, so browsing dead rooms costs a player nothing.
+
+Idle detection is also what makes the unfixed Builder/Horde round-timer defect
+(`docs/BUGS-FOUND.md` §4) safe to leave alone: those rooms run an eight-minute Deathmatch clock
+nobody asked for, and an AFK player in one now earns exactly zero instead of a full round's XP.
+Deaths count as activity on purpose — being repeatedly killed is playing badly, not idling, and a
+currency that punishes it teaches people to hide.
+
 ## Items
 
 | Kind | What it is | Tradable |

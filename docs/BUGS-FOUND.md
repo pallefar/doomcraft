@@ -62,13 +62,19 @@ Quest → menu → Horde, asserting the body's own cells are not solid.
 
 ## 4. Builder and Horde rooms run a Deathmatch round timer, pay for idling, and then regenerate the world under you — MEDIUM, NOT FIXED
 
-**Found while wiring the entitlement guard into `Room` (A1 task 1). Deliberately left alone:
-changing round-timer semantics is a much larger change than the one it was found inside.**
+**Found while wiring the entitlement guard into `Room` (A1 task 1). STILL NOT FIXED after A1 task 3
+(anti-farm), and deliberately so: changing round-timer semantics is a much larger change than either
+of the ones it was found inside, and it would take the entitlement ledger's only session boundary
+with it. What task 3 did instead was stop the defect paying anybody — see below.**
 
-**Mechanism.** `Room.updateRound` (`server/src/room.ts`) decrements `timeLeftMs` on every tick in
-the `LIVE` branch with **no reference to `plan.runRoundTimer`**. Only Deathmatch declares
-`SYS_ROUND_TIMER` (`shared/src/modes.ts`), and `plan.runRoundTimer` is read in exactly two other
-places — the `ModeAction.RESTART` handler and the mode-context sender — never by the round clock.
+**Mechanism.** `Room.updateRound` (`server/src/room.ts:1233`) decrements `timeLeftMs` on every tick
+in the `LIVE` branch (`room.ts:1244`) with **no reference to `plan.runRoundTimer`**, and calls
+`endRound('time')` at zero (`room.ts:1248`). The `ENDED` branch then restarts the round eight
+seconds later (`room.ts:1252` → `beginRound(true)` at `room.ts:1149`), which regenerates the terrain
+at `room.ts:1164` (`this.world.reset(this.seed)`). Only Deathmatch declares `SYS_ROUND_TIMER`
+(`shared/src/modes.ts:449`), and `plan.runRoundTimer` is read in exactly two other places —
+`room.ts:508` (the `ModeAction.RESTART` handler) and `room.ts:932` (the mode-context sender) —
+never by the round clock.
 
 So a Builder world or a Horde run with one human in it:
 
@@ -84,10 +90,23 @@ TRADE_UNLOCK` and explicitly no Scrap and no drops, precisely because "Builder h
 blocks and has no failure state, so any per-action payout is an idle farm". But XP for standing
 still is still XP for standing still.
 
-**Not the fix that was applied.** A1 handles idle farming with per-day caps, diminishing returns
-and a minimum paid duration rather than by touching the round clock, because gating `updateRound`
-on `plan.runRoundTimer` changes what a Horde room *is* (Horde would then have no round boundary at
-all, and `endRound` is the only thing that closes a ledger session).
+**Not the fix that was applied — and what was.** A1 task 3 leaves the clock exactly where it is and
+refuses to pay for the thing the clock enables. Four rules, none of which touches round semantics:
+
+| Rule | Where it lives |
+|---|---|
+| A round in which the player did nothing at all — no kills, no deaths, no damage, no blocks placed or broken — is worth zero however long it ran. **This is the one that closes the Builder/Horde AFK farm.** | `server/src/reward.ts:125` `playedIdle`, applied at `reward.ts:137` `roundPays` |
+| A round shorter than 30 s is worth zero. | `server/src/reward.ts:109` `MIN_PAID_SECONDS` |
+| Per-match ceilings of 900 XP / 120 Scrap. | `server/src/reward.ts:98` |
+| Per-day caps and a diminishing-returns ladder, metered under the profile lock. | `server/src/persistence.ts:508` `DR_LADDER`, `:545` `meterReward` |
+
+So a Builder player who stands still for the whole unasked-for eight minutes now earns nothing at
+all rather than a full round's XP, and the world still gets regenerated under them. **The bad half
+of this defect — losing what you built to a timer nobody set — is untouched.**
+
+Gating `updateRound` on `plan.runRoundTimer` is still the real fix and is still not taken, because
+it changes what a Horde room *is*: Horde would then have no round boundary at all, and `endRound`
+is the only thing that closes a ledger session.
 
 **Fix, when someone takes it:** gate both the countdown and the `beginRound(true)` restart on
 `plan.runRoundTimer`, and give the modes that opt out an explicit session-close path so the

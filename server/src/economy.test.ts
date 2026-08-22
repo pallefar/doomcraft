@@ -31,6 +31,7 @@ import {
   SCRAP_PER_KILL,
   SCRAP_PER_MINUTE,
   SCRAP_PER_WIN,
+  SCORE_LIMIT,
   TICK_MS,
   XP_PER_KILL,
   XP_PER_MINUTE,
@@ -44,6 +45,7 @@ import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { Room, END_SCREEN_MS } from './room.js';
 import {
   EntitlementGuard,
+  MAX_XP_PER_MATCH,
   RejectCode,
   SubmitterKind,
   emptyStats,
@@ -52,8 +54,25 @@ import {
 } from './entitlementGuard.js';
 import { DEFAULT_JOIN, resolveModePlan } from './modes.js';
 import type { ModeSimPlan } from './modes.js';
-import { JsonFileStore, MemoryStore, applyMatchResult, createProfile } from './persistence.js';
-import { buildSubmission } from './reward.js';
+import {
+  DAY_SCRAP_CAP,
+  DAY_XP_CAP,
+  DR_LADDER,
+  JsonFileStore,
+  MemoryStore,
+  applyMatchResult,
+  createProfile,
+  defaultEconomy,
+  meterReward,
+  utcDay,
+} from './persistence.js';
+import {
+  MATCH_SCRAP_CAP,
+  MATCH_XP_CAP,
+  MIN_PAID_SECONDS,
+  buildSubmission,
+  playedIdle,
+} from './reward.js';
 import type { NetTransport } from './net.js';
 import type { PlayerEntity } from './sim.js';
 
@@ -197,8 +216,16 @@ function expectedScrap(kills: number, won: boolean, ticks: number): number {
 
 const DEVICE = 'device-aaaa0001';
 const OTHER_DEVICE = 'device-bbbb0002';
-/** Ticks of play before the clock is forced out. One more tick ends the round. */
-const PLAY_TICKS = 40;
+const THIRD_DEVICE = 'device-cccc0003';
+/**
+ * Ticks of play before the clock is forced out. One more tick ends the round.
+ *
+ * Derived from `MIN_PAID_SECONDS` rather than written as a number, because a
+ * round shorter than the floor is worth nothing and every payout test here
+ * would go quietly to zero — passing its "no money" assertions for a reason
+ * that has nothing to do with what it is testing. Twenty ticks of headroom.
+ */
+const PLAY_TICKS = Math.ceil((MIN_PAID_SECONDS * 1000) / TICK_MS) + 20;
 const KILLS = 7;
 
 /* ------------------------------------------------------------------------ *
@@ -579,5 +606,368 @@ describe('Scrap', () => {
     expect(filtered.rejectedFields).toContain('economy.scrap');
     expect((filtered.accepted.economy as Record<string, unknown>).scrap).toBeUndefined();
     expect(filtered.violation).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * 6. Anti-farm
+ *
+ * `docs/ECONOMY.md` lists four rules: per-match and per-day caps, diminishing
+ * returns on repeat activity, zero reward from a match joined after it was
+ * decided, and idle detection. They live in four files, and the tests below are
+ * grouped the same way — a rule and its home, so that moving one moves both.
+ *
+ * The load-bearing one is "a player who joins after the score limit is
+ * reached". Delete the `leader < SCORE_LIMIT` clause in `roundStillOpenToJoiners`
+ * and it pays that player a full round.
+ * ------------------------------------------------------------------------ */
+
+/** One match's worth of result, so the arithmetic tests do not build it twice. */
+function matchResultOf(xp: number, scrap: number) {
+  return {
+    kills: 4, deaths: 2, won: true, bestStreak: 2, damageDealt: 300,
+    blocksPlaced: 0, blocksBroken: 0, seconds: 300,
+    xp, scrap, favouriteWeapon: 1,
+  };
+}
+
+describe('the day a player has already had', () => {
+  /** Midday, so nothing in these tests is accidentally near a boundary. */
+  const NOON = Date.UTC(2026, 7, 22, 12, 0, 0);
+
+  it('pays the eleventh match of the day a fraction of the first', () => {
+    const fresh = defaultEconomy();
+    const first = meterReward(fresh, 500, 60, NOON);
+    expect(first.xp).toBe(500);
+    expect(first.scrap).toBe(60);
+    expect(fresh.dayMatches).toBe(1);
+
+    const worn = { ...defaultEconomy(), day: utcDay(NOON), dayMatches: 10 };
+    const eleventh = meterReward(worn, 500, 60, NOON);
+
+    // The ladder's eleventh rung is 0.25, and it is a rung rather than a curve
+    // so that the number is arguable in a design review rather than emergent.
+    expect(DR_LADDER[10]).toBe(0.25);
+    expect(eleventh.xp).toBe(125);
+    expect(eleventh.scrap).toBe(15);
+
+    // Never zero. A reward that silently becomes nothing reads as a bug.
+    const exhausted = { ...defaultEconomy(), day: utcDay(NOON), dayMatches: 999 };
+    expect(meterReward(exhausted, 500, 60, NOON).xp).toBeGreaterThan(0);
+  });
+
+  it('treats the day cap as a ceiling, not as a multiplier', () => {
+    const e = { ...defaultEconomy(), day: utcDay(NOON), dayXp: DAY_XP_CAP - 10 };
+
+    // Exactly the ten that were left, not a proportion of them.
+    expect(meterReward(e, 500, 0, NOON).xp).toBe(10);
+    expect(e.dayXp).toBe(DAY_XP_CAP);
+
+    // And then nothing, for the rest of the day.
+    expect(meterReward(e, 500, 0, NOON).xp).toBe(0);
+    expect(e.dayXp).toBe(DAY_XP_CAP);
+
+    const scrappy = { ...defaultEconomy(), day: utcDay(NOON), dayScrap: DAY_SCRAP_CAP - 3 };
+    expect(meterReward(scrappy, 0, 500, NOON).scrap).toBe(3);
+  });
+
+  it('rolls the bucket at UTC midnight, and never grants a negative', () => {
+    const beforeMidnight = Date.UTC(2026, 7, 22, 23, 59, 30);
+    const afterMidnight = Date.UTC(2026, 7, 23, 0, 0, 30);
+
+    const e = defaultEconomy();
+    meterReward(e, 500, 60, beforeMidnight);
+    expect(e.day).toBe('2026-08-22');
+    expect(e.dayXp).toBe(500);
+    expect(e.dayMatches).toBe(1);
+
+    meterReward(e, 500, 60, afterMidnight);
+    // A new day: same bucket object, counters back to this match alone. UTC on
+    // purpose — a local day is a clock the player picks.
+    expect(e.day).toBe('2026-08-23');
+    expect(e.dayXp).toBe(500);
+    expect(e.dayMatches).toBe(1);
+
+    // A bucket that somehow already sits past the cap (a rolled-back build with
+    // a higher one) grants zero, not a negative that would drain a balance.
+    const over = { ...defaultEconomy(), day: utcDay(NOON), dayXp: DAY_XP_CAP + 500 };
+    expect(meterReward(over, 500, 0, NOON).xp).toBe(0);
+    expect(over.dayXp).toBe(DAY_XP_CAP + 500);
+  });
+
+  it('meters inside the profile writer, not in a helper the writer never calls', () => {
+    // The unit tests above would pass unchanged if `applyMatchResult` had never
+    // heard of `meterReward`. This is the one that says the wiring exists.
+    const profile = createProfile(DEVICE);
+    profile.economy.day = utcDay(NOON);
+    profile.economy.dayMatches = 10;
+
+    const applied = applyMatchResult(profile, matchResultOf(400, 40), NOON);
+
+    expect(applied.xp).toBe(100);
+    expect(applied.scrap).toBe(10);
+    expect(profile.progress.xp).toBe(100);
+    expect(profile.economy.scrap).toBe(10);
+    expect(profile.economy.lifetimeScrap).toBe(10);
+    expect(profile.economy.dayMatches).toBe(11);
+  });
+
+  it('does not spend a rung of the ladder on a match that paid nothing', () => {
+    // Browsing three dead rooms must not cost a player the front of their day.
+    const e = defaultEconomy();
+    expect(meterReward(e, 0, 0, NOON)).toEqual({ xp: 0, scrap: 0 });
+    expect(meterReward(e, 0, 0, NOON)).toEqual({ xp: 0, scrap: 0 });
+    expect(e.dayMatches).toBe(0);
+    expect(e.day).toBe(utcDay(NOON));
+    expect(meterReward(e, 500, 60, NOON).xp).toBe(500);
+  });
+});
+
+describe('one round, as a ceiling', () => {
+  it('caps what a single match can be worth before the guard ever sees it', () => {
+    const silly = buildSubmission({
+      sessionId: 's#1', deviceId: DEVICE, won: true,
+      kills: 500, deaths: 0, seconds: 8 * 60,
+      bestStreak: 500, damageDealt: 99_999, blocksPlaced: 0, blocksBroken: 0,
+      favouriteWeapon: 1,
+    });
+    expect(silly.xp).toBe(MATCH_XP_CAP);
+    expect(silly.scrap).toBe(MATCH_SCRAP_CAP);
+    // Still an honest report of what happened — the cap is on the money.
+    expect(silly.stats?.kills).toBe(500);
+
+    // And the guard's own ceiling is still behind it, an order of magnitude up,
+    // where hitting it means a bug rather than a good match. This half is
+    // characterisation of code that predates this change: it cannot be made red
+    // by reverting anything here.
+    const sessionId = 'ceiling#1';
+    const guard = new EntitlementGuard(() => 1_000);
+    guard.open({
+      sessionId, modeId: ModeId.DEATHMATCH,
+      origin: SessionOrigin.SERVER_MATCHMAKER, serverIntent: MatchType.PUBLIC,
+    });
+    guard.ledger.addParticipant(sessionId, DEVICE);
+    const verdict = guard.submit({
+      sessionId, deviceId: DEVICE, submittedBy: SubmitterKind.ROOM_SIM,
+      xp: 1e9, stats: { ...emptyStats(), kills: 1 },
+    });
+    expect(verdict.clamped).toContain('xp');
+    expect(verdict.granted.xp).toBe(MAX_XP_PER_MATCH);
+  });
+});
+
+describe('a match that was already decided', () => {
+  /**
+   * THE RED-FIRST ONE.
+   *
+   * A player walks in on a match somebody has already won. The room refuses to
+   * ENROL them — the ledger's participant set has no join time, so the room is
+   * the only thing that still remembers when they arrived, and the decision has
+   * to be taken at the door.
+   *
+   * The winner then quits, which puts the top score back under the limit and
+   * lets the clock run on, so the latecomer plays a full paid round's worth of
+   * time and racks up kills. They still earn nothing. That sequence is the
+   * whole point: it is not the length of their round that stops the payout, and
+   * it is not the end of the match — it is the answer given at the door.
+   */
+  it('pays a player who joined after the score limit was reached nothing at all', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard });
+
+    const regular = join(room, 'Marine', DEVICE);
+    const winner = join(room, 'Champ', THIRD_DEVICE);
+    run(room, [regular, winner], PLAY_TICKS);
+
+    regular.player.kills = 3;
+    winner.player.kills = SCORE_LIMIT;
+
+    // Not a single tick between the score limit landing and the door opening.
+    const late = join(room, 'Latecomer', OTHER_DEVICE);
+    const sid = `${room.name}#${room.round}`;
+    expect(guard.ledger.get(sid)?.participants.has(OTHER_DEVICE)).toBe(false);
+    expect(guard.ledger.get(sid)?.participants.has(DEVICE)).toBe(true);
+
+    // The winner rage-quits. Top score falls back under the limit, the round
+    // carries on, and the latecomer gets a full round of play and five kills.
+    room.leave(winner.conn);
+    late.player.kills = 5;
+    run(room, [regular, late], PLAY_TICKS);
+    endRoundNow(room, [regular, late]);
+    await settled(store, DEVICE);
+    await settled(store, OTHER_DEVICE);
+
+    const lateProfile = await store.ensure(OTHER_DEVICE);
+    expect(lateProfile.progress.gamesPlayed).toBe(0);
+    expect(lateProfile.progress.xp).toBe(0);
+    expect(lateProfile.progress.kills).toBe(0);
+    expect(lateProfile.economy.scrap).toBe(0);
+
+    // Not a dead room: the player who was there from the start was paid, and
+    // the audit ring is empty because a latecomer is not a suspect.
+    const paidProfile = await store.ensure(DEVICE);
+    expect(paidProfile.progress.gamesPlayed).toBe(1);
+    expect(paidProfile.progress.xp).toBeGreaterThan(0);
+    expect(guard.recent()).toEqual([]);
+  });
+
+  it('refuses the door once too much of the round has run', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard });
+
+    const regular = join(room, 'Marine', DEVICE);
+    regular.player.kills = 1;
+    // Past the half-time lockout: four minutes of the eight-minute clock, and
+    // nobody is anywhere near the score limit.
+    const lockoutTicks = Math.ceil((MATCH_DURATION_MS * 0.5) / TICK_MS) + 1;
+    run(room, [regular], lockoutTicks);
+
+    const late = join(room, 'Latecomer', OTHER_DEVICE);
+    const sid = `${room.name}#${room.round}`;
+    expect(guard.ledger.get(sid)?.participants.has(OTHER_DEVICE)).toBe(false);
+
+    late.player.kills = 2;
+    endRoundNow(room, [regular, late]);
+    await settled(store, OTHER_DEVICE);
+
+    expect((await store.ensure(OTHER_DEVICE)).progress.gamesPlayed).toBe(0);
+    // And the next round takes them in normally — this is a lockout, not a ban.
+    run(room, [regular, late], Math.ceil(END_SCREEN_MS / TICK_MS) + 2);
+    expect(room.round).toBe(2);
+    expect(guard.ledger.get(`${room.name}#2`)?.participants.has(OTHER_DEVICE)).toBe(true);
+  });
+});
+
+describe('the round after the one that was decided', () => {
+  /**
+   * `beginRound` resets every score and then enrols every member, and those
+   * have to be two passes over the map rather than one. In a single pass the
+   * first player is enrolled while the LAST round's kills are still sitting on
+   * everybody after them — so the player who did not win the previous round is
+   * refused the next one, silently, forever, in any room where somebody hits
+   * the score limit.
+   */
+  it('enrols everybody in the next round, not just the ones it has already reset', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard });
+
+    const first = join(room, 'Marine', DEVICE);
+    const champ = join(room, 'Champ', OTHER_DEVICE);
+    run(room, [first, champ], PLAY_TICKS);
+
+    // A win on score, which is the case that leaves a big number on a player
+    // when the next round opens.
+    champ.player.kills = SCORE_LIMIT;
+    run(room, [first, champ], 1);
+    expect(room.matchOver).toBe(true);
+
+    run(room, [first, champ], Math.ceil(END_SCREEN_MS / TICK_MS) + 2);
+    expect(room.round).toBe(2);
+
+    const next = guard.ledger.get(`${room.name}#2`);
+    expect(next?.participants.has(OTHER_DEVICE)).toBe(true);
+    expect(next?.participants.has(DEVICE)).toBe(true);
+  });
+});
+
+describe('a round nobody really played', () => {
+  it('records a five-second visit as a match and pays nothing for it', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard });
+
+    const client = join(room, 'Tourist', DEVICE);
+    client.player.kills = 3;
+    run(room, [client], 100);            // five seconds
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+
+    const profile = await store.ensure(DEVICE);
+    // The match happened and the profile says so — the kills are real and the
+    // stats are the server's own. What it is not is worth anything.
+    expect(profile.progress.gamesPlayed).toBe(1);
+    expect(profile.progress.kills).toBe(3);
+    expect(profile.progress.xp).toBe(0);
+    expect(profile.economy.scrap).toBe(0);
+    // And the round did not burn a rung of the day's ladder either.
+    expect(profile.economy.dayMatches).toBe(0);
+  });
+
+  /**
+   * IDLE DETECTION — the fourth item on `docs/ECONOMY.md`'s anti-farm list, and
+   * the reason a Builder or a Horde room can keep its unasked-for eight-minute
+   * round timer (`docs/BUGS-FOUND.md` §4) without becoming an AFK farm. The
+   * clock is not the thing being fixed; paying for idleness is.
+   */
+  it('pays nothing for a full-length round in which the player did nothing', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard });
+
+    const client = join(room, 'Statue', DEVICE);
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+
+    // The premise, asserted rather than assumed: this player really did nothing
+    // the simulation could see. Without this the test would pass for any reason
+    // at all, including the payout path being broken outright.
+    expect(client.player.kills).toBe(0);
+    expect(client.player.deaths).toBe(0);
+    expect(client.player.damageDealt).toBe(0);
+    expect(client.player.blocksPlaced).toBe(0);
+    expect(client.player.blocksBroken).toBe(0);
+
+    const profile = await store.ensure(DEVICE);
+    expect(profile.progress.gamesPlayed).toBe(1);
+    expect(profile.progress.secondsPlayed).toBeGreaterThanOrEqual(MIN_PAID_SECONDS);
+    expect(profile.progress.xp).toBe(0);
+    expect(profile.economy.scrap).toBe(0);
+
+    // Dying is not idling. A player who only ever gets shot has played.
+    expect(playedIdle({
+      sessionId: 's', deviceId: DEVICE, won: false,
+      kills: 0, deaths: 4, seconds: 300, bestStreak: 0,
+      damageDealt: 0, blocksPlaced: 0, blocksBroken: 0, favouriteWeapon: 1,
+    })).toBe(false);
+    // Placing one block is not idling either — that is Builder's whole verb.
+    expect(playedIdle({
+      sessionId: 's', deviceId: DEVICE, won: false,
+      kills: 0, deaths: 0, seconds: 300, bestStreak: 0,
+      damageDealt: 0, blocksPlaced: 1, blocksBroken: 0, favouriteWeapon: 1,
+    })).toBe(false);
+  });
+});
+
+describe('one payout per device per round', () => {
+  /**
+   * The fourth rule, and the only one this change did not have to build: the
+   * ledger has held it since the guard was wired in (`settled`, and the
+   * red-first proof is "pays the same device once per round" above). Asserted
+   * here so the rule is stated where the other three are.
+   */
+  it('is written in the ledger, and a second claim on the same round is refused', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard });
+
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+    run(room, [client], PLAY_TICKS);
+    const sid = `${room.name}#${room.round}`;
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+
+    expect(guard.ledger.get(sid)?.settled.has(DEVICE)).toBe(true);
+
+    const again = guard.submit({
+      sessionId: sid, deviceId: DEVICE, submittedBy: SubmitterKind.ROOM_SIM,
+      xp: 500, scrap: 50, stats: { ...emptyStats(), kills: KILLS },
+    });
+    expect(again.accepted).toBe(false);
+    expect(toMatchResult(again)).toBeNull();
   });
 });
