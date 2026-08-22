@@ -1,6 +1,7 @@
 node_modules/
 dist/
 tools/.profile/
+tools/.profile-*/        # capture-mc.mjs etc. create sibling profiles; these hold Cookies + Login Data
 ref/**/video-*/
 shots/
 *.log
