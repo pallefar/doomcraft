@@ -62,7 +62,18 @@ import {
   joinRequestFromQuery,
 } from './directory.js';
 import { EntitlementGuard, guardProfileWrite } from './entitlementGuard.js';
-import { AdminGate, AdminVerdict } from './adminAuth.js';
+import { AdminGate, AdminVerdict, AttemptThrottle, type AdminDecision } from './adminAuth.js';
+import {
+  AccountStore,
+  NAME_MAX,
+  NAME_MIN,
+  PASSPHRASE_MIN,
+  SessionTable,
+  expiredSessionCookie,
+  publicAccount,
+  sessionCookie,
+  sessionCredential,
+} from './accounts.js';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
 import {
@@ -86,7 +97,7 @@ import {
   redactProfileKey,
   requireMutationFields,
 } from './adminAudit.js';
-import { ADMIN_CONSOLE_HTML } from './admin/console.js';
+import { ADMIN_CONSOLE_HTML, adminSignInHtml } from './admin/console.js';
 import {
   connectionRollup,
   consoleCapabilities,
@@ -504,6 +515,39 @@ const store: PersistenceStore = new JsonFileStore(dataRoot);
 const bootMs = Date.now();
 
 /**
+ * THE ACCOUNTS, beside the profiles and under the same `DOOMCRAFT_DATA`.
+ *
+ * `server/src/accounts.ts` holds the rule that matters: the FIRST account
+ * created on this host becomes its owner, decided under the store's write lock
+ * so two signups in the same tick cannot both win it. Everything else here is
+ * plumbing.
+ *
+ * Loaded eagerly, before the first request can arrive, for one reason: the
+ * bootstrap decision reads `ownerCount()`, and an `AccountStore` that has not
+ * read its file yet reports zero. `signup()` awaits `ready()` inside the lock
+ * as well, so this is belt and braces rather than the only guard — but the
+ * `/admin` page also asks `ownerCount()` and would otherwise offer to create an
+ * owner on a host that already has one.
+ */
+const accounts = new AccountStore(dataRoot, { clock: () => Date.now() });
+void accounts.ready();
+
+/**
+ * Sessions. IN MEMORY, and they die with the process — see `accounts.ts` and
+ * the line the console prints saying so. One box, one operator; a session store
+ * on disk is a credential at rest with no expiry anybody can see.
+ */
+const sessions = new SessionTable();
+
+/**
+ * The failure budget for `/api/auth/signup` and `/api/auth/signin`, with the
+ * same numbers as the admin bearer's (20 a minute per client address) and the
+ * opposite ordering — see `AttemptThrottle` for why a scrypt route must refuse
+ * before it hashes and a sha-256 compare need not.
+ */
+const authThrottle = new AttemptThrottle();
+
+/**
  * THE REWARD JOURNAL. Append-only NDJSON beside the profile store.
  *
  * Constructed here, next to `store`, because it is the same kind of thing and
@@ -734,6 +778,10 @@ const roomSweeper = setInterval(() => {
   // flagged as a violation. Six hours is far beyond any round, so in practice
   // this only reaps rounds that already ended.
   guard.ledger.sweep();
+  // Expired sessions go out on the same timer. They are in memory, so this is
+  // a bound on the map's size and nothing more — the expiry itself is checked
+  // on every resolve, so a swept-late session was never admitted.
+  sessions.sweep(Date.now());
 }, 30_000);
 if (typeof roomSweeper.unref === 'function') roomSweeper.unref();
 
@@ -766,22 +814,75 @@ const adminGate = new AdminGate(ADMIN_TOKEN, {
   onDenied: (d) => {
     console.warn(`[admin] denied ${d.reason} from ${d.client}${d.path === '' ? '' : ` for ${d.path}`}`);
   },
+  /*
+   * THE SECOND CREDENTIAL. A session token resolves to an account, and the
+   * account's role is read LIVE on every request — so an owner demoted by
+   * `POST /api/admin/owner/transfer` stops being admitted on their existing
+   * session immediately, without anybody having to hunt down its token.
+   */
+  resolveSession: (token) => {
+    const row = sessions.resolve(token, Date.now());
+    if (row === null) return null;
+    const role = accounts.roleOf(row.accountId);
+    return role === null ? null : { accountId: row.accountId, role };
+  },
+  ownerCount: () => accounts.ownerCount(),
 });
 const adminSweeper = setInterval(() => { adminGate.sweep(); }, 60_000);
 if (typeof adminSweeper.unref === 'function') adminSweeper.unref();
 
-function admitAdmin(req: IncomingMessage, path: string): AdminVerdict {
-  return adminGate.admit(req.headers.authorization, clientAddress(req), path);
+function admitAdmin(req: IncomingMessage, path: string): AdminDecision {
+  return adminGate.admitRequest(
+    { authorization: req.headers.authorization, sessionToken: sessionCredential(req.headers) },
+    clientAddress(req),
+    path,
+  );
 }
 
-/** The refusal an admin verdict turns into. Never leaks which token is wrong. */
+/**
+ * The refusal an admin verdict turns into. Never leaks which token is wrong.
+ *
+ * Three answers, and the 403 is the new one. A caller holding a session this
+ * host minted already knows the host has accounts, so hiding the console behind
+ * a 404 from them buys nothing and costs a support ticket; every OTHER refusal
+ * still answers 404, identical to a host with no admin surface at all.
+ */
 function refuseAdmin(res: ServerResponse, verdict: AdminVerdict, cors: string | null): void {
   if (verdict === AdminVerdict.THROTTLED) {
     res.setHeader('retry-after', '60');
     sendJson(res, 429, { error: 'too many attempts' }, cors);
     return;
   }
+  if (verdict === AdminVerdict.FORBIDDEN) {
+    sendJson(res, 403, { error: 'this console is for the owner account' }, cors);
+    return;
+  }
   sendJson(res, 404, { error: 'not found' }, cors);
+}
+
+/**
+ * The sentence a refused signup gets.
+ *
+ * Spelled out rather than echoed as a code, because the two failures a human
+ * hits are "my name has a space in it" and "twelve characters, really?", and a
+ * form that says `bad-name` makes them guess. `name-taken` is deliberately
+ * distinguishable: a signup form that hides it is a form that cannot be used.
+ */
+function signupErrorText(error: 'bad-name' | 'bad-passphrase' | 'name-taken'): string {
+  switch (error) {
+    case 'bad-name':
+      return `name must be ${NAME_MIN}-${NAME_MAX} characters of a-z, 0-9, _ or -`;
+    case 'bad-passphrase':
+      return `passphrase must be at least ${PASSPHRASE_MIN} characters`;
+    default:
+      return 'that name is taken';
+  }
+}
+
+/** The public shape of one account id, or null when it has gone. */
+function publicAccountOrNull(accountId: string): ReturnType<typeof publicAccount> | null {
+  const a = accounts.byId(accountId);
+  return a === null ? null : publicAccount(a);
 }
 
 /** Correlates an audit row with the response the operator saw. */
@@ -1242,6 +1343,125 @@ async function handleApi(
     return true;
   }
 
+  /* --- accounts: sign up, sign in, sign out, who am I ------------------- *
+   *
+   * FOUR ROUTES, and the first one is the only interesting one: on a host with
+   * no owner, `POST /api/auth/signup` MINTS THE OWNER. `docs/PLATFORM.md` §2.5
+   * deleted `POST /api/account/link` and `POST /api/account/resolve` in S0
+   * because they were unauthenticated takeover primitives; these are what
+   * re-front the same substrate (`PersistenceStore.linkAccount`) behind a
+   * credential the caller has to prove.
+   *
+   * THREE RULES HOLD ACROSS ALL FOUR:
+   *
+   *   1. **No secret is ever in a response body.** Not the passphrase, not the
+   *      `passHash`, not the salt, not the session token. The session leaves
+   *      this process exactly once, in a `Set-Cookie` header, `httpOnly` so no
+   *      script can read it back — including the console's own.
+   *      `accountsRoutes.test.ts` greps every one of these bodies, and every
+   *      `/api/admin/*` body, for the on-disk hash.
+   *   2. **Signup and signin are throttled BEFORE they hash**, per client
+   *      address, with the admin bearer's numbers (20 a minute). See
+   *      `AttemptThrottle` for why the ordering is the opposite of the gate's.
+   *   3. **A wrong name and a wrong passphrase are the same answer**, 401, and
+   *      the same latency — `AccountStore.signin` hashes against a decoy salt
+   *      when the name is unknown, so this is not a user enumerator with a
+   *      stopwatch.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/auth/signup' && req.method === 'POST') {
+    const client = clientAddress(req);
+    const now = Date.now();
+    if (!authThrottle.allow(client, now)) {
+      res.setHeader('retry-after', '60');
+      sendJson(res, 429, { error: 'too many attempts' }, cors);
+      return true;
+    }
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const result = await accounts.signup(body.name, body.passphrase, now);
+    if (!result.ok) {
+      authThrottle.fail(client, now);
+      const status = result.error === 'name-taken' ? 409 : 400;
+      sendJson(res, status, { error: signupErrorText(result.error) }, cors);
+      return true;
+    }
+    authThrottle.clear(client);
+    /*
+     * THE LINK. `store.linkAccount` writes `accountId` + a fresh recovery
+     * secret into the device's profile and updates the account index, so the
+     * progress this browser already earned follows the account. The secret it
+     * returns is DELIBERATELY DROPPED here: it is a durable credential, this
+     * response is not the place for one, and the passphrase is now the stronger
+     * way in. Merging two devices' progress is `docs/PLATFORM.md` §3 (C5) and is
+     * NOT this: a second device simply links.
+     */
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
+    let linkedDevice = false;
+    if (isValidDeviceId(deviceId)) {
+      await store.linkAccount(deviceId, result.account.id);
+      await accounts.linkDevice(result.account.id, deviceId);
+      linkedDevice = true;
+    }
+    const token = sessions.mint(result.account.id, now);
+    res.setHeader('set-cookie', sessionCookie(token));
+    if (result.bootstrapped) {
+      console.warn(`[accounts] ${result.account.name} is now the OWNER of this host`);
+    }
+    sendJson(res, 201, {
+      account: publicAccount(result.account),
+      /* True exactly once in a host's life: this signup took the owner role. */
+      bootstrapped: result.bootstrapped,
+      linkedDevice,
+    }, cors);
+    return true;
+  }
+
+  if (path === '/api/auth/signin' && req.method === 'POST') {
+    const client = clientAddress(req);
+    const now = Date.now();
+    if (!authThrottle.allow(client, now)) {
+      res.setHeader('retry-after', '60');
+      sendJson(res, 429, { error: 'too many attempts' }, cors);
+      return true;
+    }
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const result = await accounts.signin(body.name, body.passphrase, now);
+    if (!result.ok) {
+      authThrottle.fail(client, now);
+      console.warn(`[accounts] failed sign-in from ${client}`);
+      sendJson(res, 401, { error: 'wrong name or passphrase' }, cors);
+      return true;
+    }
+    authThrottle.clear(client);
+    const token = sessions.mint(result.account.id, now);
+    res.setHeader('set-cookie', sessionCookie(token));
+    sendJson(res, 200, { account: publicAccount(result.account) }, cors);
+    return true;
+  }
+
+  if (path === '/api/auth/signout' && req.method === 'POST') {
+    /* Unthrottled on purpose: there is no credential to guess here, and a
+     * limiter on sign-out is a limiter that keeps somebody signed IN. */
+    const revoked = sessions.revoke(sessionCredential(req.headers));
+    res.setHeader('set-cookie', expiredSessionCookie());
+    sendJson(res, 200, { ok: true, revoked }, cors);
+    return true;
+  }
+
+  if (path === '/api/auth/me' && (req.method === 'GET' || req.method === 'HEAD')) {
+    /* What the game client will read for its account panel (C4). No panel is
+     * built in this stage — server and console only. */
+    const row = sessions.resolve(sessionCredential(req.headers), Date.now());
+    const account = row === null ? null : accounts.byId(row.accountId);
+    if (account === null) { sendJson(res, 401, { error: 'not signed in' }, cors); return true; }
+    sendJson(res, 200, {
+      account: publicAccount(account),
+      /* The console prints this. A restart signs everybody out and nobody
+       * should have to discover that from a 401 mid-rollout. */
+      sessionsSurviveRestart: false,
+    }, cors);
+    return true;
+  }
+
   /* --- the operator's two switches -------------------------------------- *
    * Both are refused outright unless `DOOMCRAFT_ADMIN_TOKEN` is set, so a
    * default deployment has no admin surface at all. "Freeze all rollouts" is
@@ -1249,8 +1469,8 @@ async function handleApi(
    * deploy takes a host out of rotation without dropping a single match.
    * --------------------------------------------------------------------- */
   if (path === '/api/admin/drain' && req.method === 'POST') {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     const who = await refuseUnaudited(res, await readBody(req), cors);
     if (who === null) return true;
     const before = JSON.stringify(lifecycle.report());
@@ -1276,7 +1496,52 @@ async function handleApi(
    * exact failure `/api/levels` had for months.
    * --------------------------------------------------------------------- */
   if (path === '/admin' && (req.method === 'GET' || req.method === 'HEAD')) {
-    if (!adminGate.configured) { sendJson(res, 404, { error: 'not found' }, cors); return true; }
+    /*
+     * FOUR ANSWERS, and which one you get is the whole of S5 at this route:
+     *
+     *   - no env token AND no owner account -> 404. There is no console here.
+     *   - a session whose account is a PLAYER -> 403. They authenticated; they
+     *     are not the owner. See `refuseAdmin`.
+     *   - no credential -> 200 and the SIGN-IN page, which offers "create the
+     *     owner account" when `ownerCount() === 0` and a sign-in otherwise.
+     *     Not a 404: 404 is reserved for a host with no surface at all, and
+     *     answering it here would hide the page the owner needs.
+     *   - the env bearer or an owner session -> 200 and the console.
+     *
+     * The env-bearer operator lands on the sign-in page too, because a browser
+     * cannot put a bearer on a top-level navigation. That page's script sends
+     * them straight through: the console it loads next asks for the bearer in
+     * the header bar exactly as it did before this stage.
+     */
+    const decision = adminGate.admitRequest(
+      { authorization: req.headers.authorization, sessionToken: sessionCredential(req.headers) },
+      clientAddress(req),
+      path,
+      // Asking for the sign-in page is not a failed attempt. See `admitRequest`.
+      { record: false },
+    );
+    if (decision.verdict === AdminVerdict.FORBIDDEN || decision.verdict === AdminVerdict.THROTTLED) {
+      refuseAdmin(res, decision.verdict, cors);
+      return true;
+    }
+    if (decision.verdict !== AdminVerdict.OK) {
+      if (!adminGate.hasSurface) { sendJson(res, 404, { error: 'not found' }, cors); return true; }
+      const page = Buffer.from(
+        stampNonce(adminSignInHtml({ bootstrap: accounts.ownerCount() === 0 }), nonce),
+        'utf8',
+      );
+      const signInHeaders: Record<string, string> = {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': String(page.length),
+        'cache-control': 'no-store',
+        'x-robots-tag': 'noindex, nofollow',
+        'referrer-policy': 'no-referrer',
+      };
+      if (req.method === 'HEAD') { res.writeHead(200, signInHeaders); res.end(); return true; }
+      res.writeHead(200, signInHeaders);
+      res.end(page);
+      return true;
+    }
     const body = Buffer.from(stampNonce(ADMIN_CONSOLE_HTML, nonce), 'utf8');
     const headers: Record<string, string> = {
       'content-type': 'text/html; charset=utf-8',
@@ -1295,8 +1560,8 @@ async function handleApi(
 
   /* --- what this host is, and what the console may do to it ------------- */
   if (path === '/api/admin/whoami' && (req.method === 'GET' || req.method === 'HEAD')) {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     sendJson(res, 200, {
       version: versionDocument(contentHash, { deploy: lifecycle.report() }),
       uptimeMs: Date.now() - bootMs,
@@ -1307,14 +1572,30 @@ async function handleApi(
       // rather than a row of buttons that do nothing.
       capabilities: consoleCapabilities(),
       auth: { denied: adminGate.denied, throttled: adminGate.throttled },
+      /*
+       * WHICH credential got in, so the console can say it out loud. `env` is
+       * the shared bearer out of the environment and is root; `owner` is a
+       * person with an account. The audit log's `actor` field is still a label
+       * and still required — one bearer admits every operator who has it — but
+       * an owner session at least names one of them.
+       */
+      identity: {
+        via: gate.via,
+        account: gate.accountId === null ? null : publicAccountOrNull(gate.accountId),
+        owners: accounts.ownerCount(),
+        sessions: sessions.size,
+        /* Stated, not implied: a restart signs everybody out. */
+        sessionsSurviveRestart: false,
+        accountsDegraded: accounts.degraded,
+      },
     }, cors);
     return true;
   }
 
   /* --- the operator's fleet view ---------------------------------------- */
   if (path === '/api/admin/status' && (req.method === 'GET' || req.method === 'HEAD')) {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     sendJson(res, 200, adminStatusDocument(), cors);
     return true;
   }
@@ -1326,8 +1607,8 @@ async function handleApi(
    * one operation an operator inspecting a live fleet must not have to perform.
    * --------------------------------------------------------------------- */
   if (path === '/api/admin/flags' && (req.method === 'GET' || req.method === 'HEAD')) {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     sendJson(res, 200, {
       host: HOST_ID,
       revision: flags.document.revision,
@@ -1350,8 +1631,8 @@ async function handleApi(
    * It writes NOTHING, including no audit row: planning is reading.
    * --------------------------------------------------------------------- */
   if (path === '/api/admin/flags/plan' && req.method === 'POST') {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     const plan = planFlagWrite(flags.document, await readBody(req));
     if (!plan.ok) {
       sendJson(res, 409, {
@@ -1385,8 +1666,8 @@ async function handleApi(
    * this route is the 409.
    */
   if (path === '/api/admin/flags' && req.method === 'POST') {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     const body = await readBody(req);
     const who = await refuseUnaudited(res, body, cors);
     if (who === null) return true;
@@ -1460,6 +1741,60 @@ async function handleApi(
     return true;
   }
 
+  /* --- WHO OWNS THIS HOST, and the way to take it back ------------------ *
+   *
+   * THE BOOTSTRAP WINDOW IS A REAL HOLE AND THIS IS ITS PATCH. Between the
+   * moment a host is deployed and the moment its operator signs up, ANYBODY who
+   * finds the URL can be the owner — the rule that makes the console ownable
+   * with no vendor is the same rule that makes it claimable by a stranger.
+   *
+   * So this route is **callable with the env bearer and NOTHING else**, not
+   * even with an owner session. `adminGate.admitEnvOnly` is a separate method
+   * for exactly this reason: if a squatter's own session could call it, the
+   * squatter would simply transfer the role back to themselves and the safety
+   * net would be a formality. `DOOMCRAFT_ADMIN_TOKEN` is the credential they
+   * never had, and it stays root.
+   *
+   * It writes an audit row like every other mutation, and demoting every other
+   * owner is part of the same call — "exactly one owner" is the invariant, and
+   * a transfer that left two would break it as surely as a raced signup.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/admin/owner/transfer' && req.method === 'POST') {
+    const verdict = adminGate.admitEnvOnly(req.headers.authorization, clientAddress(req), path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+    const before = JSON.stringify({ owners: accounts.owners() });
+    const result = await accounts.transferOwner(body.name);
+    if (!result.ok) {
+      await auditLog.record({
+        ms: Date.now(), actor: who.actor, verb: 'owner.transfer',
+        subject: typeof body.name === 'string' ? body.name.slice(0, 40) : '(none)',
+        reason: who.reason, before, after: before,
+        outcome: 'refused', requestId: newRequestId(),
+      });
+      sendJson(res, 404, { error: 'no account by that name' }, cors);
+      return true;
+    }
+    const after = JSON.stringify({ owners: accounts.owners() });
+    const action = await auditLog.record({
+      ms: Date.now(), actor: who.actor, verb: 'owner.transfer', subject: result.owner.name,
+      reason: who.reason, before, after,
+      outcome: 'applied', requestId: newRequestId(),
+    });
+    /* No session is revoked, and none needs to be: `AdminGate`'s resolver reads
+     * the role LIVE on every request, so a demoted owner's open console starts
+     * answering 403 on its next poll. */
+    sendJson(res, 200, {
+      owner: publicAccount(result.owner),
+      demoted: result.demoted,
+      owners: accounts.owners(),
+      action: action.id,
+    }, cors);
+    return true;
+  }
+
   /* --- the admin action log --------------------------------------------- *
    * Read-only. Every mutation above wrote a row here with its before and after
    * state, which is what makes an undo one paste rather than an archaeology
@@ -1467,8 +1802,8 @@ async function handleApi(
    * outlive the ordinary retention window — see `server/src/adminAudit.ts`.
    * --------------------------------------------------------------------- */
   if (path === '/api/admin/audit' && (req.method === 'GET' || req.method === 'HEAD')) {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     const sinceRaw = Number(url.searchParams.get('since') ?? '0');
     const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
     const limitRaw = Number(url.searchParams.get('limit') ?? '100');
@@ -1492,8 +1827,8 @@ async function handleApi(
    * eight-character handle the journal uses.
    * --------------------------------------------------------------------- */
   if (path === '/api/admin/player' && (req.method === 'GET' || req.method === 'HEAD')) {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     const key = url.searchParams.get('key') ?? '';
     if (!isValidDeviceId(key)) { sendJson(res, 400, { error: 'key must be a device id' }, cors); return true; }
     const limitRaw = Number(url.searchParams.get('limit') ?? '100');
@@ -1514,8 +1849,8 @@ async function handleApi(
    * Admin-gated exactly like the two switches above: no token, no route.
    */
   if (path === '/api/admin/entitlement' && (req.method === 'GET' || req.method === 'HEAD')) {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     sendJson(res, 200, {
       status: guard.status(),
       /*
@@ -1550,8 +1885,8 @@ async function handleApi(
    * a journal row carries one on every line.
    * --------------------------------------------------------------------- */
   if (path === '/api/admin/journal' && (req.method === 'GET' || req.method === 'HEAD')) {
-    const verdict = admitAdmin(req, path);
-    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     const key = url.searchParams.get('player') ?? '';
     if (!isValidDeviceId(key)) { sendJson(res, 400, { error: 'player must be a device id' }, cors); return true; }
     const sinceRaw = Number(url.searchParams.get('since') ?? '0');
@@ -2106,6 +2441,10 @@ async function shutdown(signal: string): Promise<void> {
   if (typeof forced.unref === 'function') forced.unref();
 
   try { await store.flush(); await store.close(); } catch { /* best effort */ }
+  // Accounts are written synchronously at every mutation, so this only drains a
+  // write that was in flight when SIGTERM landed. Sessions are NOT flushed:
+  // they are in memory by design and a restart signs everybody out.
+  try { await accounts.flush(); } catch { /* best effort */ }
   // After the store, because the journal's own writes are already on disk by
   // then: this only closes the append handles.
   try { await journal.close(); } catch { /* best effort */ }

@@ -29,8 +29,9 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { ADMIN_CONSOLE_HTML } from './console.js';
+import { ADMIN_CONSOLE_HTML, adminSignInHtml } from './console.js';
 import { MIN_ACTOR_CHARS, MIN_REASON_CHARS } from '../adminAudit.js';
+import { NAME_MAX, NAME_MIN, PASSPHRASE_MIN } from '../accounts.js';
 import { ROLLOUT_LADDER } from '@doomcraft/shared/flags';
 
 /** The page's own script, as source text. */
@@ -212,5 +213,119 @@ describe('the two-phase confirm', () => {
   it('never prefills a reason', () => {
     expect(SCRIPT).toContain("el('c-reason').value = ''");
     expect(SCRIPT).not.toMatch(/c-reason'\)\.value = '[^']/);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The sign-in page — the same rules, because it is the same kind of file
+ *
+ * `adminSignInHtml` is a second HTML string outside `tsc` and outside `vitest`,
+ * and every argument for the checks above applies to it unchanged. It is
+ * checked in BOTH of its states, because the state is chosen on the server and
+ * a page that only ever renders one of them is a page half of which nobody has
+ * seen.
+ * ------------------------------------------------------------------------ */
+
+const SIGNIN_PAGES: Array<{ name: string; html: string; bootstrap: boolean }> = [
+  { name: 'bootstrap', html: adminSignInHtml({ bootstrap: true }), bootstrap: true },
+  { name: 'sign-in', html: adminSignInHtml({ bootstrap: false }), bootstrap: false },
+];
+
+function scriptOf(html: string): string {
+  const m = /<script>([\s\S]*?)<\/script>/.exec(html);
+  if (m === null) throw new Error('the sign-in page has no script block');
+  return m[1];
+}
+
+describe('the sign-in page', () => {
+  for (const page of SIGNIN_PAGES) {
+    it(`${page.name}: PARSES — the only compile check it will ever get`, () => {
+      expect(() => new Function(scriptOf(page.html))).not.toThrow();
+    });
+
+    it(`${page.name}: is a whole document with every interpolation resolved`, () => {
+      expect(page.html.startsWith('<!doctype html>')).toBe(true);
+      expect(page.html.trimEnd().endsWith('</html>')).toBe(true);
+      expect(page.html, 'an interpolation did not happen').not.toContain('${');
+      expect(page.html).toContain('noindex');
+    });
+
+    it(`${page.name}: uses every id it declares and declares every id it uses`, () => {
+      const ids = new Set([...page.html.matchAll(/\bid="([A-Za-z0-9_-]+)"/g)].map((m) => m[1]));
+      const wanted = new Set([...scriptOf(page.html).matchAll(/\bel\('([A-Za-z0-9_-]+)'\)/g)].map((m) => m[1]));
+      expect([...wanted].filter((id) => !ids.has(id)), 'el() names an id the markup lacks').toEqual([]);
+      expect([...ids].filter((id) => !wanted.has(id)), 'an id nothing reads').toEqual([]);
+    });
+
+    it(`${page.name}: fetch, no submitted element, no inline handler, no innerHTML`, () => {
+      // Same three CSP facts as the console: form-action 'none',
+      // script-src-attr 'none', and every value on the page is textContent.
+      expect(page.html).not.toContain('<form');
+      expect(page.html).not.toMatch(/\son[a-z]+="/);
+      expect(scriptOf(page.html)).toContain('fetch(');
+      expect(scriptOf(page.html)).not.toMatch(/\.innerHTML\b/);
+      expect(scriptOf(page.html)).toContain('textContent');
+    });
+
+    it(`${page.name}: loads nothing off-origin`, () => {
+      expect(page.html).not.toMatch(/(src|href)="https?:/);
+    });
+
+    it(`${page.name}: holds no credential and stores nothing`, () => {
+      // The session is an httpOnly cookie. There is nothing for this page to
+      // keep, so it must not have anywhere to keep it.
+      expect(scriptOf(page.html)).not.toContain('localStorage');
+      expect(scriptOf(page.html)).not.toContain('sessionStorage');
+      expect(scriptOf(page.html)).not.toContain('document.cookie');
+    });
+
+    it(`${page.name}: says sessions do not survive a restart`, () => {
+      expect(page.html).toContain('Sessions do not survive a restart');
+    });
+
+    it(`${page.name}: prints the env-bearer way back in`, () => {
+      expect(page.html).toContain('/api/admin/owner/transfer');
+      expect(page.html).toContain('DOOMCRAFT_ADMIN_TOKEN');
+    });
+
+    it(`${page.name}: takes its limits from accounts.ts rather than typing numbers`, () => {
+      expect(page.html).toContain(`${NAME_MIN}-${NAME_MAX} of a-z 0-9 _ -`);
+      if (page.bootstrap) expect(page.html).toContain(`at least ${PASSPHRASE_MIN} characters`);
+    });
+  }
+
+  it('offers to CREATE the owner only when the host has none', () => {
+    const [boot, signin] = SIGNIN_PAGES;
+    expect(boot.html).toContain('Create the owner account');
+    expect(boot.html).toContain('the first account created becomes the owner');
+    expect(boot.html).toContain("var MODE = 'bootstrap'");
+    expect(boot.html).toContain('/api/auth/signup');
+
+    expect(signin.html).not.toContain('Create the owner account');
+    expect(signin.html).toContain('Sign in');
+    expect(signin.html).toContain("var MODE = 'signin'");
+    expect(signin.html).toContain('/api/auth/signin');
+  });
+});
+
+describe('the console knows there is a session now', () => {
+  it('sends the cookie and only attaches a bearer when one was typed', () => {
+    expect(SCRIPT).toContain("credentials: 'same-origin'");
+    expect(SCRIPT).toContain("if (tok()) opts.headers.authorization = 'Bearer ' + tok();");
+    // The old unconditional `Bearer ` + '' was a malformed credential and would
+    // be counted as a failed attempt against the operator's own address.
+    expect(SCRIPT).not.toContain("headers: { authorization: 'Bearer ' + tok() }");
+  });
+
+  it('renders who is signed in, and can sign them out', () => {
+    expect(SCRIPT).toContain('/api/auth/signout');
+    expect(SCRIPT).toContain('signed in as ');
+  });
+
+  it('prints the owner-transfer escape hatch and the restart warning', () => {
+    expect(SCRIPT).toContain('/api/admin/owner/transfer');
+    expect(SCRIPT).toContain('THE FIRST ACCOUNT CREATED ON A HOST BECOMES ITS OWNER');
+    expect(SCRIPT).toContain('ENVIRONMENT BEARER ONLY');
+    expect(SCRIPT).toContain('SESSIONS DO NOT SURVIVE A RESTART');
   });
 });

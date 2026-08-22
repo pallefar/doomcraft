@@ -54,6 +54,7 @@
 
 import { ROLLOUT_LADDER } from '@doomcraft/shared/flags';
 import { MIN_ACTOR_CHARS, MIN_REASON_CHARS } from '../adminAudit.js';
+import { NAME_MAX, NAME_MIN, PASSPHRASE_MIN } from '../accounts.js';
 
 const LADDER_JSON = JSON.stringify(ROLLOUT_LADDER);
 
@@ -147,10 +148,16 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     <button id="refresh">refresh</button>
     <span id="auth-state" class="muted">no token in this tab</span>
   </div>
+  <div class="rowline">
+    <span id="who" class="muted">not signed in</span>
+    <button id="signout">sign out</button>
+  </div>
 </header>
 <nav id="tabs"></nav>
 <main>
   <section id="tab-fleet">
+    <h2>who owns this host</h2>
+    <div class="warn" id="owner-note"></div>
     <h2>this host</h2>
     <div id="fleet-deploy"></div>
     <div class="warn" id="drain-warning"></div>
@@ -322,8 +329,50 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     s.textContent = tok() ? 'token held in this tab only' : 'no token in this tab';
     s.className = tok() ? 'ok' : 'muted';
   }
+  function paintWho(id) {
+    var w = el('who');
+    if (!id || !id.account) {
+      w.textContent = id && id.via === 'env'
+        ? 'admitted by the environment bearer (root) — no account session'
+        : 'not signed in';
+      w.className = 'muted';
+      return;
+    }
+    w.textContent = 'signed in as ' + id.account.name + ' (' + id.account.role + ')'
+      + ' — ' + id.sessions + ' live session(s) on this process';
+    w.className = 'ok';
+  }
+  function paintOwner(id) {
+    var host = el('owner-note');
+    clear(host);
+    var owners = id ? id.owners : 0;
+    host.appendChild(make('div', null,
+      'THE FIRST ACCOUNT CREATED ON A HOST BECOMES ITS OWNER. This host has '
+      + owners + ' owner account(s). Between a deploy and that first signup, anybody who finds '
+      + 'this URL can claim it — so if a stranger got here first, take it back with the '
+      + 'environment bearer, which is the one credential they never had:'));
+    host.appendChild(make('pre', null,
+      'curl -X POST ' + location.origin + '/api/admin/owner/transfer \\\\\\n'
+      + '  -H "authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" \\\\\\n'
+      + '  -H "content-type: application/json" \\\\\\n'
+      + '  -d \\'{"name":"you","actor":"you","reason":"reclaiming after a hostile bootstrap"}\\''));
+    host.appendChild(make('div', null,
+      'That route takes the ENVIRONMENT BEARER ONLY — never an owner session, because a squatter '
+      + 'holding one would just transfer the role back to themselves.'));
+    host.appendChild(make('div', null,
+      'SESSIONS DO NOT SURVIVE A RESTART. They are a map in this one process, so a deploy signs '
+      + 'everybody out and the console asks for a passphrase again. That is by design: there is no '
+      + 'database, and a session file on disk is a credential at rest with no expiry anybody can see.'));
+  }
   function api(path, method, body) {
-    var opts = { method: method || 'GET', headers: { authorization: 'Bearer ' + tok() }, cache: 'no-store' };
+    /* TWO credentials, and the request may carry either. credentials:
+       'same-origin' sends the httpOnly dc_sess cookie; the bearer is only
+       attached when one has been typed into this tab, because a bearer with an
+       empty credential is malformed and would be counted as a failed attempt
+       against this address. The server tries the env bearer first and the
+       session second. */
+    var opts = { method: method || 'GET', headers: {}, cache: 'no-store', credentials: 'same-origin' };
+    if (tok()) opts.headers.authorization = 'Bearer ' + tok();
     if (body !== undefined) {
       opts.headers['content-type'] = 'application/json';
       opts.body = JSON.stringify(body);
@@ -724,8 +773,10 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
 
   function refresh() {
     api('/api/admin/whoami').then(function (r) {
-      if (r.status !== 200) { paintFacts(null); fail(el('fleet-deploy'), r); return; }
+      if (r.status !== 200) { paintFacts(null); paintWho(null); paintOwner(null); fail(el('fleet-deploy'), r); return; }
       paintFacts(r.body);
+      paintWho(r.body.identity);
+      paintOwner(r.body.identity);
       paintMissing(r.body.capabilities.missing);
       loadFleet();
     });
@@ -744,6 +795,9 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   el('save-token').addEventListener('click', function () { setTok(el('token').value.trim()); el('token').value = ''; refresh(); });
   el('forget-token').addEventListener('click', function () { setTok(''); location.reload(); });
   el('refresh').addEventListener('click', refresh);
+  el('signout').addEventListener('click', function () {
+    api('/api/auth/signout', 'POST', {}).then(function () { setTok(''); location.reload(); });
+  });
   el('player-go').addEventListener('click', function () { loadPlayer(); });
   el('player-key').addEventListener('keydown', function (e) { if (e.key === 'Enter') loadPlayer(); });
   el('c-cancel').addEventListener('click', function () { armed = null; el('confirm').close(); });
@@ -757,8 +811,177 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
 
   paintAuth();
   show('fleet');
-  if (tok()) refresh();
+  /* Always. This document is only served to a caller the gate already admitted
+     — the env bearer or an owner session — so there is a credential by
+     construction, and waiting for a typed token would leave a signed-in owner
+     staring at an empty page. */
+  refresh();
 })();
 </script>
 </body>
 </html>`;
+
+/* ------------------------------------------------------------------------ *
+ * The sign-in page
+ * ------------------------------------------------------------------------ */
+
+/**
+ * What `GET /admin` renders when the caller has no credential.
+ *
+ * Two states, and the server picks — not the page:
+ *
+ *   - `bootstrap: true` — `accounts.ownerCount() === 0`. THIS HOST HAS NO
+ *     OWNER, and the form creates one. The copy says so in those words, because
+ *     an operator who does not understand that the first signup wins is an
+ *     operator who leaves the window open.
+ *   - `bootstrap: false` — sign in.
+ *
+ * Deciding it on the server rather than in the page is the point: the page
+ * cannot ask "how many owners are there" without a route that answers it, and a
+ * route that answers it is a route that tells an anonymous prober whether this
+ * host is still claimable. One document, chosen by a caller that already knows.
+ */
+export interface SignInView {
+  /** True when this host has no owner account yet. */
+  readonly bootstrap: boolean;
+}
+
+/**
+ * The document. A function rather than a constant because of `SignInView`, and
+ * the SAME rule applies to it as to `ADMIN_CONSOLE_HTML`: `tsc` does not see
+ * inside the literal and `vitest` does not execute it, so nothing that can be
+ * WRONG may live in here. Every interpolated value below is either a constant
+ * imported from a tested module (`NAME_MIN`, `PASSPHRASE_MIN`) or one of two
+ * literal strings chosen by the `if` above — never a request value, so there is
+ * no escaping to get right.
+ */
+export function adminSignInHtml(view: SignInView): string {
+  const headline = view.bootstrap ? 'Create the owner account' : 'Sign in';
+  const lead = view.bootstrap
+    ? 'This host has no owner yet, and the first account created becomes the owner. '
+      + 'Do it now: until you do, anybody who finds this URL can.'
+    : 'This console is for the owner account. Sign in with the name and passphrase you created.';
+  const action = view.bootstrap ? 'create the owner account' : 'sign in';
+  const mode = view.bootstrap ? 'bootstrap' : 'signin';
+  const passHint = view.bootstrap
+    ? `at least ${PASSPHRASE_MIN} characters — write it down, there is no reset`
+    : 'your passphrase';
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="data:,">
+<title>doomcraft — operator sign-in</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #0b0d10; color: #d7dde5;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  main { max-width: 72ch; margin: 0 auto; padding: 40px 16px; }
+  h1 { font-size: 14px; margin: 0 0 6px; letter-spacing: .12em; text-transform: uppercase; color: #9fb0c4; }
+  h2 { font-size: 13px; margin: 22px 0 6px; color: #eef3f8; }
+  p { color: #8ea3ba; max-width: 66ch; }
+  label { display: block; margin: 12px 0 4px; color: #8ea3ba; }
+  input { font: inherit; background: #0f141a; color: #eef3f8; border: 1px solid #2e3844; padding: 6px 8px; border-radius: 3px; width: 32ch; max-width: 100%; }
+  button { font: inherit; background: #1b2129; color: #d7dde5; border: 1px solid #2e3844; padding: 6px 12px; cursor: pointer; border-radius: 3px; margin-top: 14px; }
+  button:hover:enabled { background: #232c37; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  code, pre { background: #0f141a; border: 1px solid #1d242c; border-radius: 3px; }
+  code { padding: 1px 5px; }
+  pre { padding: 8px 10px; overflow-x: auto; }
+  .muted { color: #6d7d8f; }
+  .err { color: #ffbcbc; }
+  .warn { border-left: 3px solid #7a5a20; background: #1a1710; color: #e8d5a8; padding: 8px 10px; margin: 16px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>doomcraft — operator console</h1>
+  <h2>${headline}</h2>
+  <p>${lead}</p>
+  <label for="su-name">name</label>
+  <input id="su-name" autocomplete="username" spellcheck="false" placeholder="${NAME_MIN}-${NAME_MAX} of a-z 0-9 _ -">
+  <label for="su-pass">passphrase</label>
+  <input id="su-pass" type="password" autocomplete="current-password" spellcheck="false" placeholder="${passHint}">
+  <div><button id="su-go">${action}</button></div>
+  <p id="su-state" class="muted">nothing sent yet</p>
+  <div class="warn">
+    <div>Sessions do not survive a restart. They live in this one process, so a deploy signs everybody
+    out and this page comes back. There is no database and no session file: a session on disk is a
+    credential at rest with no expiry anybody can see.</div>
+  </div>
+  <p class="muted">Locked out, or somebody else claimed the owner role first? The environment bearer
+  <code>DOOMCRAFT_ADMIN_TOKEN</code> is still root and can re-assign it — that route takes the bearer
+  and nothing else, not even an owner session:</p>
+  <pre>curl -X POST /api/admin/owner/transfer \\
+  -H "authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" \\
+  -H "content-type: application/json" \\
+  -d '{"name":"you","actor":"you","reason":"reclaiming the owner role"}'</pre>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  /* Chosen by the SERVER — see adminSignInHtml. The page never asks how many
+     owners this host has, because a route that answered would tell an
+     anonymous prober whether the host is still claimable. */
+  var MODE = '${mode}';
+  var ROUTE = MODE === 'bootstrap' ? '/api/auth/signup' : '/api/auth/signin';
+
+  function el(id) { return document.getElementById(id); }
+  function say(msg, bad) {
+    var s = el('su-state');
+    s.textContent = msg;
+    s.className = bad ? 'err' : 'muted';
+  }
+
+  function submit() {
+    var name = el('su-name').value.trim();
+    var pass = el('su-pass').value;
+    if (name.length === 0 || pass.length === 0) { say('name and passphrase, both', true); return; }
+    el('su-go').disabled = true;
+    say('working…', false);
+    /* fetch, and never a submitted element: the Node CSP is form-action
+       'none', and a submit is a navigation. Same rule as the console. */
+    fetch(ROUTE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify({ name: name, passphrase: pass })
+    }).then(function (res) {
+      return res.text().then(function (t) {
+        var j = null;
+        try { j = JSON.parse(t); } catch (e) { j = null; }
+        return { status: res.status, body: j };
+      });
+    }).then(function (r) {
+      el('su-go').disabled = false;
+      if (r.status === 200 || r.status === 201) {
+        el('su-pass').value = '';
+        /* The session arrived as an httpOnly cookie this script cannot read,
+           which is the point: there is nothing here to store and nothing to
+           leak. Reload, and the server decides what this caller may see. */
+        location.reload();
+        return;
+      }
+      if (r.status === 429) { say('too many attempts from this address — wait a minute', true); return; }
+      say(r.body && r.body.error ? r.body.error : 'HTTP ' + r.status, true);
+    }).catch(function () {
+      el('su-go').disabled = false;
+      say('the request did not complete', true);
+    });
+  }
+
+  el('su-go').addEventListener('click', submit);
+  el('su-pass').addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+  el('su-name').addEventListener('keydown', function (e) { if (e.key === 'Enter') el('su-pass').focus(); });
+})();
+</script>
+</body>
+</html>`;
+}

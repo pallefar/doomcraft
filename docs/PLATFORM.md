@@ -1080,6 +1080,27 @@ The honest answer first: **a one-person team cannot have four-eyes review, and p
 
 ### 5.9 Server routes added, in full
 
+> **AS BUILT, S5.** `GET /admin` is no longer a bare shell: with no credential it serves a SIGN-IN
+> page (200 — the 404 is now reserved for "no admin token **and** no owner account"), with a player
+> session it answers **403**, and with the env bearer or an owner session it serves the console.
+> Five routes were added beside the list below:
+>
+> ```
+> POST /api/auth/signup   { name, passphrase, deviceId? } -> 201 { account, bootstrapped, linkedDevice }
+> POST /api/auth/signin   { name, passphrase }            -> 200 { account } | 401 | 429
+> POST /api/auth/signout                                  -> 200 { ok, revoked }
+> GET  /api/auth/me                                       -> 200 { account } | 401
+> POST /api/admin/owner/transfer { name, actor, reason }   -> 200   ENV BEARER ONLY
+> ```
+>
+> **The first account created on a host becomes its owner**, decided under `AccountStore`'s write
+> lock so two signups in the same tick cannot both claim it. `server/src/accounts.ts` holds the
+> store (scrypt N=2^15 from `node:crypto`, no new dependency, `accounts-v1.json` written tmp+rename)
+> and the in-memory session table; `AdminGate` gained the second credential and keeps the env bearer
+> as root. `owner/transfer` refuses an owner session **on purpose**: it is the patch for the
+> bootstrap window, and a squatter holding a session would otherwise transfer the role to themselves.
+> Sessions do not survive a restart, and the console says so.
+
 ```
 GET  /admin                        the console shell (404 without a token)
 GET  /api/admin/whoami          -> { host, hostId, buildId, capabilities }
