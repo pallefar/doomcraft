@@ -135,8 +135,8 @@
 
   <div class="phasestrip">
     <span class="lbl">Phase</span>
-    <span class="now">Server tier live · economy spine + console shipped</span>
-    <span class="note">Node origin deployed to Railway (document + rooms, one origin). Reward spine wired (was dead code), Scrap + anti-farm + journal, five live security holes closed, PACKS phase 0, profile overlay, admin console. Gauntlet still 0/23 — no blind A/B yet for any piece.</span>
+    <span class="now">Live on Railway · console ownable · landing site up</span>
+    <span class="note">Node origin on Railway (document + rooms), admin console with first-signup-becomes-owner, reward journal, profile overlay, landing site with a Play CTA. 64 files / 1944 tests. Gauntlet still 0/23 — no blind A/B run this session.</span>
   </div>
 
   <div class="cols">
@@ -415,6 +415,9 @@
   <section>
     <div class="shead"><h2>Run log</h2><span class="meta">newest first</span></div>
     <div class="log">
+      <div><time>12:58</time><span>Landing site live: doomcraft-site.vercel.app — Play now → Railway, Play offline → Vercel static.</span></div>
+      <div><time>12:58</time><span>Accounts: scrypt passphrases, sessions, FIRST SIGNUP BECOMES THE OWNER (proven: two owners without the lock, one with). Audit found and we closed: player-cookie throttle bypass, CSRF owner-claim via text/plain form, unreadable accounts file re-opening bootstrap.</span></div>
+      <div><time>12:58</time><span>Admin console at /admin on the Node origin; flags (runtime registry, freeze, force/rollout with typed confirm), fleet, entitlement ring, journal, player lookup. applyServerFlags finally has a caller.</span></div>
       <div><time>12:01</time><span>Server tier LIVE on Railway: doomcraft-production.up.railway.app — document + rooms from one origin; /api/version folds level hashes; /api/levels mounted; admin console at /admin behind the bearer.</span></div>
       <div><time>12:01</time><span>Two decision docs: docs/PACKS.md (content packs; CONTENT_VERSION gates nothing today) and docs/PLATFORM.md (accounts, console, profile).</span></div>
       <div><time>12:01</time><span>Audit found a proven __proto__ self-grant past guardProfileWrite (1e9 XP), Math.random() account secrets, an unauthenticated account-link, a join-code leak. All closed; exploits re-run against the real binary.</span></div>
@@ -444,5 +447,5 @@
     </div>
   </section>
 
-  <footer>Updated 2026-08-22 10:01:11 UTC · exit condition is winning the blind comparison, not a round count</footer>
+  <footer>Updated 2026-08-22 10:58:06 UTC · exit condition is winning the blind comparison, not a round count</footer>
 </div>

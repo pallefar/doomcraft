@@ -1,7 +1,7 @@
 {
-  "updated": "2026-08-22T10:01:11Z",
-  "phase": "Server tier live \u00b7 economy spine + console shipped",
-  "phaseNote": "Node origin deployed to Railway (document + rooms, one origin). Reward spine wired (was dead code), Scrap + anti-farm + journal, five live security holes closed, PACKS phase 0, profile overlay, admin console. Gauntlet still 0/23 \u2014 no blind A/B yet for any piece.",
+  "updated": "2026-08-22T10:58:06Z",
+  "phase": "Live on Railway \u00b7 console ownable \u00b7 landing site up",
+  "phaseNote": "Node origin on Railway (document + rooms), admin console with first-signup-becomes-owner, reward journal, profile overlay, landing site with a Play CTA. 64 files / 1944 tests. Gauntlet still 0/23 \u2014 no blind A/B run this session.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -311,6 +311,18 @@
     {
       "t": "12:01",
       "m": "Server tier LIVE on Railway: doomcraft-production.up.railway.app \u2014 document + rooms from one origin; /api/version folds level hashes; /api/levels mounted; admin console at /admin behind the bearer."
+    },
+    {
+      "t": "12:58",
+      "m": "Admin console at /admin on the Node origin; flags (runtime registry, freeze, force/rollout with typed confirm), fleet, entitlement ring, journal, player lookup. applyServerFlags finally has a caller."
+    },
+    {
+      "t": "12:58",
+      "m": "Accounts: scrypt passphrases, sessions, FIRST SIGNUP BECOMES THE OWNER (proven: two owners without the lock, one with). Audit found and we closed: player-cookie throttle bypass, CSRF owner-claim via text/plain form, unreadable accounts file re-opening bootstrap."
+    },
+    {
+      "t": "12:58",
+      "m": "Landing site live: doomcraft-site.vercel.app \u2014 Play now \u2192 Railway, Play offline \u2192 Vercel static."
     }
   ],
   "bars": [

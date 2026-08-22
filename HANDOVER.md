@@ -8,6 +8,8 @@ Written 2026-08-22, end of the session that deployed the server tier.
   `doomcraft`, service `doomcraft`, volume at `/data`.
 - **https://doomcraft.vercel.app** — the static single-player build. Still honest, still $0.
 - **https://github.com/pallefar/doomcraft** — `main`, pushed at every stage of this session.
+- **https://doomcraft-site.vercel.app** — the landing page (own Vercel project `doomcraft-site`,
+  source in `doomcraft-site/`): "Play now" → the Railway origin, "Play offline" → the static build.
 - Live progress page: https://claude.ai/code/artifact/7fc179b3-ad71-4681-ad40-38f20e75f672
 
 Read this, then `docs/PLATFORM.md`, `docs/PACKS.md`, `docs/ECONOMY.md`, `docs/SPONSORS.md`,
@@ -55,12 +57,17 @@ regresses to literal `\x00`, fix it to `\u0000` (a literal NUL byte) before trus
 | `c173f68` | **The player profile overlay** (client-only, on the static site too) + `wiring.test.ts`. | screenshot; ratchet proven red against an orphan |
 | `f0824bd` | **The admin console** at `/admin` on the Node origin, 404 without `DOOMCRAFT_ADMIN_TOKEN`, never in the game bundle. Flags (registry read at runtime, freeze-all + per-flag force/rollout with typed-subject confirm and the blast radius quoted verbatim), fleet, entitlement ring (device ids redacted), journal, player lookup. `applyServerFlags` finally called — the `Feature` and `FLAG_ORDER` namespaces had never met. | boot + curl; server-side mutation guards tested by calling the routes directly |
 | `609ba72` | Dockerfile: Railway refuses `VOLUME`. | deployed |
-| *(S5, this commit)* | **Accounts, and the console became ownable.** `server/src/accounts.ts`: scrypt (N=2^15, `node:crypto`, no new dependency) passphrases, `accounts-v1.json` written tmp+rename, in-memory sessions on an httpOnly+Secure+SameSite=Lax `dc_sess` cookie, and **the first account created becomes the owner** under the store's write lock. `AdminGate` now admits the env bearer (root) **or** an owner session; a player session gets 403 from `GET /admin` and from every `/api/admin/*`. `POST /api/admin/owner/transfer` is the safety net for the bootstrap window and takes the **env bearer only**. | two concurrent signups proven to yield two owners without the lock; full curl flow against the real binary on a spare port; a live scan of every auth and admin body for the on-disk `passHash` |
+| `440e968` | **Accounts, and the console became ownable.** `server/src/accounts.ts`: scrypt (N=2^15, `node:crypto`, no new dependency) passphrases, `accounts-v1.json` written tmp+rename, in-memory sessions on an httpOnly+Secure+SameSite=Lax `dc_sess` cookie, and **the first account created becomes the owner** under the store's write lock. `AdminGate` now admits the env bearer (root) **or** an owner session; a player session gets 403 from `GET /admin` and from every `/api/admin/*`. `POST /api/admin/owner/transfer` is the safety net for the bootstrap window and takes the **env bearer only**. | two concurrent signups proven to yield two owners without the lock; full curl flow against the real binary on a spare port; a live scan of every auth and admin body for the on-disk `passHash` |
 
-Suite: 53 files / 1562 tests at `41d4a94` → *[final count filled in §1.1]*. `tsc -b` clean throughout.
+Suite: 53 files / 1562 tests at `41d4a94` → **64 / 1944** at the end. `tsc -b` clean throughout.
 
-### 1.1 Session outcome — filled in last
-*[S5 result, final suite count, final audit findings, Railway build id]*
+### 1.1 Session outcome
+
+- **Suite: 64 files / 1944 tests, all green; `tsc -b` clean.** Every commit in the table was green on its own, verified by an auditor in a clean worktree per commit.
+- **S5 landed and was attacked** (`440e968`, then `49fc3da` + the commit after it): the owner-bootstrap race was proven to yield two owners without the lock and one with it; 105 surgical reverts showed every new test red; the auditor found four real holes — a player cookie skipped the admin throttle, `/api/auth/signup` accepted a cross-site `text/plain` form (a remote owner-claim by CSRF), an unreadable accounts file re-opened the bootstrap window, and the auth-throttle sweep was unwired. **All four are closed, each red-first.**
+- **Railway is running the final commit.** `GET /admin` with no session is the sign-in page (200); with a player session 403; 404 only when there is neither an env token nor an owner.
+- **The landing site is live: https://doomcraft-site.vercel.app** — static, own Vercel project, `script-src 'none'`, a "Play now" CTA to the online build and "Play offline" to the static one. Honest copy: what is real, what is not yet.
+- **Known, deliberately left:** `wiring.test.ts` guards `client/src/ui/` only (an orphan one directory deeper is invisible — the auditor planted four and 1855 tests stayed green); eight pre-existing unreachable modules totalling 5,052 lines, the worst `server/src/deathmatch.ts` (1,135 lines, and it has already drifted from the client copy); the journal's added lock-hold latency is stated, not measured; `linkDevice`'s route test is vacuous (production verified working by hand); the `/api/auth/*` surface has no caller in the game bundle yet — the game's account panel is PLATFORM C4.
 
 ---
 
@@ -73,7 +80,7 @@ browser ──(same origin)──────► doomcraft-production.up.railway
                                  ├─ /ws              rooms (authoritative sim, bots, 20 Hz)
                                  ├─ /api/*           profile (guarded), levels, status, version, flags, auth/*
                                  ├─ /api/admin/*     env bearer OR owner session; audit row per mutation
-                                 └─ /admin           the console — 404 when DOOMCRAFT_ADMIN_TOKEN is unset
+                                 └─ /admin           sign-in page → the console; 403 to a player; 404 only with no token AND no owner
                                  /data               JsonFileStore: profiles, accounts, journal, audit  (Railway volume)
 ```
 
@@ -137,6 +144,55 @@ shipped *twice*). Maps as a pack were **rejected** with the number (~11 MB per a
 `tools/gauntlet.js` is blind and honest, and no piece has yet won an admissible comparison against the
 bar. Five economy pieces are on the board with no brief. **This is real remaining work, not a
 formality**, and the three bars are on disk so a critic can still do a real A/B.
+
+### 3.8 Viral sharing and an affiliate programme — so people promote it and can make money
+Requested at the end of this session. Nothing is built; this is the design, and it is deliberately in
+two tiers because the second carries legal and tax load the first does not.
+
+**What already exists to build on:** the reward journal (`server/src/journal.ts` — append-only,
+idempotent on `(kind, sourceId)`, `balanceAfter` per row) is the ledger every payout needs; the
+entitlement guard grants rewards server-side only; `docs/ECONOMY.md` "Viral sharing" already decides
+the rules — *referrals pay on engagement, never on signup* (rewarding signups is what makes a referral
+system a bot farm), share cards are server-rendered from match data so they cannot be faked, and fraud
+caps + a review queue ship *with* the feature; `docs/SPONSORS.md` §4.5 has the HMAC `/r/<clickId>`
+redirector and the 7-day-click / 1-day-view attribution window, both of which transfer unchanged.
+
+**Tier 1 — in-game rewards for everyone (ship first; no money, no legal load).**
+- Every account gets a referral code; `?ref=<code>` on the landing site and the share card. Attribution
+  is server-recorded at first connect and stored on the referred player's profile (one referrer, forever,
+  first wins).
+- **Conversion = engagement, not signup:** the referred player reaches a threshold the server has
+  measured itself — e.g. 30 minutes of *paid* play per the anti-farm rules, or level 5. On conversion
+  both sides get Scrap + an untradable "Recruiter" title tier, written through the journal with
+  `kind: 'referral'`, `sourceId: <referredDeviceId>` (so it can never pay twice).
+- "Beat my time" challenge links for Quest drop the recipient into the same level with the sender's
+  ghost time — the highest-intent share there is.
+- Caps per account per day, self-referral detection (same device id, same account, same IP block
+  within the window), and a review queue in the console. **The cap and the queue are part of tier 1,
+  not after it.**
+
+**Tier 2 — cash affiliates (revenue share; needs a payout provider, tax handling and an agreement).**
+- Model: a revenue share on what the *referred* player actually generates — ad revenue attributed per
+  player (the sponsor event log + the ads decide/event pipeline in `SPONSORS.md` give per-player
+  impressions) and IAP net of the store's cut — e.g. 20% for 12 months, paid monthly above a $25
+  threshold. Never a CPA bounty on signups; never a flat per-referral fee (both are bot magnets).
+- The journal gains `kind: 'affiliate_accrual'` and `kind: 'affiliate_payout'`; balances reconcile to
+  Σ delta exactly as Scrap does today; clawback rows on refunds/chargebacks within the attribution
+  window. Payouts via the merchant of record's payout rail (Paddle) or PayPal Payouts — **blocked on
+  the user's account**, like every other vendor.
+- Compliance that cannot be skipped: an affiliate agreement and published terms; KYC + tax forms
+  (W-9 / W-8BEN in the US, equivalents elsewhere) above the reporting thresholds; the FTC disclosure
+  rule for promoters (`#ad` / "I earn a commission"); GDPR basis for storing attribution; and a
+  **fraud model before the first dollar** — device/IP clustering, velocity, conversion-rate outliers,
+  manual review for the top payouts, and the ability to hold a payout.
+- The affiliate dashboard is a **tab in the existing admin/owner console first** (read-only: clicks,
+  conversions, accruals per code) and a self-serve page second.
+
+**Build order:** tier 1 referral codes + attribution + journal rows (server) → share cards (server-
+rendered PNG from match data; `SPONSORS.md` S36 reserves the lockup rules) → landing-site `?ref=` and
+the "Recruiter" titles → the review queue in the console → *then* tier 2 behind the payout provider.
+Every payout path goes through `EntitlementGuard` and the journal; the client never computes a
+referral reward, ever.
 
 ### 3.7 Known defects, unfixed, filed
 `docs/BUGS-FOUND.md` §4: Builder/Horde rooms hit `endRound('time')` after 8 min and regenerate the
