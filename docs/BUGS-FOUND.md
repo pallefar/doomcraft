@@ -208,3 +208,46 @@ scheduling happens to favour the writer. The new one hands the store an `FsLike`
 resolves on command *and snapshots the file bytes when the read is issued*, so the ordering in the
 diagram above is produced deliberately rather than waited for. Red before the fix
 (`the payout was overwritten in the cache: expected +0 to be 1`), green after.
+
+---
+
+## 6. The reward journal's idempotency key, as specified, would have refused most payouts — DESIGN BUG, FOUND BEFORE IT SHIPPED
+
+Not a bug in code that ran. A bug in `docs/PLATFORM.md` §4.2–4.3, caught while building it, and
+recorded here because the design document is now wrong on paper in two places and the next reader
+needs to know which one won.
+
+**What the document specifies.** *"Idempotent on `(kind, sourceId)`"*, with
+`` sourceId = `${HOST_ID}:${sessionId}` `` and `` sessionId = `${room.name}#${round}` ``.
+
+**Three separate collisions, in increasing order of how much money they lose.**
+
+1. **Both currencies of one payout share the key.** A payout writes an XP row and a Scrap row. Under
+   `(kind, sourceId)` the second is a duplicate of the first, so exactly half of every player's
+   money never reaches the journal. Caught by the §4.4 invariant on the Scrap currency — the one
+   collision the specified test would have found.
+2. **Every player in a round shares the key.** `sessionId` names a ROUND, and a round pays everyone
+   in the room. The first player paid claims the key and the other 31 are refused. And because the
+   claim has to gate the *mutation* — a journal that declines to record a payout while
+   `applyMatchResult` runs anyway is a journal that lies about a balance it watched change — those
+   31 players are not paid at all. `server/src/economy.test.ts`, "records one row per currency,
+   summing to exactly what was stored", is red under the document's key: two players in one round,
+   two rows instead of four.
+3. **A reaped room's replacement reuses the key.** `HOST_ID` fixes the restart case the document
+   names. It does not fix the case the document does not: `ModeRouter` reaps an empty room and
+   builds another under the same key, whose rounds start at 1 again. `"deathmatch#1"` therefore
+   names two different matches on one host on one day. `server/src/economy.test.ts`, "pays a NEW
+   room that reuses the key and starts at round 1 again", is red under `${hostId}:${sessionId}`:
+   one row where there should be two, and a player silently unpaid for a whole match.
+
+**What shipped.** The idempotency key is the triple `(kind, sourceId, playerId)`, length-prefixed so
+a room key containing `~`, `:` or `#` cannot forge another one. `append` takes the whole movement
+GROUP — both currencies — and claims that one key for it. And `sourceId` is
+`` `${hostId}:${roomInstanceId}:${sessionId}` ``, where `roomInstanceId` is minted in the `Room`
+constructor and never reused.
+
+**Why the invariant test alone would not have caught the second one.** A player refused a payout has
+no rows *and* no balance, so `Σ delta == balance` still holds for them. The invariant is blind to a
+*refused* payout and only catches a *misrecorded* one. `server/src/journal.test.ts` therefore counts
+the rows as well: `expect(j.status().appended).toBe(payouts * 2)`, which fails with
+`expected 20000 to be 50000` under the document's key.

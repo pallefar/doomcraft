@@ -413,6 +413,32 @@ export function stableIdFor(conn: { deviceId?: string; id?: number }): string {
  * ------------------------------------------------------------------------ */
 
 /**
+ * THIS PROCESS. Minted at module load, never persisted, never reused.
+ *
+ * Two jobs, and it is the same value for both. A fleet console cannot tell two
+ * hosts apart without it — `build.id` is the bundle and every host in a fleet
+ * shares it. And the reward journal needs it: a room's `sessionId` is
+ * `"<room key>#<round>"`, which repeats across a restart of one host, so
+ * anything using that as an idempotency key silently refuses the second
+ * process's payouts as duplicates (`docs/PLATFORM.md` §4.2).
+ *
+ * It lives HERE, next to `BUILD_ID` and inside the version document, so a
+ * caller cannot publish a version document without it — the same reason
+ * `contentHash` is a required parameter below.
+ *
+ * `globalThis.crypto` rather than `node:crypto`: this file is imported by
+ * `index.ts` only, but the rule that keeps the server tier importable is worth
+ * not breaking one file at a time.
+ */
+export const HOST_ID = ((): string => {
+  const bytes = new Uint8Array(6);
+  globalThis.crypto.getRandomValues(bytes);
+  let out = '';
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out;
+})();
+
+/**
  * What `/api/version` answers, and what a bug report should carry.
  *
  * All three axes, named separately, because "what version are you on" is not a
@@ -447,7 +473,7 @@ export function versionDocument(
       minSupported: CONTENT_MIN_SUPPORTED,
       hash: contentHash >>> 0,
     },
-    build: { id: BUILD_ID },
+    build: { id: BUILD_ID, host: HOST_ID },
     ...extra,
   };
 }

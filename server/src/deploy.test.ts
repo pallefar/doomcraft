@@ -16,7 +16,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,10 +41,14 @@ async function freePort(): Promise<number> {
   });
 }
 
-interface Booted { child: ChildProcess; origin: string }
+interface Booted { child: ChildProcess; origin: string; data: string }
 
 async function boot(env: Record<string, string> = {}): Promise<Booted> {
   const port = await freePort();
+  /* Returned, because the reward journal writes under it and "the directory
+   * exists on a host nobody configured" is the cheapest possible proof that the
+   * journal is constructed in the real binary rather than only in a test. */
+  const data = mkdtempSync(join(tmpdir(), 'dc-deploy-data-'));
   const child = spawn(process.execPath, ['--import', 'tsx', serverEntry], {
     cwd: join(here, '..', '..'),
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -52,7 +56,7 @@ async function boot(env: Record<string, string> = {}): Promise<Booted> {
       ...process.env,
       PORT: String(port),
       HOST: '127.0.0.1',
-      DOOMCRAFT_DATA: mkdtempSync(join(tmpdir(), 'dc-deploy-data-')),
+      DOOMCRAFT_DATA: data,
       DOOMCRAFT_STATIC: mkdtempSync(join(tmpdir(), 'dc-deploy-static-')),
       DOOMCRAFT_BOTS: '0',
       DOOMCRAFT_BUILD_ID: 'deadbeef1234',
@@ -73,7 +77,7 @@ async function boot(env: Record<string, string> = {}): Promise<Booted> {
     if (Date.now() > deadline) throw new Error('server did not start');
     await new Promise((r) => setTimeout(r, 200));
   }
-  return { child, origin };
+  return { child, origin, data };
 }
 
 const admin = { Authorization: `Bearer ${ADMIN_TOKEN}` };
@@ -582,4 +586,81 @@ describe('POST /api/admin/flags merges, and refuses a stale write', () => {
       server.child.kill('SIGKILL');
     }
   }, 60_000);
+});
+
+
+/* ------------------------------------------------------------------------ *
+ * The reward journal is mounted
+ *
+ * `journal.test.ts` proves the ledger sums to the balance; `economy.test.ts`
+ * proves the room writes it. These prove the real binary constructs one and
+ * serves the read half an operator needs — the failure mode this project keeps
+ * repeating is a feature that compiles, passes hundreds of tests, and is
+ * imported by nothing.
+ * ------------------------------------------------------------------------ */
+
+describe('the reward journal, in the real binary', () => {
+  let server: Booted;
+  beforeAll(async () => { server = await boot(); }, 60_000);
+  afterAll(() => { server?.child.kill('SIGKILL'); });
+
+  it('creates both streams under the data root, on a host nobody configured', () => {
+    // The two-file split of §4.5 is made at WRITE time because it cannot be
+    // made at delete time: erasure removes one and keeps the other.
+    expect(existsSync(join(server.data, 'journal'))).toBe(true);
+    expect(existsSync(join(server.data, 'financial'))).toBe(true);
+  });
+
+  it('names THIS host in the version document, so two of them can be told apart', async () => {
+    const doc = await (await fetch(`${server.origin}/api/version`)).json() as {
+      build: { id: string; host: string };
+    };
+    // `build.id` is the bundle and every host in a fleet shares it. `host` is
+    // the process — and it is the first component of every payout's
+    // idempotency key, because a room's session id repeats across a restart.
+    expect(doc.build.id).toBe('deadbeef1234');
+    expect(doc.build.host).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it('answers the operator with a page of rows AND the reconciliation', async () => {
+    const res = await fetch(
+      `${server.origin}/api/admin/journal?player=device-live0001&limit=10`, { headers: admin },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    const body = await res.json() as {
+      player: string;
+      rows: unknown[];
+      reconcile: { xp: { stored: number | null; journal: number }; scrap: { stored: number | null; journal: number }; fromDay: string };
+      status: { appended: number; failed: number };
+    };
+    // A divergence between these two numbers is the ONLY evidence that a payout
+    // moved a balance without being recorded, and it is invisible from either
+    // number alone. That is the whole reason this route answers both.
+    expect(body.reconcile.xp.journal).toBe(0);
+    expect(body.reconcile.scrap.journal).toBe(0);
+    // Nobody has played on this host, so there is no profile and no row.
+    expect(body.reconcile.xp.stored).toBeNull();
+    expect(body.rows).toEqual([]);
+    expect(body.status.failed).toBe(0);
+  });
+
+  it('never puts the full device id in the response it just took one in', async () => {
+    // docs/PLATFORM.md §5.7: no admin serialiser may emit a full device id, and
+    // a journal row carries one on every line.
+    const res = await fetch(
+      `${server.origin}/api/admin/journal?player=device-live0001`, { headers: admin },
+    );
+    const text = await res.text();
+    expect(text).not.toContain('device-live0001');
+    expect(JSON.parse(text).player).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('is admin-gated, and refuses a device id that is not one', async () => {
+    const open = await fetch(`${server.origin}/api/admin/journal?player=device-live0001`);
+    expect(open.status).toBe(404);
+    expect(open.headers.get('content-type')).toContain('application/json');
+    const bad = await fetch(`${server.origin}/api/admin/journal?player=../etc`, { headers: admin });
+    expect(bad.status).toBe(400);
+  });
 });

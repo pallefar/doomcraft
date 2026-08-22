@@ -24,9 +24,9 @@
  *
  * The environment contract is documented in full in docs/ONLINE.md. The short
  * version: PORT, HOST, DOOMCRAFT_DATA, DOOMCRAFT_STATIC, DOOMCRAFT_ORIGINS,
- * DOOMCRAFT_MAX_ROOMS, DOOMCRAFT_DRAIN_MS. SIGINT and SIGTERM stop admitting
- * new players, let live matches finish inside the drain budget, then flush
- * saves and exit.
+ * DOOMCRAFT_MAX_ROOMS, DOOMCRAFT_DRAIN_MS, DOOMCRAFT_JOURNAL_DAYS,
+ * DOOMCRAFT_FINANCIAL_DAYS. SIGINT and SIGTERM stop admitting new players, let
+ * live matches finish inside the drain budget, then flush saves and exit.
  */
 
 import { createServer } from 'node:http';
@@ -67,12 +67,19 @@ import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
 import {
   FlagService,
+  HOST_ID,
   HostDrainingError,
   HostLifecycle,
   stableIdFor,
   versionDocument,
   type LiveRoom,
 } from './deploy.js';
+import {
+  DEFAULT_FINANCIAL_DAYS,
+  DEFAULT_JOURNAL_DAYS,
+  JsonJournal,
+  redactPlayerId,
+} from './journal.js';
 import { CONTENT_VERSION, contentHashFor } from '@doomcraft/shared/version';
 import { flagConfigETag } from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
@@ -477,6 +484,36 @@ const store: PersistenceStore = new JsonFileStore(dataRoot);
 const bootMs = Date.now();
 
 /**
+ * THE REWARD JOURNAL. Append-only NDJSON beside the profile store.
+ *
+ * Constructed here, next to `store`, because it is the same kind of thing and
+ * because the two have to agree: `Room.persistMember` writes a row from inside
+ * `store.update`'s callback, under the same per-device lock that moved the
+ * balance. Nothing else in this process may write one.
+ *
+ * A journal cannot be backfilled from balances, which is why it lands now
+ * rather than with the merge that needs it. See `server/src/journal.ts`.
+ */
+const journal = new JsonJournal(dataRoot, {
+  clock: () => Date.now(),
+  journalDays: envDays('DOOMCRAFT_JOURNAL_DAYS', DEFAULT_JOURNAL_DAYS),
+  financialDays: envDays('DOOMCRAFT_FINANCIAL_DAYS', DEFAULT_FINANCIAL_DAYS),
+});
+/* Seed the 48 h idempotency set from disk BEFORE the first match can end, so a
+ * payout retried across a restart is refused rather than paid twice. */
+void journal.ready();
+/* Retention. One sweep at boot and one every six hours: a day file is the unit,
+ * so there is nothing to do more often than that. */
+void journal.sweep();
+const journalSweeper = setInterval(() => { void journal.sweep(); }, 6 * 60 * 60 * 1000);
+if (typeof journalSweeper.unref === 'function') journalSweeper.unref();
+
+function envDays(name: string, fallback: number): number {
+  const raw = Number(process.env[name] ?? '');
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : fallback;
+}
+
+/**
  * THE reward gate. One per process, shared by every room, because the
  * session ledger and the audit ring are process-wide facts and a per-room
  * guard would give each room its own private accounting.
@@ -594,6 +631,8 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
       ...options,
       store,
       guard,
+      journal,
+      hostId: HOST_ID,
       sessionOrigin: isInvite ? SessionOrigin.SERVER_INVITE : SessionOrigin.SERVER_MATCHMAKER,
       sessionIntent: isInvite ? MatchType.PRIVATE : MatchType.PUBLIC,
       // A real server generates all 169 chunks once, at room construction; the
@@ -1107,6 +1146,56 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
+  /* --- the reward journal, for an operator ------------------------------ *
+   * The read half of `server/src/journal.ts`. The admin console (C3/C6) renders
+   * this; there is no UI in this commit and this route is the seam.
+   *
+   * Two things are answered at once and the second is the point: the PAGE of
+   * rows, and the RECONCILIATION — the stored balance beside the sum of every
+   * delta the journal holds for that player. A divergence is the only evidence
+   * that a payout moved a balance without being recorded, and it is invisible
+   * from either number on its own.
+   *
+   * `player` is a full device id on the way in — the operator has it, from a
+   * support ticket — and is never a full device id on the way OUT.
+   * `docs/PLATFORM.md` §5.7 requires every admin serialiser to redact it, and
+   * a journal row carries one on every line.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/admin/journal' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const key = url.searchParams.get('player') ?? '';
+    if (!isValidDeviceId(key)) { sendJson(res, 400, { error: 'player must be a device id' }, cors); return true; }
+    const sinceRaw = Number(url.searchParams.get('since') ?? '0');
+    const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
+    const limitRaw = Number(url.searchParams.get('limit') ?? '100');
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.floor(limitRaw))) : 100;
+    const redacted = redactPlayerId(key);
+    const rows = (await journal.read(key, since, limit))
+      .map((e) => ({ ...e, playerId: redacted }));
+    const sums = await journal.balances(key);
+    const profile = await store.load(key);
+    sendJson(res, 200, {
+      player: redacted,
+      rows,
+      /*
+       * `stored` is null when the player has no profile on this host, which is
+       * the normal state on a fleet — the rows and the balance can live on
+       * different boxes until there is one shared store. `fromDay` is the
+       * oldest retained day: outside it the sum is a lower bound, not a
+       * balance, and an operator must not read it as one.
+       */
+      reconcile: {
+        fromDay: sums.fromDay,
+        rows: sums.rows,
+        xp: { stored: profile === null ? null : profile.progress.xp, journal: sums.xp },
+        scrap: { stored: profile === null ? null : profile.economy.scrap, journal: sums.scrap },
+      },
+      status: journal.status(),
+    }, cors);
+    return true;
+  }
+
   if (path === '/api/status') {
     sendJson(res, 200, {
       // The operator's view names both drains separately, because during a
@@ -1599,6 +1688,7 @@ async function shutdown(signal: string): Promise<void> {
    * server/src/online.test.ts pins this. */
   clearInterval(roomSweeper);
   clearInterval(signalSweeper);
+  clearInterval(journalSweeper);
   // Signalling holds no match state; nothing is lost by ending it at once.
   signalHub.closeAll(1001, 'server shutting down');
 
@@ -1628,6 +1718,9 @@ async function shutdown(signal: string): Promise<void> {
   if (typeof forced.unref === 'function') forced.unref();
 
   try { await store.flush(); await store.close(); } catch { /* best effort */ }
+  // After the store, because the journal's own writes are already on disk by
+  // then: this only closes the append handles.
+  try { await journal.close(); } catch { /* best effort */ }
   await new Promise<void>((done) => { wss.close(() => done()); });
   // Only now: every match is over and there is nothing left to tell anybody.
   await new Promise<void>((done) => { httpServer.close(() => done()); });
@@ -1645,4 +1738,4 @@ process.on('unhandledRejection', (err) => {
   process.stderr.write(`unhandled rejection: ${String(err)}\n`);
 });
 
-export { router, directory, store, httpServer, wss, signalHub };
+export { router, directory, store, journal, httpServer, wss, signalHub };

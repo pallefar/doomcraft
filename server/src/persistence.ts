@@ -218,8 +218,18 @@ export interface PersistenceStore {
   /** Load or create. Never returns null. */
   ensure(deviceId: string): Promise<StoredProfile>;
   save(profile: StoredProfile): Promise<void>;
-  /** Read-modify-write under a per-device lock. */
-  update(deviceId: string, mutate: (p: StoredProfile) => void): Promise<StoredProfile>;
+  /**
+   * Read-modify-write under a per-device lock.
+   *
+   * The callback may be ASYNC, and the lock is held for the whole of it. That
+   * is what lets the reward journal be written from inside the same critical
+   * section that moved the balance — a journal appended after the lock is
+   * released is a journal that can disagree with the balance it describes.
+   * Every await inside a callback is lock time for that one device, so what
+   * belongs in here is the write that must not be separable from the mutation,
+   * and nothing else.
+   */
+  update(deviceId: string, mutate: (p: StoredProfile) => void | Promise<void>): Promise<StoredProfile>;
   grantEntitlement(deviceId: string, product: string, receipt: string | null): Promise<StoredProfile>;
   linkAccount(deviceId: string, accountId: string): Promise<{ profile: StoredProfile; secret: string }>;
   resolveAccount(accountId: string, secret: string): Promise<StoredProfile | null>;
@@ -776,10 +786,10 @@ export class MemoryStore implements PersistenceStore {
     if (profile.accountId) this.byAccount.set(profile.accountId, profile.deviceId);
   }
 
-  update(deviceId: string, mutate: (p: StoredProfile) => void): Promise<StoredProfile> {
+  update(deviceId: string, mutate: (p: StoredProfile) => void | Promise<void>): Promise<StoredProfile> {
     return this.withLock(deviceId, async () => {
       const p = await this.ensure(deviceId);
-      mutate(p);
+      await mutate(p);
       await this.save(p);
       return p;
     });
@@ -1015,10 +1025,10 @@ export class JsonFileStore implements PersistenceStore {
     this.markDirty(profile.deviceId);
   }
 
-  update(deviceId: string, mutate: (p: StoredProfile) => void): Promise<StoredProfile> {
+  update(deviceId: string, mutate: (p: StoredProfile) => void | Promise<void>): Promise<StoredProfile> {
     return this.withLock(deviceId, async () => {
       const p = await this.ensureLocked(deviceId);
-      mutate(p);
+      await mutate(p);
       await this.save(p);
       return p;
     });

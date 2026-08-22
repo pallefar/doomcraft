@@ -670,11 +670,15 @@ Both journal appends are idempotent on `(kind, sourceId)`, and `sourceId` is the
 
 ### 4.1 Why now
 
-`applyMatchResult` (`persistence.ts:574`) is the single writer of `progress.xp` and `economy.scrap`, it runs under the per-device lock, and it **discards the match**. There is no per-match record anywhere that survives a process: `SessionLedger` is an in-memory `Map` swept at 6 h holding only `{sessionId, trust, participants, settled}` (`entitlementGuard.ts:157-219`), and `Room.scoreboard()` (`room.ts:1560`) dies with the round. `docs/ECONOMY.md` asks for *"full audit log of every transfer, so a disputed or exploited trade can be traced and reversed"*; it is not built.
+> **BUILT.** `server/src/journal.ts`, wired into `Room.persistMember` and read by `GET /api/admin/journal`. §4.2's key was wrong in two ways and §4.4's test was not sufficient on its own; both are corrected in place below.
+
+`applyMatchResult` (`persistence.ts:574`) is the single writer of `progress.xp` and `economy.scrap`, it runs under the per-device lock, and it **discarded the match**. There was no per-match record anywhere that survived a process: `SessionLedger` is an in-memory `Map` swept at 6 h holding only `{sessionId, trust, participants, settled}` (`entitlementGuard.ts:157-219`), and `Room.scoreboard()` (`room.ts:1560`) dies with the round. `docs/ECONOMY.md` asks for *"full audit log of every transfer, so a disputed or exploited trade can be traced and reversed"*; it was not built.
 
 Without it: no merge, no undo, no refund, no clawback, no admin currency adjust anyone can audit, no dispute resolution, and no way to answer "where did my Scrap go".
 
 ### 4.2 The idempotency key, and a bug in the obvious choice
+
+> **BUILT, AND THIS SECTION WAS WRONG IN TWO PLACES.** What shipped is described in the block below; the original text is kept because its reasoning is right as far as it goes and the corrections only make sense against it. Full write-up: `docs/BUGS-FOUND.md` §6.
 
 `sessionId` is `` `${this.name}#${this.round}` `` (`room.ts:1155`) and `this.name` defaults to `'doomcraft'` (`room.ts:332`). **`deathmatch-1#3` is not globally unique and is not even unique across a restart of one host.** So:
 
@@ -684,6 +688,12 @@ const HOST_ID = randomBytes(6).toString('hex');
 ```
 
 and the payout's `sourceId` is `` `${HOST_ID}:${sessionId}` ``. Putting `HOST_ID` in `/api/version` is not incidental: it is the field the fleet console needs to tell two hosts apart anyway (§5.4).
+
+**CORRECTION 1 — the key is a TRIPLE, `(kind, sourceId, playerId)`.** A `sessionId` names a ROUND, and a round pays every player in the room. Under `(kind, sourceId)` the first player paid claims the key and the other thirty-one are refused as duplicates — and since the claim must gate the *mutation* as well as the row, they are not paid at all. The same key also collides between the XP row and the Scrap row of one payout, which would have dropped exactly half of everybody's money; that half is handled by `append` taking the whole movement GROUP and claiming one key for it.
+
+**CORRECTION 2 — `HOST_ID` is necessary and not sufficient.** `ModeRouter` reaps an empty room and builds another under the same key, and the new room's rounds start at 1 again. `"deathmatch#1"` therefore names two different matches on one host on one day, and the second is refused as a replay of the first. `Room` now mints a `roomInstanceId` at construction and the payout's `sourceId` is `` `${HOST_ID}:${roomInstanceId}:${sessionId}` ``.
+
+`HOST_ID` itself lives in `server/src/deploy.ts` beside `BUILD_ID`, not in `index.ts`, and it is inside `versionDocument` rather than passed to it — for the same reason `contentHash` became a required parameter: a value a caller can forget to publish is a value that quietly stops being published.
 
 ### 4.3 The model
 
@@ -728,9 +738,36 @@ export interface Journal {
 }
 ```
 
-**Storage — SHIP:** NDJSON at `<dataRoot>/journal/<YYYY-MM-DD>.ndjson`, appended inside the same `store.update` callback so it is under the per-device lock, plus an in-memory `Set` of `` `${kind}\u0000${sourceId}` `` seeded on boot from today's and yesterday's files.
+**As built** — four differences, each of which is a §4.2 or §4.5 correction reaching the signature:
 
-**Honest caveat, stated in the code:** the dedup set is per-process and covers 48 hours. That is exactly the window a retry lives in, and cross-host duplicate payouts are impossible today because only one host holds a given room. When Postgres lands, `UNIQUE (kind, source_id)` replaces the set with no call-site change.
+```ts
+export interface Journal {
+  /** Has this exact movement group already been recorded? Async because the
+   *  dedup set is seeded from disk: a synchronous `has` answers "no" for the
+   *  whole of boot, which is the window a retry lives in. */
+  has(kind: LedgerKind, sourceId: string, playerId: string): Promise<boolean>;
+  /** ONE movement group — every row sharing (kind, sourceId, playerId).
+   *  Returns rows written; 0 means it was a duplicate. */
+  append(entries: readonly LedgerEntry[]): Promise<number>;
+  read(playerId: string, sinceMs: number, limit: number): Promise<LedgerEntry[]>;
+  /** Both currencies in ONE scan, plus `fromDay` — see §4.5's bound. */
+  balances(playerId: string): Promise<JournalSums>;
+  forget(playerId: string): Promise<number>;
+  sweep(): Promise<number>;
+  status(): JournalStatus;
+  close(): Promise<void>;
+}
+```
+
+**Storage — SHIPPED:** NDJSON at `<dataRoot>/journal/<YYYY-MM-DD>.ndjson`, appended inside the same `store.update` callback so it is under the per-device lock, plus an in-memory `Set` of the idempotency key seeded on boot from today's and yesterday's files.
+
+Three things about it are not in the sketch above and are worth knowing before reading the file:
+
+- **`PersistenceStore.update`'s callback is now `void | Promise<void>`**, and the lock is held for the whole of it. That is what "inside the callback" costs and it is the point: the row reaches the disk before `save()` even marks the profile dirty, and the profile write is debounced 800 ms — so on a crash the **journal leads the balance**, which is the recoverable direction. A row with no balance can be re-applied; a balance with no row cannot be explained.
+- **`delta` is the observed movement, `balanceAfter - balanceBefore`**, not the amount the room asked for and not the amount the player was told. The three differ whenever the day cap, the ladder or `MAX_SCRAP_BALANCE` bites. Only this one makes `Σ delta == balance` true by construction; recording `MatchResult.xp` instead is red by 2.2x on the §4.4 test.
+- **The key is length-prefixed, not NUL-joined.** A room key contains `~`, `:` and `#`, so no printable delimiter is safe — and a literal NUL in a source file makes `grep` skip the whole file with no match and no warning, which `shared/src/flags.ts` already cost this project once.
+
+**Honest caveat, stated in the code:** the dedup set is per-process and covers 48 hours. That is exactly the window a retry lives in, and cross-host duplicate payouts are impossible today because only one host holds a given room. When Postgres lands, `UNIQUE (kind, source_id, player_id)` replaces the set with no call-site change.
 
 **REJECTED: Postgres now.** `docs/INFRASTRUCTURE.md:432` Phase 1 item 9 is right and stays LATER. What Postgres buys is enumeration and cross-host uniqueness; there are zero players to enumerate and one host. Adding a driver to a runtime whose only dependency is `ws` (`Dockerfile:57-60`), plus a migration tool, plus a second `PersistenceStore`, is the largest work item on any list in this document and it is not on the critical path for a game with no users.
 
@@ -740,7 +777,15 @@ export interface Journal {
 for every playerId: Σ journal.delta(currency) == profile balance(currency)
 ```
 
-`server/src/journal.test.ts` runs 10,000 synthesised matches across 200 devices through `applyMatchResult` + the journal, including day rollovers and two merges, then asserts the equality for every player and for both currencies. **Proven red** by `git stash push server/src/journal.ts` and re-running (`docs/BUGS-FOUND.md` §3's protocol) — one missing emit breaks it.
+`server/src/journal.test.ts` runs 10,000 synthesised matches across 200 devices through the real `applyMatchResult` under the real per-device lock — each round seating one to four players who **share a `sourceId`**, four UTC midnights passing underneath, the ladder firing on over 20,000 payouts and the day cap on over 5,000 — then reads the sums back off the NDJSON through the same `parseEntry` a reader uses and asserts the equality for every player and both currencies.
+
+**BUILT AS SPECIFIED EXCEPT FOR TWO THINGS, and both are corrections.**
+
+*No merges.* The specified test includes "two merges"; `merge.debit` / `merge.credit` have no producer until C5, so a merge in this test would be the test asserting against its own fixture.
+
+*The invariant alone is not enough, and that matters.* A player whose payout is **refused** has no rows *and* no balance, so `Σ delta == balance` still holds for them: the invariant is blind to a refused payout and catches only a misrecorded one. That blindness is exactly the shape of the §4.2 key bug. So the test also counts: `expect(j.status().appended).toBe(payouts * 2)`, which is what reports `expected 20000 to be 50000` under the document's original key.
+
+Red is proven by surgical hunk reverts rather than by stashing the file (a stash is an import error, not a failing assertion): recording the asked-for amount instead of the observed movement gives `xp diverged for device-inv00000: expected 52808 to be 24000`.
 
 ### 4.5 Retention, and the deletion conflict resolved at the point it is created
 
@@ -749,7 +794,11 @@ for every playerId: Σ journal.delta(currency) == profile balance(currency)
 So the journal is split at write time, not at delete time:
 
 - `journal/<date>.ndjson` — `match.payout`, `merge.*`, `admin.adjust`, `spend`. Retention `DOOMCRAFT_JOURNAL_DAYS`, default 400. `forget(playerId)` rewrites each file through a temp and an atomic rename. It is the one rewrite path and it exists for exactly one caller.
-- `financial/<date>.ndjson` — `purchase.grant`, `purchase.refund`, and the receipt. Retained for the statutory period, pseudonymised on erasure (the `playerId` is replaced by a tombstone id recorded in the deletion job) rather than removed.
+- `financial/<date>.ndjson` — `purchase.grant`, `purchase.refund`, and the receipt. Retention `DOOMCRAFT_FINANCIAL_DAYS`, default 3650. Pseudonymised on erasure — the `playerId` becomes `deleted:<8 hex>` — rather than removed.
+
+**Both directories are created at boot even though `financial` has no producer yet** (`POST /api/entitlement` 404s until a charging provider is bound). The split is made at write time because it cannot be made at delete time, and the receipt still has to move out of `StoredProfile` before the first real payment.
+
+**What happens AT the bound, stated because a retention policy nobody has read the end of is a data-loss policy.** The oldest day file is deleted whole, and with it the ability to reconstruct a balance from before that day. `balances()` therefore returns `fromDay`, and `GET /api/admin/journal` puts it beside the two numbers, so a truncated sum is never shown to an operator as if it were a balance. The stored balance remains the number a player spends against; the journal is the audit trail, not the wallet.
 
 **The receipt moves out of `StoredProfile` in the same change** (`PERSIST_VERSION` bump, §5.6). It must move **before** the first real payment, not after.
 
@@ -1232,7 +1281,7 @@ Three of the obvious first events — `session_start`, `first_frame {ttiMs}`, `m
 |---|---|
 | **Postgres** | No user list, no search, no leaderboard, no "players active today". `JsonFileStore`'s `FsLike` declares `readdir` (`persistence.ts:702`) and never calls it. User lookup is by profile key only. |
 | **Email, password or OAuth in the house provider** | Account recovery is a code the player must not lose. A stolen code is permanent, unrecoverable theft with no support path. §2.4. |
-| **Match history** | There is no per-match record that survives a process. `SessionLedger` is an in-memory `Map` swept at 6 h holding no scores and no timestamps (`entitlementGuard.ts:157-219`, `:96`); `Room.scoreboard()` (`room.ts:1560`) dies with the round. The journal (§4) records *money*, not *matches*. |
+| **Match history** | Still no per-match record with SCORES in it. `SessionLedger` is an in-memory `Map` swept at 6 h holding no scores and no timestamps (`entitlementGuard.ts:157-219`, `:96`); `Room.scoreboard()` (`room.ts:1560`) dies with the round. The journal (§4) is built and records *money*, not *matches* — two rows per player per round, saying what the balance did and nothing about who won. |
 | **Leaderboards** | `REWARD_LEADERBOARD` (`shared/src/trust.ts:250`) is a permission bit with **no store, no writer and no reader**. "Top 10 this week" is not answerable. |
 | **Friends, presence, social graph** | Zero occurrences outside prose. |
 | **Items, titles, trophies, rating** | The *names* are reserved in `SERVER_OWNED_PROFILE_FIELDS` (`trust.ts:821-822`); none of the five exists in `StoredProfile`. |
@@ -1306,10 +1355,10 @@ Route tests use the existing child-process harness at `server/src/deploy.test.ts
 **Import trace:** `main.ts:87` import → `:444` handle → `:726` button in `menuRow` → `:763` construction → `:1333` `setScreen` → `:1525` Escape → `:1825` `__DC__`. **Enforced by test (2).**
 **Node tier: no.** **Third-party account: none.** *This is the only phase a player sees this week.*
 
-### Phase C2 — The reward journal
-**Ships:** `server/src/journal.ts`, `HOST_ID` beside `bootMs` (`index.ts:434`) and on `/api/version`, one entry per currency per `applyMatchResult`, the two-file split of §4.5, the retention timer.
-**Tests:** the §4.4 invariant across 10,000 matches, 200 devices, day rollovers; plus "the same `(kind, sourceId)` appended twice yields one entry". Red by stashing `journal.ts` or a single emit.
-**Import trace:** `journal.ts` → constructed in `index.ts` beside `store` (`:433`) → `append()` called from inside the `store.update` callback at `server/src/room.ts:1436` → read by `GET /api/admin/player`.
+### Phase C2 — The reward journal — **DONE**
+**Shipped:** `server/src/journal.ts`, `HOST_ID` in `deploy.ts` beside `BUILD_ID` and inside `versionDocument` (not `index.ts`, and not a parameter — see §4.2), `Room.instanceId`, one entry per currency per `applyMatchResult` written from inside the per-device lock, the two-file split of §4.5, the retention sweep, and `GET /api/admin/journal` as the read path the console will render.
+**Tests:** the §4.4 invariant across 10,000 matches / 200 devices / 25,000 payouts / four day rollovers; "a replayed `(kind, sourceId, playerId)` writes no second row **and moves no balance**"; a torn tail; a restart; retention; erasure; three room-level tests on a real `Room`; five live-binary tests. Red by surgical hunk revert, not by stashing the file.
+**Import trace:** `journal.ts` → `new JsonJournal(dataRoot)` in `index.ts` beside `store` → passed to every `Room` in the router's `create` callback → `has()`/`append()` called from inside the `store.update` callback in `Room.persistMember` → read by `GET /api/admin/journal`.
 **Node tier: yes** to matter; buildable and testable without. **Third-party account: none.**
 
 ### Phase C3 — The admin console, read + flags + drain
@@ -1367,7 +1416,7 @@ Ordered by how badly each would mislead.
 7. **`docs/INFRASTRUCTURE.md:426-429` rejects a second frontend platform, and the game is live on Vercel.** Serving the console from the Node origin makes the question moot for this surface; the rejection stands for C8's `admin.<domain>` (same Cloudflare account, a second *project*).
 8. **`HANDOVER.md:142-143` says `tsc -b` fails on Vercel *"because the root tsconfig references `server/`"*. Not reproducible** — `npx tsc -b --pretty false` exits 0 at HEAD, and `.vercelignore` does not exclude `server/`. The load-bearing fact is unchanged and **worse** than the stated one: the production deploy gate is bundling only, vite does not typecheck, and **there is no `.github/` directory at all**, so `tsc` and `vitest` run nowhere in CI. A Phase C panel typed against server types can be red locally and green on `doomcraft.vercel.app`.
 9. **New, and it belongs in `docs/BUGS-FOUND.md`: `SaveFile.profile.{xp, level, secondsPlayed, adsRemoved}` are dead fields.** Set by `createSaveFile` (`shared/src/saves.ts:319-322`) and never written again — `grep -rn "save\.profile" client/src` shows only `avatar`, `skin` and `lastMode` are live. Any UI rendering them shows a permanent zero. Fix is one line in the two places that already write `progress`, or delete the fields at the next `SAVES_VERSION` bump.
-10. **New: `sessionId` is not unique.** `` `${room.name}#${round}` `` (`room.ts:1155`) with `name` defaulting to `'doomcraft'` (`:332`) repeats across a restart. Anything using it as an idempotency key needs `HOST_ID` in front of it. §4.2.
+10. **New: `sessionId` is not unique.** `` `${room.name}#${round}` `` (`room.ts:1155`) with `name` defaulting to `'doomcraft'` (`:332`) repeats across a restart. Anything using it as an idempotency key needs `HOST_ID` in front of it. §4.2. **And that is not enough** — it also repeats when the router reaps a room and rebuilds it under the same key, whose rounds start at 1 again, so a `roomInstanceId` is needed as well. Both are now in `Room.payoutSourceId()`; the ledger's own `sessionId` is unchanged.
 
 **Phase 1 items from `docs/INFRASTRUCTURE.md` §8 that are genuinely still open, and are the real prerequisites:** #1 brotli/ETag in `serveStatic` — `index.ts:739-784` still emits `content-length` + `cache-control` only, no `content-encoding`, no `etag`, no `last-modified`, and `/c/*` and `/characters/*` get `no-cache` **with no validator**; note the asymmetry, `vercel.json` fixes this for the static host and the Node origin does not. #4 rate-limit HELLO — still absent, and now partly addressed by C0's limiter but not on the socket path. #8 `server/src/world.ts:72`'s equality assert — the line that already took the server down once. #9 retire `JsonFileStore` — LATER by decision, §4.3.
 

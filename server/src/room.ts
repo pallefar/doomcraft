@@ -77,7 +77,9 @@ import {
 import { Connection, NetHub, sanitiseChat } from './net.js';
 import type { NetHost, NetTransport } from './net.js';
 import type { AppliedRewards, PersistenceStore, StoredProfile } from './persistence.js';
-import { applyMatchResult } from './persistence.js';
+import { applyMatchResult, randomToken } from './persistence.js';
+import type { Journal } from './journal.js';
+import { MATCH_PAYOUT, matchPayoutRows } from './journal.js';
 import {
   EntitlementGuard,
   toMatchResult,
@@ -123,6 +125,21 @@ export interface RoomOptions {
    * about the economy gets by default.
    */
   guard?: EntitlementGuard | null;
+  /**
+   * The reward journal. Null means this room records nothing — the browser
+   * worker and every test that does not care about the ledger — which is
+   * consistent with `guard: null` meaning it pays nothing.
+   *
+   * A room with a `store` and a `guard` but no `journal` still pays: the
+   * journal is not a gate, it is the record. Making it a gate would mean a
+   * disk fault stops the game.
+   */
+  journal?: Journal | null;
+  /**
+   * This PROCESS's id, from `server/src/deploy.ts`. It is the first component
+   * of every payout's idempotency key; see `payoutSourceId`.
+   */
+  hostId?: string;
   /**
    * How the server created this room. A server fact, never read off a
    * packet; `sealSessionTrust` turns it into a topology and clamps the
@@ -218,6 +235,20 @@ export class Room implements NetHost {
   readonly bots: BotDriver;
   readonly store: PersistenceStore | null;
   readonly guard: EntitlementGuard | null;
+  readonly journal: Journal | null;
+  private readonly hostId: string;
+  /**
+   * This room OBJECT's id, minted here and never reused.
+   *
+   * `sessionId` is `"<room key>#<round>"` and the room key is reused: the
+   * router reaps an empty room and builds another under the same key, whose
+   * rounds start at 1 again. So `"deathmatch#1"` names two different matches on
+   * one host on one day, and a payout keyed on it would refuse the second as a
+   * duplicate and pay that player nothing. `docs/PLATFORM.md` §4.2 names the
+   * restart case and puts `HOST_ID` in front; that is necessary and not
+   * sufficient. This is the missing component.
+   */
+  readonly instanceId: string;
 
   seed: number;
   gameMode: GameMode;
@@ -336,6 +367,9 @@ export class Room implements NetHost {
     this.enemyOverride = options.enemies ?? -1;
     this.store = options.store ?? null;
     this.guard = options.guard ?? null;
+    this.journal = options.journal ?? null;
+    this.hostId = options.hostId ?? 'local';
+    this.instanceId = randomToken().slice(0, 8);
     this.sessionOrigin = options.sessionOrigin ?? SessionOrigin.SERVER_MATCHMAKER;
     this.sessionIntent = options.sessionIntent ?? MatchType.PUBLIC;
     this.clock = options.clock ?? (() => Date.now());
@@ -1431,15 +1465,63 @@ export class Room implements NetHost {
     const conn = member.conn;
     try {
       let landed = { xp: 0, scrap: 0 };
-      const updated = await this.store.update(deviceId, (profile) => {
+      let paid: boolean = false;
+      /*
+       * THE WHOLE MOVEMENT, INSIDE ONE LOCK. Ask the journal, move the balance,
+       * record what moved — no await between the mutation and the row that
+       * describes it, and no other writer for this device in between.
+       *
+       * The order is load-bearing in both directions. The idempotency check is
+       * FIRST because a duplicate must not move the balance either: a journal
+       * that merely declines to record a second payout, while
+       * `applyMatchResult` runs twice, is a journal that lies about a balance
+       * it watched change. And the append is LAST but still inside, so the row
+       * reaches the disk before `save()` even marks the profile dirty (that
+       * write is debounced 800 ms). The journal therefore LEADS the balance on
+       * a crash, which is the recoverable direction — a row with no balance can
+       * be re-applied, a balance with no row cannot be explained.
+       */
+      const updated = await this.store.update(deviceId, async (profile) => {
+        const journal = this.journal;
+        const sourceId = this.payoutSourceId();
+        if (journal !== null && await journal.has(MATCH_PAYOUT, sourceId, deviceId)) return;
+        const before = { xp: profile.progress.xp, scrap: profile.economy.scrap };
         landed = applyMatchResult(profile, result);
+        paid = true;
         profile.progress.lastSeed = this.seed;
         if (profile.progress.name.length === 0) profile.progress.name = p.name;
+        if (journal === null) return;
+        await journal.append(matchPayoutRows({
+          playerId: deviceId,
+          sourceId,
+          ms: Date.now(),
+          before,
+          // Read back off the profile, not off `landed`: the two differ the
+          // moment `MAX_SCRAP_BALANCE` clamps, and the row has to describe the
+          // balance rather than the intention.
+          after: { xp: profile.progress.xp, scrap: profile.economy.scrap },
+          asked: { xp: result.xp, scrap: result.scrap },
+          code: verdict.code,
+        }));
       });
-      this.tellPlayerWhatLanded(conn, landed, updated, verdict.code);
+      if (paid) this.tellPlayerWhatLanded(conn, landed, updated, verdict.code);
     } catch {
       // A failed save must never take the match down.
     }
+  }
+
+  /**
+   * The idempotency source for this round's payouts: host, room object, round.
+   *
+   * All three are needed and none is decorative. `hostId` separates two
+   * processes (`sessionId` repeats across a restart); `instanceId` separates
+   * two rooms that held the same key at different times, whose rounds both
+   * start at 1; `sessionId` separates the rounds inside one room. The PLAYER is
+   * not in here — it is the third component of the idempotency key itself,
+   * because one round pays every player in the room.
+   */
+  private payoutSourceId(): string {
+    return `${this.hostId}:${this.instanceId}:${this.sessionId}`;
   }
 
   /* -------------------------------------------------------------- *

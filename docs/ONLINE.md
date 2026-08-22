@@ -129,6 +129,8 @@ seconds, `status=playing`, with terrain.
 | `DOOMCRAFT_PREWARM` | `1` | Build the default room at boot so the first player never waits for terrain. `0` to disable. |
 | `DOOMCRAFT_MODE` | `deathmatch` | Mode a socket with no `?mode=` gets. Keeps a bare `/ws` — which is what `tools/loadtest.mjs` opens — working. |
 | `DOOMCRAFT_SEED`, `DOOMCRAFT_BOTS` | *(mode defaults)* | Router-wide plan overrides. A locked room keeps them; a client cannot override them. |
+| `DOOMCRAFT_JOURNAL_DAYS` | `400` | Retention for the reward journal at `<DOOMCRAFT_DATA>/journal/<date>.ndjson`. At the bound the oldest day file is deleted whole, and a balance can no longer be reconstructed from before that day — `GET /api/admin/journal` reports `fromDay` so a truncated sum is never read as a balance. |
+| `DOOMCRAFT_FINANCIAL_DAYS` | `3650` | Retention for `<DOOMCRAFT_DATA>/financial/<date>.ndjson`, which holds purchases and refunds. Longer because it is a statutory record, and erasure pseudonymises these rows instead of deleting them. No producer writes here yet — `POST /api/entitlement` 404s until a charging provider is bound. |
 | `DOOMCRAFT_TRUST_PROXY` | `0` | Read the client address from `x-forwarded-for`. **Only behind a proxy you control.** |
 | `DOOMCRAFT_SPONSOR_ORIGIN`, `DOOMCRAFT_CSP_REPORT_URI`, `DOOMCRAFT_CSP_REPORT_ONLY` | — | Pre-existing CSP knobs, see the header of `server/src/index.ts`. |
 
@@ -151,7 +153,8 @@ never queue anybody.
 | `GET /api/quickplay?mode=…[&code=…]` | `{ws, key, humans, fresh}` — the socket URL and how many people are already in it, so the UI can say "3 playing" instead of "searching…". An unknown code is a `404`, never a quiet fall-through to a public room. While either drain is running: **`503`** `{draining:true, ticket:null}`, because a ticket pointing at a host that is leaving is matchmaking undoing the drain. |
 | `POST /api/rooms/private` | `{code, ticket}`. **Nothing is constructed here**: a room is 169 chunks and a 20 Hz timer, and a player who copies a code and never uses it must not cost a core. The router builds it on the first socket that arrives with the code. `503` while draining: the code would name a room this host will never build. |
 | `GET /api/scoreboard?room=<key>` | That room's scoreboard; without `room`, the busiest one. |
-| `GET /api/status` | Every room, plus the directory's own counters. |
+| `GET /api/status` | Every room, plus the directory's own counters. Private join codes are cut out of both `key` and `name`. |
+| `GET /api/admin/journal?player=<deviceId>[&since=&limit=]` | **Admin bearer required** (404 without one). A page of that player's reward-journal rows, newest first, plus the RECONCILIATION: the stored balance beside the sum of every delta the journal holds, per currency. A divergence between those two numbers is the only evidence that a payout moved a balance without being recorded, and it is invisible from either number alone. The device id goes in and never comes back out — every `playerId` in the response is an 8-character redaction. |
 
 Room keys are `deathmatch`, `horde`, `quest:<level>:<skill>`, `builder:<world>` — which is also how
 two people who picked the same thing end up in the same session — with `#2`, `#3`… as instances fill,

@@ -71,6 +71,8 @@ import {
   utcDay,
 } from './persistence.js';
 import type { FsLike } from './persistence.js';
+import { JsonJournal, MATCH_PAYOUT, matchPayoutRows, parseEntry } from './journal.js';
+import type { Journal, JournalFile, JournalFs, LedgerEntry } from './journal.js';
 import {
   MATCH_SCRAP_CAP,
   MATCH_XP_CAP,
@@ -117,6 +119,10 @@ interface RoomSpec {
   plan?: ModeSimPlan;
   /** What the room tells its players in SESSION_CONFIG. Default: the shipped bits. */
   flagBits?: number;
+  /** The reward journal. Null (the default) means the room records nothing. */
+  journal?: Journal | null;
+  /** This process's id, the first component of a payout's idempotency key. */
+  hostId?: string;
 }
 
 /**
@@ -149,8 +155,62 @@ function makeRoom(spec: RoomSpec): Room {
     sessionOrigin: spec.sessionOrigin,
     sessionIntent: spec.sessionIntent,
     plan: spec.plan,
+    journal: spec.journal,
+    hostId: spec.hostId,
     resolveFlags: () => spec.flagBits ?? defaultFlagBits(),
   });
+}
+
+/**
+ * An in-memory `JournalFs`, so a room test can read back the exact NDJSON the
+ * room wrote without touching a disk. Same shape as the one in
+ * `journal.test.ts`; duplicated rather than exported, because a test harness
+ * shared between two files is a harness that grows features for one of them.
+ */
+function memoryJournal(clock: () => number): { journal: JsonJournal; rows(): LedgerEntry[] } {
+  const files = new Map<string, string[]>();
+  const fs: JournalFs = {
+    async mkdir(): Promise<unknown> { return undefined; },
+    async open(path: string): Promise<JournalFile> {
+      if (!files.has(path)) files.set(path, []);
+      return {
+        async write(data: string): Promise<unknown> { files.get(path)?.push(data); return data.length; },
+        async close(): Promise<unknown> { return undefined; },
+      };
+    },
+    async stat(path: string): Promise<{ size: number }> {
+      const t = files.get(path);
+      if (t === undefined) throw new Error('ENOENT');
+      return { size: t.join('').length };
+    },
+    async readFile(path: string): Promise<string> {
+      const t = files.get(path);
+      if (t === undefined) throw new Error('ENOENT');
+      return t.join('');
+    },
+    async writeFile(path: string, data: string): Promise<void> { files.set(path, [data]); },
+    async readdir(dir: string): Promise<string[]> {
+      const out: string[] = [];
+      for (const p of files.keys()) if (p.startsWith(dir + '/')) out.push(p.slice(dir.length + 1));
+      return out;
+    },
+    async rename(from: string, to: string): Promise<void> { files.set(to, files.get(from) ?? []); files.delete(from); },
+    async unlink(path: string): Promise<void> { files.delete(path); },
+  };
+  return {
+    journal: new JsonJournal('/data', { fs, clock }),
+    rows(): LedgerEntry[] {
+      const out: LedgerEntry[] = [];
+      for (const chunks of files.values()) {
+        for (const line of chunks.join('').split('\n')) {
+          if (line.length === 0) continue;
+          const e = parseEntry(line);
+          if (e !== null) out.push(e);
+        }
+      }
+      return out;
+    },
+  };
 }
 
 /**
@@ -1224,5 +1284,119 @@ describe('what the player is told', () => {
 
     expect((await store.ensure(DEVICE)).progress.xp).toBe(0);
     expect(awards(client)).toEqual([]);
+  });
+});
+
+
+/* ------------------------------------------------------------------------ *
+ * 8. The reward journal, from inside the room
+ *
+ * `journal.test.ts` proves the ledger sums to the balance across ten thousand
+ * synthesised matches. These three prove the ROOM is the thing feeding it —
+ * that the rows are written from inside `store.update`'s callback, keyed so
+ * that every player in a round is paid, and asked about before the balance is
+ * allowed to move.
+ * ------------------------------------------------------------------------ */
+
+describe('a round writes the ledger the balance came from', () => {
+  it('records one row per currency, summing to exactly what was stored', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const j = memoryJournal(() => Date.now());
+    const room = makeRoom({ store, guard, journal: j.journal, hostId: 'host0001' });
+
+    const a = join(room, 'Marine', DEVICE);
+    const b = join(room, 'Doomguy', OTHER_DEVICE);
+    a.player.kills = KILLS;
+    b.player.kills = 2;
+
+    run(room, [a, b], PLAY_TICKS);
+    endRoundNow(room, [a, b]);
+    await settled(store, DEVICE);
+    await settled(store, OTHER_DEVICE);
+
+    const rows = j.rows();
+    // TWO players, two currencies each. The doc's `(kind, sourceId)` key would
+    // have written two rows in total and paid exactly one of them.
+    expect(rows).toHaveLength(4);
+    for (const deviceId of [DEVICE, OTHER_DEVICE]) {
+      const profile = await store.ensure(deviceId);
+      const mine = rows.filter((r) => r.playerId === deviceId);
+      expect(mine).toHaveLength(2);
+      const xp = mine.find((r) => r.currency === 'xp');
+      const scrap = mine.find((r) => r.currency === 'scrap');
+      expect(xp?.delta).toBe(profile.progress.xp);
+      expect(xp?.balanceAfter).toBe(profile.progress.xp);
+      expect(scrap?.delta).toBe(profile.economy.scrap);
+      expect(scrap?.balanceAfter).toBe(profile.economy.scrap);
+      expect(xp?.kind).toBe(MATCH_PAYOUT);
+      expect(xp?.actor).toBe('system:room');
+      // host, room object, round — and the player is NOT in it, because the
+      // player is the third component of the idempotency key.
+      expect(xp?.sourceId).toBe(`host0001:${room.instanceId}:dm-public#1`);
+    }
+  });
+
+  it('pays a NEW room that reuses the key and starts at round 1 again', async () => {
+    // The router reaps an empty room and builds another under the same key.
+    // Its rounds start at 1, so `"dm-public#1"` names two different matches on
+    // one host on one day — and a payout keyed on host + session alone refuses
+    // the second as a duplicate and pays that player NOTHING.
+    const store = new MemoryStore();
+    const j = memoryJournal(() => Date.now());
+
+    for (const pass of [0, 1]) {
+      const room = makeRoom({
+        store, guard: new EntitlementGuard(() => 1_000),
+        journal: j.journal, hostId: 'host0001',
+      });
+      const client = join(room, 'Marine', THIRD_DEVICE);
+      client.player.kills = KILLS;
+      run(room, [client], PLAY_TICKS);
+      endRoundNow(room, [client]);
+      await settled(store, THIRD_DEVICE);
+      expect(room.round, `pass ${pass} was not round 1`).toBe(1);
+    }
+
+    const rows = j.rows().filter((r) => r.currency === 'xp');
+    expect(rows, 'the second room was refused as a replay of the first').toHaveLength(2);
+    expect(rows[0].sourceId).not.toBe(rows[1].sourceId);
+    const profile = await store.ensure(THIRD_DEVICE);
+    expect(profile.progress.gamesPlayed).toBe(2);
+    expect(rows[0].delta + rows[1].delta).toBe(profile.progress.xp);
+  });
+
+  it('moves NO balance for a payout the journal has already recorded', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const j = memoryJournal(() => Date.now());
+    const room = makeRoom({ store, guard, journal: j.journal, hostId: 'host0001' });
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+
+    // Claim this exact payout before the round ends, the way a retry after a
+    // crash would find it already claimed.
+    await j.journal.append(matchPayoutRows({
+      playerId: DEVICE,
+      sourceId: `host0001:${room.instanceId}:dm-public#1`,
+      ms: Date.now(),
+      before: { xp: 0, scrap: 0 },
+      after: { xp: 0, scrap: 0 },
+      asked: { xp: 0, scrap: 0 },
+    }));
+
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+
+    const profile = await store.ensure(DEVICE);
+    // Not merely "no second row": no mutation at all. `gamesPlayed` is the
+    // tell — a room that mutated and then failed to record would show 1 here
+    // and a zero balance, which is the divergence this whole file exists to
+    // make impossible.
+    expect(profile.progress.xp).toBe(0);
+    expect(profile.progress.gamesPlayed).toBe(0);
+    expect(j.rows().filter((r) => r.playerId === DEVICE)).toHaveLength(2);
+    expect(j.journal.status().duplicates).toBe(0);
   });
 });
