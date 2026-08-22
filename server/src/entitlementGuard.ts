@@ -64,6 +64,7 @@ import {
   Topology,
   WRITE_ACCOUNT_RECORD,
   WRITE_PERSISTENT_WORLD,
+  isPrototypePollutingKey,
   isTrustedTopology,
   rewardKeys,
   sealSessionTrust,
@@ -316,6 +317,12 @@ export enum RejectCode {
   GRANTS_NOTHING = 9,
   /** Missing or unusable identifiers. */
   MALFORMED = 10,
+  /**
+   * Not a submission at all: a `POST /api/profile` body that carried a field
+   * only a match result may move. Recorded by `noteProfileWrite`, never
+   * returned by `reviewSubmission`.
+   */
+  PROFILE_FIELDS = 11,
 }
 
 export const REJECT_REASONS: readonly string[] = Object.freeze([
@@ -330,6 +337,7 @@ export const REJECT_REASONS: readonly string[] = Object.freeze([
   'this device has already been settled for this session',
   'this match type grants nothing — private and solo matches are unranked by policy',
   'malformed submission',
+  'the profile write carried a field only a match result may move',
 ]);
 
 export interface GuardVerdict {
@@ -611,6 +619,11 @@ export interface ProfileWriteVerdict {
   readonly violation: boolean;
 }
 
+/** An accumulator an attacker-named key cannot reach the prototype of. */
+function bare(): Record<string, unknown> {
+  return Object.create(null) as Record<string, unknown>;
+}
+
 /**
  * Filter a `POST /api/profile` body down to what the client owns.
  *
@@ -622,22 +635,52 @@ export interface ProfileWriteVerdict {
  *
  * Nested objects are checked one level down, because `progress` is where the
  * server-owned counters actually live.
+ *
+ * ## THE HOLE THIS FUNCTION HAD, because the shape of it will come back
+ *
+ * The allowlist was right and the ACCUMULATOR was wrong. `accepted` was a
+ * plain `{}` and the loop ended in `accepted[key] = clean`. Post this:
+ *
+ * ```json
+ * {"deviceId":"device-pwn00001","__proto__":{"progress":{"xp":1000000000}}}
+ * ```
+ *
+ * `JSON.parse` makes `__proto__` an OWN enumerable key, so `Object.keys` lists
+ * it; it is not in `SERVER_OWNED_PROFILE_FIELDS`, so nothing rejects it; its
+ * value is an object, so the descent builds `clean` from it; and then
+ * `accepted['__proto__'] = clean` invokes the `Object.prototype` setter and
+ * replaces `accepted`'s prototype. `index.ts` reads `filtered.accepted.progress`
+ * — which now resolves THROUGH that prototype — and merges it. `rejectedFields`
+ * came back `[]` and `violation` came back `false`, because from the
+ * allowlist's point of view nothing had happened. Verified against the running
+ * binary: `xp 1000000000 level 200 kills 99999 wins 99999`.
+ *
+ * Two independent defences, because either one alone is one refactor from
+ * being deleted:
+ *
+ *   1. Every accumulator is `Object.create(null)`. There is no inherited
+ *      setter to invoke and no prototype worth replacing.
+ *   2. `PROTOTYPE_POLLUTING_KEYS` is refused BY NAME, at every level, and the
+ *      refusal is recorded — so the attempt shows up in `rejectedFields` and
+ *      raises `violation`, which is what an operator actually sees.
  */
 export function guardProfileWrite(body: unknown): ProfileWriteVerdict {
   const rejected: string[] = [];
-  const accepted: Record<string, unknown> = {};
+  const accepted = bare();
   if (body === null || typeof body !== 'object') {
     return Object.freeze({ accepted, rejectedFields: Object.freeze(rejected), violation: false });
   }
 
   const rec = body as Record<string, unknown>;
   for (const key of Object.keys(rec)) {
+    if (isPrototypePollutingKey(key)) { rejected.push(key); continue; }
     if (SERVER_OWNED_PROFILE_FIELDS.includes(key)) { rejected.push(key); continue; }
     const value = rec[key];
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
       const inner = value as Record<string, unknown>;
-      const clean: Record<string, unknown> = {};
+      const clean = bare();
       for (const k of Object.keys(inner)) {
+        if (isPrototypePollutingKey(k)) { rejected.push(`${key}.${k}`); continue; }
         if (SERVER_OWNED_PROFILE_FIELDS.includes(k)) { rejected.push(`${key}.${k}`); continue; }
         clean[k] = inner[k];
       }
@@ -669,7 +712,10 @@ export interface AuditEntry {
   readonly reason: string;
   /** `deathmatch/ranked on server grants xp+scrap+…`, or '' with no session. */
   readonly trust: string;
-  /** Reward slugs the submission asked for and did not get. */
+  /**
+   * Reward slugs the submission asked for and did not get — or, on a
+   * `PROFILE_FIELDS` line, the profile fields the write was refused.
+   */
   readonly stripped: readonly string[];
 }
 
@@ -723,6 +769,44 @@ export class EntitlementGuard {
     }
 
     return v;
+  }
+
+  /**
+   * Count a refused `POST /api/profile` body.
+   *
+   * `guardProfileWrite` has always returned `violation`, and until this method
+   * existed the field had ZERO readers in the tree: `index.ts` read
+   * `rejectedFields` to echo it back to the client and nothing counted it. So
+   * the detector for the second of the four attacks this file exists to stop —
+   * *post your XP straight to `/api/profile`* — fired into nothing, and an
+   * operator watching `/api/status`.entitlement.violations saw a flat zero
+   * while a device was posting itself a billion XP.
+   *
+   * Counted the same way `submit` counts a submission violation, into the same
+   * counter and the same ring, because they are the same event seen through a
+   * different door and an operator should not have to know which door.
+   *
+   * Returns whether anything was counted, so a caller can log too.
+   */
+  noteProfileWrite(deviceId: string, verdict: ProfileWriteVerdict): boolean {
+    if (!verdict.violation) return false;
+    const now = this.clock();
+    this.violationCount++;
+    this.rejectedCount++;
+    this.byCode[RejectCode.PROFILE_FIELDS] = (this.byCode[RejectCode.PROFILE_FIELDS] ?? 0) + 1;
+    this.ring.push(Object.freeze({
+      ms: now,
+      sessionId: '',
+      deviceId,
+      code: RejectCode.PROFILE_FIELDS,
+      reason: REJECT_REASONS[RejectCode.PROFILE_FIELDS],
+      trust: '',
+      // Bounded: a body with 500 refused keys must not push 500 strings into a
+      // ring that is meant to stay readable.
+      stripped: Object.freeze(verdict.rejectedFields.slice(0, 16)),
+    }));
+    if (this.ring.length > AUDIT_RING_SIZE) this.ring.splice(0, this.ring.length - AUDIT_RING_SIZE);
+    return true;
   }
 
   /** Most recent first. */

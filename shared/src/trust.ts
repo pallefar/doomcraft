@@ -814,12 +814,20 @@ export const CLIENT_OWNED_PROFILE_FIELDS: readonly string[] = Object.freeze([
 /**
  * Profile fields only a server-authoritative match may move. A client that
  * sends any of these is not making a mistake.
+ *
+ * The last four are not counters and are here for a different reason:
+ * `economy` is the Scrap balance and the per-day earn buckets (a client that
+ * posts `economy.dayScrap: 0` resets its own anti-farm meter), `accountId` and
+ * `accountSecret` are the credential pair, and `_unknown` is the downgrade
+ * guard's carry bag — a client that can write it can smuggle any key it likes
+ * back to the top level of the stored profile through `serialiseProfile`.
  */
 export const SERVER_OWNED_PROFILE_FIELDS: readonly string[] = Object.freeze([
   'xp', 'level', 'scrap', 'kills', 'deaths', 'wins', 'gamesPlayed',
   'bestKillstreak', 'blocksPlaced', 'blocksBroken', 'secondsPlayed',
   'favouriteWeapon', 'adsRemoved', 'entitlements', 'stats', 'items',
   'drops', 'rating', 'trophies', 'titles',
+  'economy', 'accountId', 'accountSecret', '_unknown',
 ]);
 
 export function isClientOwnedProfileField(name: string): boolean {
@@ -827,6 +835,34 @@ export function isClientOwnedProfileField(name: string): boolean {
 }
 export function isServerOwnedProfileField(name: string): boolean {
   return SERVER_OWNED_PROFILE_FIELDS.includes(name);
+}
+
+/* ------------------------------------------------------------------------ *
+ * The keys that are not keys
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Property names that ASSIGN A PROTOTYPE instead of setting a property.
+ *
+ * `JSON.parse('{"__proto__":{}}')` produces an object with an **own,
+ * enumerable** `__proto__` property, so it survives `Object.keys` and every
+ * allowlist built on it. Copy it into a plain `{}` accumulator with
+ * `out[key] = value` and the `Object.prototype` setter fires instead: the
+ * accumulator's prototype is replaced, `out.anything` now resolves through the
+ * attacker's object, and every field check that already ran saw nothing wrong.
+ *
+ * That is not a hypothetical here. It walked straight through
+ * `guardProfileWrite` and paid a device 1,000,000,000 XP with
+ * `rejectedFields: []`. Any code that copies attacker-controlled keys into an
+ * accumulator must skip these three at EVERY level it descends — checking only
+ * the top level moves the hole one line deeper.
+ */
+export const PROTOTYPE_POLLUTING_KEYS: readonly string[] = Object.freeze([
+  '__proto__', 'constructor', 'prototype',
+]);
+
+export function isPrototypePollutingKey(name: string): boolean {
+  return PROTOTYPE_POLLUTING_KEYS.includes(name);
 }
 
 /* ------------------------------------------------------------------------ *

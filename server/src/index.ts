@@ -62,6 +62,7 @@ import {
   joinRequestFromQuery,
 } from './directory.js';
 import { EntitlementGuard, guardProfileWrite } from './entitlementGuard.js';
+import { AdminGate, AdminVerdict } from './adminAuth.js';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
 import {
@@ -77,7 +78,7 @@ import { flagConfigETag } from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
 import { JsonFileStore, isValidDeviceId, migrateProfile, publicProfile } from './persistence.js';
-import type { PersistenceStore, StoredProfile } from './persistence.js';
+import type { PersistenceStore } from './persistence.js';
 
 /* ------------------------------------------------------------------------ *
  * Paths and configuration
@@ -126,6 +127,48 @@ const PREWARM = process.env.DOOMCRAFT_PREWARM !== '0';
 const FORCE_MIGRATE_MS = intEnv('DOOMCRAFT_FORCE_MIGRATE_MS', 30 * 60_000, 0, 6 * 3600_000);
 /** Token for `POST /api/admin/drain`. Unset disables the endpoint entirely. */
 const ADMIN_TOKEN = (process.env.DOOMCRAFT_ADMIN_TOKEN ?? '').trim();
+
+/**
+ * The payment provider that may verify a receipt, or none.
+ *
+ * `POST /api/entitlement` used to grant the $4.99 ad-free product to any
+ * device id, from any origin, on an unverified `receipt` string — its own
+ * comment said "a real build verifies `receipt` with the payment provider
+ * here" and then granted anyway. That is not an unfinished feature, it is a
+ * free product, and the live client calls this exact route.
+ *
+ * There is no payment provider and none is expected in this stage, so the
+ * honest default is REFUSE: unset means the route 404s, exactly as
+ * `docs/PLATFORM.md` §2.5 prescribes. `DOOMCRAFT_ENTITLEMENT_PROVIDER=none`
+ * binds a no-op provider that grants without verifying — for a local dev box
+ * and nothing else, which is why it announces itself at boot and reports
+ * `verifies: false` on `/api/version`'s sibling surfaces.
+ */
+interface ChargingProvider {
+  readonly id: string;
+  /** False for any provider that cannot actually check a receipt. */
+  readonly verifies: boolean;
+  verify(product: string, receipt: string | null): Promise<boolean>;
+}
+
+const CHARGING_PROVIDER: ChargingProvider | null = ((): ChargingProvider | null => {
+  const name = (process.env.DOOMCRAFT_ENTITLEMENT_PROVIDER ?? '').trim().toLowerCase();
+  if (name === '') return null;
+  if (name === 'none' || name === 'house' || name === 'dev') {
+    return {
+      id: 'none',
+      verifies: false,
+      verify: async (): Promise<boolean> => true,
+    };
+  }
+  // An unknown name is a typo in a deploy, and a typo must not silently open
+  // the till. Refuse the same way an unset value does, and say why.
+  console.warn(`[entitlement] unknown DOOMCRAFT_ENTITLEMENT_PROVIDER "${name}" — the route stays closed`);
+  return null;
+})();
+if (CHARGING_PROVIDER !== null && !CHARGING_PROVIDER.verifies) {
+  console.warn('[entitlement] provider "none" grants without verifying a receipt — DEV ONLY');
+}
 
 /**
  * Browser origins allowed to open a game socket and to call the JSON API.
@@ -619,21 +662,39 @@ const bootRequest: ModeJoinRequest = joinRequestFor(defaultModeId());
 if (PREWARM) router.route(bootRequest);
 
 /**
- * Constant-time-ish bearer check for the two admin routes.
+ * The bearer for the three admin routes. See `server/src/adminAuth.ts` for
+ * the four things that were wrong with the version that lived here inline.
  *
- * Unset token means the routes do not exist — they answer 404, not 401, so an
- * unconfigured deployment does not advertise an admin surface at all.
+ * An unset token still means the routes do not exist — they answer 404, not
+ * 401, so an unconfigured deployment does not advertise an admin surface. A
+ * client that has burned its failure budget gets 429 instead, which is the one
+ * new answer.
+ *
+ * Every refusal writes a line. Until now a brute-force attempt against this
+ * bearer left no trace anywhere in the tree, which meant the first evidence of
+ * one would have been the drain being pulled on a live fleet.
  */
-function adminAuthorised(req: IncomingMessage): boolean {
-  if (ADMIN_TOKEN.length === 0) return false;
-  const raw = req.headers.authorization;
-  const header = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof header !== 'string') return false;
-  const supplied = header.startsWith('Bearer ') ? header.slice(7) : header;
-  if (supplied.length !== ADMIN_TOKEN.length) return false;
-  let diff = 0;
-  for (let i = 0; i < ADMIN_TOKEN.length; i++) diff |= supplied.charCodeAt(i) ^ ADMIN_TOKEN.charCodeAt(i);
-  return diff === 0;
+const adminGate = new AdminGate(ADMIN_TOKEN, {
+  clock: () => Date.now(),
+  onDenied: (d) => {
+    console.warn(`[admin] denied ${d.reason} from ${d.client}${d.path === '' ? '' : ` for ${d.path}`}`);
+  },
+});
+const adminSweeper = setInterval(() => { adminGate.sweep(); }, 60_000);
+if (typeof adminSweeper.unref === 'function') adminSweeper.unref();
+
+function admitAdmin(req: IncomingMessage, path: string): AdminVerdict {
+  return adminGate.admit(req.headers.authorization, clientAddress(req), path);
+}
+
+/** The refusal an admin verdict turns into. Never leaks which token is wrong. */
+function refuseAdmin(res: ServerResponse, verdict: AdminVerdict, cors: string | null): void {
+  if (verdict === AdminVerdict.THROTTLED) {
+    res.setHeader('retry-after', '60');
+    sendJson(res, 429, { error: 'too many attempts' }, cors);
+    return;
+  }
+  sendJson(res, 404, { error: 'not found' }, cors);
 }
 
 /**
@@ -650,6 +711,33 @@ function adminAuthorised(req: IncomingMessage): boolean {
  */
 function notAdmitting(): boolean {
   return draining || lifecycle.draining;
+}
+
+/**
+ * A room key with its private join code removed.
+ *
+ * `docs/PACKS.md` §0.2 item 2: `GET /api/status` is unauthenticated, defaults
+ * to `access-control-allow-origin: *`, and returned `router.status()` verbatim
+ * — and a private room's key IS its join code: `${roomKey}~${code}`. So the
+ * operator page handed every private room in the fleet to anybody who asked,
+ * and `/api/rooms` filtering them out (`directory.ts`) bought nothing.
+ *
+ * `key` is not the only carrier: the router builds each room with `name: key`
+ * (see the `create` callback), so `Room.status().name` is the same string and
+ * is spread into the same row. Both are cut. The row keeps saying that a
+ * private room exists and how full it is, which is what an operator is
+ * actually looking at during a rollout; what it stops saying is how to join it.
+ */
+function redactRoomRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...row };
+  const key = typeof out.key === 'string' ? out.key : '';
+  if (!key.includes(PRIVATE_KEY_MARK)) return out;
+  out.key = key.slice(0, key.indexOf(PRIVATE_KEY_MARK));
+  out.private = true;
+  if (typeof out.name === 'string' && out.name.includes(PRIVATE_KEY_MARK)) {
+    out.name = out.name.slice(0, out.name.indexOf(PRIVATE_KEY_MARK));
+  }
+  return out;
 }
 
 /** Totals across every live room, for `/health` and the status page. */
@@ -795,6 +883,15 @@ function pickRoom(key: string | null): { key: string; room: Room } | null {
   }
   let best: { key: string; room: Room } | null = null;
   for (const k of router.keys()) {
+    /*
+     * THE SECOND DOOR onto the same leak `redactRoomRow` closes, found while
+     * closing the first. Auto-pick chooses the busiest room, a private room is
+     * usually the busiest room on a quiet host, and the response echoes
+     * `key` — so `GET /api/scoreboard` with no parameters handed out a live
+     * join code to anybody who asked. Naming a private key explicitly is
+     * still answered: a caller who has the code already has the code.
+     */
+    if (RoomDirectory.isPrivateKey(k)) continue;
     const room = router.get(k);
     if (room === null) continue;
     if (best === null || room.humanCount > best.room.humanCount) best = { key: k, room };
@@ -899,14 +996,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
    * deploy takes a host out of rotation without dropping a single match.
    * --------------------------------------------------------------------- */
   if (path === '/api/admin/drain' && req.method === 'POST') {
-    if (!adminAuthorised(req)) { sendJson(res, 404, { error: 'not found' }, cors); return true; }
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
     lifecycle.beginDrain();
     sendJson(res, 200, { deploy: lifecycle.report() }, cors);
     return true;
   }
 
   if (path === '/api/admin/flags' && req.method === 'POST') {
-    if (!adminAuthorised(req)) { sendJson(res, 404, { error: 'not found' }, cors); return true; }
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
     const doc = flags.load(await readBody(req));
     // Everyone already connected keeps the flags they were resolved with for
     // the life of their session. That is deliberate: a feature appearing or
@@ -922,8 +1021,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
    * Admin-gated exactly like the two switches above: no token, no route.
    */
   if (path === '/api/admin/entitlement' && (req.method === 'GET' || req.method === 'HEAD')) {
-    if (!adminAuthorised(req)) { sendJson(res, 404, { error: 'not found' }, cors); return true; }
-    sendJson(res, 200, { status: guard.status(), recent: guard.recent(64) }, cors);
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    sendJson(res, 200, {
+      status: guard.status(),
+      recent: guard.recent(64),
+      // The other half of "an operator can see the gate running": until now a
+      // refused bearer was counted nowhere and logged nowhere.
+      auth: { denied: adminGate.denied, throttled: adminGate.throttled },
+    }, cors);
     return true;
   }
 
@@ -936,7 +1042,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       deploy: lifecycle.report(),
       fleet: fleetStatus(),
       directory: directory.status(),
-      rooms: router.status(),
+      rooms: router.status().map(redactRoomRow),
       // A healthy fleet shows a rising `accepted` and an all-but-empty `codes`
       // map. `violations` climbing is the number worth an alert.
       entitlement: guard.status(),
@@ -1016,10 +1122,23 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
+  /*
+   * A GET THAT DOES NOT WRITE. It used to call `store.ensure`, which creates.
+   *
+   * `curl ".../api/profile?device=$(openssl rand -hex 6)"` in a loop was
+   * therefore unauthenticated, unbounded disk growth at roughly 900 bytes a
+   * request, on a route with no rate limit — and nothing in the tree sweeps
+   * `<dataRoot>/profiles/`. A device with no profile is not an error state
+   * either: the client mints its own id in localStorage and a player who has
+   * never finished a match has genuinely never had one written.
+   *
+   * 404 with no body detail, and `publicProfile` decides what a body may say.
+   */
   if (path === '/api/profile' && req.method === 'GET') {
     const deviceId = url.searchParams.get('device') ?? '';
     if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
-    const profile = await store.ensure(deviceId);
+    const profile = await store.load(deviceId);
+    if (profile === null) { sendJson(res, 404, { error: 'no such profile' }, cors); return true; }
     sendJson(res, 200, { profile: publicProfile(profile) }, cors);
     return true;
   }
@@ -1066,6 +1185,19 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
      * tells an attacker nothing they could not read in the repo, and it turns
      * "my xp did not save" from a mystery into a one-line answer.
      */
+    /*
+     * COUNT the refusal, do not merely echo it.
+     *
+     * `guardProfileWrite` has always returned `violation` and this call site
+     * read only `rejectedFields` — so the field had zero readers in the whole
+     * tree and the detector for "post your XP straight to /api/profile" was
+     * wired to nothing. `guard.noteProfileWrite` puts it in the same counter
+     * and the same audit ring as a refused match submission, because they are
+     * the same event through a different door.
+     */
+    if (guard.noteProfileWrite(deviceId, filtered)) {
+      console.warn(`[profile] refused ${filtered.rejectedFields.length} server-owned field(s) from ${deviceId}: ${filtered.rejectedFields.slice(0, 8).join(', ')}`);
+    }
     sendJson(res, 200, {
       profile: publicProfile(merged),
       rejected: filtered.rejectedFields,
@@ -1079,36 +1211,54 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const product = String(body.product ?? '');
     const receipt = typeof body.receipt === 'string' ? body.receipt : null;
     if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
-    // A real build verifies `receipt` with the payment provider here. Until a
-    // provider is wired up this endpoint is the single place that decides, so
-    // the client can never grant itself the entitlement.
+    /*
+     * NO PROVIDER, NO GRANT. This route used to hand the paid product to any
+     * device id, from any origin, on an unverified `receipt` string, and its
+     * own comment said so. `CHARGING_PROVIDER` is null unless an operator
+     * deliberately bound one, so the shipping default is a refusal —
+     * `docs/PLATFORM.md` §2.5's "404 unless a charging provider is bound".
+     * The live client already treats a non-2xx here as "not purchased" and
+     * leaves the button alone, so this degrades instead of breaking.
+     */
+    if (CHARGING_PROVIDER === null) {
+      sendJson(res, 404, { error: 'no charging provider is configured', granted: false }, cors);
+      return true;
+    }
+    if (!await CHARGING_PROVIDER.verify(product, receipt)) {
+      sendJson(res, 402, { error: 'receipt not verified', granted: false }, cors);
+      return true;
+    }
     const profile = await store.grantEntitlement(deviceId, product, receipt);
     sendJson(res, 200, { profile: publicProfile(profile), granted: profile.entitlements.adsRemoved }, cors);
     return true;
   }
 
-  if (path === '/api/account/link' && req.method === 'POST') {
-    const body = await readBody(req) as Record<string, unknown>;
-    const deviceId = String(body.deviceId ?? '');
-    const accountId = String(body.accountId ?? '');
-    if (!isValidDeviceId(deviceId) || accountId.length < 3 || accountId.length > 64) {
-      sendJson(res, 400, { error: 'bad request' }, cors);
-      return true;
-    }
-    const { profile, secret } = await store.linkAccount(deviceId, accountId);
-    sendJson(res, 200, { profile: publicProfile(profile), secret }, cors);
-    return true;
-  }
-
-  if (path === '/api/account/resolve' && req.method === 'POST') {
-    const body = await readBody(req) as Record<string, unknown>;
-    const accountId = String(body.accountId ?? '');
-    const secret = String(body.secret ?? '');
-    const profile: StoredProfile | null = await store.resolveAccount(accountId, secret);
-    if (!profile) { sendJson(res, 404, { error: 'no such account' }, cors); return true; }
-    sendJson(res, 200, { profile: publicProfile(profile) }, cors);
-    return true;
-  }
+  /* --- the two routes that are deliberately not here -------------------- *
+   *
+   * `POST /api/account/link` and `POST /api/account/resolve` are DELETED, and
+   * this comment is here so the next person does not helpfully add them back.
+   *
+   * `link` took `{deviceId, accountId}` unauthenticated, on ANY device id it
+   * was handed, and answered with `publicProfile(victim)` PLUS a freshly
+   * minted durable secret — a permanent read handle on any profile whose
+   * device id you can guess or observe. In the other direction
+   * `accountIndex.set(accountId, deviceId)` is unconditional, so re-pointing a
+   * victim's `accountId` at an attacker's device makes the victim's own
+   * `(accountId, secret)` fail forever, invisibly, while their profile file
+   * still says the right thing. `resolve` then turned a bearer secret straight
+   * into a profile blob with no session concept anywhere behind it.
+   *
+   * Both had ZERO callers in `client/` — `grep -rn "/api/account" client/src`
+   * is empty — so nothing shipped depended on them. Deleting them is also the
+   * precondition for a real provider later (`docs/PLATFORM.md` §2.6): if
+   * `link` survives to the day WorkOS lands, an attacker links
+   * `workos:<subject>` to their own device BEFORE the real owner ever signs
+   * in, and the owner's first sign-in lands on the attacker's profile.
+   *
+   * `PersistenceStore.linkAccount` / `resolveAccount` are KEPT, with their
+   * tests (`sim.test.ts`): they are the substrate a real, authenticated flow
+   * re-fronts. Only the unauthenticated HTTP surface is gone.
+   * --------------------------------------------------------------------- */
 
   return false;
 }

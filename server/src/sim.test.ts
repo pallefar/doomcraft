@@ -35,6 +35,8 @@ import {
   PERSIST_VERSION,
   createProfile,
   migrateProfile,
+  publicProfile,
+  randomToken,
   serialiseProfile,
 } from './persistence.js';
 
@@ -940,11 +942,110 @@ describe('persistence', () => {
   });
 
   it('links an account and only resolves it with the right secret', async () => {
+    /*
+     * KEPT ON PURPOSE, and this comment is the reason.
+     *
+     * `POST /api/account/link` and `POST /api/account/resolve` were deleted in
+     * S0 — they were unauthenticated takeover primitives. The STORE methods
+     * behind them are the substrate a real, authenticated flow re-fronts, so
+     * they stay and so does this test. Deleting them alongside the routes
+     * would mean rebuilding them blind the day auth lands.
+     */
     const store = new MemoryStore();
     await store.ensure('device-linkable1');
     const { secret } = await store.linkAccount('device-linkable1', 'account-1');
     expect(await store.resolveAccount('account-1', secret)).not.toBeNull();
     expect(await store.resolveAccount('account-1', 'wrong')).toBeNull();
     expect(await store.resolveAccount('nope', secret)).toBeNull();
+  });
+
+  /* ---------------------------------------------------------------------- *
+   * The credential itself
+   * ---------------------------------------------------------------------- */
+
+  it('does not mint account secrets from the engine PRNG', () => {
+    /*
+     * THE TEST THAT CAN ACTUALLY FAIL. A source scan for `Math.random` is a
+     * scan somebody edits around; this pins `Math.random` to a constant and
+     * demands the tokens still differ, which no `Math.random`-derived token
+     * can do.
+     *
+     * Why it matters, concretely: V8's PRNG is ONE process-wide xorshift128+
+     * state, recoverable from a handful of raw outputs — and this process
+     * publishes raw outputs. The same generator seeds every room, the seed
+     * ships to every joiner in `S2C.WELCOME`, and `POST /api/rooms/private`
+     * mints rooms unauthenticated. Harvest seeds, recover the state, predict
+     * the next account secret.
+     */
+    const real = Math.random;
+    Math.random = (): number => 0.42;
+    try {
+      const seen = new Set<string>();
+      for (let i = 0; i < 64; i++) seen.add(randomToken());
+      expect(seen.size, 'every token was identical — this is Math.random').toBe(64);
+    } finally {
+      Math.random = real;
+    }
+  });
+
+  it('mints a 128-bit token that is not guessable by shape', () => {
+    const t = randomToken();
+    expect(t).toMatch(/^[0-9a-f]{32}$/);
+    const many = new Set<string>();
+    for (let i = 0; i < 1000; i++) many.add(randomToken());
+    expect(many.size).toBe(1000);
+  });
+
+  it('never shows an unauthenticated caller a durable identifier', () => {
+    // `GET /api/profile?device=<id>` is unauthenticated and serves exactly
+    // this object. It used to strip only `accountSecret`, which left the other
+    // half of the credential pair — and the payment receipt — on the wire.
+    const p = createProfile('device-public01');
+    p.accountId = 'house:abc';
+    p.accountSecret = 'the-secret';
+    p.entitlements.receipt = 'receipt-from-the-store';
+
+    const shown = publicProfile(p) as unknown as Record<string, unknown>;
+    const body = JSON.stringify(shown);
+    expect(body).not.toContain('the-secret');
+    expect(body).not.toContain('house:abc');
+    expect(body).not.toContain('receipt-from-the-store');
+    expect('accountSecret' in shown).toBe(false);
+    expect('accountId' in shown).toBe(false);
+    expect('receipt' in (shown.entitlements as Record<string, unknown>)).toBe(false);
+
+    // What it still says is what the profile screen actually needs.
+    expect((shown.entitlements as Record<string, boolean>).adsRemoved).toBe(false);
+    expect(shown.deviceId).toBe('device-public01');
+  });
+
+  it('does not let a stored __proto__ key corrupt the downgrade guard', () => {
+    /*
+     * The same primitive as `guardProfileWrite`'s hole, one file over:
+     * `collectUnknownProfileKeys` did `(out ??= {})[k] = v` over keys read off
+     * disk. A profile whose file carried `"__proto__": {...}` replaced the
+     * bag's prototype instead of adding a key — the key then vanished from
+     * `Object.keys`, so it was NOT written back on the next flush, and
+     * `migrate(migrate(x)) !== migrate(x)`. The downgrade guard failing
+     * silently at exactly the job it exists for.
+     */
+    const raw = JSON.parse(
+      '{"version":4,"deviceId":"ghost-device-1","__proto__":{"polluted":true},"seasonPass":"season-9"}',
+    ) as unknown;
+
+    const read = migrateProfile(raw, 'ghost-device-1');
+    expect(read._unknown).toEqual({ seasonPass: 'season-9' });
+    expect(Object.getPrototypeOf(read._unknown!)).toBeNull();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+
+    // Idempotent: the same bytes go back out, and a second pass changes nothing.
+    const once = serialiseProfile(read);
+    expect(once.seasonPass).toBe('season-9');
+    // `once.__proto__` would read the PROTOTYPE, not a key, so ask for the own
+    // property — and check the bytes, which is what actually goes to disk.
+    expect(Object.prototype.hasOwnProperty.call(once, '__proto__')).toBe(false);
+    expect(JSON.stringify(once)).not.toContain('__proto__');
+    const twice = serialiseProfile(migrateProfile(JSON.parse(JSON.stringify(once)), 'ghost-device-1'));
+    expect(JSON.stringify(twice)).toBe(JSON.stringify(once));
   });
 });

@@ -25,6 +25,7 @@ import {
   levelForXp,
 } from '@doomcraft/shared';
 import type { GameSettings, SaveProgress } from '@doomcraft/shared';
+import { isPrototypePollutingKey } from '@doomcraft/shared/trust';
 
 /**
  * Bump when the stored shape changes and add a step to MIGRATIONS.
@@ -445,22 +446,41 @@ function mergeSettings(raw: AnyRecord): GameSettings {
   return out;
 }
 
-/** Top-level keys this build has no idea about, or null when there are none. */
+/**
+ * Top-level keys this build has no idea about, or null when there are none.
+ *
+ * The accumulator has a NULL PROTOTYPE and `__proto__`, `constructor` and
+ * `prototype` are dropped by name. `(out ??= {})[k] = v` over keys read out of
+ * a JSON file is the same primitive that walked through `guardProfileWrite`
+ * (see the long note there): a stored profile containing `"__proto__": {...}`
+ * would have replaced this bag's prototype instead of adding a key to it.
+ *
+ * It is not exploitable today — nothing reads a field off the bag, it is only
+ * spread back out by `serialiseProfile` — but it silently corrupts it: the
+ * polluted key vanishes from `Object.keys`, so it is NOT written back on the
+ * next flush and `migrate(migrate(x)) !== migrate(x)`. That is the downgrade
+ * guard failing at exactly the job it exists for, quietly.
+ */
 function collectUnknownProfileKeys(raw: AnyRecord): Record<string, unknown> | null {
   let out: Record<string, unknown> | null = null;
+  const put = (k: string, v: unknown): void => {
+    (out ??= Object.create(null) as Record<string, unknown>)[k] = v;
+  };
   // An older reader may already have set a bag aside; merge it in first so a
   // field survives being opened by two different old builds in a row.
   const prior = raw._unknown;
   if (prior !== null && typeof prior === 'object' && !Array.isArray(prior)) {
     for (const [k, v] of Object.entries(prior as AnyRecord)) {
+      if (isPrototypePollutingKey(k)) continue;
       if (KNOWN_PROFILE_KEYS.includes(k)) continue;
-      (out ??= {})[k] = v;
+      put(k, v);
     }
   }
   for (const [k, v] of Object.entries(raw)) {
+    if (isPrototypePollutingKey(k)) continue;
     if (KNOWN_PROFILE_KEYS.includes(k)) continue;
     if (v === undefined) continue;
-    (out ??= {})[k] = v;
+    put(k, v);
   }
   return out;
 }
@@ -485,6 +505,11 @@ function sanitiseBindings(raw: unknown): Record<string, string> {
   let n = 0;
   for (const k of Object.keys(rec)) {
     if (n++ > 64) break;
+    // Same primitive as the bag above. A string value makes the `__proto__`
+    // setter a silent no-op rather than a takeover, so this one was never
+    // exploitable — it is skipped by name anyway, because "harmless today
+    // because of the value type" is not a property anybody will re-derive.
+    if (isPrototypePollutingKey(k)) continue;
     const v = rec[k];
     if (typeof v === 'string' && v.length <= 24 && k.length <= 24) out[k] = v;
   }
@@ -694,7 +719,13 @@ export class MemoryStore implements PersistenceStore {
  * JSON file store
  * ------------------------------------------------------------------------ */
 
-interface FsLike {
+/**
+ * The slice of `node:fs/promises` this store uses. Exported so a test can
+ * substitute one whose `readFile` resolves when the test says so — the only
+ * way to write a *deterministic* test about which of two concurrent readers
+ * caches last, which is the bug in `load()` below.
+ */
+export interface FsLike {
   mkdir(path: string, opts: { recursive: boolean }): Promise<unknown>;
   readFile(path: string, encoding: 'utf8'): Promise<string>;
   writeFile(path: string, data: string, encoding: 'utf8'): Promise<void>;
@@ -765,7 +796,46 @@ export class JsonFileStore implements PersistenceStore {
     await fs.rename(tmp, `${this.root}/accounts.json`);
   }
 
+  /**
+   * Read a profile, or null. **A CACHE WRITER, and therefore locked.**
+   *
+   * THE HALF-FIX THIS CLOSES. The per-device lock was put on `ensure()`, and
+   * `docs/BUGS-FOUND.md` §5 was marked FIXED — but `ensure` and `ensureLocked`
+   * both delegate to *this*, and this is the function that does
+   * `cache.set(deviceId, profile)` after two `await`s. Every other caller was
+   * still unlocked: `resolveAccount` called it directly, and after `GET
+   * /api/profile` stopped creating, so does the busiest read path in the
+   * server.
+   *
+   * The surviving race, deterministic rather than lucky:
+   *
+   * ```
+   * payout: update() -> LOCK -> ensureLocked -> load -> readFile -> mutate -> save -> cache.set
+   * reader: load()               (no lock)          -> readFile ............... -> cache.set
+   *                                                    ^ resolves LAST, and caches
+   *                                                      the pre-match profile over the paid one
+   * ```
+   *
+   * The reader's copy is the one `markDirty` has already named, so `flush()`
+   * writes the loss to disk 800 ms later; `reviewSubmission` has already
+   * stamped `record.settled`, so the match cannot be replayed. Same silent,
+   * permanent loss as §5, one layer down.
+   *
+   * A cache HIT still skips the lock: it hands back the very object `update`
+   * mutates, so there is nothing to serialise and the common path stays free.
+   */
   async load(deviceId: string): Promise<StoredProfile | null> {
+    const cached = this.cache.get(deviceId);
+    if (cached) return cached;
+    return this.withLock(deviceId, () => this.loadLocked(deviceId));
+  }
+
+  /**
+   * The body of `load`, for callers that ALREADY hold the device's lock.
+   * `withLock` is not reentrant, so `ensureLocked` must use this one.
+   */
+  private async loadLocked(deviceId: string): Promise<StoredProfile | null> {
+    // Re-check: whoever held the lock before us may have filled it.
     const cached = this.cache.get(deviceId);
     if (cached) return cached;
     let fs: FsLike;
@@ -778,6 +848,12 @@ export class JsonFileStore implements PersistenceStore {
     try {
       const text = await fs.readFile(this.filePath(deviceId), 'utf8');
       const profile = migrateProfile(JSON.parse(text), deviceId);
+      // And AGAIN, after the awaits. Belt and braces: `save()` is a public
+      // method that writes the cache without taking the lock, so a caller who
+      // uses it directly would otherwise re-open the window this closes. A
+      // live entry always wins over a copy read from disk.
+      const live = this.cache.get(deviceId);
+      if (live) return live;
       this.cache.set(deviceId, profile);
       if (profile.accountId) this.accountIndex.set(profile.accountId, deviceId);
       return profile;
@@ -801,6 +877,10 @@ export class JsonFileStore implements PersistenceStore {
    *
    * A cache hit skips the lock: it hands back the very object `update` mutates,
    * so there is nothing to serialise.
+   *
+   * NOTE that the lock has since been pushed down onto `load` as well, which is
+   * where the `cache.set` actually happens — putting it only here left every
+   * direct `load()` caller racing. See the note on `load`.
    */
   async ensure(deviceId: string): Promise<StoredProfile> {
     const cached = this.cache.get(deviceId);
@@ -815,7 +895,7 @@ export class JsonFileStore implements PersistenceStore {
    * `linkAccount` must use this one.
    */
   private async ensureLocked(deviceId: string): Promise<StoredProfile> {
-    const existing = await this.load(deviceId);
+    const existing = await this.loadLocked(deviceId);
     if (existing) return existing;
     const fresh = createProfile(deviceId);
     this.cache.set(deviceId, fresh);
@@ -939,13 +1019,35 @@ function grantInto(p: StoredProfile, product: string, receipt: string | null): v
   p.settings.showAds = false;
 }
 
-/** 128 bits of opaque token. Not a password — the server issues and rotates it. */
+/**
+ * 128 bits of opaque token. Not a password — the server issues and rotates it.
+ *
+ * A CSPRNG, and `server/src/signal.ts`'s note above `generateRoomCode` states
+ * the rule this obeys, for a *40-bit room code*: the value is a bearer
+ * credential, and a predictable PRNG makes the entropy argument worthless no
+ * matter how many characters it has. An account secret is a longer-lived
+ * bearer credential than a room code, so the rule applies with more force,
+ * and it was the one place still minting one from the engine's PRNG.
+ *
+ * That was not a theoretical weakness. V8's is one process-wide xorshift128+
+ * state recoverable from a handful of raw outputs — and this process publishes
+ * raw outputs: the same generator seeds every room (`server/src/room.ts`), the
+ * seed is broadcast to every joiner in `S2C.WELCOME`, and
+ * `POST /api/rooms/private` mints rooms unauthenticated. Harvest seeds,
+ * recover the state, predict the next secret.
+ *
+ * `globalThis.crypto` and not `node:crypto`: this module's header promises it
+ * is importable (as types) from browser code and builds its `node:fs` specifier
+ * at runtime so a bundler cannot follow it. A static `node:crypto` import would
+ * break that promise. `crypto.getRandomValues` is on `globalThis` in Node 18+
+ * and in every browser, so this line runs in both.
+ */
 export function randomToken(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
   let out = '';
-  for (let i = 0; i < 4; i++) {
-    out += Math.floor(Math.random() * 0x100000000).toString(36).padStart(7, '0');
-  }
-  return out.slice(0, 28);
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out;
 }
 
 /** Length-independent comparison so a token cannot be guessed byte by byte. */
@@ -958,8 +1060,27 @@ export function constantTimeEquals(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** Public view of a profile — never leaks the account secret. */
-export function publicProfile(p: StoredProfile): Omit<StoredProfile, 'accountSecret'> {
-  const { accountSecret: _secret, ...rest } = p;
-  return rest;
+/**
+ * What an unauthenticated caller may be shown.
+ *
+ * THREE fields come off, not one. Stripping only `accountSecret` was a
+ * half-answer: `GET /api/profile?device=<id>` is unauthenticated, so it also
+ * handed out `accountId` — the other half of the credential pair, and the
+ * value an attacker needs before a secret is worth guessing — and
+ * `entitlements.receipt`, which is a payment-provider token belonging to the
+ * purchase, not to the game. `docs/INFRASTRUCTURE.md` already requires that a
+ * profile surface leak no durable identifier.
+ *
+ * Written as an explicit destructure rather than a deny-list loop so that a
+ * new secret-bearing field is a TYPE ERROR here on the day it is added, not a
+ * leak nobody notices.
+ */
+export type PublicProfile =
+  Omit<StoredProfile, 'accountSecret' | 'accountId' | 'entitlements'>
+  & { entitlements: Omit<StoredEntitlements, 'receipt'> };
+
+export function publicProfile(p: StoredProfile): PublicProfile {
+  const { accountSecret: _secret, accountId: _account, entitlements, ...rest } = p;
+  const { receipt: _receipt, ...safeEntitlements } = entitlements;
+  return { ...rest, entitlements: safeEntitlements };
 }

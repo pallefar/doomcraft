@@ -304,6 +304,50 @@ describe('one process, many rooms, over a real socket', () => {
     b.close();
   }, 60_000);
 
+  /**
+   * `docs/PACKS.md` §0.2 item 2, proven on a LIVE private room.
+   *
+   * A private room's key IS its join code: `${roomKey}~${code}`. `/api/rooms`
+   * filtered those out; `/api/status` returned `router.status()` verbatim, is
+   * unauthenticated, and defaults to `access-control-allow-origin: *` — so the
+   * operator page handed every live private room in the fleet to anybody who
+   * asked for it, from any origin. `/api/scoreboard` with no parameters was the
+   * second door onto the same leak: it auto-picks the BUSIEST room, which on a
+   * quiet host is the private one, and echoes its key.
+   *
+   * The test needs a real socket, because a minted code creates nothing — the
+   * router builds the room on the first join, and a room that does not exist
+   * cannot leak out of a room listing.
+   */
+  it('never publishes a live private join code on an unauthenticated route', async () => {
+    const srv = await boot();
+    const made = await (await fetch(`${srv.origin}/api/rooms/private`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'deathmatch' }),
+    })).json() as { code: string };
+    expect(made.code).toMatch(/^[a-z0-9]{6}$/);
+
+    const friend = new TestClient(`${srv.wsBase}/ws?code=${made.code}`, 'Friend1');
+    await until(() => friend.gotWelcome, 20_000, 'the private room to exist');
+
+    // The whole document, as bytes: the code must not appear anywhere in it,
+    // under any key, however the row is shaped.
+    const status = await (await fetch(`${srv.origin}/api/status`)).text();
+    expect(status, `the join code ${made.code} is in /api/status`).not.toContain(made.code);
+    expect(status, 'a private key marker survived in /api/status').not.toContain('~');
+
+    // …and the row is still there, so an operator can still see the room.
+    const parsed = JSON.parse(status) as { rooms: Array<Record<string, unknown>> };
+    expect(parsed.rooms.some((r) => r.private === true), 'the private room vanished entirely').toBe(true);
+
+    const board = await (await fetch(`${srv.origin}/api/scoreboard`)).text();
+    expect(board, `the join code ${made.code} is in /api/scoreboard`).not.toContain(made.code);
+    expect(board).not.toContain('~');
+
+    friend.close();
+  }, 60_000);
+
   it('will not let one joiner reconfigure the room everybody else is in', async () => {
     /* An operator bot fill that is NOT the mode default (`BOT_FILL_TARGET` is
      * 6), so a room re-planned from a client's `SELECT` is visible as the

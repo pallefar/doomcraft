@@ -70,6 +70,7 @@ import {
   meterReward,
   utcDay,
 } from './persistence.js';
+import type { FsLike } from './persistence.js';
 import {
   MATCH_SCRAP_CAP,
   MATCH_XP_CAP,
@@ -461,6 +462,115 @@ describe('a payout landing while somebody reads the profile', () => {
   });
 
   /**
+   * THE HALF THAT WAS STILL OPEN, and the reason this one controls the clock.
+   *
+   * `docs/BUGS-FOUND.md` §5 put the per-device lock on `ensure()` and called
+   * the bug fixed. But `ensure` and `ensureLocked` both delegate to `load()`,
+   * and `load()` is what writes the cache — so every DIRECT caller of `load`
+   * was still racing, including `resolveAccount` and (after the profile GET
+   * stopped creating files) the busiest read path in the server.
+   *
+   * The test above cannot catch that: it fires both halves and hopes, so which
+   * one caches last is a matter of libuv scheduling, and it happens to favour
+   * the writer. This one takes the scheduling away. The store is handed an
+   * `FsLike` whose `readFile` resolves only when this test says so, and the
+   * test says so in the order the audit describes: the writer's read lands
+   * first, the payout completes, and only THEN does the reader's read come
+   * back — which is the moment the unguarded version overwrites a paid profile
+   * with the copy it read from disk before the match.
+   *
+   * The disk assertion at the end is the part that makes it a data-LOSS test
+   * rather than a cache-consistency one: `markDirty` has already named the
+   * device, so `flush()` writes whatever is in the cache, and the match is gone
+   * for good — `reviewSubmission` stamped `settled`, so it cannot be replayed.
+   */
+  it('is not overwritten by an UNLOCKED reader whose disk read lands last', async () => {
+    const DEV = 'device-racer001';
+    const onDisk = JSON.stringify({
+      version: 4,
+      deviceId: DEV,
+      progress: { name: 'Original', xp: 0, gamesPlayed: 0 },
+      economy: { scrap: 0, lifetimeScrap: 0, day: '', dayXp: 0, dayScrap: 0, dayMatches: 0 },
+    });
+
+    /** Every `readFile` the store issues, held open until released by hand. */
+    const pending: Array<() => void> = [];
+    const written = new Map<string, string>();
+    const fake: FsLike = {
+      mkdir: async () => undefined,
+      /*
+       * The bytes are snapshotted WHEN THE READ IS ISSUED, not when it is
+       * released. That is the whole point of the scenario: the reader's read
+       * was already in flight before the payout was written, so it returns the
+       * pre-match file however long the kernel takes to hand it over. A fake
+       * that re-reads at release time quietly serves the payout back to the
+       * reader and the test can no longer fail.
+       */
+      readFile: (path: string) => {
+        const snapshot = written.get(path)
+          ?? (path.endsWith(`${DEV}.json`) ? onDisk : null);
+        return new Promise<string>((resolve, reject) => {
+          pending.push(() => {
+            if (snapshot === null) reject(new Error('ENOENT'));
+            else resolve(snapshot);
+          });
+        });
+      },
+      writeFile: async (path: string, data: string) => { written.set(path, data); },
+      rename: async (from: string, to: string) => {
+        const d = written.get(from);
+        if (d !== undefined) { written.set(to, d); written.delete(from); }
+      },
+      readdir: async () => [],
+    };
+
+    const store = new JsonFileStore('/fake', 0);
+    // The store builds its `node:fs` specifier at runtime so a bundler cannot
+    // follow it; presetting the resolved module is the only seam, and the
+    // claim under test is about ordering, which needs one.
+    (store as unknown as { fs: FsLike }).fs = fake;
+
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      await new Promise<void>((r) => { setTimeout(r, 0); });
+    };
+
+    // Both start in the same tick, writer first — so the writer's read is
+    // issued first and the reader's is the one still outstanding.
+    const writer = store.update(DEV, (p) => {
+      p.progress.gamesPlayed += 1;
+      p.progress.xp += 400;
+      p.economy.scrap += 40;
+    });
+    const reader = store.load(DEV);
+    await settle();
+
+    // Release every read EXCEPT the first-issued one, then let the payout run
+    // all the way to completion.
+    for (let i = pending.length - 1; i >= 1; i--) pending[i]();
+    await settle();
+    await settle();
+
+    // And now the unlocked reader's disk read finally comes back.
+    pending[0]();
+    await Promise.all([writer, reader]);
+
+    const live = await store.ensure(DEV);
+    expect(live.progress.gamesPlayed, 'the payout was overwritten in the cache').toBe(1);
+    expect(live.progress.xp).toBe(400);
+    expect(live.economy.scrap).toBe(40);
+
+    // …and the loss is not merely in memory: the debounced flush commits it.
+    await store.flush();
+    const path = [...written.keys()].find((k) => k.endsWith(`${DEV}.json`));
+    expect(path, 'nothing was written at all').toBeDefined();
+    const disk = JSON.parse(written.get(path!)!) as { progress: Record<string, number> };
+    expect(disk.progress.gamesPlayed, 'the loss was flushed to disk').toBe(1);
+    expect(disk.progress.xp).toBe(400);
+    await store.close();
+  });
+
+  /**
    * A balance that only survives in memory is not a balance. This is the one
    * test that goes all the way to the bytes: it reads the JSON file the store
    * wrote, so it fails if `PERSIST_VERSION`, the migration step, the whitelist
@@ -612,17 +722,29 @@ describe('Scrap', () => {
   });
 
   it('is not a field the client can post to itself', () => {
-    // `SERVER_OWNED_PROFILE_FIELDS` already names `scrap`, so the filter that
-    // guards `POST /api/profile` drops it one level down as well — which is the
-    // level `economy.scrap` actually lives at.
+    /*
+     * `economy` is refused WHOLE, at the top level, and that is a change from
+     * the field-by-field version this test used to assert.
+     *
+     * The old list named `scrap`, so the nested strip caught `economy.scrap`
+     * and `economy.lifetimeScrap` — and let `day`, `dayXp`, `dayScrap` and
+     * `dayMatches` straight through. Those four are the per-day anti-farm
+     * meter (`DAY_XP_CAP`, `DAY_SCRAP_CAP`, `DR_LADDER`), so a client could
+     * post `{"economy":{"dayScrap":0,"dayMatches":0}}` between rounds and farm
+     * a full day's cap over and over without ever touching a balance. There is
+     * no field of `economy` a browser owns, so the whole section is server-
+     * owned and the section name is what the refusal reports.
+     */
     const filtered = guardProfileWrite({
       deviceId: DEVICE,
-      economy: { scrap: 1_000_000, lifetimeScrap: 1_000_000 },
+      economy: { scrap: 1_000_000, lifetimeScrap: 1_000_000, dayScrap: 0, dayMatches: 0 },
       progress: { name: 'Marine' },
     });
-    expect(filtered.rejectedFields).toContain('economy.scrap');
-    expect((filtered.accepted.economy as Record<string, unknown>).scrap).toBeUndefined();
+    expect(filtered.rejectedFields).toContain('economy');
+    expect(filtered.accepted.economy).toBeUndefined();
     expect(filtered.violation).toBe(true);
+    // The parts a client really does own are untouched by the widening.
+    expect((filtered.accepted.progress as Record<string, unknown>).name).toBe('Marine');
   });
 });
 

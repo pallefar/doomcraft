@@ -118,7 +118,7 @@ regenerating everybody's terrain on request.
 
 ---
 
-## 5. A finished match could be erased by somebody opening the profile page — FIXED
+## 5. A finished match could be erased by somebody opening the profile page — HALF FIXED, THEN FIXED
 
 **Found by the live-server test added with the entitlement guard, which was flaky in roughly one
 full-suite run in three. The flake was the bug.**
@@ -142,10 +142,10 @@ Two `await`s inside the cache-miss path is all the window it takes. Reproduced *
 nothing is cached, and the first match ends while a menu fetches the profile. Against a warm cache
 it never fires, which is why nothing had noticed.
 
-**Fix.** `ensure` returns a cache hit without locking (that object is the one `update` mutates
-anyway) and takes the per-device lock on a miss, re-reading under it. `update` and `linkAccount`
-already hold that lock, so they call a private `ensureLocked` — `withLock` is not reentrant and the
-naive version deadlocks on itself.
+**First fix (incomplete).** `ensure` returns a cache hit without locking (that object is the one
+`update` mutates anyway) and takes the per-device lock on a miss, re-reading under it. `update` and
+`linkAccount` already hold that lock, so they call a private `ensureLocked` — `withLock` is not
+reentrant and the naive version deadlocks on itself.
 
 **Test.** `server/src/economy.test.ts`, "a payout landing while somebody reads the profile". Cold
 `JsonFileStore`, `update` and `ensure` started in the same tick. Red before the fix
@@ -154,3 +154,57 @@ flaking.
 
 **`MemoryStore` does not have this bug** — its `ensure` has no `await` before `cache.set`, so there
 is no window to interleave in. It is left alone deliberately rather than "fixed" symmetrically.
+
+### 5b. …and the lock was put on the wrong function. Reopened, then closed properly.
+
+**This section said FIXED for one commit and was wrong, so the correction lives here rather than in
+a new section — a "FIXED" that was only half true is worse than an open bug, because it is the
+reason nobody looks again.**
+
+The lock went on `ensure()`. But `ensure` and `ensureLocked` **both delegate to `load()`**, and
+`load()` is the function that does `this.cache.set(deviceId, profile)` after two `await`s. Guarding
+the caller and not the writer left every other path into `load` racing exactly as before:
+
+```
+payout:  update() -> LOCK -> ensureLocked -> load -> readFile ->  mutate -> save -> cache.set
+reader:  load()             (NO LOCK)              -> readFile .................. -> cache.set
+                                                      ^ resolves LAST, caching the pre-match
+                                                        profile over the paid one
+```
+
+`resolveAccount()` called `load()` directly. And the S0 change that stopped `GET /api/profile`
+creating files (`store.ensure` -> `store.load`, so an unauthenticated GET is no longer an
+unauthenticated disk write) pointed the **busiest read path in the server** straight at it.
+
+**Proven against the real binary, not argued.** Twenty pre-seeded profiles, cold cache, one
+`POST /api/profile` and one `GET /api/profile` fired at the same instant per device:
+
+```
+$ node h2-race.mjs race <dataRoot> http://127.0.0.1:8794 20     # lock on ensure() only
+  round 0  device-race00000: LOST — cache="Original" disk="Original"
+  round 1  device-race00001: LOST — cache="Original" disk="Original"
+  round 13 device-race00013: LOST — cache="Original" disk="Original"
+  round 16 device-race00016: LOST — cache="Original" disk="Original"
+  round 19 device-race00019: LOST — cache="Original" disk="Original"
+  5/20 writes lost
+
+$ node h2-race.mjs race <dataRoot> http://127.0.0.1:8795 20     # lock on load()
+  0/20 writes lost
+```
+
+`disk="Original"` is the part that matters: `markDirty` had already named the device, so the 800 ms
+debounce flushed the loss to the file. `reviewSubmission` had already stamped `record.settled`, so
+the match could not be replayed.
+
+**Real fix.** The lock is on `load()` — the writer — with a private `loadLocked()` for the callers
+that already hold it (`ensureLocked`). `loadLocked` re-checks the cache both before and *after* its
+`await`s, so a live entry always wins over a copy read from disk; the second check is belt and
+braces against `save()`, which is public and writes the cache without the lock. A cache hit still
+skips the lock entirely, so the common path is unchanged.
+
+**Test.** `server/src/economy.test.ts`, "is not overwritten by an UNLOCKED reader whose disk read
+lands last". The earlier test fires both halves and hopes — which is why it never caught this: real
+scheduling happens to favour the writer. The new one hands the store an `FsLike` whose `readFile`
+resolves on command *and snapshots the file bytes when the read is issued*, so the ordering in the
+diagram above is produced deliberately rather than waited for. Red before the fix
+(`the payout was overwritten in the cache: expected +0 to be 1`), green after.

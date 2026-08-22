@@ -463,4 +463,97 @@ describe('guardProfileWrite', () => {
     expect(guardProfileWrite(null).violation).toBe(false);
     expect(guardProfileWrite('xp=999').accepted).toEqual({});
   });
+
+  /* ---------------------------------------------------------------------- *
+   * The spelling that walked straight past all of the above
+   * ---------------------------------------------------------------------- */
+
+  it('refuses __proto__, which is an OWN key after JSON.parse', () => {
+    // Built by parsing, not by an object literal: a literal `__proto__:` in
+    // source sets the prototype at construction time and never becomes an own
+    // key, so a test written the obvious way tests nothing at all. This is the
+    // exact body that paid a device a billion XP against the live binary.
+    const body = JSON.parse(
+      '{"deviceId":"device-pwn00001","__proto__":{"progress":{"xp":1000000000,"level":200,"kills":99999}}}',
+    ) as unknown;
+
+    const v = guardProfileWrite(body);
+
+    // Named, not silently dropped — and it raises `violation`, which is what
+    // an operator sees.
+    expect(v.rejectedFields).toContain('__proto__');
+    expect(v.violation).toBe(true);
+
+    // THE ASSERTION THAT MATTERS. `index.ts` reads `filtered.accepted.progress`
+    // and merges it. Before the fix that read resolved through a prototype the
+    // attacker had just installed, so it was an object full of counters.
+    expect(v.accepted.progress).toBeUndefined();
+    expect(Object.getPrototypeOf(v.accepted)).toBeNull();
+    expect(({} as Record<string, unknown>).progress).toBeUndefined();
+  });
+
+  it('refuses the same trick one level down, and by its other two names', () => {
+    // Checking only the top level moves the hole one line deeper.
+    const nested = JSON.parse(
+      '{"deviceId":"device-pwn00001","progress":{"name":"Marine","__proto__":{"xp":777},"constructor":{"x":1},"prototype":{"y":2}}}',
+    ) as unknown;
+
+    const v = guardProfileWrite(nested);
+    expect(v.rejectedFields).toContain('progress.__proto__');
+    expect(v.rejectedFields).toContain('progress.constructor');
+    expect(v.rejectedFields).toContain('progress.prototype');
+    expect(v.violation).toBe(true);
+
+    const progress = v.accepted.progress as Record<string, unknown>;
+    expect(progress.name).toBe('Marine');
+    expect(progress.xp).toBeUndefined();
+    expect(Object.getPrototypeOf(progress)).toBeNull();
+
+    // And nothing global was harmed on the way through.
+    expect(({} as Record<string, unknown>).xp).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * 7. The violation the guard was not counting
+ * ------------------------------------------------------------------------ */
+
+describe('a refused profile write reaches the counters', () => {
+  it('counts as a violation and lands in the audit ring', () => {
+    // `guardProfileWrite` has always returned `violation`. Until `index.ts`
+    // read it, the field had zero readers in the entire tree — so the detector
+    // for "post your XP straight to /api/profile" was wired to nothing and an
+    // operator watching `violations` saw a flat zero through the attack.
+    const guard = new EntitlementGuard(() => 1_000);
+    expect(guard.status().violations).toBe(0);
+
+    const clean = guardProfileWrite({ deviceId: DEVICE, progress: { name: 'Marine' } });
+    expect(guard.noteProfileWrite(DEVICE, clean)).toBe(false);
+    expect(guard.status().violations).toBe(0);
+    expect(guard.recent()).toEqual([]);
+
+    const attack = guardProfileWrite({ deviceId: DEVICE, progress: { xp: 999_999 } });
+    expect(guard.noteProfileWrite(DEVICE, attack)).toBe(true);
+
+    const status = guard.status();
+    expect(status.violations).toBe(1);
+    expect((status.codes as Record<string, number>).PROFILE_FIELDS).toBe(1);
+
+    const [line] = guard.recent();
+    expect(line.code).toBe(RejectCode.PROFILE_FIELDS);
+    expect(line.deviceId).toBe(DEVICE);
+    expect(line.stripped).toContain('progress.xp');
+  });
+
+  it('bounds what one hostile body can push into the ring', () => {
+    const guard = new EntitlementGuard(() => 1_000);
+    const progress: Record<string, unknown> = {};
+    // Every server-owned name at once, so the refusal list is long.
+    for (const k of ['xp', 'level', 'kills', 'deaths', 'wins', 'gamesPlayed',
+      'bestKillstreak', 'blocksPlaced', 'blocksBroken', 'secondsPlayed',
+      'favouriteWeapon', 'adsRemoved', 'rating', 'trophies', 'titles', 'items',
+      'drops', 'scrap']) progress[k] = 1;
+    guard.noteProfileWrite(DEVICE, guardProfileWrite({ deviceId: DEVICE, progress }));
+    expect(guard.recent()[0].stripped.length).toBe(16);
+  });
 });

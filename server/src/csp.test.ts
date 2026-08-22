@@ -15,7 +15,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,6 +60,8 @@ async function freePort(): Promise<number> {
 interface Booted {
   child: ChildProcess;
   origin: string;
+  /** `DOOMCRAFT_DATA`, so a test can assert what the server did NOT write. */
+  dataRoot: string;
 }
 
 async function boot(env: Record<string, string> = {}): Promise<Booted> {
@@ -95,7 +97,7 @@ async function boot(env: Record<string, string> = {}): Promise<Booted> {
     if (Date.now() > deadline) throw new Error('server did not start');
     await new Promise((r) => setTimeout(r, 200));
   }
-  return { child, origin };
+  return { child, origin, dataRoot };
 }
 
 function directive(csp: string, name: string): string | null {
@@ -354,6 +356,144 @@ describe('POST /api/profile is not a self-grant', () => {
     // The parts the client really does own still land, or the filter is just
     // a broken endpoint wearing a security hat.
     expect(body.profile.progress.name).toBe('Cheater');
+  });
+
+  /*
+   * THE SPELLING THE TEST ABOVE DOES NOT COVER, and the reason it is here
+   * rather than only in the unit test.
+   *
+   * The test above was a FALSE GREEN. It passed for months while the same
+   * attack, written `__proto__` instead of `progress`, succeeded end to end
+   * against this binary:
+   *
+   *     POST /api/profile {"deviceId":"device-pwn00001","__proto__":{"progress":{"xp":1000000000,…}}}
+   *     rejected []
+   *     xp 1000000000 level 200 kills 99999 wins 99999 gamesPlayed 123456
+   *
+   * `JSON.parse` makes `__proto__` an OWN key, so it enumerated; it was not in
+   * `SERVER_OWNED_PROFILE_FIELDS`, so nothing rejected it; and the accumulator
+   * was a plain `{}`, so writing it replaced the accumulator's prototype and
+   * `index.ts` then read `accepted.progress` straight through it.
+   *
+   * The body is a hand-built STRING: `JSON.stringify({__proto__: {...}})`
+   * silently drops the key, so a test that builds the payload the obvious way
+   * sends `{}` and passes against a completely broken server.
+   */
+  const pwned = 'device-pwn00001';
+
+  it('refuses the same attack spelled __proto__ — the one that got through', async () => {
+    const raw = `{"deviceId":"${pwned}","__proto__":{"progress":{"xp":1000000000,"level":200,"kills":99999,"wins":99999,"gamesPlayed":123456}}}`;
+    expect(JSON.parse(raw).progress, 'the payload must not be an own progress key').toBeUndefined();
+
+    const posted = await fetch(`${server.origin}/api/profile`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: raw,
+    });
+    expect(posted.status).toBe(200);
+    const echoed = await posted.json() as { rejected: string[] };
+    expect(echoed.rejected, 'the refusal must be named, not silent').toContain('__proto__');
+
+    const res = await fetch(`${server.origin}/api/profile?device=${pwned}`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { profile: { progress: Record<string, number> } };
+    expect(body.profile.progress.xp).toBe(0);
+    expect(body.profile.progress.level).toBe(1);
+    expect(body.profile.progress.kills).toBe(0);
+    expect(body.profile.progress.wins).toBe(0);
+    expect(body.profile.progress.gamesPlayed).toBe(0);
+  });
+
+  it('counts the refused write, so the detector is not wired to nothing', async () => {
+    // `guardProfileWrite`'s `violation` had ZERO readers in the whole tree.
+    // The two POSTs above are exactly the attack this counter exists for, and
+    // it read a flat zero through both of them.
+    const res = await fetch(`${server.origin}/api/status`);
+    const body = await res.json() as { entitlement: { violations: number; codes: Record<string, number> } };
+    expect(body.entitlement.violations).toBeGreaterThan(0);
+    expect(body.entitlement.codes.PROFILE_FIELDS).toBeGreaterThan(0);
+  });
+
+  it('does not create a profile on a GET — a read must not write to disk', async () => {
+    // `store.ensure` on a GET made `curl "…?device=$(openssl rand -hex 6)"` in
+    // a loop unauthenticated, unbounded disk growth, and nothing sweeps the
+    // profile directory.
+    const unseen = 'device-neverseen1';
+    const res = await fetch(`${server.origin}/api/profile?device=${unseen}`);
+    expect(res.status).toBe(404);
+    await res.text();
+
+    // Give the 800 ms flush debounce more than its chance to betray us.
+    await new Promise<void>((r) => { setTimeout(r, 1200); });
+    const files = existsSync(join(server.dataRoot, 'profiles'))
+      ? readdirSync(join(server.dataRoot, 'profiles'), { recursive: true }) as string[]
+      : [];
+    expect(files.some((f) => String(f).includes(unseen)), `wrote a file for ${unseen}`).toBe(false);
+  }, 20_000);
+
+  it('never puts a durable identifier on the wire', async () => {
+    const res = await fetch(`${server.origin}/api/profile?device=${device}`);
+    const text = await res.text();
+    expect(text).not.toContain('accountSecret');
+    expect(text).not.toContain('accountId');
+    expect(text).not.toContain('receipt');
+  });
+
+  it('has no unauthenticated account routes left to take an account over', async () => {
+    // `link` returned `publicProfile(victim)` PLUS a fresh durable secret for
+    // ANY device id, and permanently re-pointed the victim's account index.
+    const link = await fetch(`${server.origin}/api/account/link`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: device, accountId: 'victim-account' }),
+    });
+    const linkBody = await link.text();
+    expect(link.status).not.toBe(200);
+    expect(linkBody).not.toContain('secret');
+
+    const resolve = await fetch(`${server.origin}/api/account/resolve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: 'victim-account', secret: 'anything' }),
+    });
+    const resolveBody = await resolve.text();
+    expect(resolve.status).not.toBe(200);
+    expect(resolveBody).not.toContain('progress');
+  });
+
+  it('refuses to grant a paid entitlement with no charging provider bound', async () => {
+    // The one identity route the live client actually calls, and it used to
+    // hand over the $4.99 product on an unverified receipt string.
+    const res = await fetch(`${server.origin}/api/entitlement`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: device, product: 'doomcraft.remove_ads', receipt: 'made-up' }),
+    });
+    expect(res.status).toBe(404);
+    const body = await res.json() as { granted?: boolean };
+    expect(body.granted).not.toBe(true);
+
+    // And the refusal is real: the profile did not quietly get the product.
+    const after = await (await fetch(`${server.origin}/api/profile?device=${device}`)).json() as {
+      profile: { entitlements: { adsRemoved: boolean } };
+    };
+    expect(after.profile.entitlements.adsRemoved).toBe(false);
+  });
+
+  it('takes the admin bearer with a lower-case scheme and refuses a bare token', async () => {
+    // RFC 7235 §2.1: the scheme is case-insensitive. The old check compared
+    // `startsWith('Bearer ')` and fell back to accepting the raw header value.
+    const lower = await fetch(`${server.origin}/api/admin/entitlement`, {
+      headers: { authorization: `bearer ${adminToken}` },
+    });
+    expect(lower.status).toBe(200);
+    await lower.text();
+
+    const bare = await fetch(`${server.origin}/api/admin/entitlement`, {
+      headers: { authorization: adminToken },
+    });
+    expect(bare.status).toBe(404);
+    await bare.text();
   });
 
   /*
