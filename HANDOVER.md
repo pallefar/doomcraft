@@ -1,140 +1,146 @@
-# Doomcraft — handover, 2026-08-20 ~19:50
+# Doomcraft — handover and plan for the next session
 
-Paused mid-build. Resume at 22:00. This file plus `ref/BAR.md`, `docs/MODES.md`, `docs/CRITIC.md`
-and `docs/CONTRACT.md` is everything you need.
+Written 2026-08-22. **Live at https://doomcraft.vercel.app** (static, single-player, $0).
+~100k lines, 1462 tests green, `tsc -b` clean.
 
-## Where to start when you come back
+Read this, then `ref/BAR.md`, `docs/INFRASTRUCTURE.md`, `docs/ECONOMY.md`, `docs/SPONSORS.md`.
+
+---
+
+## 0. Start here — three things that will save you hours
+
+**1. "It compiles and tests pass" is not evidence.** Five times on this project, code has been
+written, typechecked, passed hundreds of tests, and been **imported by nothing**. The character
+system (2,395 lines), the whole server tier, `ModeRouter`, and more. Every verifier prompt must
+demand *an import traced from the live entry point* **plus** a screenshot or a measurement.
+
+**2. A green test that cannot fail is worse than no test.** See `docs/BUGS-FOUND.md` §3: three
+drafts of one regression test all passed **with the bug still in the tree**. Always prove a
+regression test goes red — `git stash push <file>`, re-run, confirm failure, `git stash pop`. If it
+cannot fail, say so and do not count it as coverage.
+
+**3. The performance metrics lie unless you pick the right one.**
+- Page-level `fps1pctLow` is **saturated at 53.5–53.8** in every configuration ever measured —
+  headless and headed, 1× to 20× CPU throttle, 20 draw calls and 132. It is Chrome's rAF jitter
+  floor. It cannot prove a win or catch a regression.
+- `game.medianMs` times **only CPU submission** inside `renderer.render()`. It is structurally
+  **blind to fragment-shader changes**. For those use `EXT_disjoint_timer_query_webgl2` with a
+  pinned camera and a pixel sweep (ms/Mpx).
+- `game.medianMs` tracks **draw calls**, not throttle: ~46 → 0.1 ms, ~124–132 → 0.9–1.0 ms. The real
+  budget is **~120 draw calls**, and `drawCalls ≈ 1.85 × visibleChunks + 17.9` — it is nearly all
+  terrain.
+
+---
+
+## 1. Immediate — finish what is in flight
+
+**A workflow may still be running** (`doomcraft-defects`): three deploy gaps, the shotgun crack, the
+silent multiplayer digging, and the Quest 404s. Check `/workflows`. If it died, resume from
+`.../workflows/scripts/doomcraft-defects-wf_7ae4b4c9-c1c.js` (a fresh session must re-run from the
+script path — `resumeFromRunId` is same-session only).
+
+**Then the GitHub push, which is BLOCKED on a security step:**
 
 ```bash
 cd /Users/karstenhaldan/youtube/doomcraft
-npx tsc -b --pretty false && npx vitest run          # confirm the repo is still green
-npm run dev                                          # boots on :5173
-node tools/capture-ours.mjs                          # screenshots + metrics into shots/
+git status --porcelain                 # must be clean for filter-branch
+FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --index-filter \
+  'git rm -r --cached --ignore-unmatch tools/.profile-mc' --prune-empty -- --all
+git log --all --oneline -- tools/.profile-mc | wc -l   # MUST be 0
+git ls-files | grep -cF tools/.profile-mc              # MUST be 0
+git remote add origin https://github.com/pallefar/doomcraft.git
+git push -u origin main
 ```
 
-Then re-run the mode workflow, which was **still in flight when we stopped**:
+`tools/.profile-mc/` was tracked — 298 files including `Default/Cookies`, `Default/Login Data`,
+`Account Web Data`. It is out of the index and `.gitignore` now covers `tools/.profile-*/`, but it
+is **still in 2 commits of history**. `pallefar/doomcraft` is **public and empty**. Do not push
+before that count reads 0.
 
-```
-Workflow({ scriptPath: "/Users/karstenhaldan/.claude/projects/-Users-karstenhaldan-youtube-doomcraft/9e8c505b-feeb-47bd-af12-833ebb96376b/workflows/scripts/doomcraft-modes-wf_edf6177f-b5b.js" })
-```
+Everything else scanned clean: the "secret" grep hits are Doom level secrets; the user's email is in
+no tracked file. Use `grep -F` for path searches — an unescaped `.` matched 298 wrong files here.
 
-`resumeFromRunId` is same-session only, so a fresh session must re-run it from the script path.
-The framework phase already completed and its files are on disk, so the re-run will redo work that
-is partly done — read `docs/MODES-API.md` and `shared/src/{modes,level}.ts` first and consider
-trimming the framework phase out of the script before re-running.
+---
 
-## The level format — the answer to "many levels with options to expand"
+## 2. The plan — what is left, in the order I would do it
 
-A new episode is a **file, never a code change**. Drop a `.json` into `content/levels/` with a unique
-`meta.id` and `episodeId`; `LevelLibrary.load()` compiles, validates, encodes and hashes it at boot,
-and it appears in mode select, on `GET /api/levels`, and as a joinable room key
-`quest:<id>:<skill>` with nothing else touched.
+### Phase A · Economy (the user's item 5) — the biggest remaining chunk
+Spec: `docs/ECONOMY.md`. Nothing is built. This is likely more code than everything so far.
 
-Three representations, one truth:
-`*.json --parseLevelSource--> LevelSource --compileLevel--> Level --encodeLevel--> *.dcl`
+Build in this order, because each depends on the last:
+1. **Points** — two currencies. XP (monotonic, gates unlocks) + Scrap (spendable). **Server grants
+   every reward; the client never does.** Anti-farm: per-match and per-day caps, diminishing
+   returns, zero reward from a match joined after it is decided.
+2. **Items** — weapon variants (sidegrades, never upgrades), skins as **palette + emissive mask, never
+   new geometry or a new material** (a material per player is a draw call per player, and draw calls
+   are the budget). Five rarity tiers. Titles and trophies are **untradable** — they are proof of
+   achievement, so trading launders them.
+3. **Trading** — two-sided escrow where **confirm resets whenever either offer changes** (that is the
+   specific defence against the last-instant swap scam), atomic settlement, audit log, cooldowns,
+   no trading for new accounts.
+4. **Viral** — server-rendered share cards; referrals pay on **engagement, not signup** (rewarding
+   signups is what makes a referral system a bot farm); fraud caps and a review queue ship *with* it.
+5. **Competitions** — seasons, tournaments, prize claim. Default skill-based; **random draw behind an
+   explicit per-event flag**, because the random element — not the prize value — is what makes a
+   promotion a lottery. Real-money events refuse to open without jurisdiction allowlist, age floor,
+   tax field and published rules.
 
-- **Authoring is brush-based**, not per-voxel — box, hollow room, cylinder, stairs, clear. Nobody
-  hand-writes 589,824 voxels, and a brush list diffs readably. The Doom way, used by E1M1: fill the
-  whole volume with stone, then carve every room as a CLEAR, so a carve can never leak into a void.
-- **Runtime sections are byte-identical to engine chunks** in `voxelIndex` order, so they stream over
-  the existing `S2C.CHUNK` message. No new chunk protocol.
-- **`.dcl` round-trips byte-identically** (all authored floats are f64), asserted in a test. Shipped
-  E1M1 is 15,531 bytes for 248,439 solid voxels.
+Gate: cosmetics must not move `game.medianMs` or the draw-call count. Ship it **dark behind
+`shared/src/features.ts`** and switch on via the admin toggle — that is what the flag system is for.
 
-**Validation is a real gate, not a formality.** `validateLevel()` runs a lock-and-key reachability
-solve: flood standable cells from the player spawn (headroom checked before a climb, closed door = a
-wall, one-way drops modelled correctly), collect reachable keys, throw reachable switches whose key
-requirement is met, then re-flood to a fixpoint. The exit counts only if the flood entered its sector
-AND its switch was thrown. Deleting E1M1's blue keycard drops reachable cells 3,214 → 1,799 and fails
-the level. An invalid level is never served — `/data` answers 409 and the picker greys the row.
+### Phase B · Sponsors and ads (item 6, revenue half)
+Spec: `docs/SPONSORS.md` (1,389 lines, already decided — do not redesign it).
+Phase-one slice it names: **S1 (three DOM slots) + S3 (mode-tile badge) + S4 (boot line) + S12
+(intermission card)**, all zero in-game frame cost, plus `POST /api/ads/decide` and `/api/ads/event`,
+the 2D viewability implementation, and the `/r/<clickId>` HMAC redirector.
 
-## State: what is DONE and verified
+Two hard constraints from that doc: the **1.5% screen-coverage floor** means in-world placements must
+be authored at **16×8 m minimum** or the inventory is a rounding error; and 3D viewability is
+**server-side reconstruction** from the yaw/pitch already on the wire — client-side WebGL2 occlusion
+queries were measured and rejected (0.19 ms spike landing on the p99 tail).
 
-**Spine — complete, running, verified by eye (not by agent self-report).**
-25,330 lines, 31 files. `tsc -b` clean, tests 18/18 + 19/19 + 29/29. 312 ms to interactive, zero
-console errors. On screen: voxel arenas, 7 Doom weapons, dynamic crosshair that blooms with spread,
-7-pellet shotgun sparks, rocket craters cut into terrain, killfeed, minimap, in-engine menu, full
-settings panel, three reserved ad slots. **Mobile portrait plays** with a big FIRE pad and labelled
-JUMP/CRCH/RUN/RLD/BLD buttons — the bar refuses portrait entirely.
+**Before any third-party ad tag ships**, the static CSP is no longer adequate — see `docs/DEPLOY.md`.
+Move to the Node origin with its nonce CSP, or isolate the ad frame to a separate origin.
 
-**Three bars captured and on disk** — `ref/voxiom/`, `ref/doom/`, and Minecraft Classic verified
-reachable (`ref/mcclassic/` still to be filled by the Builder agent).
+### Phase C · Platform (item 6, tooling half)
+Profile page, feedback, admin **UI** (only `/api/admin/drain` and `/api/admin/flags` exist today),
+user management, billing, analytics. All picks are already decided in `docs/INFRASTRUCTURE.md` —
+WorkOS AuthKit, Paddle as merchant of record, PostHog + self-hosted ClickHouse. **Buy, don't build.**
 
-**Mode framework — complete.** `shared/src/modes.ts`, `shared/src/level.ts` (the expandable level
-format), `server/src/{modes,levels}.ts`, `client/src/modes/registry.ts`, three Quest levels in
-`content/levels/`. API documented in `docs/MODES-API.md`.
+**My honest advice on ordering:** this phase mostly wants real players to be worth building. An admin
+panel and analytics dashboard for a game with no users is premature. Economy changes what players do;
+this measures it. If the user wants it earlier, that is their call.
 
-**Four mode builders — cut off by the weekly usage limit, not by any technical failure.** They got
-further than the journal showed: six Quest levels in `content/levels/`, `modes/quest/quest.ts`, and
-most of Builder landed before the cut. Two TS errors remain from the interruption
-(`quest.ts:387` touching a private `ChunkRenderer.renderDistance`, and a stale 5-arg call in
-`worlds.test.ts:352`). **Resumed at 22:00** from the saved run — the framework replayed from cache
-and the five killed agents re-ran.
+### Phase D · Known defects and polish
+- Integration test owed for `BUGS-FOUND.md` §3 (needs a real server with levels loaded).
+- ~Half the Kenney outfits clash — Medic reads as a clown, Timber is a lumberjack in plaid. Fix is
+  pipeline-side in `tools/build-character-atlas.mjs`: cut the roster to the ~7 military ones or
+  re-tint toward ash/blood. Costs nothing at runtime and shrinks `cast.png`.
+- `client/src/player/controller.ts` (630 lines) is dead code with a duplicate `STEP_SMOOTH_RATE`.
+- Quest tile floor regressed 4.03 → 2.56 grey levels (seam strength was cut).
+- Distant walls still flat past ~25 m.
+- **Run the gauntlet.** `tools/gauntlet.js` works and is now genuinely blind, but the board still
+  reads 0/23 — no piece has a clean admissible win yet.
 
-## The one honest negative
+### Blocked on the user, not on engineering
+ElevenLabs API key · **GTA mode has no obtainable bar** (no browser-playable GTA found; do not fake
+the comparison) · payment processor · ad network account · CDN origin · legal review for real-money
+prizes.
 
-**Performance is a TIE with the bar, not a win, and a tie is a loss by our own rule.** Headed at
-915×412 under verified 4× CPU throttle: ours 60.2 median / 53.8 1% low, voxiom 60.2 / 53.8 —
-identical, because both are vsync-locked. Both collapse together at 20×. The 120 fps figure that
-appears in some captures is a **headless artifact**; headless Chrome is uncapped while the bar must
-be captured headed (Cloudflare). **Always compare headed-to-headed.**
+---
 
-Three things I would fail our own build on today, before any critic runs:
-1. **Our blocks are flat-coloured; the bar's are textured.** Straight loss on art.
-2. Viewmodels read as coloured boxes, not weapons.
-3. Scenes are murky — large dead grey walls, weak mid-ground contrast.
+## 3. Tooling invariants — do not break
 
-## Next actions, in order
+`playwright@1.62.1` is a required root devDependency; it is the measuring apparatus.
+`tools/`: `capture-ref.mjs` (voxiom, **headed only** — Cloudflare blocks headless), `capture-doom.mjs`
+(**the webm has NO audio track** — `canvas.captureStream()` is video-only; decode DMX lumps from
+`DOOM1.WAD` via `wad2wav.mjs` instead), `capture-ours.mjs`, `reccanvas.mjs`, `strip.mjs`,
+`blind.mjs`, `bw-verify.mjs`, `gauntlet.js`, `progress/build.mjs`.
 
-1. Finish the four modes (re-run the workflow above).
-2. Run the gauntlet: `tools/gauntlet.js` is written and ready — builder → capture steward → blind
-   critic per piece, looping while ours loses. Launch it via `Workflow({scriptPath: ".../tools/gauntlet.js", args: {pieces: [...], maxRounds: 4}})`.
-   The batch cap is an orchestration checkpoint, **not** the exit condition; the exit is winning.
-3. Fix the three art losses above — they are the likeliest first critic verdicts.
+Deploy: `npx vercel --prod --yes`. Preview URLs sit behind Vercel's login wall — verify production.
+`.vercelignore` is mandatory (first attempt uploaded 1.7 GB) but **must not ignore `shared/`**.
+`buildCommand` is `vite build` only — `tsc -b` fails there because the root tsconfig references
+`server/`.
 
-## Queued by the user, NOT started
-
-### Advertiser self-serve ad layer
-"add the ad in game layer where advertisers can buy ads in the game". The interesting, genuinely
-novel part is **in-world ad surfaces** — billboards as voxel geometry inside the arenas — on top of
-the DOM slots that already exist. Building it means an ad server: inventory, slot targeting,
-impression and click tracking, and a buyer console.
-
-Two things to settle before writing code, because they change the design:
-- **Advertiser-uploaded creative is untrusted third-party content.** It needs moderation, size and
-  format limits, and sandboxing. Do not render arbitrary uploaded HTML/JS into the game page.
-- **Real money needs explicit setup.** Build against a mock gateway behind a provider interface;
-  wiring a live payment processor or a real ad network is a decision for the user, not a default.
-
-### GTA mode
-"look at old GTA games and make quests". **The bar is unresolved and this is the blocker.** Every
-other mode has a fetchable opponent; this one does not yet.
-- archive.org has no browser-playable GTA 1/2 emulator item (the identifiers that look right are
-  download-only uploads of commercial games).
-- playclassic.games has a GTA page but it produced **no canvas** when driven — it did not run.
-- The legitimate path: **GTA 1 and GTA 2 were officially released as freeware by Rockstar**, so a
-  clean DOSBox/browser build of those is obtainable in principle. Find one that actually runs before
-  promising the mode, or pick a different bar. Do not fake this comparison.
-
-What GTA mode would actually need on top of the existing spine: vehicles and vehicle physics, a city
-generator (grid streets, blocks, interiors), pedestrian and traffic AI, a wanted/heat system, and a
-mission scripting layer. The mission layer can reuse the Quest trigger system rather than duplicating it.
-
-### ElevenLabs voices
-**Blocker: no API key is configured.** Ask for one before starting.
-Design notes that matter for a browser game: generate voice lines **offline as build-time assets**,
-never at runtime — runtime API calls cost money per play and add latency. Budget the payload: we are
-at 3.3 MB cold and voice lines can dwarf that, so stream them lazily per level rather than bundling.
-
-## Tooling invariants — do not break
-
-`playwright@1.62.1` must stay a root devDependency; it is the measuring apparatus, not test
-scaffolding. See `TOOLING.md`. Capture scripts: `capture-ref.mjs` (voxiom), `capture-doom.mjs`
-(DOOM 1993), `capture-ours.mjs` (us), `reccanvas.mjs` (60 fps canvas recording — Playwright's own
-`recordVideo` cannot see a WebGL canvas), `strip.mjs` (contact sheets), `blind.mjs` (blind A/B pairs).
-
-## Live progress page
-
-https://claude.ai/code/artifact/7fc179b3-ad71-4681-ad40-38f20e75f672
-Regenerate with `node progress/build.mjs` (reads `progress/state.json`), then republish **the same
-file path** to keep the URL.
+Live progress page: https://claude.ai/code/artifact/7fc179b3-ad71-4681-ad40-38f20e75f672
+(`node progress/build.mjs`, then republish the same file path).
