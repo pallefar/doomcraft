@@ -80,8 +80,15 @@ import {
 } from './modes.js';
 import { Connection, NetHub, sanitiseChat } from './net.js';
 import type { NetHost, NetTransport } from './net.js';
-import type { MatchResult, PersistenceStore } from './persistence.js';
+import type { PersistenceStore } from './persistence.js';
 import { applyMatchResult } from './persistence.js';
+import {
+  EntitlementGuard,
+  SubmitterKind,
+  toMatchResult,
+  type ResultSubmission,
+} from './entitlementGuard.js';
+import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { PlayerEntity, Simulation } from './sim.js';
 import { ServerWorld } from './world.js';
 
@@ -114,6 +121,20 @@ export interface RoomOptions {
   /** Doom monsters alive at once. -1 uses the mode default. */
   enemies?: number;
   store?: PersistenceStore | null;
+  /**
+   * The reward gate. Null means this room grants nothing at all — which is
+   * what the browser worker wants, and what every test that does not care
+   * about the economy gets by default.
+   */
+  guard?: EntitlementGuard | null;
+  /**
+   * How the server created this room. A server fact, never read off a
+   * packet; `sealSessionTrust` turns it into a topology and clamps the
+   * intent below. Defaults to the matchmaker.
+   */
+  sessionOrigin?: SessionOrigin;
+  /** What the matchmaker asked for. `resolveMatchType` clamps it by origin. */
+  sessionIntent?: MatchType;
   /** Monotonic wall clock in ms. Defaults to Date.now. */
   clock?: () => number;
   /**
@@ -200,6 +221,7 @@ export class Room implements NetHost {
   readonly monsters: MonsterManager;
   readonly bots: BotDriver;
   readonly store: PersistenceStore | null;
+  readonly guard: EntitlementGuard | null;
 
   seed: number;
   gameMode: GameMode;
@@ -279,6 +301,8 @@ export class Room implements NetHost {
   timeLeftMs = MATCH_DURATION_MS;
   stateEndsMs = 0;
   round = 0;
+  /** `elapsedMs` when the round in progress began. Written every round. */
+  roundStartMs = 0;
 
   private readonly clock: () => number;
   private readonly members = new Map<number, Membership>();
@@ -293,6 +317,20 @@ export class Room implements NetHost {
   /** Total simulated milliseconds — the room clock the net layer stamps with. */
   private elapsedMs = 0;
 
+  /* --- the reward gate's two server facts and the round's ledger id ---- *
+   * Set once at construction from `RoomOptions`, because how a room came
+   * into existence is not something a player may influence later.
+   * -------------------------------------------------------------------- */
+  private readonly sessionOrigin: SessionOrigin;
+  private readonly sessionIntent: MatchType;
+  /**
+   * The ledger id of the round in progress, `"<room>#<round>"`. Empty until
+   * the first round opens. Per ROUND, not per room: the room key outlives
+   * every round it holds, so a per-room id would make round 2 a replay of
+   * round 1 and pay nobody.
+   */
+  private sessionId = '';
+
   constructor(options: RoomOptions = {}) {
     this.name = options.name ?? 'doomcraft';
     this.seed = (options.seed ?? ((Math.random() * 0xffffffff) >>> 0)) >>> 0;
@@ -301,6 +339,9 @@ export class Room implements NetHost {
     this.botFill = clamp(options.botFill ?? BOT_FILL_TARGET, 0, this.maxPlayers);
     this.enemyOverride = options.enemies ?? -1;
     this.store = options.store ?? null;
+    this.guard = options.guard ?? null;
+    this.sessionOrigin = options.sessionOrigin ?? SessionOrigin.SERVER_MATCHMAKER;
+    this.sessionIntent = options.sessionIntent ?? MatchType.PUBLIC;
     this.clock = options.clock ?? (() => Date.now());
     this.eagerWorld = options.eagerWorld ?? true;
 
@@ -975,14 +1016,19 @@ export class Room implements NetHost {
 
     const id = this.allocateId();
     const player = this.sim.addPlayer(id, name, skin, false);
-    this.members.set(id, {
+    const member: Membership = {
       conn, player, isBot: false, joinedMs: this.elapsedMs,
       baseKills: 0, baseDeaths: 0,
-    });
+    };
+    this.members.set(id, member);
 
     // An idle room belongs to whoever walks in: fresh scores, fresh clock.
     if (humans === 0) this.beginRound(false);
     else if (this.state === RoundState.IDLE) this.state = RoundState.LIVE;
+
+    // The server saw this device attach. That observation — not anything the
+    // client will later claim — is what makes a payout possible at all.
+    this.addSessionParticipant(member);
 
     this.modeTracker.add(id);
     this.modePlayers.set(id, createModePlayerState());
@@ -1105,6 +1151,17 @@ export class Room implements NetHost {
 
   private beginRound(newSeed: boolean): void {
     this.round++;
+    // Open the ledger entry BEFORE the world reset: `generateAll()` can take
+    // a while on a real host, and a payout landing in that window has to find
+    // a session to land in.
+    this.roundStartMs = this.elapsedMs;
+    this.sessionId = `${this.name}#${this.round}`;
+    this.guard?.open({
+      sessionId: this.sessionId,
+      modeId: this.plan.modeId,
+      origin: this.sessionOrigin,
+      serverIntent: this.sessionIntent,
+    });
     if (newSeed) {
       this.seed = (this.seed * 1664525 + 1013904223) >>> 0;
       this.world.reset(this.seed);
@@ -1140,6 +1197,7 @@ export class Room implements NetHost {
       m.baseDeaths = 0;
       m.joinedMs = this.elapsedMs;
       this.sim.spawnPlayer(m.player);
+      this.addSessionParticipant(m);
     }
     this.net.broadcastChat(0, ChatChannel.SYSTEM,
       this.round === 1 ? 'Match live. Go.' : `Round ${this.round}. New world.`);
@@ -1155,6 +1213,16 @@ export class Room implements NetHost {
     }
     for (const m of this.members.values()) {
       void this.persistMember(m, best !== null && m.player.id === best.id);
+    }
+    // AFTER the loop, never before. `reviewSubmission` refuses anything that
+    // arrives past `closedMs`, so closing first would reject the whole room.
+    //
+    // `sessionId` is deliberately NOT cleared here. It keeps naming the round
+    // that just ended, so a player who quits during the 8 s end screen still
+    // reaches the guard and is *recorded* being refused a second payout,
+    // rather than silently dropped. `beginRound` overwrites it.
+    if (this.guard !== null && this.sessionId.length > 0) {
+      this.guard.ledger.close(this.sessionId);
     }
     this.net.broadcastChat(best ? best.id : 0, ChatChannel.SYSTEM,
       best ? `${best.name} wins with ${best.kills} — ${reason}` : `Round over — ${reason}`);
@@ -1317,20 +1385,34 @@ export class Room implements NetHost {
     const seconds = Math.max(0, (this.elapsedMs - member.joinedMs) / 1000);
     const kills = Math.max(0, p.kills - member.baseKills);
     const deaths = Math.max(0, p.deaths - member.baseDeaths);
-    const result: MatchResult = {
-      kills,
-      deaths,
-      won,
-      bestStreak: p.bestStreak,
-      damageDealt: p.damageDealt,
-      blocksPlaced: p.blocksPlaced,
-      blocksBroken: p.blocksBroken,
-      seconds,
-      xp: kills * XP_PER_KILL + (won ? XP_PER_WIN : 0) + (seconds / 60) * XP_PER_MINUTE,
-      favouriteWeapon: p.weapon,
-    };
+
+    // Rebase BEFORE anything can throw or await, so a failure downstream loses
+    // one payout rather than paying the same kills again on the next call.
     member.baseKills = p.kills;
     member.baseDeaths = p.deaths;
+
+    // No gate, no money. A room built without one (the browser worker, and most
+    // tests) writes nothing at all — which is the honest answer, because nothing
+    // in that process is in a position to attest to the result.
+    if (this.guard === null || this.sessionId.length === 0) return;
+
+    /*
+     * SYNCHRONOUS up to and including `submit`. `endRound` closes the session
+     * immediately after its payout loop and the guard refuses anything that
+     * arrives after `closedMs`, so an `await` before this line would reject the
+     * whole room. See the note in `endRound`.
+     *
+     * Known and accepted for now: `reviewSubmission` marks the device settled
+     * on acceptance and there is no un-settle, so if the `store.update` below
+     * throws, that player's round is gone. Logged, not retried — a retry would
+     * need a two-phase settle the ledger does not have.
+     */
+    const verdict = this.guard.submit(
+      this.buildRoundSubmission(member, deviceId, won, kills, deaths, seconds),
+    );
+    const result = toMatchResult(verdict);
+    if (result === null) return;
+
     try {
       await this.store.update(deviceId, (profile) => {
         applyMatchResult(profile, result);
@@ -1340,6 +1422,71 @@ export class Room implements NetHost {
     } catch {
       // A failed save must never take the match down.
     }
+  }
+
+  /* -------------------------------------------------------------- *
+   * The reward path
+   *
+   * Everything the room knows about what a match was worth lives in this one
+   * section, and it knows nothing about which mode pays what — that is
+   * `shared/src/trust.ts`'s job and the guard applies it. Deliberately kept
+   * clear of mode literals: `shared/src/trust.test.ts` scans the whole tree for
+   * a line that names a mode and a reward in the same breath, because that is
+   * how a policy leaks out of the table one convenient `if` at a time.
+   * -------------------------------------------------------------- */
+
+  /**
+   * One player's claim on the round in progress, as the room tallied it.
+   *
+   * `stats` is never omitted: `toMatchResult` returns null without it, so an
+   * XP-only submission would be accepted, mark the device settled, and pay
+   * exactly nothing.
+   */
+  private buildRoundSubmission(
+    member: Membership, deviceId: string,
+    won: boolean, kills: number, deaths: number, seconds: number,
+  ): ResultSubmission {
+    const p = member.player;
+    return {
+      sessionId: this.sessionId,
+      deviceId,
+      submittedBy: SubmitterKind.ROOM_SIM,
+      xp: kills * XP_PER_KILL + (won ? XP_PER_WIN : 0) + (seconds / 60) * XP_PER_MINUTE,
+      stats: {
+        kills,
+        deaths,
+        won,
+        bestStreak: p.bestStreak,
+        damageDealt: p.damageDealt,
+        blocksPlaced: p.blocksPlaced,
+        blocksBroken: p.blocksBroken,
+        seconds,
+        favouriteWeapon: p.weapon,
+      },
+    };
+  }
+
+  /**
+   * Note that the server saw this device in this round. A device that is not in
+   * the participant set cannot be paid for the round, however honest its
+   * numbers look — which is what stops one player settling for everybody else.
+   */
+  private addSessionParticipant(m: Membership): void {
+    if (this.guard === null || this.sessionId.length === 0) return;
+    if (m.isBot || m.conn === null || m.conn.deviceId.length === 0) return;
+    if (!this.roundStillOpenToJoiners()) return;
+    this.guard.ledger.addParticipant(this.sessionId, m.conn.deviceId);
+  }
+
+  /**
+   * May somebody arriving right now still earn anything from this round?
+   *
+   * Today the only answer is "not once it is over" — walking in during the end
+   * screen is not playing the match. The real late-join lockout is a separate
+   * change and belongs here when it lands.
+   */
+  private roundStillOpenToJoiners(): boolean {
+    return this.state !== RoundState.ENDED;
   }
 
   /* -------------------------------------------------------------- *

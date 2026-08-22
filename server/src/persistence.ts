@@ -526,7 +526,35 @@ export class JsonFileStore implements PersistenceStore {
     }
   }
 
+  /**
+   * Load or create — under the per-device lock.
+   *
+   * THE BUG THIS CLOSES. A cache miss means a disk read, and a disk read means
+   * two `await`s: long enough for a match payout to run `update`, create the
+   * same profile, fold the result into it and cache it. The reader, still
+   * holding its own `createProfile()` from before all that, then cached the
+   * blank one on top and the match was gone. `applyMatchResult` had already
+   * run, the entitlement guard had already marked the device settled, and the
+   * player's profile said they had played nothing — reproducible 12 times out
+   * of 12 against a cold store, which is exactly the shape of "first match
+   * after a deploy, while the menu fetches the profile".
+   *
+   * A cache hit skips the lock: it hands back the very object `update` mutates,
+   * so there is nothing to serialise.
+   */
   async ensure(deviceId: string): Promise<StoredProfile> {
+    const cached = this.cache.get(deviceId);
+    if (cached) return cached;
+    return this.withLock(deviceId, () => this.ensureLocked(deviceId));
+  }
+
+  /**
+   * The body of `ensure`, for callers that ALREADY hold the device's lock.
+   * `withLock` is not reentrant — the inner call would chain onto a promise
+   * that cannot settle until the inner call finishes — so `update` and
+   * `linkAccount` must use this one.
+   */
+  private async ensureLocked(deviceId: string): Promise<StoredProfile> {
     const existing = await this.load(deviceId);
     if (existing) return existing;
     const fresh = createProfile(deviceId);
@@ -544,7 +572,7 @@ export class JsonFileStore implements PersistenceStore {
 
   update(deviceId: string, mutate: (p: StoredProfile) => void): Promise<StoredProfile> {
     return this.withLock(deviceId, async () => {
-      const p = await this.ensure(deviceId);
+      const p = await this.ensureLocked(deviceId);
       mutate(p);
       await this.save(p);
       return p;
@@ -557,7 +585,7 @@ export class JsonFileStore implements PersistenceStore {
 
   linkAccount(deviceId: string, accountId: string): Promise<{ profile: StoredProfile; secret: string }> {
     return this.withLock(deviceId, async () => {
-      const p = await this.ensure(deviceId);
+      const p = await this.ensureLocked(deviceId);
       const secret = randomToken();
       p.accountId = accountId;
       p.accountSecret = secret;

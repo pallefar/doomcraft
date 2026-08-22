@@ -290,3 +290,102 @@ describe('sponsor origins and report-uri are validated, not trusted', () => {
     expect(res.headers.get('content-security-policy')).not.toContain('report-uri');
   });
 });
+
+/* ------------------------------------------------------------------------ *
+ * The other door into the profile
+ *
+ * The CSP keeps hostile code out of the origin. `guardProfileWrite` keeps the
+ * client out of the fields only a match result may move — the same "the server
+ * grants every reward" line, one layer in. It is tested here because it is
+ * about ROUTING, not about a function: `entitlementGuard.test.ts` already
+ * proves the filter filters, and proved nothing about whether `index.ts` calls
+ * it. This boots the real binary and posts the attack.
+ * ------------------------------------------------------------------------ */
+
+describe('POST /api/profile is not a self-grant', () => {
+  let server: Booted;
+  const adminToken = 'entitlement-test-token';
+  beforeAll(async () => {
+    server = await boot({ DOOMCRAFT_ADMIN_TOKEN: adminToken });
+  }, 60_000);
+  afterAll(() => { server?.child.kill('SIGKILL'); });
+
+  const device = 'device-post0001';
+
+  it('refuses xp, level and lifetime counters the client posted for itself', async () => {
+    const posted = await fetch(`${server.origin}/api/profile`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: device,
+        progress: {
+          name: 'Cheater',
+          xp: 1_000_000_000,
+          level: 99,
+          kills: 500_000,
+          wins: 500_000,
+          gamesPlayed: 500_000,
+          bestKillstreak: 999,
+        },
+        stats: { kills: 500_000, matches: 500_000 },
+      }),
+    });
+    expect(posted.status).toBe(200);
+    // The refusal is named, not silent.
+    const echoed = await posted.json() as { rejected: string[] };
+    expect(echoed.rejected).toContain('progress.xp');
+    expect(echoed.rejected).toContain('progress.kills');
+    expect(echoed.rejected).toContain('stats');
+
+    // Read it back over the wire rather than trusting the POST's own echo.
+    const res = await fetch(`${server.origin}/api/profile?device=${device}`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { profile: { progress: Record<string, number | string>; stats: Record<string, number> } };
+
+    expect(body.profile.progress.xp).toBe(0);
+    expect(body.profile.progress.level).toBe(1);
+    expect(body.profile.progress.kills).toBe(0);
+    expect(body.profile.progress.wins).toBe(0);
+    expect(body.profile.progress.gamesPlayed).toBe(0);
+    expect(body.profile.progress.bestKillstreak).toBe(0);
+    expect(body.profile.stats.kills).toBe(0);
+    expect(body.profile.stats.matches).toBe(0);
+
+    // The parts the client really does own still land, or the filter is just
+    // a broken endpoint wearing a security hat.
+    expect(body.profile.progress.name).toBe('Cheater');
+  });
+
+  /*
+   * The gate is only real if an operator can see it running. These two are the
+   * "is it wired in?" check the design asks for by name: a counter on the
+   * status page and an admin-only view of every refusal.
+   */
+  it('reports the gate on /api/status, so a dark guard is visible', async () => {
+    const res = await fetch(`${server.origin}/api/status`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { entitlement?: Record<string, number> };
+    expect(body.entitlement, 'no entitlement block on /api/status').toBeTruthy();
+    expect(typeof body.entitlement?.sessions).toBe('number');
+    expect(typeof body.entitlement?.accepted).toBe('number');
+    expect(typeof body.entitlement?.violations).toBe('number');
+  });
+
+  it('keeps the refusal log behind the admin token, 404 without one', async () => {
+    const anon = await fetch(`${server.origin}/api/admin/entitlement`);
+    expect(anon.status).toBe(404);
+
+    const wrong = await fetch(`${server.origin}/api/admin/entitlement`, {
+      headers: { authorization: 'Bearer not-the-token-at-all' },
+    });
+    expect(wrong.status).toBe(404);
+
+    const ok = await fetch(`${server.origin}/api/admin/entitlement`, {
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(ok.status).toBe(200);
+    const body = await ok.json() as { status: Record<string, number>; recent: unknown[] };
+    expect(Array.isArray(body.recent)).toBe(true);
+    expect(typeof body.status.rejected).toBe('number');
+  });
+});

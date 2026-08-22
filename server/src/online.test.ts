@@ -538,3 +538,56 @@ describe('POST /api/admin/drain converges instead of waiting out the deadline', 
     resident.close();
   }, 90_000);
 });
+
+/* ------------------------------------------------------------------------ *
+ * The reward path, in the live binary
+ *
+ * `economy.test.ts` drives a `Room` in-process with a guard a test handed it.
+ * That proves the room uses a guard; it cannot prove `server/src/index.ts`
+ * gives it one. This does: a real socket, a real device id off the query
+ * string, the real `JsonFileStore`, and a profile read back over HTTP.
+ *
+ * The claim, stated as a wire fact: after one real player has been in one real
+ * match, `/api/status` reports a non-zero `entitlement.accepted` and the
+ * profile API shows the match. Before the guard was wired in, `accepted` did
+ * not exist at all — the whole file was imported by nothing.
+ * ------------------------------------------------------------------------ */
+
+describe('the entitlement guard is in the live payout path', () => {
+  it('opens a session for a real socket and settles it through the guard', async () => {
+    const srv = await boot();
+    const device = 'device-live0001';
+
+    const player = new TestClient(`${srv.wsBase}/ws?mode=deathmatch&device=${device}`, 'LedgerMarine');
+    await until(() => player.gotWelcome, 20_000, 'welcome');
+
+    // The room opened a ledger entry the moment the round began.
+    const mid = await json(`${srv.origin}/api/status`);
+    const midGate = mid.entitlement as Record<string, number> | undefined;
+    expect(midGate, 'no entitlement block on /api/status').toBeTruthy();
+    expect(midGate?.sessions).toBeGreaterThan(0);
+    expect(midGate?.accepted).toBe(0);
+
+    // Leaving settles the round for that device — the same `persistMember` the
+    // end of a match calls, just reached by the door players actually use.
+    player.close();
+
+    let progress: Record<string, number> | null = null;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const body = await json(`${srv.origin}/api/profile?device=${device}`);
+      const profile = body.profile as { progress: Record<string, number> } | undefined;
+      progress = profile?.progress ?? null;
+      if ((progress?.gamesPlayed ?? 0) >= 1) break;
+      await new Promise<void>((r) => { setTimeout(r, 100); });
+    }
+
+    const after = await json(`${srv.origin}/api/status`);
+    const gate = after.entitlement as Record<string, number>;
+
+    expect(progress, 'no profile came back').not.toBeNull();
+    expect(progress?.gamesPlayed, `gate: ${JSON.stringify(gate)}`).toBe(1);
+    expect(gate.accepted).toBe(1);
+    expect(gate.violations).toBe(0);
+  }, 60_000);
+});

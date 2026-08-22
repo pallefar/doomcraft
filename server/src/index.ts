@@ -56,10 +56,13 @@ import {
   type ModeSimPlan,
 } from './modes.js';
 import {
+  PRIVATE_KEY_MARK,
   RoomDirectory,
   UnknownCodeError,
   joinRequestFromQuery,
 } from './directory.js';
+import { EntitlementGuard, guardProfileWrite } from './entitlementGuard.js';
+import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
 import {
   FlagService,
@@ -431,6 +434,17 @@ const store: PersistenceStore = new JsonFileStore(dataRoot);
 const bootMs = Date.now();
 
 /**
+ * THE reward gate. One per process, shared by every room, because the
+ * session ledger and the audit ring are process-wide facts and a per-room
+ * guard would give each room its own private accounting.
+ *
+ * `docs/ECONOMY.md` decision 1 in its wired form: every payout in this
+ * process goes through `guard.submit`, and `guardProfileWrite` closes the
+ * other door — the HTTP profile route a client could otherwise post XP to.
+ */
+const guard = new EntitlementGuard(() => Date.now());
+
+/**
  * The installed campaign. The router uses it as its `ContentResolver`, so a
  * `?level=` naming something that is not on disk lands on a level that is,
  * rather than on an empty room. A library that cannot load is not fatal — the
@@ -517,9 +531,22 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
    * answers a throw here with a 503 at the upgrade.
    */
   create: lifecycle.guardCreate((key: string, plan: ModeSimPlan, options: RoomOptions): Room => {
+    /*
+     * How this room came into existence, decided here and nowhere else.
+     *
+     * A private room is one the directory minted a code for, and its key
+     * carries `PRIVATE_KEY_MARK` — a server fact no client can forge, because
+     * the client never supplies the key, only a code the directory resolves.
+     * `resolveMatchType` clamps both of these anyway (an invite room is PRIVATE
+     * however it was requested), so this pair is the intent, not the verdict.
+     */
+    const isInvite = key.includes(PRIVATE_KEY_MARK);
     const room = new Room({
       ...options,
       store,
+      guard,
+      sessionOrigin: isInvite ? SessionOrigin.SERVER_INVITE : SessionOrigin.SERVER_MATCHMAKER,
+      sessionIntent: isInvite ? MatchType.PRIVATE : MatchType.PUBLIC,
       // A real server generates all 169 chunks once, at room construction; the
       // browser Worker trickles. `roomOptionsFor` already turns this off for an
       // authored Quest level, whose terrain is replaced anyway.
@@ -571,6 +598,12 @@ const roomSweeper = setInterval(() => {
   if (draining) return;
   router.sweep();
   directory.sweep();
+  // The ledger keys its TTL on when a session was CREATED, not on when it was
+  // last touched, so a room that stays up for more than SESSION_TTL_MS loses
+  // its current round's entry and the next payout comes back NO_SESSION —
+  // flagged as a violation. Six hours is far beyond any round, so in practice
+  // this only reaps rounds that already ended.
+  guard.ledger.sweep();
 }, 30_000);
 if (typeof roomSweeper.unref === 'function') roomSweeper.unref();
 
@@ -882,6 +915,18 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
+  /*
+   * The refusal log. Only rejections and strips are recorded, so an empty ring
+   * next to a non-zero `accepted` is what a healthy process looks like — and a
+   * ring full of NOT_A_PARTICIPANT or CLIENT_REPORTED is somebody probing.
+   * Admin-gated exactly like the two switches above: no token, no route.
+   */
+  if (path === '/api/admin/entitlement' && (req.method === 'GET' || req.method === 'HEAD')) {
+    if (!adminAuthorised(req)) { sendJson(res, 404, { error: 'not found' }, cors); return true; }
+    sendJson(res, 200, { status: guard.status(), recent: guard.recent(64) }, cors);
+    return true;
+  }
+
   if (path === '/api/status') {
     sendJson(res, 200, {
       // The operator's view names both drains separately, because during a
@@ -892,6 +937,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       fleet: fleetStatus(),
       directory: directory.status(),
       rooms: router.status(),
+      // A healthy fleet shows a rising `accepted` and an all-but-empty `codes`
+      // map. `violations` climbing is the number worth an alert.
+      entitlement: guard.status(),
     }, cors);
     return true;
   }
@@ -980,9 +1028,30 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const body = await readBody(req) as Record<string, unknown>;
     const deviceId = String(body.deviceId ?? '');
     if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
+    /*
+     * THE OTHER HALF of "the server grants every reward".
+     *
+     * This route used to merge the client's whole `progress` object into the
+     * stored profile, and `migrateProfile`'s only bound on xp is `>= 0` — so a
+     * browser could post itself any level it liked without playing a match.
+     * `guardProfileWrite` drops every field that is an output of
+     * `reviewSubmission` rather than an input from a browser.
+     */
+    const filtered = guardProfileWrite(body);
     const merged = await store.update(deviceId, (p) => {
+      /*
+       * Merge `progress` FIELD BY FIELD onto the stored copy rather than
+       * replacing it. The filter has just removed xp, kills, wins and the rest
+       * from the incoming object; a wholesale replace would therefore read them
+       * back as absent and reset them to zero — the guard destroying exactly
+       * the counters it exists to protect.
+       */
+      const sent = filtered.accepted.progress;
+      const progress = sent !== null && typeof sent === 'object' && !Array.isArray(sent)
+        ? { ...p.progress, ...(sent as Record<string, unknown>) }
+        : p.progress;
       // The client may only send the parts it owns; everything is re-validated.
-      const incoming = migrateProfile({ ...p, ...body, deviceId }, deviceId);
+      const incoming = migrateProfile({ ...p, ...filtered.accepted, progress, deviceId }, deviceId);
       p.progress = incoming.progress;
       p.settings = incoming.settings;
       p.bindings = incoming.bindings;
@@ -991,7 +1060,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       p.progress.adsRemoved = p.entitlements.adsRemoved;
       if (p.entitlements.adsRemoved) p.settings.showAds = false;
     });
-    sendJson(res, 200, { profile: publicProfile(merged) }, cors);
+    /*
+     * Say what was dropped rather than accepting it silently. The list is a
+     * checked-in constant (`SERVER_OWNED_PROFILE_FIELDS`), so naming it back
+     * tells an attacker nothing they could not read in the repo, and it turns
+     * "my xp did not save" from a mystery into a one-line answer.
+     */
+    sendJson(res, 200, {
+      profile: publicProfile(merged),
+      rejected: filtered.rejectedFields,
+    }, cors);
     return true;
   }
 
