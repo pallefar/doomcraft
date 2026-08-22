@@ -48,6 +48,11 @@ import {
 } from '@shared/modes';
 import { AMMO_TYPE_COUNT, AmmoType, WeaponId } from '@shared/weapons';
 import {
+  LevelAgreement,
+  levelAgreement,
+  ownLevelHash,
+} from '@/modes/quest/agreement';
+import {
   PU_IN_SECRET,
   PickupKind,
   SpawnKind,
@@ -733,4 +738,90 @@ describe('the ammo economy', () => {
       });
     });
   }
+});
+
+/* ------------------------------------------------------------------------ *
+ * The room's level bytes versus ours
+ * ------------------------------------------------------------------------ */
+
+describe('the room and the client agree about which level this is', () => {
+  /*
+   * `S2C_MODE.CONTEXT.contentHash` is the room's statement of exactly which
+   * level bytes it stamped into its own world. Quest tested it AGAINST ZERO:
+   *
+   *     if (!this.placed) this.roomOwnsLevel = context.contentHash !== 0;
+   *
+   * so a host running an edited `e1m1-hangar.json` and a client on the bundled
+   * copy both concluded they agreed — and the client then blitted its own
+   * geometry into a world the room was simulating differently, which is the
+   * "I was going through walls" failure the handshake exists to end.
+   *
+   * Note what these tests would have done to the old code: EVERY case below
+   * passes trivially under `contentHash !== 0`, in both directions, because
+   * that expression cannot tell two levels apart. That is precisely why the
+   * comparison is worth having a test for.
+   */
+  const shipped = SHIPPED[0];
+
+  /** What a room stamps: the hash of the bytes it painted, 0 folded to 1. */
+  function roomStampFor(level: Level): number {
+    return ownLevelHash(level);
+  }
+
+  it('matches when the client decoded the exact bytes the room compiled', () => {
+    // The real path: the server compiles the .json, serves the .dcl, and the
+    // client decodes it (`loadQuestLevel`). Both sides then hash the SAME
+    // encoding, which is the only reason this comparison can be strict.
+    const roomSide = roomStampFor(shipped.level);
+    const clientSide = ownLevelHash(decodeLevel(encodeLevel(shipped.level)));
+    expect(clientSide).toBe(roomSide);
+    expect(levelAgreement(roomSide, clientSide)).toBe(LevelAgreement.AGREED);
+  });
+
+  it('raises a mismatch for a room stamped with a DIFFERENT build of the same id', () => {
+    // One field of one level changed, id untouched — the operational mistake
+    // that matters: two hosts, same level name, different files on disk.
+    const edited = reparse(shipped);
+    edited.meta.name = `${edited.meta.name} (edited)`;
+    const theirs = roomStampFor(compileLevel(edited));
+    const ours = ownLevelHash(shipped.level);
+
+    expect(theirs).not.toBe(ours);
+    expect(levelAgreement(theirs, ours)).toBe(LevelAgreement.MISMATCH);
+    // And the old rule's verdict on the same pair, stated so the difference is
+    // not a matter of opinion: it saw a non-zero hash and called it agreement.
+    expect(theirs !== 0).toBe(true);
+  });
+
+  it('raises a mismatch for two different shipped levels, which is the same bug louder', () => {
+    const a = ownLevelHash(SHIPPED[0].level);
+    const b = ownLevelHash(SHIPPED[1].level);
+    expect(levelAgreement(b, a)).toBe(LevelAgreement.MISMATCH);
+  });
+
+  it('keeps zero meaning "this room has no copy", which is playable and must stay', () => {
+    // Not an error: the room is running generated terrain, the client's blit is
+    // the only level there is, and the campaign plays with a warning. Turning
+    // this into a refusal would break every room that predates the handshake.
+    expect(levelAgreement(0, ownLevelHash(shipped.level))).toBe(LevelAgreement.CLIENT_ONLY);
+  });
+
+  it('falls back rather than refusing when the CLIENT could not hash its own level', () => {
+    expect(levelAgreement(0xdeadbeef, 0)).toBe(LevelAgreement.CLIENT_ONLY);
+  });
+
+  it('never stamps zero, because zero is the "no level here" signal', () => {
+    // The room folds a zero hash to 1 so a level can never be mistaken for
+    // generated terrain. The client has to fold identically or it would report
+    // a mismatch for a level it really does have.
+    for (const s of SHIPPED) expect(ownLevelHash(s.level)).not.toBe(0);
+    expect(levelAgreement(1, 1)).toBe(LevelAgreement.AGREED);
+  });
+
+  it('compares as an unsigned 32-bit number on both sides', () => {
+    // The wire field is a u32; a hash with the top bit set arrives negative if
+    // anything reads it as an i32, and `-1 !== 4294967295` would report a
+    // mismatch for a level that matches.
+    expect(levelAgreement(-1, 0xffffffff)).toBe(LevelAgreement.AGREED);
+  });
 });

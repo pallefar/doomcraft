@@ -654,7 +654,7 @@ PROTOCOL_MIN_SUPPORTED = 2      // the oldest it still SERVES — a window, not 
 
 enum C2S { HELLO=1, INPUT=2, BLOCK_EDIT=3, CHAT=4, RESPAWN=5, PING=6, APPEARANCE=7 }
 enum S2C { WELCOME=1, CHUNK=2, SNAPSHOT=3, BLOCK_DELTA=4, DAMAGE=5, KILL=6, CHAT=7, PONG=8,
-           CHUNK_Z=9, UPDATE_REQUIRED=10, SESSION_CONFIG=11 }
+           CHUNK_Z=9, UPDATE_REQUIRED=10, SESSION_CONFIG=11, MATCH_AWARD=12 }
 readMessageId(data: ArrayBuffer | Uint8Array | DataView): number
 ```
 
@@ -663,8 +663,16 @@ readMessageId(data: ArrayBuffer | Uint8Array | DataView): number
 Strict equality made every deploy a fleet-wide simultaneous logout. `docs/PATCHING.md` §1.
 
 **An unknown message id is IGNORED, on both sides.** That is load-bearing, not sloppiness: it is what
-lets a message id be appended without a version bump, which is how `UPDATE_REQUIRED` and
-`SESSION_CONFIG` shipped at protocol 3. Do not turn either `default: break` into an error.
+lets a message id be appended without a version bump, which is how `UPDATE_REQUIRED`,
+`SESSION_CONFIG` and `MATCH_AWARD` shipped at protocol 3. Do not turn either `default: break` into an
+error.
+
+`MATCH_AWARD = 12` is the most recent of those, and it is why this line is being re-read: it landed
+without a `PROTOCOL_VERSION` bump — correctly, because `protocolFingerprint()` freezes the v3 ids **by
+name** and a v2 client ignores an id it has never heard of — and this section, the document that
+DEFINES the wire, was not updated with it. Ids **13, 14, 15** are free; `isModeMessage` hard-codes
+16–18 (`shared/src/modes.ts`). Appending an id is cheap; leaving this list wrong is not, because it is
+what the next person reads before deciding whether their change is additive.
 
 **Trailing fields are appended and guarded by `r.remaining >= k`, never inserted.** `decodeHello`
 does this twice (`avatar`, then `contentVersion`). Renumbering an id, reordering a bitmask bit or

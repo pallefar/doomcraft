@@ -1414,6 +1414,22 @@ export function hashLevelBytes(bytes: Uint8Array): number {
   return h >>> 0;
 }
 
+/**
+ * The number a room STAMPS for a level, and therefore the number a client has
+ * to reproduce to claim it holds the same level.
+ *
+ * `S2C_MODE.CONTEXT.contentHash` uses 0 to mean "this room is running generated
+ * terrain", so a level whose bytes happen to hash to zero still has to say
+ * something — hence the fold to 1. That fold is one line, it is load-bearing on
+ * both sides of the wire, and it lived only in `server/src/room.ts`. It is here
+ * so the room and the client cannot drift: a client that folded differently
+ * would report a content mismatch for a level it actually has, once in every
+ * 4 billion levels, and nobody would ever find it.
+ */
+export function stampedLevelHash(level: Level): number {
+  return (hashLevelBytes(encodeLevel(level)) >>> 0) || 1;
+}
+
 /* ------------------------------------------------------------------------ *
  * Skill filtering and totals
  * ------------------------------------------------------------------------ */

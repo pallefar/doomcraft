@@ -542,6 +542,12 @@ const contentHash = contentHashFor(
   // order. Two hosts on the same CONTENT_VERSION with different level files on
   // disk is a real operational mistake, and comparing `/api/version` between
   // hosts is the only thing that catches it.
+  //
+  // That last sentence was false until this commit: this value rode
+  // `SESSION_CONFIG` to players and NEVER reached `/api/version`, which built
+  // its own bare `contentHashFor()`. Every host in the fleet published the same
+  // constant. It is now passed to `versionDocument` at both call sites, and the
+  // parameter is required so it cannot be dropped again silently.
   levels === null ? [] : levels.all().map((l) => l.contentHash),
 );
 
@@ -938,7 +944,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       deploy: lifecycle.report(),
       uptimeMs: Date.now() - bootMs,
       protocol: 1,
-      version: versionDocument(),
+      version: versionDocument(contentHash),
       fleet: fleetStatus(),
     }, cors);
     return true;
@@ -951,7 +957,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
    * is the failure nobody thinks to look for. See docs/PATCHING.md.
    * --------------------------------------------------------------------- */
   if (path === '/api/version') {
-    sendJson(res, 200, versionDocument({ deploy: lifecycle.report() }), cors);
+    sendJson(res, 200, versionDocument(contentHash, { deploy: lifecycle.report() }), cors);
     return true;
   }
 
@@ -989,6 +995,52 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
+  /* --- the installed campaign ------------------------------------------- *
+   * `LevelLibrary.handle()` is a complete, tested HTTP surface that NOTHING
+   * called. `grep '\.handle(' server/src/index.ts` returned nothing, while
+   * `client/src/modes/quest/quest.ts` has been fetching `/api/levels` and
+   * `/api/levels/<id>/data` on every Quest launch whenever a server is
+   * configured — and getting the SPA `index.html` back with a 200, because an
+   * unmatched GET falls through to `serveStatic`. The client's `isLevelBinary`
+   * check is what stopped that becoming a crash; it was never a route.
+   *
+   * Mounted here, next to `/api/flags`, because it is the same kind of thing:
+   * content this host is serving, read-only, cacheable, no token.
+   *
+   * The library's own responses carry `access-control-allow-origin: *`. That is
+   * this process's decision to make, not the library's, so the header is
+   * dropped and replaced with whatever `corsOrigin` allows — otherwise mounting
+   * it would silently widen a surface `DOOMCRAFT_ORIGINS` was set to narrow.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/levels' || path.startsWith('/api/levels/')) {
+    if (levels === null) {
+      // Honest 503 rather than the SPA document: this host has no campaign
+      // installed, and a client that asked deserves to be told in JSON.
+      sendJson(res, 503, { error: 'this host has no level library' }, cors);
+      return true;
+    }
+    const inm = req.headers['if-none-match'];
+    const out = levels.handle(path, req.method ?? 'GET', Array.isArray(inm) ? inm[0] : inm);
+    if (out === null) { sendJson(res, 404, { error: 'no such level resource' }, cors); return true; }
+    const headers: Record<string, string | number> = { ...out.headers };
+    delete headers['access-control-allow-origin'];
+    if (cors !== null) {
+      headers['access-control-allow-origin'] = cors;
+      if (cors !== '*') headers.vary = 'origin';
+    }
+    const body = typeof out.body === 'string' ? Buffer.from(out.body, 'utf8') : Buffer.from(out.body);
+    headers['content-length'] = body.length;
+    if (req.method === 'HEAD' || out.status === 304) {
+      if (out.status === 304) delete headers['content-length'];
+      res.writeHead(out.status, headers);
+      res.end();
+      return true;
+    }
+    res.writeHead(out.status, headers);
+    res.end(body);
+    return true;
+  }
+
   /* --- the operator's two switches -------------------------------------- *
    * Both are refused outright unless `DOOMCRAFT_ADMIN_TOKEN` is set, so a
    * default deployment has no admin surface at all. "Freeze all rollouts" is
@@ -1003,14 +1055,36 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
 
+  /*
+   * A MERGE, not a replace, and a compare-and-swap on `revision`.
+   *
+   * `docs/PATCHING.md` prescribes the emergency freeze as
+   * `-d '{"revision":9,"frozen":true}'`. Under the old full-replace this
+   * request deleted every force and every rolloutBp on the host: the single
+   * most destructive call in the API was the one the runbook told an operator
+   * to paste at 3 a.m. `nextFlagDocument` is the whole rule set and it is pure;
+   * this route is the 409.
+   */
   if (path === '/api/admin/flags' && req.method === 'POST') {
     const verdict = admitAdmin(req, path);
     if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
-    const doc = flags.load(await readBody(req));
+    const write = flags.apply(await readBody(req));
+    if (!write.ok) {
+      const c = write.conflict;
+      sendJson(res, 409, {
+        error: 'revision conflict — somebody else edited the document',
+        expected: c?.expected ?? -1,
+        revision: c?.actual ?? flags.document.revision,
+      }, cors);
+      return true;
+    }
+    const doc = write.document;
     // Everyone already connected keeps the flags they were resolved with for
     // the life of their session. That is deliberate: a feature appearing or
     // vanishing under a player mid-match is the thing flags exist to prevent.
-    sendJson(res, 200, { revision: doc.revision, frozen: doc.frozen, registry: flags.registry() }, cors);
+    sendJson(res, 200, {
+      revision: doc.revision, frozen: doc.frozen, touched: write.touched, registry: flags.registry(),
+    }, cors);
     return true;
   }
 

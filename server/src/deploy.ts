@@ -55,7 +55,6 @@ import {
   PROTOCOL_MIN_SUPPORTED,
   PROTOCOL_VERSION,
   PROTOCOL_WINDOW_DAYS,
-  contentHashFor,
   protocolFingerprint,
 } from '@doomcraft/shared/version';
 import {
@@ -64,10 +63,12 @@ import {
   createFlagConfig,
   flagConfigETag,
   hostBucket,
+  nextFlagDocument,
   parseFlagConfig,
   resolveFlagBits,
   unpackFlags,
   type FlagConfig,
+  type FlagWrite,
 } from '@doomcraft/shared/flags';
 
 /* ------------------------------------------------------------------------ *
@@ -311,12 +312,34 @@ export class FlagService {
   private config: FlagConfig = createFlagConfig();
   private tag = flagConfigETag(this.config);
 
-  /** Replace the document. Total: bad input leaves the previous one in force. */
+  /**
+   * REPLACE the document wholesale. Total: bad input leaves the previous one in
+   * force.
+   *
+   * This is the BOOT path (`DOOMCRAFT_FLAGS`) and it is right there, where the
+   * env var is the whole truth. It is the wrong thing for an operator's edit —
+   * see `apply`, and see `nextFlagDocument` for what a full replace did to the
+   * freeze command `docs/PATCHING.md` prescribes.
+   */
   load(input: unknown): FlagConfig {
     const next = parseFlagConfig(input);
     this.config = next;
     this.tag = flagConfigETag(next);
     return next;
+  }
+
+  /**
+   * MERGE an operator's patch into the live document, with compare-and-swap.
+   *
+   * A refused write (`ok === false`) changes nothing at all — not the document,
+   * not the ETag — so the caller can answer 409 and mean it.
+   */
+  apply(patch: unknown): FlagWrite {
+    const write = nextFlagDocument(this.config, patch);
+    if (!write.ok) return write;
+    this.config = write.document;
+    this.tag = flagConfigETag(write.document);
+    return write;
   }
 
   /** Parse a JSON string, e.g. `DOOMCRAFT_FLAGS`. Never throws. */
@@ -397,8 +420,21 @@ export function stableIdFor(conn: { deviceId?: string; id?: number }): string {
  * claim the same protocol version can be checked for actually having the same
  * wire layout — which is precisely the failure a mixed fleet produces and the
  * one nobody thinks to look for.
+ *
+ * `contentHash` is a REQUIRED parameter, and that is the fix rather than an
+ * inconvenience. It used to default to a bare `contentHashFor()` — no level
+ * hashes — so the one number `docs/PATCHING.md` says exists precisely so that
+ * "two hosts on the same CONTENT_VERSION with different files on disk produce
+ * different hashes and are visible in /api/version" was a per-BUILD constant,
+ * identical on every host in the fleet. The folded value was computed correctly
+ * in `index.ts`, rode `SESSION_CONFIG`, and never reached this document. A
+ * default is what let that happen quietly; now a caller that does not have the
+ * host's real content hash cannot produce the document at all.
  */
-export function versionDocument(extra: Record<string, unknown> = {}): Record<string, unknown> {
+export function versionDocument(
+  contentHash: number,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     protocol: {
       version: PROTOCOL_VERSION,
@@ -409,7 +445,7 @@ export function versionDocument(extra: Record<string, unknown> = {}): Record<str
     content: {
       version: CONTENT_VERSION,
       minSupported: CONTENT_MIN_SUPPORTED,
-      hash: contentHashFor(),
+      hash: contentHash >>> 0,
     },
     build: { id: BUILD_ID },
     ...extra,

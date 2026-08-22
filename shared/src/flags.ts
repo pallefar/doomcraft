@@ -245,6 +245,115 @@ function clampInt(v: unknown, fallback: number, min: number, max: number): numbe
   return n < min ? min : n > max ? max : n;
 }
 
+/* ------------------------------------------------------------------------ *
+ * Editing the document
+ * ------------------------------------------------------------------------ */
+
+/** Why a write was refused: what the caller expected, and what is actually here. */
+export interface FlagWriteConflict {
+  expected: number;
+  actual: number;
+}
+
+export interface FlagWrite {
+  /** False only for a compare-and-swap miss. A malformed patch is not an error. */
+  ok: boolean;
+  /** The document that should now be in force. **Unchanged** when `ok` is false. */
+  document: FlagConfig;
+  conflict: FlagWriteConflict | null;
+  /** Rule keys this patch actually named, in `FLAG_ORDER`. For the audit line. */
+  touched: readonly string[];
+}
+
+/**
+ * Apply an operator's PATCH to the live document. Pure: it reads `current` and
+ * returns the next one.
+ *
+ * This exists because `parseFlagConfig` is a **full replace** — it starts from
+ * `createFlagConfig()`, whose `rules` are `{}` — and `docs/PATCHING.md` has
+ * always prescribed the freeze as
+ *
+ *     curl -X POST .../api/admin/flags -d '{"revision":9,"frozen":true}'
+ *
+ * which under a full replace **deletes every force and every rolloutBp on the
+ * host**. The documented emergency command was the most destructive request in
+ * the API, and the test that "covered" freeze re-sent the whole rules block, so
+ * the shape the document prescribes was never once exercised.
+ *
+ * The rules, each of which exists because its absence is a way to lose a flag:
+ *
+ *   - **Absent means unchanged.** `frozen`, `revision` and every rule key not
+ *     named in the patch keep the value they have.
+ *   - **A named rule is merged field by field.** `{"economy_scrap":{"force":true}}`
+ *     leaves that flag's `rolloutBp` alone; it does not reset it to 0.
+ *   - **`null` deletes**, and it is the only way to delete: `{"share_cards":null}`
+ *     drops the rule so the flag falls back to its registry default. Deletion by
+ *     omission is exactly the bug above, so it is not offered.
+ *   - **`expectRevision` is a compare-and-swap.** When present and unequal to
+ *     the live `revision`, nothing is applied and `conflict` says what was
+ *     found — two operators editing at once cannot silently clobber each other,
+ *     which is what "revision is clamped and never compared" allowed.
+ *   - **An accepted write always moves the revision.** With no explicit
+ *     `revision` it is `current.revision + 1`, so the CAS token cannot stand
+ *     still while the document changes underneath it.
+ *
+ * Unknown flag keys are dropped, as `parseFlagConfig` drops them: only
+ * `FLAG_ORDER` is iterated, so `__proto__` can never name a rule.
+ */
+export function nextFlagDocument(current: FlagConfig, patch: unknown): FlagWrite {
+  const raw = (typeof patch === 'object' && patch !== null)
+    ? patch as Record<string, unknown> : {};
+  const has = (k: string): boolean => Object.prototype.hasOwnProperty.call(raw, k);
+
+  if (has('expectRevision')) {
+    const want = raw.expectRevision;
+    const n = typeof want === 'number' && Number.isFinite(want) ? Math.round(want) : Number.NaN;
+    if (!Number.isFinite(n) || n !== current.revision) {
+      return {
+        ok: false,
+        document: current,
+        conflict: { expected: Number.isFinite(n) ? n : -1, actual: current.revision },
+        touched: [],
+      };
+    }
+  }
+
+  const next: FlagConfig = {
+    revision: has('revision')
+      ? clampInt(raw.revision, current.revision, 0, 1e9)
+      : Math.min(current.revision + 1, 1e9),
+    frozen: has('frozen') ? raw.frozen === true : current.frozen,
+    rules: {},
+  };
+  for (const key of FLAG_ORDER) {
+    const rule = current.rules[key];
+    if (rule !== undefined) next.rules[key] = { force: rule.force, rolloutBp: rule.rolloutBp };
+  }
+
+  const touched: string[] = [];
+  const rules = (typeof raw.rules === 'object' && raw.rules !== null)
+    ? raw.rules as Record<string, unknown> : {};
+  for (const key of FLAG_ORDER) {
+    if (!Object.prototype.hasOwnProperty.call(rules, key)) continue;
+    const r = rules[key];
+    touched.push(key);
+    if (r === null) { delete next.rules[key]; continue; }
+    if (typeof r !== 'object') continue;
+    const rr = r as Record<string, unknown>;
+    const prior = next.rules[key] ?? { force: null, rolloutBp: 0 };
+    next.rules[key] = {
+      force: Object.prototype.hasOwnProperty.call(rr, 'force')
+        ? (rr.force === true ? true : rr.force === false ? false : null)
+        : prior.force,
+      rolloutBp: Object.prototype.hasOwnProperty.call(rr, 'rolloutBp')
+        ? clampInt(rr.rolloutBp, prior.rolloutBp, 0, 10000)
+        : prior.rolloutBp,
+    };
+  }
+
+  return { ok: true, document: next, conflict: null, touched };
+}
+
 /**
  * A strong ETag for the document, so `/api/flags` answers 304 for the whole
  * fleet between edits. Cheap to compute and stable across processes.
@@ -270,9 +379,16 @@ export function flagConfigETag(cfg: FlagConfig): string {
  * not systematically outside the 1% of every other one. That is different from
  * version routing (`hostBucket` below), which is deliberately UNsalted so a
  * player stays on the same build across matches.
+ *
+ * The separator is written as the escape `\u0000` rather than as a literal NUL
+ * byte, and that is not cosmetic: one raw NUL anywhere in a file makes `grep`
+ * treat the file as binary and skip ALL of it silently — no match, no warning,
+ * exit 0. Two of them lived here, so anyone grepping this file for a flag key
+ * was told it did not exist. Same bytes into `fingerprint`, same buckets, and
+ * the file is searchable again.
  */
 export function flagBucket(flagKey: string, stableId: string): number {
-  return fingerprint(`${flagKey} ${stableId}`) % 10000;
+  return fingerprint(`${flagKey}\u0000${stableId}`) % 10000;
 }
 
 /**
@@ -284,7 +400,7 @@ export function flagBucket(flagKey: string, stableId: string): number {
  * growing set of players and nobody is ever moved backwards.
  */
 export function hostBucket(stableId: string): number {
-  return fingerprint(`host ${stableId}`) % 10000;
+  return fingerprint(`host\u0000${stableId}`) % 10000;
 }
 
 /** True when this player gets this flag under this config. */

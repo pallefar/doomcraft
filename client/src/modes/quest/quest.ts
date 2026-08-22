@@ -117,6 +117,12 @@ import {
   type QuestSpawn,
   type QuestWorldSink,
 } from '@/modes/quest/levelRuntime';
+import {
+  LevelAgreement,
+  levelAgreement,
+  mismatchLine,
+  ownLevelHash,
+} from '@/modes/quest/agreement';
 import { QuestHud } from '@/modes/quest/hud';
 import { QuestIntermission } from '@/modes/quest/intermission';
 import { economySurfacesOn } from '@/hud/hud';
@@ -410,6 +416,20 @@ class QuestMode implements ModeInstance {
    * ---------------------------------------------------------------------- */
   private contextSeen = false;
   private roomOwnsLevel = false;
+  /**
+   * The room stamped a DIFFERENT build of this level id, so the blit is off.
+   *
+   * This is not the same as `!roomOwnsLevel`: that is a room with no copy of
+   * the level, which is playable and shipped. This is two copies that disagree,
+   * where painting ours over the room's would produce exactly the divergence
+   * the CONTEXT handshake exists to prevent.
+   */
+  private contentMismatch = false;
+  private mismatchTold = false;
+  /** The hash the room reported, kept only so the refusal names both numbers. */
+  private mismatchHash = 0;
+  /** What this client would stamp for the level it holds. See `agreement.ts`. */
+  private readonly ownHash: number;
   /** Seconds spent waiting for that answer, and then for the authored spawn. */
   private placeWait = 0;
 
@@ -450,6 +470,9 @@ class QuestMode implements ModeInstance {
     this.level = level;
     this.levelId = level.meta.id;
     this.catalog = catalog;
+    // Once, here: it encodes the whole level, and the answer cannot change for
+    // the life of the mode.
+    this.ownHash = ownLevelHash(level);
 
     const game = ctx.host.game;
     const skill = clampSkill(ctx.params.skill);
@@ -649,6 +672,25 @@ class QuestMode implements ModeInstance {
     this.placeWait += dt;
     // Placing before the room has answered risks placing it in the wrong place.
     if (!this.contextSeen && this.placeWait < ROOM_CONTEXT_WAIT_S) return;
+
+    /* REFUSE THE BLIT. The room stamped a different build of this level id, so
+     * our copy is not the level being simulated. Painting it in would put the
+     * player inside geometry the room has never heard of and the room's
+     * reconciliation would win every argument about every wall — the exact
+     * failure this handshake exists to prevent, arrived at by agreeing.
+     *
+     * The room's own world is already streaming in as ordinary chunks, so
+     * refusing leaves the player in a coherent world rather than in two. It is
+     * a dead end for the campaign script, and it says so once. */
+    if (this.contentMismatch) {
+      if (!this.mismatchTold) {
+        this.mismatchTold = true;
+        game.hud.pushFeed(mismatchLine(this.levelId, this.mismatchHash, this.ownHash), 'k');
+        this.hud.toast('Level version mismatch', true);
+        this.ctx.host.setStatus('This room is running a different build of this level.');
+      }
+      return;
+    }
 
     const authored = primarySpawn(this.level);
     const onSpawn = Math.abs(px - authored.x) < 3
@@ -1141,7 +1183,12 @@ class QuestMode implements ModeInstance {
       this.contextSeen = true;
       // Never downgrade after the level is on the ground: re-placing would
       // reset every door and switch the player has already used.
-      if (!this.placed) this.roomOwnsLevel = context.contentHash !== 0;
+      if (!this.placed) {
+        const verdict = levelAgreement(context.contentHash, this.ownHash);
+        this.roomOwnsLevel = verdict === LevelAgreement.AGREED;
+        this.contentMismatch = verdict === LevelAgreement.MISMATCH;
+        this.mismatchHash = context.contentHash >>> 0;
+      }
       return;
     }
     // The room is running a different level than we loaded — follow it.

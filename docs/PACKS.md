@@ -19,16 +19,16 @@ Everything in §0 was re-read against the working tree at `cfda9e4` plus the eco
 | Thing | Where | State |
 |---|---|---|
 | Content pinned per room, `readonly`, never re-read | `server/src/room.ts:277-278`, set at `:355-356` | **built, tested** (`server/src/patch.test.ts:229-243`) |
-| `contentHashFor(levelHashes)` folding every installed level's own hash | `shared/src/version.ts:356`, fed at `server/src/index.ts:497-503` | built — and **not** plumbed into `/api/version` (§0.2.1) |
+| `contentHashFor(levelHashes)` folding every installed level's own hash | `shared/src/version.ts:356`, fed at `server/src/index.ts:497-503` | built, and **plumbed into `/api/version` in Phase 0** — `versionDocument(contentHash, extra)` (§0.2.1) |
 | The room factory — the one place a room comes into existence | `server/src/index.ts:534-588`, inside `lifecycle.guardCreate` | built. **This is the hook everything below uses** |
-| `LevelLibrary`: directory scan, compile, validate, refuse, serve | `server/src/levels.ts:114-455` | built, tested, **`handle()` is mounted by nothing** (§0.2.3) |
+| `LevelLibrary`: directory scan, compile, validate, refuse, serve | `server/src/levels.ts:114-455` | built, tested, **mounted in the dispatcher in Phase 0** (§0.2.3) |
 | `validateLevel` — a real lock-and-key reachability solve | `shared/src/level.ts:1777` | built. The strongest gate already in the tree |
 | `formatValidation(id, r)` — a reason string an author can read | `shared/src/level.ts:1923` | built |
-| `FlagService`, rollout buckets, freeze | `server/src/deploy.ts:310-378`, `shared/src/flags.ts` | built. In-memory only, no CAS (§0.2.4) |
+| `FlagService`, rollout buckets, freeze | `server/src/deploy.ts:310-378`, `shared/src/flags.ts` | built. In-memory only; **merge + `expectRevision` CAS added in Phase 0** (§0.2.4), still not durable |
 | `flags.registry()` — *"for an admin panel that has to render the switches"* | `server/src/deploy.ts:356-378` | built. Its only caller is the POST response |
 | `HostLifecycle` — deploy drain, forward-only | `server/src/deploy.ts:137-295` | built, tested |
 | Three token-gated admin endpoints | `server/src/index.ts:901, 908, 924` | built. **Nothing in `client/` calls any of them** |
-| `ModeContextMessage.contentHash` — the room's stamped level bytes, on the wire | `shared/src/modes.ts:1038`, set at `server/src/room.ts:897` | built, and **thrown away as a boolean** (§0.2.5) |
+| `ModeContextMessage.contentHash` — the room's stamped level bytes, on the wire | `shared/src/modes.ts:1038`, set at `server/src/room.ts:897` | built, was **thrown away as a boolean**; compared properly in Phase 0 (§3 "Why no per-pack manifest" — the §0.2.5 this row used to point at is the admin-auth item, not this one) |
 | `content/levels/*.json` ×6, `content/episodes.json` | `content/` | data files. `episodes.json` is read by the client only |
 | An admin panel | — | **does not exist** |
 | Any CI | — | **does not exist.** No `.github/`, `Dockerfile` runs no tests |
@@ -36,6 +36,11 @@ Everything in §0 was re-read against the working tree at `cfda9e4` plus the eco
 ### 0.2 Five prerequisites that are bugs, not features
 
 These block the work and each is cheap. They are Phase 0 in §11. None of them needs a pack abstraction.
+
+> **STATUS: all five are closed.** Items 2 and 5 in the security commit that followed this document;
+> items 1, 3 and 4 in the Phase 0 commit, together with the client-side comparison in §11's item 5.
+> The five paragraphs below are left exactly as written, as the record of what was found — the line
+> anchors in them are from `cfda9e4` and have moved. Re-locate by content, never by number.
 
 1. **`/api/version` cannot tell two hosts apart.** `versionDocument()` at `server/src/deploy.ts:412` calls a bare `contentHashFor()` — **no level hashes**. `docs/PATCHING.md:76-78` says the fold exists precisely so *"two hosts on the same `CONTENT_VERSION` with different files on disk … produce different hashes and are visible in `/api/version`"*. They are not. The correct value is computed once at `server/src/index.ts:497-503` and rides `SESSION_CONFIG`; it never reaches the document. `server/src/deploy.test.ts:96` asserts only `doc.content.version`, so nothing fails. **The fleet-agreement number this whole design leans on is currently a constant.**
 
@@ -679,9 +684,15 @@ Each phase is independently shippable and ends in an honest state. Each names **
 
 ---
 
-### Phase 0 — the five bugs. **3 days. No node tier needed to merge; two of the five only matter once one exists.**
+### Phase 0 — the five bugs. **DONE. 3 days. No node tier needed to merge; two of the five only matter once one exists.**
 
 Not pack work. The pack work is a lie without them.
+
+Items 2 (`/api/status` join codes) and 5's auth half shipped in the security commit; items 1, 3, 4
+and the client comparison shipped in the Phase 0 commit. Two things below were found to be
+understated while doing them, and both are recorded in that commit's tests: `/api/status` leaked the
+private code through **`name` as well as `key`** (the router builds rooms with `name: key`), and
+`GET /api/scoreboard` with no parameters was a second door onto the same leak.
 
 1. Fold the level hashes into `versionDocument()` — plumb `server/src/index.ts:497-503` into `server/src/deploy.ts:412`.
 2. Strip `key` from `/api/status`'s room rows (`server/src/index.ts:930-945`).

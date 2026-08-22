@@ -150,6 +150,39 @@ export const KNOWN_PROFILE_KEYS: readonly string[] = Object.freeze([
   'economy', '_unknown',
 ]);
 
+/**
+ * Sections the downgrade guard also protects INSIDE, not just at the top level.
+ *
+ * `docs/DEPLOY.md` claimed "a v5 profile opened by a v4 host comes back out with
+ * its v5 fields intact". That was true only of top-level keys: the guard walked
+ * `Object.entries(raw)` and stopped. A v5 field added inside `economy` — the
+ * natural home for a second currency or a season, i.e. the most likely v5 field
+ * there is — was annihilated by a v4 rollback, silently, with no counter and no
+ * log line. The sentence was corrected by making it true.
+ *
+ * These are the sections whose sub-keys are a FIXED schema, so an unrecognised
+ * one is a newer build's field. `bindings` is deliberately absent: its keys ARE
+ * the data (`action -> key code`), so "unknown key" has no meaning there.
+ *
+ * The known sub-keys are never listed. They are read off the migrated section
+ * itself, which is built from a whitelist literal in `migrateProfile` — so this
+ * cannot drift out of date the way a second hand-written list would.
+ */
+export const GUARDED_PROFILE_SECTIONS: readonly string[] = Object.freeze([
+  'progress', 'settings', 'loadout', 'entitlements', 'stats', 'economy',
+]);
+
+/**
+ * Where the per-section bags live: `_unknown._nested`, which `serialiseProfile`
+ * spreads out as a single top-level `_nested` key.
+ *
+ * Deliberately NOT in `KNOWN_PROFILE_KEYS`, so a build that has the top-level
+ * guard but not this one treats it as an ordinary unknown key and carries it
+ * through untouched. That build is the one shipping today, which makes rolling
+ * THIS commit back lossless as well.
+ */
+const NESTED_BAG_KEY = '_nested';
+
 export interface MatchResult {
   kills: number;
   deaths: number;
@@ -402,7 +435,7 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
    * writing: the next flush would overwrite a newer profile with a strictly
    * smaller one. Anything unrecognised is set aside here and `serialiseProfile`
    * puts it back verbatim. See `StoredProfile._unknown`. */
-  const carried = collectUnknownProfileKeys(raw);
+  const carried = collectUnknownProfileKeys(raw, out as unknown as AnyRecord);
   if (carried !== null) out._unknown = carried;
 
   // Derived, never trusted from disk.
@@ -461,7 +494,7 @@ function mergeSettings(raw: AnyRecord): GameSettings {
  * next flush and `migrate(migrate(x)) !== migrate(x)`. That is the downgrade
  * guard failing at exactly the job it exists for, quietly.
  */
-function collectUnknownProfileKeys(raw: AnyRecord): Record<string, unknown> | null {
+function collectUnknownProfileKeys(raw: AnyRecord, known: AnyRecord): Record<string, unknown> | null {
   let out: Record<string, unknown> | null = null;
   const put = (k: string, v: unknown): void => {
     (out ??= Object.create(null) as Record<string, unknown>)[k] = v;
@@ -469,18 +502,76 @@ function collectUnknownProfileKeys(raw: AnyRecord): Record<string, unknown> | nu
   // An older reader may already have set a bag aside; merge it in first so a
   // field survives being opened by two different old builds in a row.
   const prior = raw._unknown;
-  if (prior !== null && typeof prior === 'object' && !Array.isArray(prior)) {
-    for (const [k, v] of Object.entries(prior as AnyRecord)) {
+  if (isPlainObject(prior)) {
+    for (const [k, v] of Object.entries(prior)) {
       if (isPrototypePollutingKey(k)) continue;
+      if (k === NESTED_BAG_KEY) continue;
       if (KNOWN_PROFILE_KEYS.includes(k)) continue;
       put(k, v);
     }
   }
   for (const [k, v] of Object.entries(raw)) {
     if (isPrototypePollutingKey(k)) continue;
+    if (k === NESTED_BAG_KEY) continue;
     if (KNOWN_PROFILE_KEYS.includes(k)) continue;
     if (v === undefined) continue;
     put(k, v);
+  }
+  const nested = collectNestedUnknownKeys(raw, known);
+  if (nested !== null) put(NESTED_BAG_KEY, nested);
+  return out;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** The `_nested` bag an older reader left behind, wherever it left it. */
+function priorNestedBag(raw: AnyRecord): Record<string, unknown> {
+  const inBag = isPlainObject(raw._unknown) ? raw._unknown[NESTED_BAG_KEY] : undefined;
+  if (isPlainObject(inBag)) return inBag;
+  // A build with only the top-level guard spreads the bag back out, so the key
+  // arrives at the TOP level on the next read. Same data, one level up.
+  const atTop = raw[NESTED_BAG_KEY];
+  return isPlainObject(atTop) ? atTop : {};
+}
+
+/**
+ * Sub-keys of a guarded section that this build does not own — one bag per
+ * section, or null when every section is fully understood (the normal case, and
+ * the one that must not add a byte to the file).
+ *
+ * `known` is the profile this build just rebuilt, so `known[section]` is exactly
+ * the whitelist literal in `migrateProfile`. Comparing against it rather than
+ * against a hand-maintained list is the whole reason this cannot rot: a field
+ * added to `StoredEconomy` stops being "unknown" the moment the literal gains
+ * it, with no second edit.
+ *
+ * Note the limit, stated rather than discovered later: this preserves fields
+ * from a NEWER profile. A MIGRATION step that rewrites a section wholesale (the
+ * v3 -> v4 economy step does) still drops sub-keys it does not name, because it
+ * runs before this and rewrites `raw`. That direction is a forward migration
+ * the author is looking at, not a silent rollback.
+ */
+function collectNestedUnknownKeys(raw: AnyRecord, known: AnyRecord): Record<string, unknown> | null {
+  let out: Record<string, unknown> | null = null;
+  const carried = priorNestedBag(raw);
+  for (const section of GUARDED_PROFILE_SECTIONS) {
+    const live = known[section];
+    if (!isPlainObject(live)) continue;
+    let bag: Record<string, unknown> | null = null;
+    const take = (src: unknown): void => {
+      if (!isPlainObject(src)) return;
+      for (const [k, v] of Object.entries(src)) {
+        if (isPrototypePollutingKey(k)) continue;
+        if (Object.prototype.hasOwnProperty.call(live, k)) continue;
+        if (v === undefined) continue;
+        (bag ??= Object.create(null) as Record<string, unknown>)[k] = v;
+      }
+    };
+    take(carried[section]);
+    take(raw[section]);
+    if (bag !== null) (out ??= Object.create(null) as Record<string, unknown>)[section] = bag;
   }
   return out;
 }
@@ -496,7 +587,21 @@ function collectUnknownProfileKeys(raw: AnyRecord): Record<string, unknown> | nu
 export function serialiseProfile(p: StoredProfile): Record<string, unknown> {
   const { _unknown, ...known } = p;
   if (_unknown === undefined) return known as unknown as Record<string, unknown>;
-  return { ..._unknown, ...(known as unknown as Record<string, unknown>) };
+  const out: Record<string, unknown> = { ..._unknown, ...(known as unknown as Record<string, unknown>) };
+  /* And the same rule one level down, for the sections in
+   * `GUARDED_PROFILE_SECTIONS`: the newer build's fields go back first, this
+   * build's own fields are written over them. `_unknown[NESTED_BAG_KEY]` itself
+   * was already spread out as the top-level `_nested` key by the line above,
+   * which is where the next reader will find it. */
+  const nested = _unknown[NESTED_BAG_KEY];
+  if (!isPlainObject(nested)) return out;
+  for (const section of GUARDED_PROFILE_SECTIONS) {
+    const bag = nested[section];
+    const live = out[section];
+    if (!isPlainObject(bag) || !isPlainObject(live)) continue;
+    out[section] = { ...bag, ...live };
+  }
+  return out;
 }
 
 function sanitiseBindings(raw: unknown): Record<string, string> {

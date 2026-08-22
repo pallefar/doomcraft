@@ -32,12 +32,15 @@ import { resolve } from 'node:path';
 
 import {
   BTN_SPRINT,
+  CHUNK_SIZE_MASK,
   CHUNK_SIZE_X,
   CHUNK_SIZE_Z,
   GameMode,
   PLAYER_HALF_WIDTH,
   aabbHitsSolid,
   blockToChunk,
+  chunkKey,
+  voxelIndex,
 } from '@shared';
 import { BlockId } from '@shared/blocks';
 import { PacketWriter } from '@shared/protocol';
@@ -50,13 +53,22 @@ import {
   encodeModeSelect,
   type ModeContextMessage,
 } from '@shared/modes';
-import { DR_START_OPEN, compileLevel, parseLevelJson, primarySpawn, type Level } from '@shared/level';
+import {
+  DR_START_OPEN,
+  compileLevel,
+  decodeLevel,
+  encodeLevel,
+  parseLevelJson,
+  primarySpawn,
+  type Level,
+} from '@shared/level';
 import { Room } from '@doomcraft/server/src/room.js';
 import type { ContentResolver } from '@doomcraft/server/src/modes.js';
 import type { NetTransport } from '@doomcraft/server/src/net.js';
 
 import { NetClient, type ClientTransport } from '@/net/client';
 import { QuestEvent, QuestLevelRuntime } from '@/modes/quest/levelRuntime';
+import { LevelAgreement, levelAgreement, ownLevelHash } from '@/modes/quest/agreement';
 
 /* ------------------------------------------------------------------------ *
  * Content
@@ -242,10 +254,18 @@ function runtimeFor(f: Fixture, level: Level): QuestLevelRuntime {
 /**
  * `QuestMode.tryPlace`, reduced to the decision this file is about: place on
  * the authored origin when the room owns the geometry, relocate when it does
- * not.
+ * not — and REFUSE ENTIRELY when the room owns a different build of the level.
+ *
+ * The verdict comes from the same `levelAgreement` the mode calls, so every
+ * test in this file exercises the real comparison rather than a copy of it.
  */
-function placeLevel(f: Fixture, runtime: QuestLevelRuntime, level: Level): boolean {
-  const roomOwns = f.context !== null && f.context.contentHash !== 0;
+function placeLevel(f: Fixture, runtime: QuestLevelRuntime, level: Level): LevelAgreement {
+  const verdict = f.context === null
+    ? LevelAgreement.CLIENT_ONLY
+    : levelAgreement(f.context.contentHash, ownLevelHash(level));
+  if (verdict === LevelAgreement.MISMATCH) return verdict;
+
+  const roomOwns = verdict === LevelAgreement.AGREED;
   const px = f.net.renderPos[0], py = f.net.renderPos[1], pz = f.net.renderPos[2];
   const authored = primarySpawn(level);
   const onSpawn = Math.abs(px - authored.x) < 3
@@ -253,7 +273,37 @@ function placeLevel(f: Fixture, runtime: QuestLevelRuntime, level: Level): boole
     && Math.abs(py - authored.y) < 4;
   if (!roomOwns && !onSpawn) runtime.alignSpawnTo(px, py, pz);
   runtime.place();
-  return roomOwns;
+  return verdict;
+}
+
+/**
+ * The same level with three voxels of stone added near the player start.
+ *
+ * This is a HOST WITH A DIFFERENT FILE UNDER THE SAME ID — the operational
+ * mistake `/api/version`'s content hash exists to make visible, seen from the
+ * one place it actually hurts: a room simulating walls the client cannot see.
+ * Going through `encodeLevel`/`decodeLevel` first makes the copy structural, so
+ * editing it cannot reach back into the cached original.
+ */
+function withExtraWall(level: Level): { level: Level; x: number; y: number; z: number } {
+  const copy = decodeLevel(encodeLevel(level));
+  const spawn = primarySpawn(copy);
+  const cx = blockToChunk(Math.floor(spawn.x));
+  const cz = blockToChunk(Math.floor(spawn.z));
+  const section = copy.volume.sections.get(chunkKey(cx, cz));
+  if (section === undefined) throw new Error('the spawn chunk is not in the level volume');
+
+  const y = Math.floor(spawn.y) + 1;
+  const sx = Math.floor(spawn.x) & CHUNK_SIZE_MASK;
+  const sz = Math.floor(spawn.z) & CHUNK_SIZE_MASK;
+  for (let d = 3; d < CHUNK_SIZE_X; d++) {
+    const lx = (sx + d) & CHUNK_SIZE_MASK;
+    const lz = (sz + d) & CHUNK_SIZE_MASK;
+    if (section[voxelIndex(lx, y, lz)] !== BlockId.AIR) continue;
+    section[voxelIndex(lx, y, lz)] = BlockId.STONE;
+    return { level: copy, x: cx * CHUNK_SIZE_X + lx, y, z: cz * CHUNK_SIZE_Z + lz };
+  }
+  throw new Error('no air column near the player start to edit');
 }
 
 /* ------------------------------------------------------------------------ *
@@ -398,7 +448,7 @@ describe('Quest: the room simulates the level the player is looking at', () => {
     f.play(20);
 
     const runtime = runtimeFor(f, level);
-    expect(placeLevel(f, runtime, level)).toBe(true);
+    expect(placeLevel(f, runtime, level)).toBe(LevelAgreement.AGREED);
     f.play(60);
 
     expect(voxelDisagreements(f, level)).toBe(0);
@@ -414,7 +464,7 @@ describe('Quest: the room simulates the level the player is looking at', () => {
       f.play(20);
 
       const runtime = runtimeFor(f, level);
-      expect(placeLevel(f, runtime, level)).toBe(true);
+      expect(placeLevel(f, runtime, level)).toBe(LevelAgreement.AGREED);
       f.play(30);
 
       const walk = walkAround(f, runtime, HEADINGS, 90);
@@ -484,7 +534,7 @@ describe('Quest: the room simulates the level the player is looking at', () => {
 
     const level = loadLevel(id);
     const runtime = runtimeFor(f, level);
-    expect(placeLevel(f, runtime, level)).toBe(true);
+    expect(placeLevel(f, runtime, level)).toBe(LevelAgreement.AGREED);
     f.play(30);
     expect(voxelDisagreements(f, level)).toBe(0);
   });
@@ -500,7 +550,7 @@ describe('Quest: the room simulates the level the player is looking at', () => {
     selectQuest(f, 'e1m1-hangar');
     f.play(20);
     const runtime = runtimeFor(f, level);
-    expect(placeLevel(f, runtime, level)).toBe(true);
+    expect(placeLevel(f, runtime, level)).toBe(LevelAgreement.AGREED);
     f.play(30);
 
     // A waist-high wall three metres down the room the level points you at,
@@ -570,7 +620,7 @@ describe('Quest: the room simulates the level the player is looking at', () => {
     f.play(20);
 
     const runtime = runtimeFor(f, level);
-    expect(placeLevel(f, runtime, level)).toBe(true);
+    expect(placeLevel(f, runtime, level)).toBe(LevelAgreement.AGREED);
     f.play(20);
 
     // The one door in E1M1 that opens without a keycard: the secret.
@@ -645,6 +695,96 @@ describe('Quest: the room simulates the level the player is looking at', () => {
   });
 
   /* ---------------------------------------------------------------- *
+   * The room is running a DIFFERENT build of this level
+   * ---------------------------------------------------------------- */
+
+  it('refuses to blit its own copy over a room running different level bytes', () => {
+    /*
+     * The gap this closes. `S2C_MODE.CONTEXT.contentHash` was tested against
+     * ZERO — `this.roomOwnsLevel = context.contentHash !== 0` — so a host with
+     * an edited `e1m1-hangar.json` and a client on the bundled copy both
+     * concluded they agreed. The client then painted its own voxels over the
+     * room's and `levelRuntime` re-asserted them one chunk per frame, while the
+     * room went on colliding the body against walls the client had deleted.
+     * That is "I was going through walls" again, arrived at by agreeing.
+     */
+    const ours = loadLevel('e1m1-hangar');
+    const theirs = withExtraWall(ours);
+
+    const f = makeFixture(90210, {
+      resolveId: (): string => 'e1m1-hangar',
+      levelFor: (): Level => theirs.level,
+    });
+    reachPlaying(f);
+    selectQuest(f, 'e1m1-hangar');
+    f.play(30);
+
+    // The room really is running a level under this id, and really did stamp a
+    // different one: the old rule looked at exactly this number and said yes.
+    expect(f.context?.levelId).toBe('e1m1-hangar');
+    expect(f.context?.contentHash).not.toBe(0);
+    expect(f.context?.contentHash).not.toBe(ownLevelHash(ours));
+    expect(levelAgreement(f.context?.contentHash ?? 0, ownLevelHash(ours)))
+      .toBe(LevelAgreement.MISMATCH);
+
+    // The room's wall is real, and it is streaming to the client as ordinary
+    // voxels — so refusing leaves the player in ONE coherent world.
+    const runtime = runtimeFor(f, ours);
+    expect(placeLevel(f, runtime, ours)).toBe(LevelAgreement.MISMATCH);
+    f.play(60);
+
+    expect(f.room.world.isSolid(theirs.x, theirs.y, theirs.z)).toBe(true);
+    expect(f.net.world.solidAt(theirs.x, theirs.y, theirs.z)).toBe(true);
+    expect(voxelDisagreements(f, ours)).toBe(0);
+  });
+
+  it('and the MODE is the thing that decides it, not just this harness', () => {
+    /*
+     * `placeLevel` above is a reduction of `QuestMode.tryPlace`, and a
+     * reduction that has drifted from the code it stands for is worse than no
+     * test at all. `quest.ts` cannot be instantiated here — `vitest` runs
+     * `environment: 'node'` and `QuestHud` needs a document — so the link is
+     * asserted where it can be: on the source.
+     */
+    const src = readFileSync(resolve(REPO_ROOT, 'client/src/modes/quest/quest.ts'), 'utf8');
+    expect(src).toContain("from '@/modes/quest/agreement'");
+    expect(src).toContain('levelAgreement(context.contentHash');
+    const zeroTest = src.split('\n')
+      .map((line, i) => ({ line: line.trim(), n: i + 1 }))
+      .filter((x) => /contentHash\s*[!=]==?\s*0/.test(x.line) && !x.line.startsWith('*'));
+    expect(
+      zeroTest.map((x) => `quest.ts:${x.n} ${x.line}`),
+      'the level-identity test is back to a truthiness check on a hash',
+    ).toEqual([]);
+  });
+
+  it('CONTROL: blitting anyway is what produces the divergence', () => {
+    // Not decoration. Without this, "0 disagreements" above could be a harness
+    // that stopped measuring: this is the same room, the same client and the
+    // same level, with the blit the old code would have performed.
+    const ours = loadLevel('e1m1-hangar');
+    const theirs = withExtraWall(ours);
+
+    const f = makeFixture(90210, {
+      resolveId: (): string => 'e1m1-hangar',
+      levelFor: (): Level => theirs.level,
+    });
+    reachPlaying(f);
+    selectQuest(f, 'e1m1-hangar');
+    f.play(30);
+
+    const runtime = runtimeFor(f, ours);
+    runtime.place();
+    f.play(30);
+
+    // The client now believes there is nothing there. The room disagrees, and
+    // the room wins every argument about every wall.
+    expect(f.room.world.isSolid(theirs.x, theirs.y, theirs.z)).toBe(true);
+    expect(f.net.world.solidAt(theirs.x, theirs.y, theirs.z)).toBe(false);
+    expect(voxelDisagreements(f, ours)).toBeGreaterThan(0);
+  });
+
+  /* ---------------------------------------------------------------- *
    * The control
    * ---------------------------------------------------------------- */
 
@@ -661,7 +801,7 @@ describe('Quest: the room simulates the level the player is looking at', () => {
     expect(f.context?.contentHash).toBe(0);
 
     const runtime = runtimeFor(f, level);
-    expect(placeLevel(f, runtime, level)).toBe(false);
+    expect(placeLevel(f, runtime, level)).toBe(LevelAgreement.CLIENT_ONLY);
     f.play(30);
 
     const walk = walkAround(f, runtime, HEADINGS, 90);

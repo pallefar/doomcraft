@@ -53,9 +53,8 @@ import {
 import {
   DR_START_OPEN,
   applyLevelToWorld,
-  encodeLevel,
-  hashLevelBytes,
   primarySpawn,
+  stampedLevelHash as levelStampHash,
   type Level,
 } from '@doomcraft/shared/level';
 import { CONTENT_VERSION, contentHashFor } from '@doomcraft/shared/version';
@@ -586,8 +585,10 @@ export class Room implements NetHost {
     this.stampedLevelId = levelId;
     this.stampedLevel = level;
     // 0 is reserved for "this room is running generated terrain", so a level
-    // that hashes to zero still has to say something.
-    this.stampedLevelHash = (hashLevelBytes(encodeLevel(level)) >>> 0) || 1;
+    // that hashes to zero still has to say something. The fold lives in
+    // `stampedLevelHash` because the CLIENT now reproduces this exact number to
+    // decide whether the room is running its copy of the level.
+    this.stampedLevelHash = levelStampHash(level);
 
     // `compileLevel` has already carved the doors that start open; every other
     // door is stamped shut, which is exactly what the client's blit produces.

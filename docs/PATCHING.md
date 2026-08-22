@@ -77,6 +77,14 @@ the tables swapped mid-fight.
 `CONTENT_VERSION` with different files on disk — a real operational mistake — produce different
 hashes and are visible in `/api/version`.
 
+That last clause was **false from the day it was written until PACKS Phase 0**: `versionDocument()`
+called a bare `contentHashFor()` with no level hashes, so every host in the fleet published the same
+per-BUILD constant while the correctly folded value went to PLAYERS on `SESSION_CONFIG` and nowhere
+else. `versionDocument(contentHash, extra)` now takes the host's real hash as a **required**
+parameter — a default is what let it be dropped silently — and `server/src/deploy.test.ts` boots two
+processes over level directories differing in one byte and demands two different
+`/api/version` `content.hash` values.
+
 ### `BUILD_ID` — telemetry only
 
 Stamped by `client/vite.config.ts` (`define: __DC_BUILD_ID__`, from `DOOMCRAFT_BUILD_ID` or
@@ -317,7 +325,28 @@ curl -XPOST -H "Authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" \
 # FREEZE ALL ROLLOUTS — the one toggle, reachable from a phone
 curl -XPOST -H "Authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" \
   -d '{"revision":9,"frozen":true}' https://host/api/admin/flags
+
+# ...and the same thing safely from a script that read the document first:
+# refused with 409 if anybody else edited it in between.
+curl -XPOST -H "Authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" \
+  -d '{"expectRevision":8,"frozen":true}' https://host/api/admin/flags
 ```
+
+**`POST /api/admin/flags` is a MERGE, and that is a correction, not a preference.** It used to be a
+full replace (`parseFlagConfig` starts from `createFlagConfig()`, whose `rules` are `{}`), which
+means the freeze command printed above — the one this runbook tells you to paste at 3 a.m. — **deleted
+every force and every `rolloutBp` on the host**. The single most destructive request in the API was
+the documented emergency procedure, and the test that covered freeze re-sent the whole rules block,
+so the shape prescribed here was never once exercised. `shared/src/flags.ts:nextFlagDocument` is now
+the whole rule set, and it is pure:
+
+| In the body | Effect |
+|---|---|
+| absent | **unchanged** — `frozen`, `revision` and every rule you did not name keep their values |
+| `rules: { key: { force } }` | merged field by field; that flag's `rolloutBp` is left alone |
+| `rules: { key: null }` | **deletes** the rule, so the flag falls back to its registry default. The only delete there is — deletion by omission is the bug above |
+| `expectRevision: n` | compare-and-swap: `409` and **no change at all** unless the live document is at revision `n` |
+| `revision: n` | sets it. Omit it and an accepted write is `revision + 1`, so the CAS token cannot stand still while the document moves |
 
 **Freeze** has defined semantics, because a panic button with vague ones is not a panic button: it
 resolves every **partial** rollout to its default (off for a feature) and leaves **finished** ones

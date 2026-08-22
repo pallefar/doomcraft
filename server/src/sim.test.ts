@@ -921,6 +921,87 @@ describe('persistence', () => {
     expect(again.seasonPass).toBe('season-4');
   });
 
+  /**
+   * The half of that promise `docs/DEPLOY.md` claimed and did not have.
+   *
+   * "A v5 profile opened by a v4 host comes back out with its v5 fields intact"
+   * was true only of TOP-LEVEL keys: the guard walked `Object.entries(raw)` and
+   * stopped there. A v5 field added inside `economy` — the natural home for a
+   * second currency or a season, which is to say the most likely v5 field there
+   * is — was annihilated by a v4 rollback, silently, with no counter and no log
+   * line. The sentence has been made true rather than corrected.
+   */
+  it('carries a future version\'s fields through from INSIDE a section too', () => {
+    const fromTheFuture = {
+      version: 99,
+      deviceId: 'future-device-02',
+      economy: { scrap: 7, season: 'winter-2027', shards: 41 },
+      progress: { xp: 10, prestige: 3 },
+      bindings: { forward: 'KeyW' },
+    };
+
+    const read = migrateProfile(fromTheFuture, 'future-device-02');
+    expect(read.economy.scrap).toBe(7);
+
+    const written = serialiseProfile(read) as Record<string, Record<string, unknown>>;
+    expect(written.economy.season).toBe('winter-2027');
+    expect(written.economy.shards).toBe(41);
+    expect(written.progress.prestige).toBe(3);
+    // This build's own fields are still this build's own.
+    expect(written.economy.scrap).toBe(7);
+    expect(written.progress.xp).toBe(10);
+
+    // Two old builds in a row: the bag is a top-level key on disk, so a build
+    // with only the flat guard carries it through as an ordinary unknown.
+    const again = serialiseProfile(
+      migrateProfile(JSON.parse(JSON.stringify(written)), 'future-device-02'),
+    ) as Record<string, Record<string, unknown>>;
+    expect(again.economy.season).toBe('winter-2027');
+    expect(again.progress.prestige).toBe(3);
+  });
+
+  it('adds nothing at all to a profile this build fully understands', () => {
+    // The guard must be invisible in the normal case: a byte per profile per
+    // flush, times every player, for a rollback that may never happen.
+    const p = migrateProfile({ version: PERSIST_VERSION, economy: { scrap: 3 } }, 'plain-device-01');
+    expect(p._unknown).toBeUndefined();
+    expect(serialiseProfile(p)._unknown).toBeUndefined();
+    expect(JSON.stringify(serialiseProfile(p))).not.toContain('_nested');
+  });
+
+  it('never lets a carried section field overwrite one this build owns', () => {
+    // `economy.scrap` is money. A stale copy of it in the bag must lose to the
+    // live one every single time, or a rollback becomes a way to restore a
+    // balance.
+    const p = migrateProfile({
+      version: 99,
+      economy: { scrap: 500, season: 'winter-2027' },
+    }, 'shadow-device-02');
+    p.economy.scrap = 12;
+    const written = serialiseProfile(p) as Record<string, Record<string, unknown>>;
+    expect(written.economy.scrap).toBe(12);
+    expect(written.economy.season).toBe('winter-2027');
+  });
+
+  it('does not let a stored __proto__ inside a section corrupt the bag', () => {
+    const raw = JSON.parse('{"version":99,"economy":{"scrap":1,"__proto__":{"polluted":true}}}') as unknown;
+    const read = migrateProfile(raw, 'proto-device-02');
+    const nested = read._unknown?._nested as Record<string, Record<string, unknown>> | undefined;
+    expect(nested?.economy).toBeUndefined();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('leaves bindings alone, because there every key IS the data', () => {
+    // A guard over `bindings` would file every custom key binding as a "future
+    // field" and write each one twice.
+    const read = migrateProfile({
+      version: 99,
+      bindings: { forward: 'KeyW', somethingNew: 'KeyQ' },
+    }, 'bindings-device-01');
+    const nested = read._unknown?._nested as Record<string, unknown> | undefined;
+    expect(nested?.bindings).toBeUndefined();
+  });
+
   it('never lets a carried unknown key overwrite a field this build owns', () => {
     const p = createProfile('shadow-device-01');
     p.progress.xp = 4242;

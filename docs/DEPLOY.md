@@ -127,6 +127,26 @@ does not recognise and `serialiseProfile` puts it back at the top level on the w
 profile opened by a v4 host comes back out with its v5 fields intact. `shared/src/saves.ts` has done
 the same for the browser's local save since it shipped; profiles had nothing until now.
 
+**And that sentence was true only of TOP-LEVEL keys until the Phase 0 commit**, which is worth
+stating because the gap was in the likeliest place: `collectUnknownProfileKeys` walked
+`Object.entries(raw)` and stopped, so a v5 field added *inside* `economy` — the natural home for a
+second currency or a season — was annihilated by a v4 rollback, silently, with no counter and no log
+line. The guard now runs one level down as well, over the sections named in
+`GUARDED_PROFILE_SECTIONS` (`progress`, `settings`, `loadout`, `entitlements`, `stats`, `economy`),
+with three properties worth knowing:
+
+- The known sub-keys are **derived** from the section this build just rebuilt, not listed a second
+  time, so the guard cannot rot when a field is added to `StoredEconomy`.
+- `bindings` is deliberately **not** guarded: its keys are the data (`action -> key code`), so
+  "unknown key" has no meaning there and a guard would write every custom binding twice.
+- The bags live under a single top-level `_nested` key on disk, which a build with only the flat
+  guard carries through as an ordinary unknown — so rolling back *past* this change is lossless too.
+
+The limit, stated rather than discovered later: this protects a **newer** profile read by an older
+build. A forward MIGRATION step that rewrites a section wholesale (the v3 -> v4 economy step does)
+still drops sub-keys it does not name, because it runs first and rewrites the input. That direction
+is a migration an author is looking at, not a silent rollback.
+
 **The one case that is NOT covered is v4 → v3**, because a v3 binary has no bag to put anything in.
 A v3 host that reads a v4 profile writes it back as v3 and every Scrap balance on it is gone for
 good. So:

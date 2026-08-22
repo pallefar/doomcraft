@@ -27,6 +27,7 @@ import {
   flagConfigETag,
   flagOn,
   hostBucket,
+  nextFlagDocument,
   parseFlagConfig,
   resolveFlag,
   resolveFlagBits,
@@ -275,5 +276,127 @@ describe('the u32 that rides on SESSION_CONFIG', () => {
     const bits = resolveFlagBits(cfg(rules), 'p');
     expect(bits >>> 0).toBe(bits);
     expect(bits & (1 << 31)).toBe(0);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Editing the document
+ * ------------------------------------------------------------------------ */
+
+describe('nextFlagDocument', () => {
+  /** Two rules an operator would be very unhappy to lose. */
+  function live(): FlagConfig {
+    return {
+      revision: 4,
+      frozen: false,
+      rules: {
+        share_cards: { force: true, rolloutBp: 10000 },
+        economy_scrap: { force: null, rolloutBp: 5000 },
+      },
+    };
+  }
+
+  /*
+   * `docs/PATCHING.md` prescribes the emergency freeze as
+   * `-d '{"revision":9,"frozen":true}'`, and `parseFlagConfig` starts from
+   * `createFlagConfig()` whose rules are `{}` — so the documented command
+   * deleted every force and every rolloutBp on the host. The test that
+   * "covered" freeze re-sent the whole rules block, which is why the shape the
+   * runbook prescribes was never once exercised.
+   */
+  it('leaves every rule intact when handed the documented freeze command', () => {
+    const write = nextFlagDocument(live(), JSON.parse('{"revision":9,"frozen":true}'));
+    expect(write.ok).toBe(true);
+    expect(write.document.frozen).toBe(true);
+    expect(write.document.revision).toBe(9);
+    expect(write.document.rules.share_cards).toEqual({ force: true, rolloutBp: 10000 });
+    expect(write.document.rules.economy_scrap).toEqual({ force: null, rolloutBp: 5000 });
+  });
+
+  it('merges one rule field without resetting the other', () => {
+    const write = nextFlagDocument(live(), { rules: { economy_scrap: { force: false } } });
+    // The rollout survives a force, and vice versa. A patch that named `force`
+    // used to imply `rolloutBp: 0`, which silently ended a staged rollout.
+    expect(write.document.rules.economy_scrap).toEqual({ force: false, rolloutBp: 5000 });
+    expect(write.document.rules.share_cards).toEqual({ force: true, rolloutBp: 10000 });
+    expect(write.touched).toEqual(['economy_scrap']);
+  });
+
+  it('deletes a rule only when told to, in the one way that says so', () => {
+    const write = nextFlagDocument(live(), { rules: { share_cards: null } });
+    expect(write.document.rules.share_cards).toBeUndefined();
+    expect(write.document.rules.economy_scrap).toEqual({ force: null, rolloutBp: 5000 });
+    // `null` is the only delete. Omission is a no-op, which is the whole fix.
+    const omitted = nextFlagDocument(live(), { rules: {} });
+    expect(Object.keys(omitted.document.rules).sort()).toEqual(['economy_scrap', 'share_cards']);
+  });
+
+  it('keeps frozen where it is when the patch does not mention it', () => {
+    const frozen = { ...live(), frozen: true };
+    expect(nextFlagDocument(frozen, { rules: {} }).document.frozen).toBe(true);
+    expect(nextFlagDocument(frozen, { frozen: false }).document.frozen).toBe(false);
+  });
+
+  it('moves the revision on every accepted write, so the CAS token cannot stand still', () => {
+    const write = nextFlagDocument(live(), { rules: { economy_scrap: { rolloutBp: 7500 } } });
+    expect(write.document.revision).toBe(5);
+  });
+
+  it('refuses a stale expectRevision and returns the document UNCHANGED', () => {
+    const before = live();
+    const write = nextFlagDocument(before, { expectRevision: 3, frozen: true });
+    expect(write.ok).toBe(false);
+    expect(write.conflict).toEqual({ expected: 3, actual: 4 });
+    // Not "a copy that happens to be equal": the same object, so a caller that
+    // stores `write.document` unconditionally still cannot corrupt anything.
+    expect(write.document).toBe(before);
+    expect(write.document.frozen).toBe(false);
+  });
+
+  it('accepts the matching expectRevision', () => {
+    const write = nextFlagDocument(live(), { expectRevision: 4, frozen: true });
+    expect(write.ok).toBe(true);
+    expect(write.document.frozen).toBe(true);
+  });
+
+  it('treats a garbage expectRevision as a conflict, never as absent', () => {
+    for (const bad of ['4', null, {}, Number.NaN]) {
+      const write = nextFlagDocument(live(), { expectRevision: bad, frozen: true });
+      expect(write.ok, `expectRevision: ${JSON.stringify(bad)}`).toBe(false);
+    }
+  });
+
+  it('drops a rule for a flag that does not exist, including __proto__', () => {
+    const write = nextFlagDocument(live(), JSON.parse(
+      '{"rules":{"not_a_flag":{"force":true},"__proto__":{"force":true}}}',
+    ));
+    expect(write.ok).toBe(true);
+    expect(Object.keys(write.document.rules).sort()).toEqual(['economy_scrap', 'share_cards']);
+    expect(write.touched).toEqual([]);
+    // The accumulator was never reachable by name, because only FLAG_ORDER is
+    // iterated — but assert the consequence, not the implementation.
+    expect(({} as Record<string, unknown>).force).toBeUndefined();
+  });
+
+  it('clamps a rollout the same way the parser does', () => {
+    const write = nextFlagDocument(live(), { rules: { economy_scrap: { rolloutBp: 99999 } } });
+    expect(write.document.rules.economy_scrap.rolloutBp).toBe(10000);
+    const low = nextFlagDocument(live(), { rules: { economy_scrap: { rolloutBp: -5 } } });
+    expect(low.document.rules.economy_scrap.rolloutBp).toBe(0);
+  });
+
+  it('never hands back the object it was given to edit', () => {
+    const before = live();
+    const write = nextFlagDocument(before, { rules: { economy_scrap: { rolloutBp: 1 } } });
+    expect(write.document).not.toBe(before);
+    expect(before.rules.economy_scrap.rolloutBp).toBe(5000);
+  });
+
+  it('survives a patch that is not an object at all', () => {
+    for (const junk of [null, undefined, 7, 'freeze', []]) {
+      const write = nextFlagDocument(live(), junk);
+      expect(write.ok).toBe(true);
+      expect(write.document.rules.share_cards).toEqual({ force: true, rolloutBp: 10000 });
+    }
   });
 });
