@@ -37,6 +37,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -400,5 +401,33 @@ describe('the cookie', () => {
     expect(sessionCredential({ authorization: 'bearer frombearer' })).toBe('frombearer');
     expect(sessionCredential({ authorization: 'frombearer' })).toBeNull();
     expect(sessionCredential({})).toBeNull();
+  });
+});
+
+describe('only a MISSING accounts file is the first-run state', () => {
+  // Anything else that stops the file being read must refuse to start: treating
+  // it as "no accounts" hands the owner role to the next stranger to sign up.
+  it('refuses an accounts file it cannot read (EACCES), rather than re-opening the bootstrap window', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dc-accounts-'));
+    const file = join(root, 'accounts-v1.json');
+    writeFileSync(file, JSON.stringify({ version: 1, accounts: [] }));
+    chmodSync(file, 0o000);
+    try {
+      await expect(new AccountStore(root, { scrypt: CHEAP }).ready()).rejects.toThrow(/unreadable/);
+    } finally {
+      chmodSync(file, 0o600);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it('refuses a file that is valid JSON of the wrong shape, or holds a record that fails validation', async () => {
+    for (const body of ['[]', '{"accounts":"nope"}', '{"accounts":[{"id":"x"}]}']) {
+      const root = mkdtempSync(join(tmpdir(), 'dc-accounts-'));
+      writeFileSync(join(root, 'accounts-v1.json'), body);
+      try {
+        await expect(new AccountStore(root, { scrypt: CHEAP }).ready()).rejects.toThrow();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
   });
 });

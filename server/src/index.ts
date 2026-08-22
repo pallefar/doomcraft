@@ -828,7 +828,7 @@ const adminGate = new AdminGate(ADMIN_TOKEN, {
   },
   ownerCount: () => accounts.ownerCount(),
 });
-const adminSweeper = setInterval(() => { adminGate.sweep(); }, 60_000);
+const adminSweeper = setInterval(() => { adminGate.sweep(); authThrottle.sweep(Date.now()); }, 60_000);
 if (typeof adminSweeper.unref === 'function') adminSweeper.unref();
 
 function admitAdmin(req: IncomingMessage, path: string): AdminDecision {
@@ -1067,6 +1067,25 @@ function sendText(res: ServerResponse, status: number, text: string): void {
     'cache-control': 'no-store',
   });
   res.end(text);
+}
+
+/**
+ * A state-changing POST must come from a page we serve, as JSON. Two checks,
+ * each sufficient on its own: an `Origin` we do not allow is refused (browsers
+ * always send one on a cross-site POST), and a body that is not
+ * `application/json` is refused — which is what stops a `<form
+ * enctype="text/plain">` on any site from reaching `/api/auth/signup` and
+ * claiming the owner role on a virgin host. Requests with no `Origin` at all
+ * (curl, tests, the operator's own shell) are unaffected by the first check
+ * and must still send JSON for the second.
+ */
+function refuseCrossSiteWrite(req: IncomingMessage, res: ServerResponse, cors: string | null): boolean {
+  if (!originAllowed(req)) { sendJson(res, 403, { error: 'origin not allowed' }, cors); return true; }
+  const ct = String(req.headers['content-type'] ?? '').toLowerCase();
+  if (!ct.startsWith('application/json')) {
+    sendJson(res, 415, { error: 'content-type must be application/json' }, cors); return true;
+  }
+  return false;
 }
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
@@ -1369,6 +1388,7 @@ async function handleApi(
    *      stopwatch.
    * --------------------------------------------------------------------- */
   if (path === '/api/auth/signup' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
     const client = clientAddress(req);
     const now = Date.now();
     if (!authThrottle.allow(client, now)) {
@@ -1416,6 +1436,7 @@ async function handleApi(
   }
 
   if (path === '/api/auth/signin' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
     const client = clientAddress(req);
     const now = Date.now();
     if (!authThrottle.allow(client, now)) {
@@ -1439,6 +1460,7 @@ async function handleApi(
   }
 
   if (path === '/api/auth/signout' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
     /* Unthrottled on purpose: there is no credential to guess here, and a
      * limiter on sign-out is a limiter that keeps somebody signed IN. */
     const revoked = sessions.revoke(sessionCredential(req.headers));
@@ -1471,6 +1493,7 @@ async function handleApi(
   if (path === '/api/admin/drain' && req.method === 'POST') {
     const gate = admitAdmin(req, path);
     if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
     const who = await refuseUnaudited(res, await readBody(req), cors);
     if (who === null) return true;
     const before = JSON.stringify(lifecycle.report());
@@ -1633,6 +1656,7 @@ async function handleApi(
   if (path === '/api/admin/flags/plan' && req.method === 'POST') {
     const gate = admitAdmin(req, path);
     if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
     const plan = planFlagWrite(flags.document, await readBody(req));
     if (!plan.ok) {
       sendJson(res, 409, {
@@ -1668,6 +1692,7 @@ async function handleApi(
   if (path === '/api/admin/flags' && req.method === 'POST') {
     const gate = admitAdmin(req, path);
     if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
     const body = await readBody(req);
     const who = await refuseUnaudited(res, body, cors);
     if (who === null) return true;
@@ -1762,6 +1787,7 @@ async function handleApi(
   if (path === '/api/admin/owner/transfer' && req.method === 'POST') {
     const verdict = adminGate.admitEnvOnly(req.headers.authorization, clientAddress(req), path);
     if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
     const body = (await readBody(req) ?? {}) as Record<string, unknown>;
     const who = await refuseUnaudited(res, body, cors);
     if (who === null) return true;
@@ -2030,6 +2056,7 @@ async function handleApi(
   }
 
   if (path === '/api/profile' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
     const body = await readBody(req) as Record<string, unknown>;
     const deviceId = String(body.deviceId ?? '');
     if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
@@ -2092,6 +2119,7 @@ async function handleApi(
   }
 
   if (path === '/api/entitlement' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
     const body = await readBody(req) as Record<string, unknown>;
     const deviceId = String(body.deviceId ?? '');
     const product = String(body.product ?? '');

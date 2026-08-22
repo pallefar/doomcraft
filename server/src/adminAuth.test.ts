@@ -325,3 +325,35 @@ describe('AttemptThrottle', () => {
     expect(t.allow('1.1.1.1', ADMIN_FAILURE_WINDOW_MS + 1)).toBe(true);
   });
 });
+
+describe('a player cookie is not a pass around the throttle', () => {
+  function playerGate(log: AdminDenial[]) {
+    let now = 1_000;
+    const gate = new AdminGate(TOKEN, {
+      clock: () => now, limit: 3, windowMs: 60_000,
+      onDenied: (d) => { log.push(d); },
+      resolveSession: () => ({ accountId: 'acct-player', role: 'player' as const }),
+      ownerCount: () => 1,
+    });
+    return { gate, tick: (ms: number) => { now += ms; } };
+  }
+  it('throttles bearer guesses that arrive wearing a player session', () => {
+    // Audit finding: a resolved player principal returned 403 before the bucket
+    // was consulted, so anyone who signed up could brute-force the env bearer
+    // at line rate by attaching their cookie to every guess.
+    const log: AdminDenial[] = [];
+    const { gate } = playerGate(log);
+    const cred = { authorization: 'Bearer definitely-wrong', sessionToken: 'p' };
+    for (let i = 0; i < 3; i++) expect(gate.admitRequest(cred, '8.8.8.8').verdict).not.toBe(AdminVerdict.OK);
+    expect(gate.admitRequest(cred, '8.8.8.8').verdict).toBe(AdminVerdict.THROTTLED);
+    expect(gate.throttled).toBe(1);
+  });
+  it('still answers a plain player session with 403 and never counts it as a guess', () => {
+    const log: AdminDenial[] = [];
+    const { gate } = playerGate(log);
+    for (let i = 0; i < 10; i++) {
+      expect(gate.admitRequest({ authorization: undefined, sessionToken: 'p' }, '8.8.8.9').verdict).toBe(AdminVerdict.FORBIDDEN);
+    }
+    expect(gate.throttled).toBe(0);
+  });
+});

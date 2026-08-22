@@ -315,11 +315,17 @@ export class AdminGate {
         this.failures.delete(client);
         return { verdict: AdminVerdict.OK, via: 'owner', accountId: principal.accountId };
       }
-      if (record) {
-        this.deniedCount++;
-        this.onDenied(Object.freeze({ ms: now, client, reason: 'not-owner', path }));
+      if (supplied === null) {
+        if (record) {
+          this.deniedCount++;
+          this.onDenied(Object.freeze({ ms: now, client, reason: 'not-owner', path }));
+        }
+        return { verdict: AdminVerdict.FORBIDDEN, via: 'none', accountId: principal.accountId };
       }
-      return { verdict: AdminVerdict.FORBIDDEN, via: 'none', accountId: principal.accountId };
+      // A player session carrying a WRONG bearer is a bearer guess wearing a
+      // cookie. It falls through to the bucket like any other guess — or a
+      // free signup becomes a free pass around the throttle, and the bearer is
+      // brute-forceable at line rate again (the defect this file exists to fix).
     }
 
     /* 3. No surface at all: identical answer to every caller, forever, and no

@@ -369,16 +369,25 @@ export class AccountStore {
     let text: string;
     try {
       text = await readFile(`${this.root}/${ACCOUNTS_FILE}`, 'utf8');
-    } catch {
-      // No file yet: the normal first-run state, and the state in which the
-      // next signup becomes the owner.
-      return;
+    } catch (err) {
+      // ONLY a missing file is the first-run state in which the next signup
+      // becomes the owner. Any other read error — permissions, a volume that
+      // came back with different ownership, EIO — is a present-but-unreadable
+      // file, and treating it as "no accounts" would re-open the bootstrap
+      // window on a host that already has an owner.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw new Error(`${ACCOUNTS_FILE} is present but unreadable: ${(err as Error).message}`);
     }
     try {
-      const parsed = JSON.parse(text) as AccountsFile;
-      for (const raw of parsed.accounts ?? []) {
+      const parsed = JSON.parse(text) as Partial<AccountsFile> | null;
+      if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.accounts)) {
+        throw new Error('wrong shape');
+      }
+      for (const raw of parsed.accounts) {
         const a = sanitiseAccount(raw);
-        if (a === null) continue;
+        // A record that fails validation is corruption, not "skip it": skipping
+        // the only owner is the same re-opened bootstrap window by another path.
+        if (a === null) throw new Error('a record failed validation');
         this.byKey.set(a.nameKey, a);
         this.byIdMap.set(a.id, a);
       }

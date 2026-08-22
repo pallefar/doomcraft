@@ -472,3 +472,18 @@ describe('the sign-in throttle', () => {
     expect(attempts).toBe(21);
   }, 60_000);
 });
+
+describe('cross-site writes', () => {
+  it('refuses a text/plain form POST to signup, so a stranger cannot claim the owner by CSRF', async () => {
+    // A <form enctype="text/plain"> on any site can reach this URL with a
+    // JSON-looking body. Before the fix it was a 201 and, on a virgin host, the
+    // owner role. The route must demand application/json.
+    const r = await call('/api/auth/signup', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain', origin: 'https://evil.example.com' },
+      body: JSON.stringify({ name: 'csrfmade', passphrase: 'twelve-chars-long-ok' }),
+    });
+    expect([403, 415]).toContain(r.status);
+    expect(diskAccounts().some((a) => a.name === 'csrfmade')).toBe(false);
+  });
+});
