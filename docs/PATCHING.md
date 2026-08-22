@@ -163,7 +163,7 @@ If it genuinely is a layout change:
 |---|---|---|
 | Trigger | `POST /api/admin/drain` | `SIGTERM` / `SIGINT` |
 | Budget | `DOOMCRAFT_FORCE_MIGRATE_MS`, default 30 min | `DOOMCRAFT_DRAIN_MS`, default 25 s |
-| Refuses | **creating a new room** | the WebSocket upgrade outright |
+| Refuses | **a new room, and a new player into an existing one** | the WebSocket upgrade outright |
 | Live matches | run to completion | get the 25 s the orchestrator allows |
 | Owned by | `HostLifecycle` (`server/src/deploy.ts`) | `shutdown()` in `server/src/index.ts` |
 
@@ -171,11 +171,25 @@ A deploy uses the **first**, waits for the host to report `drained`, and only th
 That ordering is what makes a rollout free of dropped players. Sending `SIGTERM` first collapses the
 budget from thirty minutes to twenty-five seconds and turns a graceful rollout into a short outage.
 
-**The deploy drain gates room creation, not sockets.** The obvious implementation refuses every new
-socket on a draining host, and it hurts a real player: your friend is nine minutes into a match on
-the old host, you click their invite, and you are turned away from a match that is very much alive.
-So the gate sits inside the room factory (`lifecycle.guardCreate`), which is the one place a room can
-possibly come into existence. Joining a live room is fine; making a new one is not.
+**The deploy drain has two gates, and it needs both.** `lifecycle.guardCreate` wraps the room factory,
+which is the one place a room can come into existence, so no new room is built. `lifecycle.admitting`
+is passed to every `Room` as `RoomOptions.admitting`, so `net.ts` turns a new HELLO away with
+`UpdateReason.HOST_DRAINING` — a 4004 close and "your next match starts on the new one", not a dead
+socket.
+
+Gating creation alone reads like the kinder design, and it does not converge. Every existing room
+stays open, so `route` keeps handing arrivals into the busy `deathmatch` key, the humans count never
+reaches zero, and the host sits in `draining` until `DOOMCRAFT_FORCE_MIGRATE_MS` — a deadline whose
+entire cost is `forcedPlayers`, the number this system exists to keep at zero. It is worth naming
+what the second gate costs, because it is a real player: your friend is nine minutes into a match
+here, you click their invite, and you get the new host instead of their match. A rollout that never
+finishes costs more, and it charges it to everybody still inside when the deadline fires.
+
+**The directory honours the same state.** `/api/rooms` answers `draining: true` with an empty list and
+`/api/quickplay` answers 503 with no ticket while either drain is running (`notAdmitting()` in
+`server/src/index.ts`). Those endpoints used to report the SHUTDOWN flag only, so a deploy-draining
+host answered 503 on `/health` while still listing its rooms and still minting tickets pointing at
+itself. `server/src/online.test.ts` pins both halves over a real socket.
 
 ### The deploy procedure
 

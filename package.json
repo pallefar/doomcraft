@@ -18,7 +18,9 @@
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "bench": "node tools/bench.mjs",
-    "verify:online": "node tools/online-verify.mjs"
+    "verify:online": "node tools/online-verify.mjs",
+    "verify:audio": "tsx --tsconfig client/tsconfig.json tools/audio-spectrum.ts",
+    "verify:blockaudio": "node tools/blockaudio-verify.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

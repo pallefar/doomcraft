@@ -55,6 +55,65 @@ function energyBelow(buf: Float32Array, hz: number, sr = SR): number {
   return total > 0 ? below / total : 0;
 }
 
+/** Fraction of total energy inside [`lo`, `hi`). Same DFT as `energyBelow`. */
+function energyBetween(buf: Float32Array, lo: number, hi: number, sr = SR): number {
+  const step = Math.max(1, Math.round(sr / 11025));
+  const n = Math.floor(buf.length / step);
+  const N = 1 << Math.floor(Math.log2(Math.min(n, 8192)));
+  const x = new Float64Array(N);
+  for (let i = 0; i < N; i++) x[i] = buf[i * step] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N));
+  const rate = sr / step;
+  let band = 0, total = 0;
+  const kMax = N >> 1;
+  for (let k = 4; k < kMax; k += 4) {
+    let re = 0, im = 0;
+    for (let i = 0; i < N; i++) {
+      const a = (-2 * Math.PI * k * i) / N;
+      re += x[i] * Math.cos(a);
+      im += x[i] * Math.sin(a);
+    }
+    const p = re * re + im * im;
+    total += p;
+    const f = (k * rate) / N;
+    if (f >= lo && f < hi) band += p;
+  }
+  return total > 0 ? band / total : 0;
+}
+
+/**
+ * Level of the 2-5 kHz band, in dB relative to that band's own loudest frame,
+ * at `atMs` into the sound.
+ *
+ * This is the measurement that caught the shotgun: the failure was never
+ * "no top end at all", it was "top end for 20 ms and then nothing", which no
+ * whole-sound spectrum can see. DSSHOTGN holds this band within about 9 dB of
+ * its own peak for its full 854 ms.
+ */
+function bandHoldDb(buf: Float32Array, atMs: number, sr = SR): number {
+  const band = Float32Array.from(buf);
+  const stage = (f: number, kind: 'hp' | 'lp'): void => {
+    const w = (2 * Math.PI * Math.min(f, sr * 0.49)) / sr;
+    const cw = Math.cos(w), sw = Math.sin(w);
+    const alpha = sw / (2 * 0.707), a0 = 1 + alpha;
+    const b0 = kind === 'lp' ? ((1 - cw) / 2) / a0 : ((1 + cw) / 2) / a0;
+    const b1 = kind === 'lp' ? (1 - cw) / a0 : (-(1 + cw)) / a0;
+    const a1 = (-2 * cw) / a0, a2 = (1 - alpha) / a0;
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for (let i = 0; i < band.length; i++) {
+      const x0 = band[i];
+      const y0 = b0 * x0 + b1 * x1 + b0 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x0; y2 = y1; y1 = y0;
+      band[i] = y0;
+    }
+  };
+  stage(2000, 'hp'); stage(2000, 'hp'); stage(5000, 'lp'); stage(5000, 'lp');
+  const e = envelope(band, 20, sr);
+  let pk = 0;
+  for (let i = 0; i < e.length; i++) if (e[i] > pk) pk = e[i];
+  const at = e[Math.min(e.length - 1, Math.floor(atMs / 20))];
+  return 20 * Math.log10(Math.max(at, 1e-9) / Math.max(pk, 1e-9));
+}
+
 /** RMS envelope in `frameMs` frames. */
 function envelope(buf: Float32Array, frameMs = 10, sr = SR): Float32Array {
   const w = Math.max(1, Math.floor((sr * frameMs) / 1000));
@@ -421,5 +480,57 @@ describe('the whole catalogue is cheap enough to bake', () => {
     }
     const ms = performance.now() - t0;
     expect(ms).toBeLessThan(2500);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The band that went missing
+ * ------------------------------------------------------------------------ */
+
+/**
+ * A ratchet, not a taste test.
+ *
+ * The shotgun shipped once with 0.03% of its power above 2 kHz against
+ * DSSHOTGN's 5.3% — a 180x miss that made it read as a door slam — because the
+ * spec's own comment reasoned "only 5.3% is above 2 kHz, so this layer should
+ * be tiny" and gave the whole band a 28 ms tick. 5.3% of a 854 ms sound is a
+ * LAYER. Reproduce with:
+ *
+ *   npx tsx --tsconfig client/tsconfig.json tools/audio-spectrum.ts --wad DOOM1.WAD
+ *
+ * Every bound below sits well inside the reference so seed-to-seed variation in
+ * the noise layers cannot flap it, and well outside the old behaviour so the
+ * old behaviour cannot come back.
+ */
+describe('weapons carry DOOM\'s top end, and carry it for their whole length', () => {
+  it('the shotgun has real power above 2 kHz — DSSHOTGN measures 5.3%', () => {
+    const buf = render(specById(sndFire(WeaponId.SHOTGUN))!, SR, 4242);
+    // Old spec measured 0.0004. Reference is 0.053.
+    expect(energyBetween(buf, 2000, 6000)).toBeGreaterThan(0.03);
+  });
+
+  it('the shotgun HOLDS that band, rather than flashing it and dying', () => {
+    const buf = render(specById(sndFire(WeaponId.SHOTGUN))!, SR, 4242);
+    // DSSHOTGN is inside 9 dB of its own 2-5 kHz peak 400 ms in. The old spec
+    // was 19 dB down by then and 31 dB down by 600 ms.
+    expect(bandHoldDb(buf, 400)).toBeGreaterThan(-12);
+    expect(bandHoldDb(buf, 600)).toBeGreaterThan(-18);
+  });
+
+  it('the shotgun is still DARK and still a plateau — the fix added, it did not brighten', () => {
+    const buf = render(specById(sndFire(WeaponId.SHOTGUN))!, SR, 4242);
+    // Both of these were true before the top end was added and must stay true:
+    // the failure mode of "make it brighter" is losing the body.
+    expect(energyBelow(buf, 200)).toBeGreaterThan(0.45);
+    expect(plateauMs(buf)).toBeGreaterThan(250);
+  });
+
+  it('the explosion has debris, not just boom — DSBAREXP measures 13.2%', () => {
+    const buf = render(specById('exp.b')!, SR, 4242);
+    // 0.058 as this helper measures it, which windows the first ~740 ms of the
+    // 1680 ms blast rather than all of it; the old spec measured 0.0019 the
+    // same way, and 0.0004 over the whole sound.
+    expect(energyBetween(buf, 2000, 6000)).toBeGreaterThan(0.035);
+    expect(bandHoldDb(buf, 700)).toBeGreaterThan(-14);
   });
 });

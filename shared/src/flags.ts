@@ -170,8 +170,11 @@ export const FLAGS: Readonly<Record<string, FlagDef>> = Object.freeze({
     key: 'client_update_prompt',
     kind: 'control',
     what: 'Show the "update ready" card at return-to-menu when a new build is waiting.',
-    blastRadius: 'The prompt only. The service worker still swaps at the next safe moment with this '
-      + 'off — the player is simply not told first. Turn it off if a release ships a broken prompt.',
+    blastRadius: 'The prompt only, and this is enforced rather than asserted: with it off, '
+      + '`UpdateController.pump()` applies the waiting build itself at the next moment the player '
+      + 'is out of a match (client/src/boot/updates.ts), so the player is not ASKED rather than not '
+      + 'updated. Turn it off if a release ships a broken prompt. Shipped ON — a control flag over '
+      + 'behaviour that already exists, so turning the switch off is the change.',
     defaultOn: true,
   },
 });

@@ -85,7 +85,7 @@ import {
   type ModeSelectLevel,
 } from '@/ui/modeSelect';
 import { avatarButtonLabel, createAvatarEditor, type AvatarEditor } from '@/ui/avatarEditor';
-import { installUpdates, type UpdateSnapshot } from '@/boot/updates';
+import { installUpdates, shouldPromptUpdate, type UpdateSnapshot } from '@/boot/updates';
 import { UpdateReason } from '@shared/version';
 import { AVATAR_PALETTE, legacySkinFromAvatar, unpackAvatar, writeAvatar } from '@/characters/avatar';
 
@@ -2009,6 +2009,10 @@ window.addEventListener('pagehide', () => {
  *
  *   > Never activate a new bundle while `game.playing === true`.
  *
+ * Answered here with the superset `game.playing || screen === 'paused'`, since
+ * `openPause()` calls `leavePlay()` and the match behind the pause menu is
+ * still running. Stronger than the rule, never weaker.
+ *
  * docs/INFRASTRUCTURE.md §6, and docs/PATCHING.md for the whole procedure. The
  * policy lives in `client/src/boot/updates.ts` and is tested there; this is the
  * mount, and it is deliberately the last thing in the file so that nothing the
@@ -2022,19 +2026,39 @@ window.addEventListener('pagehide', () => {
  * ------------------------------------------------------------------------ */
 
 const updates = installUpdates({
-  isPlaying: () => game.playing,
+  /*
+   * "In a match", which is a bigger set than `game.playing`.
+   *
+   * `openPause()` calls `game.leavePlay()`, so `game.playing` is false the
+   * whole time the pause menu is up — and the match behind it is still running,
+   * still on the server, still costing the player the round if the tab
+   * reloads. The rule is never to swap under a player who is in a match, so the
+   * predicate has to be the superset. It is still strictly stronger than
+   * "`game.playing === true`": everything that rule refuses, this refuses too.
+   */
+  isPlaying: () => game.playing || uiRoot!.dataset.screen === 'paused',
+  /*
+   * With the prompt off the controller applies the update itself at the next
+   * safe moment rather than waiting for a button nobody can press. See
+   * `UpdateHost.promptAllowed`.
+   */
+  promptAllowed: () => game.net.flag('client_update_prompt'),
   onState: (state) => { renderUpdatePrompt(state); },
 });
 
 let updateCard: HTMLDivElement | null = null;
 
 function renderUpdatePrompt(state: UpdateSnapshot): void {
-  // The prompt itself is behind a flag, so a release that ships a broken card
-  // can have it taken away without a deploy. The SWAP is not behind the flag —
-  // with the prompt off the new build still lands at the next safe moment, the
-  // player is simply not asked first.
-  const allowed = game.net.flag('client_update_prompt');
-  const show = allowed && state.state === 'ready' && uiRoot!.dataset.screen === 'menu';
+  // The prompt itself is behind a flag (`client_update_prompt`, a CONTROL flag
+  // shipped ON), so a release that ships a broken card can have it taken away
+  // without a deploy. The SWAP is not behind the flag: with the prompt off
+  // `UpdateController.pump()` applies the update itself at the next safe
+  // moment, so the player is not asked rather than not updated.
+  const show = shouldPromptUpdate(
+    state,
+    game.net.flag('client_update_prompt'),
+    uiRoot!.dataset.screen ?? '',
+  );
 
   if (!show) {
     updateCard?.remove();

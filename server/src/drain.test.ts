@@ -10,13 +10,17 @@
  * That is two properties and they pull in opposite directions, which is why
  * both are asserted against the same live object rather than separately:
  *
- *   - a draining host must create nothing new, and
+ *   - a draining host must take on nothing new — no new ROOM (`guardCreate`)
+ *     and no new PLAYER into an existing one (`admitting`), and
  *   - a draining host must not touch what it already has.
  *
  * An implementation that satisfies only the first is a deploy that kicks
  * everybody; one that satisfies only the second is a rollout that never
- * finishes. The third property — the deadline — is what stops one AFK player in
- * a Builder world pinning an old binary online for a week.
+ * finishes. So is one that gates only room creation: arrivals keep repopulating
+ * the rooms that are already here, the humans count never reaches zero, and the
+ * deadline becomes the only exit. The third property — the deadline — is what
+ * stops one AFK player in a Builder world pinning an old binary online for a
+ * week, and `forcedPlayers` is the number that says how much it cost.
  *
  * These drive the REAL `ModeRouter` with a fake room, because the room table
  * and its key scheme are exactly what the drain has to be correct about; the
@@ -113,7 +117,7 @@ function harness(forceMigrateMs = DEFAULT_FORCE_MIGRATE_MS): Harness {
  * Tests
  * ------------------------------------------------------------------------ */
 
-describe('a draining host accepts no new rooms', () => {
+describe('a draining host accepts no new rooms and no new players', () => {
   it('creates rooms freely while admitting', () => {
     const h = harness();
     expect(h.join({ modeId: ModeId.DEATHMATCH })).not.toBeNull();
@@ -132,18 +136,63 @@ describe('a draining host accepts no new rooms', () => {
     expect(h.router.size).toBe(1);
   });
 
-  it('still lets a friend into a match that is already running here', () => {
-    // The case a socket-level drain gets wrong: your friend is nine minutes
-    // into a match on the old host, you click their invite, and a naive drain
-    // turns you away from a room that is very much alive.
+  it('stops ADMITTING as well, or the drain can never converge', () => {
+    /*
+     * The second gate, and the one that was missing.
+     *
+     * `guardCreate` alone leaves every existing room open, so `route` keeps
+     * handing arrivals into the busy `deathmatch` key and the humans count
+     * never reaches zero. The host stays DRAINING until `forceMigrateMs`, and
+     * that deadline's whole cost is `forcedPlayers` — the number this file
+     * exists to keep at zero. `admitting` is what `server/src/index.ts` passes
+     * to every `Room` as `RoomOptions.admitting`; `net.ts` turns the HELLO away
+     * with `UpdateReason.HOST_DRAINING`.
+     *
+     * Routing is deliberately UNCHANGED: the room is still there and still
+     * ticking for the people in it. It is admission that closes.
+     */
     const h = harness();
     const first = h.join({ modeId: ModeId.DEATHMATCH });
+    expect(h.life.admitting).toBe(true);
+
+    h.life.beginDrain();
+    expect(h.life.admitting).toBe(false);
+
+    // The router still resolves to the live room — nothing was torn down...
+    const routed = h.router.route({
+      modeId: ModeId.DEATHMATCH, skill: 2, levelId: '', worldId: '', seed: 7, flags: 0,
+    });
+    expect(routed.room).toBe(first);
+    // ...and the host refuses to seat anybody new in it, so as that match ends
+    // the room empties for good instead of being topped back up.
+    expect(h.life.report()).toMatchObject({ admitting: false, state: 'draining' });
+  });
+
+  it('converges once the match it was already running ends', () => {
+    // The whole point of gate two, stated as the outcome: no arrival can keep
+    // this host alive, so the drain finishes on the match clock and nobody is
+    // force-migrated.
+    const h = harness(30 * 60_000);
+    const room = h.join({ modeId: ModeId.DEATHMATCH }) as FakeRoom;
     h.life.beginDrain();
 
-    const second = h.join({ modeId: ModeId.DEATHMATCH });
-    expect(second).toBe(first);
-    expect(first?.humanCount).toBe(2);
-    expect(h.router.size).toBe(1);
+    // Ten minutes of a busy host: the lifecycle refuses everybody, so the
+    // room's population can only go down.
+    for (let i = 0; i < 20; i++) {
+      h.now.ms += 30_000;
+      expect(h.life.admitting).toBe(false);
+      h.life.tick();
+    }
+    expect(h.life.drained).toBe(false);
+    expect(room.stopped).toBe(false);
+
+    room.humanCount = 0;
+    h.now.ms += 30_000;
+    expect(h.life.tick()).toBe(true);
+    expect(h.life.status).toBe(HostState.DRAINED);
+    // Converged on the match clock, well inside the deadline, at zero cost.
+    expect(h.life.forcedPlayers).toBe(0);
+    expect(h.life.msUntilDeadline()).toBeGreaterThan(0);
   });
 
   it('refuses a SECOND instance of a shared key once the first is full', () => {

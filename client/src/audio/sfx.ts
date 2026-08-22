@@ -197,9 +197,33 @@ function fit(
  * ------------------------------------------------------------------------ */
 
 function shotgunFire(): SoundSpec {
-  // The measured article: 854 ms, 410 ms plateau, 420 ms tail, 85% of energy
-  // under 548 Hz, dominant resonance at 153 Hz, crest 13.8 dB. The 800 ms fire
-  // interval at 75 rpm leaves room for essentially all of it.
+  // The measured article: 854 ms, 410 ms plateau, 420 ms tail, dominant
+  // resonance at 153 Hz, crest 13.8 dB. The 800 ms fire interval at 75 rpm
+  // leaves room for essentially all of it.
+  //
+  // ── The 5.3% mistake, and what replaced it ──────────────────────────────
+  //
+  // The first version of this spec read "5.3% of DSSHOTGN's energy is above
+  // 2 kHz" as licence to make the top end a 28 ms tick at gain 0.30, and
+  // measured out at 0.03% — a 180x miss that turned the weapon into a door
+  // slam. Two things were wrong with the reading.
+  //
+  // First, 5.3% of the energy of a 854 ms sound is not a transient, it is a
+  // LAYER. `tools/audio-spectrum.ts` resolves the reference in time: DSSHOTGN
+  // holds -22 to -31 dBFS in the 2-5 kHz band across the whole 854 ms, never
+  // dropping out. The old crack layer gave one 20 ms window at -32 and then
+  // collapsed to -63.
+  //
+  // Second, the "85% of energy under 548 Hz" figure in the header table is a
+  // POWER-weighted rolloff. On the magnitude spectrum every analyser reaches
+  // for, DSSHOTGN's 85% point is 3037 Hz — 5.5x higher — and the shot was
+  // voiced against the darker of the two numbers.
+  //
+  // So the fix is not "brighter". The band profile below is fitted to the
+  // reference band by band (9 bands, 20 Hz to DOOM's own 5512 Hz Nyquist,
+  // 0.68 dB RMS error): the plateau, the 153 Hz barrel and the attack are
+  // exactly what they were, and the missing 600 Hz - 4 kHz shelf that DOOM
+  // carries for its entire length has been added as its own sustained layer.
   const b = tailBudgetMs(WeaponId.SHOTGUN);       // 1280 ms
   const e = fit(b, 2, 410, 420);
   return {
@@ -218,27 +242,54 @@ function shotgunFire(): SoundSpec {
       // The steep slope is not decoration — at 12 dB/octave the midrange that
       // survives keeps the sub-200 Hz share near 25% against a measured 64.6%,
       // and the shot reads as thin however loud it is.
+      //
+      // The corner sits at 520 rather than 620 because the grit layer below now
+      // owns everything above it: left at 620 the two overlap in the 350-600 Hz
+      // band and it measures 2 dB hot against the reference.
       {
-        kind: 'noise', gain: 1.0, colour: 0.88, lp: 620, lpTo: 210, lpQ: 0.8, lpOrder: 4,
+        kind: 'noise', gain: 1.0, colour: 0.88, lp: 520, lpTo: 176, lpQ: 0.8, lpOrder: 4,
         env: { attackMs: e.attackMs, holdMs: e.holdMs, decayMs: e.decayMs, curve: 2.4, hold: 0.86 },
       },
       // The 153 Hz resonance — the barrel. This is the layer that makes it read
-      // as a shotgun rather than as an explosion.
+      // as a shotgun rather than as an explosion. Untouched: it measured right.
       {
         kind: 'body', gain: 0.85, freq: 153, q: 5.5,
         env: { attackMs: 1, holdMs: e.holdMs * 0.7, decayMs: e.decayMs * 1.1, curve: 2.0, hold: 0.72 },
       },
       // Sub weight: 17.9% of the measured energy is under 100 Hz. Without this
       // the shot has no chest and reads as thin on anything with a woofer.
+      //
+      // Adding a whole band of top costs the sub-200 share about 5 points, and
+      // this pays it back — but by HOLDING longer (70 -> 220 ms), not by turning
+      // up. Raising the gain instead was tried and `synth.test.ts` rejected it
+      // correctly: a loud 70 ms sub spike owns the peak the plateau is measured
+      // against, and the measured 410 ms plateau collapsed to 200 ms. Same
+      // energy, spread over the body, keeps both.
       {
         kind: 'sweep', gain: 0.72, freq: 138, freqTo: 46, freqCurve: 2.6, wave: 'sine',
-        env: { attackMs: 1, holdMs: 70, decayMs: Math.min(360, e.decayMs), curve: 2.3 },
+        env: { attackMs: 1, holdMs: 220, decayMs: Math.min(360, e.decayMs), curve: 2.3 },
+      },
+      // THE GRIT — the band that was missing.
+      //
+      // A saturated 12-gauge recorded onto a 1993 sampler is broadband hash for
+      // as long as it is loud, and it is loud for 410 ms. This is that: white
+      // noise across 520 Hz - 2.4 kHz (the master 5512 Hz band limit takes the
+      // rest), on the SAME envelope as the body so it decays with the shot
+      // instead of preceding it. It is what moves spectral flatness from 0.17
+      // to 0.56 against DOOM's 0.57 — from "resonance" to "noise", which is the
+      // measurement that separates a gunshot from a filter sweep.
+      {
+        kind: 'noise', gain: 1.85, colour: 0, hp: 520, lp: 2400,
+        // curve 1.6, not the 2.2 the body uses: a grit layer that falls on the
+        // body's own curve is 20 dB down by 700 ms, and the reference is not —
+        // DSSHOTGN's 2-5 kHz band is still at -28 dBFS in its last frame.
+        env: { attackMs: 1, holdMs: e.holdMs, decayMs: e.decayMs * 1.05, curve: 1.6, hold: 0.55 },
       },
       // The crack: a few milliseconds of bright noise so the shot has an edge
-      // to arrive on. Only 5.3% of the measured energy sits above 2 kHz, so
-      // this is deliberately tiny — audible as attack, never as brightness.
+      // to arrive on. Still small — the grit now carries the sustained top and
+      // this only has to supply the first transient.
       {
-        kind: 'noise', gain: 0.30, colour: 0.1, hp: 1200, lp: 4600,
+        kind: 'noise', gain: 0.22, colour: 0.1, hp: 1200, lp: 4600,
         env: { attackMs: 0.4, holdMs: 4, decayMs: 24, curve: 3.0 },
       },
     ],
@@ -666,9 +717,19 @@ function fleshImpact(headshot: boolean): SoundSpec {
 
 /**
  * DSBAREXP: 1683 ms, 540 ms plateau, 1143 ms tail, 56% of energy below 200 Hz,
- * dominant at 94 Hz, 85% rolloff at 1822 Hz. Long, low and loud, with far more
- * top than a shotgun (13.2% above 2 kHz against the shotgun's 5.3%) because a
- * blast throws debris and a barrel does not.
+ * dominant at 94 Hz. Long, low and loud, with far more top than a shotgun
+ * because a blast throws debris and a barrel does not.
+ *
+ * The debris is not a garnish and it is not a transient. Measured band by band
+ * (`tools/audio-spectrum.ts`), DSBAREXP is *louder* between 1.6 and 4 kHz
+ * (-10.7 / -11.2 dB of total power) than it is between 600 Hz and 1 kHz
+ * (-14.8 dB): the barrel has a rising shelf on top of the boom, and it holds
+ * -18 to -30 dBFS in the 2-5 kHz band for well over a second. The first version
+ * of this spec gave that shelf a 60 ms hold at gain 0.30 and measured 0.0004 of
+ * the power in 2-6 kHz against the reference's 0.132 — boom, no debris.
+ *
+ * What follows is fitted to the reference across 9 bands from 20 Hz to DOOM's
+ * own 5512 Hz Nyquist, 0.68 dB RMS error.
  */
 function explosion(big: boolean): SoundSpec {
   const dur = big ? 1680 : 900;
@@ -679,16 +740,26 @@ function explosion(big: boolean): SoundSpec {
     peak: 1.0, drive: big ? 1.2 : 1.15, bits: 8, bandLimitHz: 5512,
     reverb: big ? 0.34 : 0.2, reverbSize: big ? 2.2 : 1.5,
     layers: [
-      { kind: 'noise', gain: 1.0, colour: 0.9, lp: 900, lpTo: 130, lpQ: 0.8, lpOrder: 4,
+      // The blast front. Corner pulled 900 -> 520 for the same reason as the
+      // shotgun's: the debris bed below now owns the midrange, and leaving both
+      // in it measured 7 dB hot in the 350-600 Hz band.
+      { kind: 'noise', gain: 1.0, colour: 0.9, lp: 520, lpTo: 130, lpQ: 0.8, lpOrder: 4,
         env: { attackMs: 2, holdMs: hold, decayMs: tail, curve: 2.3, hold: 0.8 } },
-      { kind: 'sweep', gain: 1.1, freq: 150, freqTo: 34, freqCurve: 2.2, wave: 'sine',
+      { kind: 'sweep', gain: 1.6, freq: 150, freqTo: 34, freqCurve: 2.2, wave: 'sine',
         env: { attackMs: 3, holdMs: hold * 0.5, decayMs: tail * 0.8, curve: 2.2, hold: 0.85 } },
-      { kind: 'body', gain: 0.7, freq: 94, q: 4,
+      // The 94 Hz measured dominant, raised with the sweep so the added debris
+      // does not cost the blast its sub-200 Hz share.
+      { kind: 'body', gain: 1.5, freq: 94, q: 4,
         env: { attackMs: 2, holdMs: hold * 0.6, decayMs: tail, curve: 2.1, hold: 0.8 } },
-      // Debris: the bright fraction, deliberately delayed so it arrives after
-      // the blast front rather than inside it.
-      { kind: 'noise', gain: 0.30, colour: 0.1, hp: 1600, lp: 5000, delayMs: 30,
-        env: { attackMs: 4, holdMs: 60, decayMs: tail * 0.55, curve: 2.6 } },
+      // DEBRIS — the crackle, and it lasts as long as the blast does.
+      //
+      // Still delayed 30 ms so it arrives after the front rather than inside
+      // it, which is what the reference does too: DSBAREXP's 2-5 kHz band is
+      // at -32 dBFS in its first frame and -18 forty milliseconds later. But it
+      // now runs the full hold and the full tail, because that is what a barrel
+      // full of shrapnel landing on concrete actually sounds like.
+      { kind: 'noise', gain: 2.4, colour: 0, hp: 600, lp: 3000, delayMs: 30,
+        env: { attackMs: 4, holdMs: hold, decayMs: tail, curve: 1.6, hold: 0.6 } },
     ],
   };
 }

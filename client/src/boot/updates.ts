@@ -8,6 +8,11 @@
  * the only way to guarantee that is for the page — which is the only thing that
  * knows whether a match is running — to own activation.
  *
+ * `isPlaying()` is what the page answers with, and `main.ts` answers it with a
+ * SUPERSET of `game.playing`: `openPause()` calls `game.leavePlay()`, so the
+ * flag alone reads false while the pause menu is up and the match behind it is
+ * still live. Everything the rule refuses, this refuses too.
+ *
  * So `self.skipWaiting()` is **banned inside the service worker**. The worker
  * installs, precaches nothing it was not asked for, and then sits in `waiting`
  * indefinitely. It activates when, and only when, this page posts
@@ -19,7 +24,11 @@
  *
  * 1. **Update lands mid-match.** Hold it. Swap at return-to-menu, in the
  *    "Restarting to update" beat, which is under 300 ms warm because every
- *    hashed asset is already in the cache.
+ *    hashed asset is already in the cache. WHO presses the button is
+ *    `promptAllowed()` (the `client_update_prompt` flag): with the prompt on
+ *    the player chooses, with it off `pump()` takes the update itself at that
+ *    same safe moment. The flag decides whether the player is ASKED — never
+ *    whether they are updated.
  * 2. **TWO updates land during one long match.** The browser replaces the
  *    waiting worker when a newer one installs, so any reference this file kept
  *    to the first one is dead. `UpdateController` therefore stores no worker
@@ -71,6 +80,18 @@ export interface UpdateHost {
    * not, an activation is a first install and must never trigger a reload.
    */
   hadController(): boolean;
+  /**
+   * May the shell ASK before taking the update? Defaults to true.
+   *
+   * This is the `client_update_prompt` flag, and it decides who presses the
+   * button, not whether the update lands. With it on, the shell draws the card
+   * and the player chooses. With it off there is nobody to ask, so the
+   * controller takes the update itself at the next safe moment — which is what
+   * makes the flag's stated blast radius ("the prompt only") true. Before this
+   * seam existed, `applyNow()` had exactly one call site — the card's button —
+   * and turning the prompt off silently turned updates off with it.
+   */
+  promptAllowed?(): boolean;
   /** Told when the visible state changes, so the shell can draw the prompt. */
   onState?(state: UpdateSnapshot): void;
 }
@@ -180,16 +201,31 @@ export class UpdateController {
     this.pump();
   }
 
+  /** The `client_update_prompt` flag, defaulting to "yes, ask the player". */
+  private mayPrompt(): boolean {
+    return this.host.promptAllowed?.() ?? true;
+  }
+
   /**
    * Re-evaluate. Call it whenever the answer to `isPlaying()` may have changed
    * — return-to-menu above all — and on a timer.
    *
-   * A forced update applies itself here. An ordinary one only advertises
-   * itself, and waits for `applyNow()`, because a player who has just walked
-   * out of a match into the menu has not agreed to lose the page yet.
+   * Two updates apply themselves here, and both only once the player is out of
+   * a match:
+   *
+   *   - a FORCED one, because the server will not talk to this build;
+   *   - an ordinary one when `promptAllowed()` is false, because there is then
+   *     nobody to ask. That is the case that used to go nowhere: the prompt was
+   *     the only path to `applyNow()`, so with the prompt off the update simply
+   *     never landed, while every comment in the tree claimed it still swapped
+   *     "at the next safe moment". It does now.
+   *
+   * With the prompt on — the shipped default — an ordinary update is still only
+   * ADVERTISED here, because a player who has just walked out of a match into
+   * the menu has not agreed to lose the page yet.
    */
   pump(): void {
-    if (this.pending && this.forced && !this.host.isPlaying()) {
+    if (this.pending && !this.host.isPlaying() && (this.forced || !this.mayPrompt())) {
       this.applyNow();
       return;
     }
@@ -277,12 +313,40 @@ export class UpdateController {
 }
 
 /* ------------------------------------------------------------------------ *
+ * The shell's half of the rule
+ * ------------------------------------------------------------------------ */
+
+/** The screen the update card is allowed to appear on. Nowhere else. */
+export const UPDATE_PROMPT_SCREEN = 'menu';
+
+/**
+ * Should the shell draw the "update ready" card right now?
+ *
+ * Extracted from `main.ts` so the decision is testable without a DOM, because
+ * it is the decision that carries the rule: `'paused'` is NOT a safe screen —
+ * the match behind the pause menu is still live — and neither is `'playing'`.
+ * Only the menu, only when a build is actually waiting, only when the operator
+ * has left the prompt on.
+ *
+ * @param screen the shell's published `#ui[data-screen]` (docs/CONTRACT.md §6).
+ */
+export function shouldPromptUpdate(
+  state: UpdateSnapshot,
+  promptAllowed: boolean,
+  screen: string,
+): boolean {
+  return promptAllowed && state.state === 'ready' && screen === UPDATE_PROMPT_SCREEN;
+}
+
+/* ------------------------------------------------------------------------ *
  * Wiring to the real browser
  * ------------------------------------------------------------------------ */
 
 export interface InstallUpdatesOptions {
   isPlaying(): boolean;
   onState?(state: UpdateSnapshot): void;
+  /** See `UpdateHost.promptAllowed`. Defaults to true. */
+  promptAllowed?(): boolean;
   /** Path to the worker. Root-scoped so it can serve the whole app. */
   scriptUrl?: string;
 }
@@ -311,6 +375,7 @@ export function installUpdates(options: InstallUpdatesOptions): UpdateController
     reload: () => { (globalThis as { location?: Location }).location?.reload(); },
     now: () => Date.now(),
     hadController: () => hadController,
+    promptAllowed: options.promptAllowed,
     onState: options.onState,
   });
 

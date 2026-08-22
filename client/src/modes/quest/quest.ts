@@ -42,6 +42,15 @@
  * Quest is played), and a plain fetch. Adding a level is adding a file in all
  * three paths — there is no list of level ids in this file.
  *
+ * ...and the first of those three is SKIPPED ENTIRELY when no server is
+ * configured. The shipped static build has none (see `net/serverConfig.ts`),
+ * so probing `/api/levels` there is not a fallback, it is two guaranteed 404s
+ * and two red console lines on every campaign launch — the page already knows
+ * the answer before it asks. `levelApiBase()` below is that knowledge, and it
+ * is the same `resolveServerUrl()` the session uses, so a build that DOES have
+ * a server still asks it, and asks it on the server's own origin rather than
+ * on the static host that is only serving the bundle.
+ *
  * COST. `update` walks fixed arrays and re-asserts one chunk; nothing here
  * allocates per frame. Everything expensive is in `enter`, behind the loading
  * status line.
@@ -92,6 +101,7 @@ import {
 } from '@shared/saves';
 
 import { DOOM_FOG, DOOM_SKY_GROUND, DOOM_SKY_HIGH, DOOM_SKY_ZENITH } from '@/engine/material';
+import { apiUrl, resolveServerUrl } from '@/net/serverConfig';
 
 import type { ModeContext, ModeFactory, ModeInstance } from '@/modes/registry';
 import {
@@ -127,6 +137,34 @@ const BUNDLED_EPISODES = import.meta.glob(
   '../../../../content/episodes.json',
   { query: '?raw', import: 'default' },
 ) as Record<string, () => Promise<string>>;
+
+/**
+ * The origin that serves `/api/levels`, or '' when this build has no server.
+ *
+ * Resolved once and cached, because the answer cannot change inside a session
+ * (`resolveServerUrl` reads the query string, localStorage and a meta tag that
+ * the document was served with) and because it is on the path to the campaign
+ * loading. '' is the shipped static build and is the ONLY reason this function
+ * exists: it is what turns "fetch and fall back" into "do not fetch".
+ *
+ * Injectable so a test can exercise both sides without a DOM; `null` restores
+ * the real resolver.
+ */
+let levelApiBaseOverride: string | null = null;
+let levelApiBaseCache: string | null = null;
+
+export function setLevelApiBase(base: string | null): void {
+  levelApiBaseOverride = base;
+  levelApiBaseCache = null;
+}
+
+function levelApiBase(): string {
+  if (levelApiBaseOverride !== null) return levelApiBaseOverride;
+  if (levelApiBaseCache === null) {
+    try { levelApiBaseCache = resolveServerUrl(); } catch { levelApiBaseCache = ''; }
+  }
+  return levelApiBaseCache;
+}
 
 /** `../../../../content/levels/e1m2-coolant.json` -> `e1m2-coolant`. */
 function idFromPath(path: string): string {
@@ -194,20 +232,27 @@ async function buildCatalog(): Promise<QuestCatalog> {
     } catch { /* a broken manifest must not cost the player the campaign */ }
   }
 
-  /* --- enrich from the server, when there is one ------------------------ */
-  try {
-    const res = await fetch('/api/levels', { headers: { accept: 'application/json' } });
-    if (res.ok) {
-      const manifest = asRecord(await res.json());
-      for (const raw of Array.isArray(manifest.levels) ? manifest.levels : []) {
-        const l = asRecord(raw);
-        const id = typeof l.id === 'string' ? l.id : '';
-        if (id.length === 0) continue;
-        if (l.valid !== false) available.add(id);
-        if (typeof l.name === 'string' && l.name.length > 0) names.set(id, l.name);
+  /* --- enrich from the server, when there is one ------------------------ *
+   * `base === ''` is the shipped static build. There is no server, there was
+   * never going to be one, and a request here would be a 404 the player can
+   * see in devtools — so it is not made. The bundled levels are the campaign.
+   * --------------------------------------------------------------------- */
+  const base = levelApiBase();
+  if (base.length > 0) {
+    try {
+      const res = await fetch(apiUrl(base, '/api/levels'), { headers: { accept: 'application/json' } });
+      if (res.ok) {
+        const manifest = asRecord(await res.json());
+        for (const raw of Array.isArray(manifest.levels) ? manifest.levels : []) {
+          const l = asRecord(raw);
+          const id = typeof l.id === 'string' ? l.id : '';
+          if (id.length === 0) continue;
+          if (l.valid !== false) available.add(id);
+          if (typeof l.name === 'string' && l.name.length > 0) names.set(id, l.name);
+        }
       }
-    }
-  } catch { /* offline: the bundled levels are the whole campaign */ }
+    } catch { /* the server is configured but not answering: bundled it is */ }
+  }
 
   /* --- run order --------------------------------------------------------- */
   const order: string[] = [];
@@ -254,18 +299,23 @@ export function episodeOf(catalog: QuestCatalog, id: string): QuestEpisode | nul
 export async function loadQuestLevel(id: string, signal?: AbortSignal): Promise<Level> {
   const problems: string[] = [];
 
-  try {
-    const res = await fetch(`/api/levels/${encodeURIComponent(id)}/data`, { signal });
-    if (res.ok) {
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      if (isLevelBinary(bytes)) return decodeLevel(bytes);
-      problems.push('the server returned something that is not a .dcl');
-    } else {
-      problems.push(`/api/levels returned ${res.status}`);
+  // Same rule as the manifest above: no configured server, no request. On the
+  // static build the bundled source below is not a fallback, it is the path.
+  const base = levelApiBase();
+  if (base.length > 0) {
+    try {
+      const res = await fetch(apiUrl(base, `/api/levels/${encodeURIComponent(id)}/data`), { signal });
+      if (res.ok) {
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        if (isLevelBinary(bytes)) return decodeLevel(bytes);
+        problems.push('the server returned something that is not a .dcl');
+      } else {
+        problems.push(`/api/levels returned ${res.status}`);
+      }
+    } catch (e) {
+      if (signal?.aborted === true) throw e;
+      problems.push('the level server did not answer');
     }
-  } catch (e) {
-    if (signal?.aborted === true) throw e;
-    problems.push('no level server');
   }
 
   for (const path of Object.keys(BUNDLED_LEVELS)) {

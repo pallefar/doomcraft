@@ -16,15 +16,28 @@
  *   3. `versionDocument` — what `/api/version` answers, so a bug report can
  *      name the exact three axes it came from.
  *
- * ## Why the drain is a gate on ROOM CREATION and not on sockets
+ * ## The drain has TWO gates, and it needs both
  *
- * The obvious implementation refuses every new socket on a draining host. That
- * is wrong, and wrong in a way that hurts a real player: your friend is in a
- * match on the old host, you click their invite, and you are turned away from a
- * match that is still running for another nine minutes. So the gate is on
- * *making a new room*, not on *joining a live one*. A draining host takes
- * joiners into rooms it already has and creates nothing new, which is exactly
- * "existing matches run to completion".
+ * 1. `guardCreate` — no new ROOM. Wrapped around the room factory, below.
+ * 2. `admitting` — no new PLAYER, into any room, including the ones already
+ *    running here. `server/src/index.ts` passes it to every `Room` as
+ *    `RoomOptions.admitting`, and `net.ts` turns a HELLO away with
+ *    `UpdateReason.HOST_DRAINING`.
+ *
+ * The second gate used to be missing, and the drain could not converge without
+ * it. Gate creation alone and a busy `deathmatch` key is repopulated as fast as
+ * it empties: arrivals keep the humans count above zero forever, the host never
+ * reaches `DRAINED`, and the only thing that ever ends the rollout is
+ * `forceMigrateMs` — a deadline whose whole cost is `forcedPlayers`, the number
+ * this file exists to keep at zero. "Existing matches run to completion" is a
+ * claim about the players who are already in them, not a licence to admit more.
+ *
+ * It is worth naming what this costs, because it is a real player: your friend
+ * is nine minutes into a match on this host, you click their invite, and you
+ * are turned away from a match that is still alive. What they get is
+ * `HOST_DRAINING` — "your next match starts on the new one" — and a room on a
+ * host that is not about to disappear. A drain that never finishes costs more,
+ * and it costs it to everybody still inside when the deadline fires.
  *
  * ## Why the factory and not the router
  *
@@ -64,7 +77,7 @@ import {
 export enum HostState {
   /** Normal. New rooms are created here. */
   ADMITTING = 0,
-  /** No new rooms. Live matches run to completion. */
+  /** No new rooms and no new players. Live matches run to completion. */
   DRAINING = 1,
   /** Every room is gone. Safe to exit. */
   DRAINED = 2,
@@ -157,7 +170,14 @@ export class HostLifecycle {
   get draining(): boolean { return this.state !== HostState.ADMITTING; }
   get drained(): boolean { return this.state === HostState.DRAINED; }
 
-  /** `NetHost.admitting`: false stops this host taking on anything new. */
+  /**
+   * `NetHost.admitting`: false stops this host taking on anything new —
+   * including a new player into a room it is already running.
+   *
+   * Wired into every `Room` as `RoomOptions.admitting` in
+   * `server/src/index.ts`. Without that wiring the drain cannot converge; see
+   * the header. Read live, so `beginDrain()` takes effect on the next HELLO.
+   */
   get admitting(): boolean { return this.state === HostState.ADMITTING; }
 
   /** True while this host may still bring a new room into existence. */

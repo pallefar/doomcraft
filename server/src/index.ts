@@ -63,6 +63,7 @@ import {
 import { levelLibrary } from './levels.js';
 import {
   FlagService,
+  HostDrainingError,
   HostLifecycle,
   stableIdFor,
   versionDocument,
@@ -459,9 +460,12 @@ let draining = false;
  *     (25 s by default), bounded by the orchestrator's kill grace period. It
  *     refuses the upgrade outright, because in 25 s this process is gone.
  *   - `lifecycle` below is the DEPLOY drain (docs/PATCHING.md). Hours if it
- *     needs them. It refuses to CREATE a room and lets every match already
- *     running finish, so a deploy drops nobody. A player can still join a
- *     friend's live match here; only new rooms are refused.
+ *     needs them. It refuses to CREATE a room AND refuses new players into the
+ *     rooms it already has, while letting every match already running finish —
+ *     so a deploy drops nobody and the host empties as those matches end.
+ *     Refusing arrivals is what makes the drain converge: gate creation alone
+ *     and a busy key is repopulated as fast as it empties, leaving the
+ *     30-minute deadline — measured in dropped players — as the only exit.
  *
  * A deploy uses the second and only then, once the host reports `drained`,
  * the first. That ordering is what makes a rollout free of dropped players.
@@ -534,7 +538,21 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
        * transmitted in `S2C.SESSION_CONFIG` — the client never decides. */
       contentVersion: CONTENT_VERSION,
       contentHash,
-      admitting: () => !draining,
+      /*
+       * BOTH drains stop new players, and the deploy one has to or it never
+       * converges.
+       *
+       * Gating only room CREATION leaves every existing room open, so arrivals
+       * keep repopulating a host that is trying to leave and the only thing
+       * that ever ends the drain is the 30-minute deadline — which is the one
+       * outcome the whole design exists to avoid, because that deadline is
+       * measured in dropped players. A draining host therefore refuses new
+       * HELLOs into the rooms it already has as well, with
+       * `UpdateReason.HOST_DRAINING`, which the client reads as "your next
+       * match starts on the new host". Everybody already inside is untouched:
+       * their matches run to completion and the host drains as they end.
+       */
+      admitting: () => !draining && lifecycle.admitting,
       resolveFlags: (conn) => flags.bitsFor(stableIdFor(conn)),
     });
     room.start();
@@ -583,6 +601,22 @@ function adminAuthorised(req: IncomingMessage): boolean {
   let diff = 0;
   for (let i = 0; i < ADMIN_TOKEN.length; i++) diff |= supplied.charCodeAt(i) ^ ADMIN_TOKEN.charCodeAt(i);
   return diff === 0;
+}
+
+/**
+ * "Is this host taking anybody new?" — the ONE question every matchmaking
+ * surface has to answer, and the one they used to get wrong.
+ *
+ * `/health`, `/api/rooms`, `/api/quickplay` and `/api/rooms/private` all used to
+ * read the bare `draining` flag, which is the SHUTDOWN drain only. A host that
+ * was deploy-draining therefore answered 503 on `/health` while still listing
+ * its rooms and still minting tickets pointing at itself — the directory
+ * actively contradicting the drain and sending players at a host trying to go
+ * away. Both drains mean the same thing to a client, so they are asked as one
+ * question here and nowhere else.
+ */
+function notAdmitting(): boolean {
+  return draining || lifecycle.draining;
 }
 
 /** Totals across every live room, for `/health` and the status page. */
@@ -767,7 +801,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     // the process is about to be gone, the deploy one because it must stop
     // being handed new rooms. Both are a 503 to a load balancer and neither
     // touches the matches already inside.
-    const out = draining || lifecycle.draining;
+    const out = notAdmitting();
     sendJson(res, out ? 503 : 200, {
       ok: !out,
       draining,
@@ -850,7 +884,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
 
   if (path === '/api/status') {
     sendJson(res, 200, {
-      draining,
+      // The operator's view names both drains separately, because during a
+      // rollout "which one am I in" is the question being asked.
+      draining: notAdmitting(),
+      shutdown: draining,
+      deploy: lifecycle.report(),
       fleet: fleetStatus(),
       directory: directory.status(),
       rooms: router.status(),
@@ -872,19 +910,37 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (path === '/api/rooms' && (req.method === 'GET' || req.method === 'HEAD')) {
     const modeParam = (url.searchParams.get('mode') ?? '').toLowerCase();
     const modeIndex = MODE_KEYS.indexOf(modeParam);
+    /*
+     * A draining host lists NOTHING, and says so.
+     *
+     * Not merely a flag next to a full list: every room on this host now
+     * refuses new HELLOs, so advertising one as `open` would be a lie the
+     * client can only discover by opening a socket and being turned away. The
+     * operator's view of what is still running is `/api/status` and
+     * `/health`.deploy, which are the surfaces that want it.
+     */
+    const out = notAdmitting();
     sendJson(res, 200, {
-      draining,
-      rooms: directory.list(modeIndex >= 0 ? (modeIndex as ModeId) : undefined),
+      draining: out,
+      rooms: out ? [] : directory.list(modeIndex >= 0 ? (modeIndex as ModeId) : undefined),
     }, cors);
     return true;
   }
 
   /** "Where do I play?" — one round trip, never a wait. */
   if (path === '/api/quickplay') {
+    // No ticket may ever point at a host that is going away — that is
+    // matchmaking undoing the drain. 503, with the same body shape, so the
+    // client's `parseTicket` reads null and falls back exactly as it does for
+    // an unreachable server.
+    if (notAdmitting()) {
+      sendJson(res, 503, { draining: true, ticket: null, error: 'draining' }, cors);
+      return true;
+    }
     const code = url.searchParams.get('code');
     try {
       const ticket = directory.quickplay(joinRequestFromQuery(url.searchParams), code);
-      sendJson(res, 200, { draining, ticket }, cors);
+      sendJson(res, 200, { draining: false, ticket }, cors);
     } catch (err) {
       if (err instanceof UnknownCodeError) sendJson(res, 404, { error: 'no such room code' }, cors);
       else throw err;
@@ -894,7 +950,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
 
   /** Mint a private room. Nothing is built until somebody actually joins it. */
   if (path === '/api/rooms/private' && req.method === 'POST') {
-    if (draining) { sendJson(res, 503, { error: 'draining' }, cors); return true; }
+    // A code minted here names a room that does not exist yet, and a draining
+    // host creates none — so the code would be dead on arrival.
+    if (notAdmitting()) { sendJson(res, 503, { error: 'draining' }, cors); return true; }
     const body = await readBody(req) as Record<string, unknown>;
     const params = new URLSearchParams();
     for (const k of ['mode', 'level', 'world', 'skill', 'seed']) {
@@ -1132,8 +1190,12 @@ httpServer.on('upgrade', (req, socket, head) => {
   let routed;
   try {
     routed = router.route(joinRequest, baseKey);
-  } catch {
-    refuseUpgrade(socket, 503, 'No Room Available');
+  } catch (err) {
+    // Two different 503s. "Draining" is a deploy and the client should look for
+    // another host; "No Room Available" is this host being full, and retrying
+    // it later is reasonable. Same status, different reason, and the reason is
+    // the only thing a human debugging a rollout has to go on.
+    refuseUpgrade(socket, 503, err instanceof HostDrainingError ? 'Draining' : 'No Room Available');
     return;
   }
   const { key, room } = routed;

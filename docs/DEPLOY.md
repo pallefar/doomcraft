@@ -85,13 +85,21 @@ Patching uses **three independent version axes**: `PROTOCOL_VERSION` gates a con
 supported **window** (`checkProtocol` in `shared/src/version.ts`; strict equality made every deploy a
 fleet-wide logout), `CONTENT_VERSION` is **pinned per room** at construction so no in-flight match
 has its balance changed underneath it, and `BUILD_ID` gates nothing and exists for bug reports.
-**Rooms are the deploy unit** — `POST /api/admin/drain` stops a host creating new rooms while every
-match already on it runs to completion, and `/health` turns 503 so the load balancer stops sending
-players by itself. Rollback is a routing change.
+**Rooms are the deploy unit** — `POST /api/admin/drain` stops a host taking on anything new (a new
+room, and a new player into a room it already has) while every match already on it runs to
+completion, so the host empties on the match clock instead of on the 30-minute deadline. `/health`
+turns 503, and `/api/rooms` and `/api/quickplay` report the same drain and hand out nothing, so
+neither the load balancer nor the matchmaker keeps sending players at a host that is leaving.
+Rollback is a routing change.
 
 The static client's half now ships too: **`dist/sw.js`** (from `client/public/sw.js`), whose one
-rule is that it **never activates while `game.playing === true`**. `skipWaiting()` is banned inside
-the worker; the page posts `DC_SKIP_WAITING` at the next return-to-menu.
+rule is that it **never activates while the player is in a match**. `skipWaiting()` is banned inside
+the worker; the page posts `DC_SKIP_WAITING` at the next return-to-menu. The page's predicate is
+`game.playing || screen === 'paused'`, because `openPause()` calls `leavePlay()` and the match behind
+the pause menu is still running. Who presses the button is the `client_update_prompt` flag, shipped
+**on**: on, the menu draws the "Update ready" card and the player chooses; off, `UpdateController`
+applies the waiting build itself at the next safe moment. Either way the update lands — the flag
+decides whether the player is asked, never whether they are updated.
 
 Two things about the static host in particular:
 

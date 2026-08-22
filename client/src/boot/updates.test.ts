@@ -21,11 +21,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { UpdateReason } from '@shared/version';
+import { FLAGS, defaultFlagBits, flagOn } from '@shared/flags';
 
 import {
   SKIP_WAITING_MESSAGE,
   UPDATE_CHECK_INTERVAL_MS,
   UpdateController,
+  shouldPromptUpdate,
   type RegistrationLike,
   type UpdateSnapshot,
   type WorkerLike,
@@ -59,6 +61,8 @@ interface Rig {
   controller: UpdateController;
   reg: FakeRegistration;
   playing: { value: boolean };
+  /** The `client_update_prompt` flag, as the shell would resolve it. */
+  prompt: { allowed: boolean };
   reloads: number[];
   states: UpdateSnapshot[];
   now: { ms: number };
@@ -66,9 +70,10 @@ interface Rig {
   deploy(label: string): FakeWorker;
 }
 
-function rig(opts: { hadController?: boolean } = {}): Rig {
+function rig(opts: { hadController?: boolean; promptAllowed?: boolean } = {}): Rig {
   const reg = new FakeRegistration();
   const playing = { value: false };
+  const prompt = { allowed: opts.promptAllowed ?? true };
   const reloads: number[] = [];
   const states: UpdateSnapshot[] = [];
   const now = { ms: 0 };
@@ -78,6 +83,7 @@ function rig(opts: { hadController?: boolean } = {}): Rig {
     reload: () => { reloads.push(now.ms); },
     now: () => now.ms,
     hadController: () => opts.hadController ?? true,
+    promptAllowed: () => prompt.allowed,
     onState: (s) => { states.push(s); },
   });
   controller.attach(reg);
@@ -91,7 +97,7 @@ function rig(opts: { hadController?: boolean } = {}): Rig {
     return w;
   };
 
-  return { controller, reg, playing, reloads, states, now, deploy };
+  return { controller, reg, playing, prompt, reloads, states, now, deploy };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -340,6 +346,121 @@ describe('edges', () => {
     r.reg.waiting = new FakeWorker('build-2');
     await r.controller.check(true);
     expect(r.controller.snapshot.state).toBe('ready');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * An ordinary update actually lands
+ *
+ * The defect these lock down: `applyNow()` had exactly ONE call site — the
+ * card's "Restart" button — so everything about whether an update ever landed
+ * hung on whether that card rendered. Two ways that went wrong:
+ *
+ *   1. the card is behind `client_update_prompt`, and with the flag off there
+ *      was no path to `applyNow()` at all, while `main.ts`, `updates.ts` and
+ *      `flags.ts` all claimed the swap still happened "at the next safe
+ *      moment". It does now, and it is asserted here rather than asserted in
+ *      a comment;
+ *   2. the shipped default has to actually be ON, or every player is in case 1.
+ *
+ * `defaultFlagBits()` is the real resolver the client uses when it has no
+ * connection and no `/api/flags` answer — which is precisely the shipped static
+ * deploy — so these read the shipped value rather than restating it.
+ * ------------------------------------------------------------------------ */
+
+describe('the update card, with shipped defaults', () => {
+  const shipped = flagOn(defaultFlagBits(), 'client_update_prompt');
+
+  it('ships the prompt ON, so the player is asked rather than surprised', () => {
+    // A `control` flag over behaviour that already exists: turning the SWITCH
+    // off is the change, so its default is on. If this ever flips to false,
+    // every update becomes an unannounced reload.
+    expect(shipped).toBe(true);
+    expect(FLAGS.client_update_prompt.kind).toBe('control');
+  });
+
+  it('appears at the menu when a build is waiting', () => {
+    const r = rig();
+    r.deploy('build-2');
+    expect(r.controller.snapshot.state).toBe('ready');
+    expect(shouldPromptUpdate(r.controller.snapshot, shipped, 'menu')).toBe(true);
+  });
+
+  it('never appears while the player is in a match — playing or paused', () => {
+    const r = rig();
+    r.playing.value = true;
+    r.deploy('build-2');
+    // Held, not ready: the card has nothing to offer during a match.
+    expect(r.controller.snapshot.state).toBe('held');
+    expect(shouldPromptUpdate(r.controller.snapshot, shipped, 'playing')).toBe(false);
+
+    // And the screen alone is enough to refuse it. `openPause()` calls
+    // `game.leavePlay()`, so a paused player can read as "not playing" while
+    // their match is very much alive behind the menu.
+    r.playing.value = false;
+    r.controller.pump();
+    expect(r.controller.snapshot.state).toBe('ready');
+    expect(shouldPromptUpdate(r.controller.snapshot, shipped, 'paused')).toBe(false);
+    expect(shouldPromptUpdate(r.controller.snapshot, shipped, 'playing')).toBe(false);
+    expect(shouldPromptUpdate(r.controller.snapshot, shipped, 'boot')).toBe(false);
+  });
+
+  it('does not swap on its own while the prompt is on', () => {
+    // The player presses the button. Nothing else may take the page from them.
+    const r = rig();
+    const w = r.deploy('build-2');
+    r.controller.pump();
+    expect(w.skipped).toBe(false);
+    expect(r.controller.swaps).toBe(0);
+  });
+});
+
+describe('with the prompt turned off, the update still lands', () => {
+  it('applies at the next safe moment instead of waiting for a button', () => {
+    const r = rig({ promptAllowed: false });
+    r.playing.value = true;
+    const w = r.deploy('build-2');
+
+    // THE RULE still comes first: nothing moves during the match.
+    expect(w.skipped).toBe(false);
+    expect(r.controller.swaps).toBe(0);
+    expect(r.controller.snapshot.state).toBe('held');
+
+    // Return to menu. Nobody to ask, so the controller takes it itself.
+    r.playing.value = false;
+    r.controller.pump();
+    expect(w.skipped).toBe(true);
+    expect(r.controller.swaps).toBe(1);
+    expect(r.controller.snapshot.state).toBe('swapping');
+
+    // And no card was ever offered for it.
+    expect(shouldPromptUpdate(r.controller.snapshot, false, 'menu')).toBe(false);
+  });
+
+  it('still refuses to swap while playing, however often it is pumped', () => {
+    const r = rig({ promptAllowed: false });
+    r.playing.value = true;
+    const w = r.deploy('build-2');
+    for (let i = 0; i < 10; i++) { r.now.ms += 1000; r.controller.pump(); }
+    expect(w.skipped).toBe(false);
+    expect(r.controller.swaps).toBe(0);
+    expect(r.controller.reloads).toBe(0);
+  });
+
+  it('takes the NEWEST build when the flag is flipped mid-match', () => {
+    // An operator turning the prompt off during a rollout must not strand a
+    // tab on a stale worker reference — the same case the button path has.
+    const r = rig();
+    r.playing.value = true;
+    const first = r.deploy('build-2');
+    r.prompt.allowed = false;
+    const second = r.deploy('build-3');
+
+    r.playing.value = false;
+    r.controller.pump();
+    expect(first.skipped).toBe(false);
+    expect(second.skipped).toBe(true);
+    expect(r.controller.swaps).toBe(1);
   });
 });
 

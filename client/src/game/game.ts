@@ -67,6 +67,9 @@ import {
   pushPlayerTarget, pushEntityTarget,
   type FireContext, type HitTargets, type WeaponFx,
 } from '@/game/weapons';
+import {
+  EditAudioGate, createEditAudioPick,
+} from '@/game/editAudio';
 
 import { NetClient, type NetStatus } from '@/net/client';
 import { ThirdPersonRenderer, loadCharacterAtlas } from '@/characters/thirdPerson';
@@ -462,6 +465,17 @@ export class Game {
   private meshedSpawn = false;
   private readonly dirtyMinimap: number[] = [];
 
+  /**
+   * Which of the server's voxel changes get a sound — see `editAudio.ts`.
+   *
+   * Before this existed, `onBlocks` applied every block change in the match and
+   * played nothing: other players' digging, explosion craters and every
+   * server-side edit were silent, and the only world-edit sounds in the game
+   * came from the local player's own click in `stepEdits`.
+   */
+  private readonly editAudio = new EditAudioGate();
+  private readonly editAudioPick = createEditAudioPick();
+
   constructor(opts: GameOptions) {
     this.events = opts.events ?? {};
     this.settings = opts.settings;
@@ -657,7 +671,7 @@ export class Game {
       events: {
         onStatus: (s, d) => { this.onNetStatus(s, d); },
         onChunk: (cx, cz, voxels, received, total) => this.onChunk(cx, cz, voxels, received, total),
-        onBlocks: (n, x, y, z, id) => this.onBlocks(n, x, y, z, id),
+        onBlocks: (n, x, y, z, id, prev) => this.onBlocks(n, x, y, z, id, prev),
         onDamage: (e) => this.onDamage(e),
         onKill: (e) => this.onKill(e),
         onChat: (m) => this.onChat(m),
@@ -781,6 +795,9 @@ export class Game {
     this.net.world.clear();
     this.chunks.clear();
     this.hud.clearFeed();
+    // Voxel coordinates from the old world mean nothing in the new one, and a
+    // stale self-edit record would silence the first dig at the same spot.
+    this.editAudio.reset();
   }
 
   /* -------------------------------------------------------------------- *
@@ -1116,7 +1133,18 @@ export class Game {
     );
   }
 
-  private onBlocks(count: number, xs: Int16Array, ys: Uint8Array, zs: Int16Array, ids: Uint8Array): void {
+  /**
+   * The server's voxel changes: mesh them, repaint the minimap, and — the part
+   * that did not exist — make them audible.
+   *
+   * `EditAudioGate` owns the rules (nearest of each kind, one break and one
+   * place per message at most, never inside 60 ms, never our own echo); this
+   * only has to hand it the deltas and play what comes back.
+   */
+  private onBlocks(
+    count: number, xs: Int16Array, ys: Uint8Array, zs: Int16Array, ids: Uint8Array,
+    prev: Uint8Array,
+  ): void {
     const dirty = this.dirtyMinimap;
     dirty.length = 0;
     for (let i = 0; i < count; i++) {
@@ -1131,6 +1159,23 @@ export class Game {
       const cz = chunkKeyCZ(key);
       const v = this.net.world.chunkAt(cx, cz);
       if (v !== undefined) this.hud.updateMinimapChunk(cx, cz, v);
+    }
+
+    const ear = this.net.renderPos;
+    const pick = this.editAudioPick;
+    if (!this.editAudio.pick(
+      count, xs, ys, zs, ids, prev, ear[0], ear[1], ear[2], performance.now(), pick,
+    )) return;
+    if (pick.breakIndex >= 0) {
+      const i = pick.breakIndex;
+      // The material is the block that WAS there. `ids[i]` is AIR, and
+      // `materialOf(AIR)` is dirt, so passing it would make every remote dig —
+      // through stone, through glass, through metal — sound like a flowerbed.
+      this.sfx.blockBreak(xs[i] + 0.5, ys[i] + 0.5, zs[i] + 0.5, prev[i]);
+    }
+    if (pick.placeIndex >= 0) {
+      const i = pick.placeIndex;
+      this.sfx.blockPlace(xs[i] + 0.5, ys[i] + 0.5, zs[i] + 0.5);
     }
   }
 
@@ -1649,6 +1694,7 @@ export class Game {
         this.camera.addShake(0.02, 60, 22);
         this.viewmodel.fire();
         this.sfx.blockBreak(cx, cy, cz, id);
+        this.editAudio.noteSelf(this.hit.x, this.hit.y, this.hit.z, performance.now());
       }
       return;
     }
@@ -1666,6 +1712,7 @@ export class Game {
       this.fx.impact(px + 0.5, py + 0.5, pz + 0.5, 0, 1, 0, minimapColor(block), 0.4);
       this.viewmodel.fire();
       this.sfx.blockPlace(px + 0.5, py + 0.5, pz + 0.5);
+      this.editAudio.noteSelf(px, py, pz, performance.now());
     }
   }
 

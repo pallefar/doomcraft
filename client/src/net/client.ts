@@ -32,6 +32,7 @@ import {
   HEARTBEAT_MS,
   INPUT_SEND_MS,
   INTERP_DELAY_MS,
+  MAX_BLOCK_DELTAS_PER_MESSAGE,
   MAX_ENTITIES,
   MAX_EXTRAPOLATE_MS,
   MAX_PLAYERS,
@@ -591,7 +592,20 @@ export interface NetClientEvents {
   /** A chunk arrived. `voxels` is owned by ClientWorld — do not keep a mutable copy. */
   onChunk?(cx: number, cz: number, voxels: Uint8Array, received: number, total: number): void;
   /** Voxels changed. Coordinates are world space; remesh the touched chunks. */
-  onBlocks?(count: number, x: Int16Array, y: Uint8Array, z: Int16Array, id: Uint8Array): void;
+  /**
+   * The server's authoritative voxel changes: every other player's dig, every
+   * explosion crater, every server-side edit — and the echo of your own edits.
+   *
+   * `prev[i]` is the block that stood at that voxel immediately BEFORE this
+   * message was applied, which the consumer cannot recover for itself (the
+   * world has already been written by the time this fires) and which a break
+   * needs, because `id[i]` is AIR and AIR has no material. Where the owning
+   * chunk is still in the inflate worker the previous value is unknowable and
+   * `prev[i] === id[i]` says so.
+   */
+  onBlocks?(
+    count: number, x: Int16Array, y: Uint8Array, z: Int16Array, id: Uint8Array, prev: Uint8Array,
+  ): void;
   onDamage?(e: DamageEvent): void;
   onKill?(e: KillEvent): void;
   /**
@@ -777,8 +791,15 @@ export const MAX_PREDICT_STEPS = 4;
  *
  * So the BODY still steps instantly — the physics is untouched, and it has to
  * be, because the server runs the same kernel — and the EYE is left behind and
- * catches up over ~150 ms. `PlayerController` (unused) has always done this;
- * these two constants are its `STEP_SMOOTH_RATE` and a cap of one step.
+ * catches up over ~150 ms. These two constants are that rate and a cap of one
+ * step.
+ *
+ * This is the ONLY `STEP_SMOOTH_RATE` in the tree. There used to be a second
+ * one, in `client/src/player/controller.ts`, belonging to a whole parallel
+ * movement implementation that nothing imported; "movement feels wrong" sent
+ * people to that file for months. It is deleted. Its contract now lives in
+ * `server/src/movement.test.ts`, against `moveStep` — the kernel this class
+ * actually runs.
  * ----------------------------------------------------------------------- */
 
 /** 1/s the eye catches up after an auto step-up. ~0.15 s for a full block. */
@@ -906,6 +927,8 @@ export class NetClient {
   private readonly chat = createChatMessage();
   private readonly pong = createPongMessage();
   private readonly deltas = new BlockDeltaBuffer();
+  /** Parallel to `deltas`: what stood at each voxel before the message landed. */
+  private readonly deltaPrev = new Uint8Array(MAX_BLOCK_DELTAS_PER_MESSAGE);
   private readonly sampleOut = new Float64Array(8);
 
   /* --- prediction history --- */
@@ -1612,24 +1635,29 @@ export class NetClient {
 
   private onBlockDelta(r: PacketReader): void {
     const d = decodeBlockDeltas(r, this.deltas);
+    const prev = this.deltaPrev;
     for (let i = 0; i < d.count; i++) {
       const pending = this.pendingChunks.size === 0
         ? undefined
         : this.pendingChunks.get(chunkKey(blockToChunk(d.x[i]), blockToChunk(d.z[i])));
       if (pending !== undefined) {
         // The chunk is still in the inflate worker. Hold the edit; it is baked
-        // into the voxels in `onChunkDecoded`.
+        // into the voxels in `onChunkDecoded`. Nothing can be said about what
+        // was there, so say exactly that.
+        prev[i] = d.id[i];
         pending.x.push(d.x[i]);
         pending.y.push(d.y[i]);
         pending.z.push(d.z[i]);
         pending.id.push(d.id[i]);
         continue;
       }
+      // Read BEFORE the write: this is the only moment the old block exists.
+      prev[i] = this.world.getBlock(d.x[i], d.y[i], d.z[i]);
       this.world.setBlock(d.x[i], d.y[i], d.z[i], d.id[i]);
     }
     this.ackedEditSeq = d.ackEditSeq;
     this.reconcileEdits(d);
-    if (d.count > 0) this.events.onBlocks?.(d.count, d.x, d.y, d.z, d.id);
+    if (d.count > 0) this.events.onBlocks?.(d.count, d.x, d.y, d.z, d.id, prev);
   }
 
   /**

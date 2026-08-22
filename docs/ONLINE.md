@@ -102,12 +102,14 @@ two worlds. Killing the server mid-match puts both browsers back in a live local
 seconds, `status=playing`, with terrain.
 
 > **Interaction with the deploy drain** (`docs/PATCHING.md`): `/health` reports `ok:false` for the
-> shutdown drain *and* for the deploy drain, and `probeServer` refuses both. That is deliberately
-> conservative — during a deploy drain the host would still admit a player into a match that is
-> already running, and this client will play locally instead. On a fleet the load balancer routes them
-> to a fresh host and nobody notices; on a single box it means the drain window is offline-only. The
-> alternative is a client that connects and is turned away at HELLO with `HOST_DRAINING`, which is a
-> worse version of the same outcome.
+> shutdown drain *and* for the deploy drain, and `probeServer` refuses both — as do `/api/rooms`
+> (`draining:true`, empty list) and `/api/quickplay` (`503`, no ticket). A draining host admits nobody
+> new into any room, including the ones it is already running, so the client refusing it up front and
+> the host refusing it at HELLO now agree: this client plays locally. On a fleet the load balancer
+> routes them to a fresh host and nobody notices; on a single box it means the drain window is
+> offline-only. A client that ignores all three and connects anyway is closed with `4004` and
+> `HOST_DRAINING` — "your next match starts on the new one" — rather than being seated in a match on a
+> host that is leaving.
 
 ---
 
@@ -145,9 +147,9 @@ never queue anybody.
 | Endpoint | Answer |
 |---|---|
 | `GET /health` | `200 {ok, draining:false, fleet:{rooms,humans,players,connections}}`, or **`503`** with `draining:true`. Point **readiness** here. Do **not** point liveness here: a draining host is unhealthy on purpose. |
-| `GET /api/rooms[?mode=]` | Public rooms, busiest first. Full rooms are listed with `open:false` rather than hidden. Private rooms are never listed. |
-| `GET /api/quickplay?mode=…[&code=…]` | `{ws, key, humans, fresh}` — the socket URL and how many people are already in it, so the UI can say "3 playing" instead of "searching…". An unknown code is a `404`, never a quiet fall-through to a public room. |
-| `POST /api/rooms/private` | `{code, ticket}`. **Nothing is constructed here**: a room is 169 chunks and a 20 Hz timer, and a player who copies a code and never uses it must not cost a core. The router builds it on the first socket that arrives with the code. |
+| `GET /api/rooms[?mode=]` | Public rooms, busiest first. Full rooms are listed with `open:false` rather than hidden. Private rooms are never listed. While **either** drain is running: `{draining:true, rooms:[]}` — nothing here is joinable, so nothing is advertised. |
+| `GET /api/quickplay?mode=…[&code=…]` | `{ws, key, humans, fresh}` — the socket URL and how many people are already in it, so the UI can say "3 playing" instead of "searching…". An unknown code is a `404`, never a quiet fall-through to a public room. While either drain is running: **`503`** `{draining:true, ticket:null}`, because a ticket pointing at a host that is leaving is matchmaking undoing the drain. |
+| `POST /api/rooms/private` | `{code, ticket}`. **Nothing is constructed here**: a room is 169 chunks and a 20 Hz timer, and a player who copies a code and never uses it must not cost a core. The router builds it on the first socket that arrives with the code. `503` while draining: the code would name a room this host will never build. |
 | `GET /api/scoreboard?room=<key>` | That room's scoreboard; without `room`, the busiest one. |
 | `GET /api/status` | Every room, plus the directory's own counters. |
 
@@ -193,7 +195,11 @@ PID 1 is `node`, not a shell, so `SIGTERM` reaches the drain handler directly.
 
 `docs/INFRASTRUCTURE.md` asks for four things. All four, in single-process form:
 
-1. **Stop admitting new players.** `draining` gates the `/ws` upgrade; a late joiner gets `503`.
+1. **Stop admitting new players.** `draining` gates the `/ws` upgrade; a late joiner gets `503`. The
+   DEPLOY drain (`POST /api/admin/drain`, `docs/PATCHING.md`) is gentler and just as total: the
+   upgrade succeeds, and the HELLO is answered with `UpdateReason.HOST_DRAINING` and a `4004` close,
+   including for a room that is already running here. Both are what make the drain converge — a host
+   that keeps admitting arrivals never empties.
 2. **Tell the load balancer.** `/health` flips to `503` — and the HTTP listener deliberately **stays
    up for the whole drain** so it can. Closing it, which is the obvious thing to write, makes the
    probe fail to *connect* rather than answer, and some balancers read that as "retry later". The

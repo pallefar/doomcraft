@@ -19,6 +19,9 @@
  *      upgrade rather than dropped into a public room.
  *   4. SIGTERM drains: health flips, new players are refused, the people
  *      already playing are not thrown out.
+ *   5. The DEPLOY drain (`POST /api/admin/drain`) refuses a new player into a
+ *      room that already exists, and the directory stops advertising the host —
+ *      the two halves of "the drain actually converges".
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -46,6 +49,7 @@ import {
   createModeSelectMessage,
   encodeModeSelect,
 } from '@doomcraft/shared/modes';
+import { CLOSE_HOST_DRAINING } from '@doomcraft/shared/version';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const serverEntry = join(here, 'index.ts');
@@ -418,5 +422,119 @@ describe('SIGTERM drains instead of dropping the match', () => {
     await until(() => playing.closeCode !== 0, 20_000, 'the socket to be closed');
     // 1001 "going away" — the code a client reads as "reconnect, do not panic".
     expect(playing.closeCode).toBe(1001);
+  }, 90_000);
+});
+
+/* ------------------------------------------------------------------------ *
+ * The DEPLOY drain, over real sockets
+ *
+ * Different from the SIGTERM drain above, and the difference is the whole
+ * point: this one refuses nobody at the upgrade and kills no process. It has to
+ * be measured through a socket that actually speaks HELLO, because the refusal
+ * happens after the upgrade — the client is told `HOST_DRAINING` and closed
+ * with 4004 rather than being met with a TCP reset it cannot explain.
+ *
+ * Three claims, and each one bit the first time a deploy happened under load:
+ *
+ *   1. a draining host refuses a new player into an EXISTING room, or the drain
+ *      never converges and the 30-minute deadline is the only exit;
+ *   2. `/api/rooms` and `/api/quickplay` say so, instead of cheerfully sending
+ *      more players at a host that is trying to leave;
+ *   3. the match already running is untouched, which is the reason for all of
+ *      the above being this careful rather than just closing the listener.
+ * ------------------------------------------------------------------------ */
+
+const DRAIN_ADMIN_TOKEN = 'test-token-not-a-secret';
+const drainAdmin = { Authorization: `Bearer ${DRAIN_ADMIN_TOKEN}` };
+
+describe('POST /api/admin/drain converges instead of waiting out the deadline', () => {
+  it('refuses a new player into a room it is already running', async () => {
+    const srv = await boot({ DOOMCRAFT_ADMIN_TOKEN: DRAIN_ADMIN_TOKEN });
+
+    const resident = new TestClient(`${srv.wsBase}/ws?mode=deathmatch`, 'Resident');
+    await until(() => resident.gotWelcome, 20_000, 'the resident to be welcomed');
+    const before = resident.snapshots;
+
+    const drain = await fetch(`${srv.origin}/api/admin/drain`, { method: 'POST', headers: drainAdmin });
+    expect(drain.status).toBe(200);
+    await drain.text();
+
+    // The host is draining and still has exactly the one match it started with.
+    const health = await json(`${srv.origin}/health`);
+    const deploy = health.deploy as Record<string, unknown>;
+    expect(health.ok).toBe(false);
+    expect(deploy.state).toBe('draining');
+    expect(deploy.humans).toBe(1);
+
+    /* THE CLAIM. `deathmatch` exists, is ticking, and has a seat free — the old
+     * code let this client straight in and gave it a player id. */
+    const late = new TestClient(`${srv.wsBase}/ws?mode=deathmatch`, 'TooLate');
+    await until(() => late.closeCode !== 0, 15_000, 'the late joiner to be turned away');
+    expect(late.gotWelcome).toBe(false);
+    expect(late.playerId).toBe(0);
+    // Not a generic error: "your next match starts on the new host".
+    expect(late.closeCode).toBe(CLOSE_HOST_DRAINING);
+
+    // And the host did not gain a player from the attempt, so the drain still
+    // ends when this one match ends.
+    const after = await json(`${srv.origin}/health`);
+    expect((after.deploy as Record<string, unknown>).humans).toBe(1);
+
+    // The resident is untouched: still connected, still being simulated.
+    expect(resident.open).toBe(true);
+    await until(() => resident.snapshots > before + 3, 10_000, 'the match to keep ticking');
+    expect(resident.closeCode).toBe(0);
+
+    resident.close();
+  }, 90_000);
+
+  it('stops advertising itself in the directory the moment it drains', async () => {
+    const srv = await boot({ DOOMCRAFT_ADMIN_TOKEN: DRAIN_ADMIN_TOKEN });
+
+    const resident = new TestClient(`${srv.wsBase}/ws?mode=deathmatch`, 'Resident');
+    await until(() => resident.gotWelcome, 20_000, 'the resident to be welcomed');
+
+    // Before: a room to list and a ticket that points at it.
+    const roomsBefore = await json(`${srv.origin}/api/rooms`);
+    expect(roomsBefore.draining).toBe(false);
+    expect((roomsBefore.rooms as unknown[]).length).toBeGreaterThan(0);
+    const quickBefore = await fetch(`${srv.origin}/api/quickplay?mode=deathmatch`);
+    expect(quickBefore.status).toBe(200);
+    expect((await quickBefore.json() as Record<string, unknown>).ticket).toBeTruthy();
+
+    await (await fetch(`${srv.origin}/api/admin/drain`, { method: 'POST', headers: drainAdmin })).text();
+
+    /* After: both endpoints report the LIFECYCLE state, not the shutdown flag.
+     * They used to answer `draining:false` and hand out a ticket at a host
+     * whose own `/health` was already 503 — matchmaking undoing the drain. */
+    const roomsAfter = await json(`${srv.origin}/api/rooms`);
+    expect(roomsAfter.draining).toBe(true);
+    // Nothing is listed as joinable, because nothing here is joinable.
+    expect(roomsAfter.rooms).toEqual([]);
+
+    const quickAfter = await fetch(`${srv.origin}/api/quickplay?mode=deathmatch`);
+    expect(quickAfter.status).toBe(503);
+    const quickBody = await quickAfter.json() as Record<string, unknown>;
+    expect(quickBody.draining).toBe(true);
+    expect(quickBody.ticket).toBeNull();
+
+    // A private code would name a room this host will never build, so it is
+    // refused too rather than handed out dead.
+    const priv = await fetch(`${srv.origin}/api/rooms/private`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'deathmatch' }),
+    });
+    expect(priv.status).toBe(503);
+    await priv.text();
+
+    // The operator's view still shows what is actually running, because that
+    // is what a rollout is watched through.
+    const status = await json(`${srv.origin}/api/status`);
+    expect(status.draining).toBe(true);
+    expect((status.deploy as Record<string, unknown>).humans).toBe(1);
+    expect((status.fleet as Record<string, unknown>).humans).toBe(1);
+
+    resident.close();
   }, 90_000);
 });

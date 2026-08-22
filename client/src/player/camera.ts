@@ -45,8 +45,12 @@ export interface CameraTargetLike {
 }
 
 /**
- * What the camera reads off the movement controller each frame.
- * `PlayerController` satisfies this structurally — do not couple to the class.
+ * What the camera reads off the movement state each frame.
+ *
+ * Structural on purpose — do not couple this to a class. The live implementor
+ * is `Game.driver` (`client/src/game/game.ts`), a plain object refilled each
+ * frame from `NetClient.renderPos` / `NetClient.predicted`, which is where the
+ * body actually is after prediction and reconciliation.
  */
 export interface CameraDriver {
   readonly pos: Float64Array;
