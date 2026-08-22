@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600&display=swap">
+  <style>
+    body { margin: 0; background: #131010; color: #DED4C4; font-family: Barlow, "Helvetica Neue", Arial, sans-serif; }
+    a { color: #DED4C4; } a:hover { color: #FF5A2E; }
+    @keyframes ember { 0%,100% { opacity: .5; } 50% { opacity: .9; } }
+    @keyframes throb { 0%,100% { box-shadow: 0 0 0 2px #000, 6px 6px 0 #000; } 50% { box-shadow: 0 0 0 2px #000, 6px 6px 0 #000, 0 0 28px rgba(224,67,28,.5); } }
+    @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+  </style>
+</helmet>
+<div style="width: 412px; min-height: 1780px; background: #131010; color: #DED4C4; position: relative; overflow: hidden;">
+  <!-- hero -->
+  <div style="position: relative; padding: 18px 20px 28px; background: #0C0A09; overflow: hidden;">
+    <div style="position: absolute; left: 50%; top: 40%; width: 520px; height: 360px; transform: translate(-50%, -50%); background: radial-gradient(closest-side, rgba(224,67,28,.4), rgba(224,67,28,0)); animation: ember 4.8s ease-in-out infinite; pointer-events: none;"></div>
+    <div style="position: relative; display: flex; align-items: center; justify-content: space-between;">
+      <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 26px; text-transform: uppercase; text-shadow: 2px 2px 0 {{accent}};">Doomcraft</div>
+      <a href="#signin" style="text-decoration: none; display: inline-flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid #6B5347; background: rgba(30,25,23,.7); color: #DED4C4; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; min-height: 44px;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"></path></svg>
+        Sign in
+      </a>
+    </div>
+    <div style="position: relative; margin-top: 28px; display: inline-flex; align-items: center; gap: 8px; padding: 5px 10px; border: 1px solid #463731; background: rgba(30,25,23,.75); font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: #86C232;">
+      <span style="display: inline-block; width: 7px; height: 7px; background: #86C232; animation: blink 1.6s ease-in-out infinite;"></span>
+      <span>[LIVE COUNT] playing now</span>
+    </div>
+    <h1 style="position: relative; margin: 14px 0 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 68px; line-height: .86; text-transform: uppercase; text-shadow: 4px 4px 0 {{accent}};">Doom pace.<br>Minecraft blocks.</h1>
+    <p style="position: relative; margin: 14px 0 0; color: #B9AE9F; font-size: 16px; line-height: 1.45; text-wrap: pretty;">Doom speed, no install, no queue. The room is already running when you tap.</p>
+    <a href="#play" style="position: relative; margin-top: 20px; display: flex; align-items: center; justify-content: center; gap: 12px; text-decoration: none; background: {{accent}}; color: #fff; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 32px; text-transform: uppercase; letter-spacing: .04em; line-height: 1; padding: 18px; min-height: 56px; animation: throb 2.4s ease-in-out infinite;">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3l14 9-14 9z"></path></svg>
+      Play now
+    </a>
+    <div style="position: relative; margin-top: 10px; text-align: center; font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .1em; color: #5C5249;">0.31 s to load · plays in portrait · progress saves</div>
+  </div>
+
+  <!-- facts -->
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #463731; border-top: 1px solid #463731; border-bottom: 1px solid #463731;">
+    <div style="background: #1E1917; padding: 14px 16px;"><div style="font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: #5C5249;">Interactive</div><div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; font-size: 32px; line-height: 1; color: #86C232;">0.31<span style="font: 500 12px Barlow, sans-serif; color: #8E8175;"> s</span></div></div>
+    <div style="background: #1E1917; padding: 14px 16px;"><div style="font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: #5C5249;">Frame rate</div><div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; font-size: 32px; line-height: 1; color: #E5A02E;">60<span style="font: 500 12px Barlow, sans-serif; color: #8E8175;"> fps</span></div></div>
+  </div>
+
+  <!-- modes 2x2 -->
+  <div style="padding: 28px 20px 0;">
+    <h2 style="margin: 0 0 12px; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 28px; text-transform: uppercase;">Pick a mode</h2>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+      <a href="#q" style="text-decoration: none; background: #1E1917; border: 1px solid #463731; padding: 14px; min-height: 96px; display: flex; flex-direction: column; gap: 4px;"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: #E5A02E;">Campaign</span><span style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 26px; line-height: 1; text-transform: uppercase;">Quest</span><span style="color: #8E8175; font-size: 12px;">Keys, doors, secrets.</span></a>
+      <a href="#b" style="text-decoration: none; background: #1E1917; border: 1px solid #463731; padding: 14px; min-height: 96px; display: flex; flex-direction: column; gap: 4px;"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: #E5A02E;">Creative</span><span style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 26px; line-height: 1; text-transform: uppercase;">Builder</span><span style="color: #8E8175; font-size: 12px;">Place, break, fly.</span></a>
+      <a href="#h" style="text-decoration: none; background: #1E1917; border: 1px solid #463731; padding: 14px; min-height: 96px; display: flex; flex-direction: column; gap: 4px;"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: #E5A02E;">Co-op</span><span style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 26px; line-height: 1; text-transform: uppercase;">Horde</span><span style="color: #8E8175; font-size: 12px;">Fortify. Survive.</span></a>
+      <a href="#d" style="text-decoration: none; background: #1E1917; border: 1px solid {{accent}}; padding: 14px; min-height: 96px; display: flex; flex-direction: column; gap: 4px;"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: {{accent}};">PvP · most played</span><span style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 26px; line-height: 1; text-transform: uppercase;">Deathmatch</span><span style="color: #8E8175; font-size: 12px;">32 players, 7 guns.</span></a>
+    </div>
+  </div>
+
+  <!-- portrait screenshot: the point -->
+  <div style="padding: 28px 20px 0; display: grid; grid-template-columns: 150px 1fr; gap: 16px; align-items: center;">
+    <figure style="margin: 0; background: #0C0A09; border: 2px solid #463731; box-shadow: 6px 6px 0 #000;"><img src="ours-mobile.jpg" style="display: block; width: 100%; height: auto;" alt="Doomcraft in portrait on a phone"></figure>
+    <div>
+      <h2 style="margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 28px; line-height: .95; text-transform: uppercase;">Either way up.</h2>
+      <p style="margin: 8px 0 0; color: #8E8175; font-size: 14px; line-height: 1.45;">Portrait or landscape, a real fire button, auto-fire and aim assist. Half of phone sessions are one-handed; we don't refuse them.</p>
+    </div>
+  </div>
+
+  <!-- sponsor + community -->
+  <div style="margin: 28px 20px 0; background: #1E1917; border: 1px solid #463731; padding: 18px;">
+    <div style="font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: #E5A02E;">Sponsors</div>
+    <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 24px; line-height: 1; text-transform: uppercase; margin-top: 6px;">Measured attention. Zero in-game cost.</div>
+    <a href="#sponsors" style="text-decoration: none; margin-top: 12px; display: inline-flex; align-items: center; gap: 8px; padding: 10px 14px; background: #DED4C4; color: #131010; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; font-weight: 600; min-height: 44px;">Apply to sponsor →</a>
+  </div>
+
+  <div style="text-align: center; padding: 44px 20px 36px;">
+    <h2 style="margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 48px; line-height: .9; text-transform: uppercase; text-shadow: 3px 3px 0 {{accent}};">Stop reading.</h2>
+    <a href="#play" style="margin-top: 18px; display: flex; align-items: center; justify-content: center; gap: 10px; text-decoration: none; background: {{accent}}; color: #fff; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 28px; text-transform: uppercase; letter-spacing: .04em; line-height: 1; padding: 16px; min-height: 54px; box-shadow: 0 0 0 2px #000, 6px 6px 0 #000;">Play Doomcraft</a>
+  </div>
+  <div style="padding: 16px 20px 28px; border-top: 1px solid #463731; font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .06em; color: #5C5249; line-height: 1.6;">Doomcraft · open alpha · <a href="#privacy" style="color: #8E8175; text-decoration: none;">Privacy</a> · <a href="#terms" style="color: #8E8175; text-decoration: none;">Terms</a><br>Not affiliated with id Software or Mojang.</div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"accent":{"editor":"color","default":"#E0431C","options":["#E0431C","#FF5A2E","#E5A02E","#86C232"]},"$preview":{"width":412,"height":1780}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? '#E0431C' };
+  }
+}
+</script>
+</body>
+</html>

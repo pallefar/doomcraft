@@ -1,0 +1,13 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "title": "Homepage · desktop", "x": 0, "y": 0, "w": 1440, "h": 2560 },
+    { "file": "SignIn.dc.html", "title": "Sign in · over the game", "x": 1540, "y": 0, "w": 1440, "h": 900 },
+    { "file": "Sponsors.dc.html", "title": "Sponsors · apply", "x": 1540, "y": 1000, "w": 1440, "h": 2080 },
+    { "file": "Mobile.dc.html", "title": "Homepage · phone 412", "x": 3080, "y": 0, "w": 412, "h": 1780 }
+  ],
+  "annotations": [
+    { "id": "read-me-first", "x": 0, "y": -170, "w": 760, "text": "DOOMCRAFT SITE — four screens, one vocabulary (the live landing page + progress board tokens).\nHomepage: animated hero (voxel build-in, ember, muzzle-flash pulse, scanline, ticker), one primary action repeated, modes, proof, what's-new fed from the release feed, a sponsor band, community.\nSign in: name + passphrase (the real auth), device progress claimed on sign-in, guest path kept. Social sign-in shown as 'soon'.\nSponsors: the phase-one surfaces and the measurement promise from docs/SPONSORS.md, an apply form.\n[BRACKETS] are real facts we do not have yet — live count, rate card, contact email, build id, news items. Fill them; do not let them ship." },
+    { "id": "motion-note", "x": 1540, "y": -110, "w": 520, "text": "Motion is CSS only (the site has no script budget and the game's CSP is strict). The 'motion' tweak on the homepage switches it all off; prefers-reduced-motion does too. Play button throb is the one repeating beat; everything else plays once on load." }
+  ],
+  "launch": { "view": "canvas" }
+}

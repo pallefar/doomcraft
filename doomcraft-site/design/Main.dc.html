@@ -1,0 +1,261 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600&display=swap">
+  <style>
+    body { margin: 0; background: #131010; color: #DED4C4; font-family: Barlow, "Helvetica Neue", Arial, sans-serif; }
+    a { color: #DED4C4; } a:hover { color: #FF5A2E; }
+    @keyframes pop { 0% { transform: scale(0) rotate(-8deg); opacity: 0; } 70% { transform: scale(1.08); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+    @keyframes ember { 0%,100% { opacity: .55; transform: scale(1); } 50% { opacity: .95; transform: scale(1.08); } }
+    @keyframes scan { 0% { transform: translateY(-120%); } 100% { transform: translateY(900px); } }
+    @keyframes rise { 0% { transform: translateY(28px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+    @keyframes throb { 0%,100% { box-shadow: 0 0 0 2px #000, 8px 8px 0 #000; } 50% { box-shadow: 0 0 0 2px #000, 8px 8px 0 #000, 0 0 36px rgba(224,67,28,.55); } }
+    @keyframes ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+    @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+    @keyframes flash { 0%,92%,100% { opacity: 0; } 94% { opacity: .9; } 96% { opacity: 0; } 98% { opacity: .5; } }
+    [data-motion="false"] * { animation: none !important; }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+  </style>
+</helmet>
+<div data-motion="{{motion}}" style="width: 1440px; min-height: 2560px; background: #131010; color: #DED4C4; position: relative; overflow: hidden;">
+
+  <!-- ============ HERO ============ -->
+  <div style="position: relative; height: 900px; overflow: hidden; background: #0C0A09;">
+    <!-- voxel build-in field -->
+    <div style="position: absolute; inset: 0; display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 6px; padding: 24px; opacity: .42; transform: perspective(1400px) rotateX(58deg) translateY(140px) scale(1.35); transform-origin: 50% 100%;">
+      <sc-for list="{{blocks}}" as="b" hint-placeholder-count="96">
+        <div style="aspect-ratio: 1 / 1; background: {{b.color}}; animation: pop .7s cubic-bezier(.2,.8,.2,1) both; animation-delay: {{b.delay}};"></div>
+      </sc-for>
+    </div>
+    <!-- ember glow -->
+    <div style="position: absolute; left: 50%; top: 52%; width: 1100px; height: 620px; transform: translate(-50%, -50%); background: radial-gradient(closest-side, rgba(224,67,28,.42), rgba(224,67,28,0)); animation: ember 4.8s ease-in-out infinite; pointer-events: none;"></div>
+    <!-- muzzle flash pulse -->
+    <div style="position: absolute; inset: 0; background: radial-gradient(circle at 50% 60%, rgba(255,200,120,.55), rgba(255,120,40,0) 46%); animation: flash 7s linear infinite; pointer-events: none; mix-blend-mode: screen;"></div>
+    <!-- scanline -->
+    <div style="position: absolute; left: 0; right: 0; top: 0; height: 140px; background: linear-gradient(180deg, rgba(222,212,196,0), rgba(222,212,196,.07), rgba(222,212,196,0)); animation: scan 6s linear infinite; pointer-events: none;"></div>
+    <!-- vignette to ground -->
+    <div style="position: absolute; inset: 0; background: linear-gradient(180deg, rgba(12,10,9,.15) 0%, rgba(12,10,9,0) 35%, rgba(19,16,16,1) 100%); pointer-events: none;"></div>
+
+    <!-- top bar -->
+    <div style="position: relative; display: flex; align-items: center; justify-content: space-between; padding: 22px 56px;">
+      <div style="display: flex; align-items: baseline; gap: 14px;">
+        <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 34px; text-transform: uppercase; letter-spacing: .02em; text-shadow: 3px 3px 0 {{accent}};">Doomcraft</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .24em; text-transform: uppercase; color: #8E8175;">open alpha · free · browser</div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 28px; font-weight: 500; font-size: 15px;">
+        <a href="#modes" style="text-decoration: none; color: #8E8175;">Modes</a>
+        <a href="#news" style="text-decoration: none; color: #8E8175;">What's new</a>
+        <a href="#sponsors" style="text-decoration: none; color: #8E8175;">Sponsors</a>
+        <a href="#signin" style="text-decoration: none; display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border: 1px solid #6B5347; background: rgba(30,25,23,.7); color: #DED4C4; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: .12em; text-transform: uppercase;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"></path></svg>
+          Sign in
+        </a>
+      </div>
+    </div>
+
+    <!-- hero copy -->
+    <div style="position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; padding: 96px 56px 0;">
+      <div style="display: inline-flex; align-items: center; gap: 10px; padding: 6px 12px; border: 1px solid #463731; background: rgba(30,25,23,.75); font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: #86C232; animation: rise .8s ease-out both;">
+        <span style="display: inline-block; width: 8px; height: 8px; background: #86C232; animation: blink 1.6s ease-in-out infinite;"></span>
+        <span>[LIVE COUNT] playing now · matches already running</span>
+      </div>
+      <h1 style="margin: 26px 0 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 148px; line-height: .84; text-transform: uppercase; letter-spacing: .005em; text-shadow: 6px 6px 0 {{accent}}, 9px 9px 0 rgba(0,0,0,.55);">
+        <span style="display: block; animation: rise .7s ease-out .15s both;">Doom pace.</span>
+        <span style="display: block; animation: rise .7s ease-out .32s both;">Minecraft blocks.</span>
+      </h1>
+      <p style="margin: 26px 0 0; max-width: 62ch; font-size: 22px; line-height: 1.45; color: #B9AE9F; animation: rise .7s ease-out .5s both; text-wrap: pretty;">
+        A voxel shooter that moves at Doom speed. No install, no account, no queue — the room is already
+        running with bots in it when you click.
+      </p>
+      <div style="display: flex; align-items: center; gap: 16px; margin-top: 38px; animation: rise .7s ease-out .66s both;">
+        <a href="#play" style="display: inline-flex; align-items: center; gap: 14px; text-decoration: none; background: {{accent}}; color: #fff; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 40px; text-transform: uppercase; letter-spacing: .04em; line-height: 1; padding: 22px 40px; animation: throb 2.4s ease-in-out infinite;">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3l14 9-14 9z"></path></svg>
+          Play now
+        </a>
+        <a href="#offline" style="text-decoration: none; font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; font-size: 20px; text-transform: uppercase; letter-spacing: .06em; padding: 16px 20px; border: 2px solid #6B5347; background: rgba(30,25,23,.8); color: #DED4C4;">Play offline</a>
+      </div>
+      <div style="margin-top: 14px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .1em; color: #5C5249; animation: rise .7s ease-out .8s both;">Loads in 0.31 s · works on a phone in portrait · progress saves to the server</div>
+    </div>
+  </div>
+
+  <!-- ============ TICKER ============ -->
+  <div style="overflow: hidden; border-top: 1px solid #463731; border-bottom: 1px solid #463731; background: #1E1917;">
+    <div style="display: flex; width: max-content; animation: ticker 28s linear infinite; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: .16em; text-transform: uppercase; color: #8E8175;">
+      <div style="display: flex; gap: 0;">
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">Time to interactive <b style="color: #86C232; font-weight: 600;">0.31 s</b> vs 3.16 s</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">Click → shooting <b style="color: #86C232; font-weight: 600;">&lt; 1 s</b> · no lobby</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;"><b style="color: #E5A02E; font-weight: 600;">60 fps</b> median at 915×412, 4× CPU throttle</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">Plays in <b style="color: #86C232; font-weight: 600;">portrait</b> · dedicated fire button</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">7 Doom weapons · 4 modes · 32-player deathmatch</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">Authoritative server · 20 Hz · bots fill every room</span>
+      </div>
+      <div style="display: flex; gap: 0;">
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">Time to interactive <b style="color: #86C232; font-weight: 600;">0.31 s</b> vs 3.16 s</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">Click → shooting <b style="color: #86C232; font-weight: 600;">&lt; 1 s</b> · no lobby</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;"><b style="color: #E5A02E; font-weight: 600;">60 fps</b> median at 915×412, 4× CPU throttle</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">Plays in <b style="color: #86C232; font-weight: 600;">portrait</b> · dedicated fire button</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">7 Doom weapons · 4 modes · 32-player deathmatch</span>
+        <span style="padding: 12px 28px; border-right: 1px solid #463731;">Authoritative server · 20 Hz · bots fill every room</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ MODES ============ -->
+  <div id="modes" style="padding: 72px 56px 0;">
+    <div style="display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid #463731; padding-bottom: 12px; margin-bottom: 22px;">
+      <h2 style="margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 40px; text-transform: uppercase;">Pick a mode. You're in.</h2>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: #5C5249;">one world · one save · one weapon set</span>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px;">
+      <a href="#play-quest" style="text-decoration: none; display: flex; flex-direction: column; gap: 10px; background: #1E1917; border: 1px solid #463731; padding: 20px 20px 18px; min-height: 210px; position: relative; overflow: hidden;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #E5A02E;">Campaign</div>
+        <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 38px; line-height: 1; text-transform: uppercase;">Quest</div>
+        <p style="margin: 0; color: #8E8175; font-size: 15px; line-height: 1.45;">Authored levels — keys, doors, switches, secrets. Bar: DOOM E1M1.</p>
+        <div style="margin-top: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #DED4C4;">Play →</div>
+      </a>
+      <a href="#play-builder" style="text-decoration: none; display: flex; flex-direction: column; gap: 10px; background: #1E1917; border: 1px solid #463731; padding: 20px 20px 18px; min-height: 210px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #E5A02E;">Creative</div>
+        <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 38px; line-height: 1; text-transform: uppercase;">Builder</div>
+        <p style="margin: 0; color: #8E8175; font-size: 15px; line-height: 1.45;">Place, break, fly, undo. Bar: Minecraft Classic.</p>
+        <div style="margin-top: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #DED4C4;">Play →</div>
+      </a>
+      <a href="#play-horde" style="text-decoration: none; display: flex; flex-direction: column; gap: 10px; background: #1E1917; border: 1px solid #463731; padding: 20px 20px 18px; min-height: 210px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #E5A02E;">Co-op survival</div>
+        <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 38px; line-height: 1; text-transform: uppercase;">Horde</div>
+        <p style="margin: 0; color: #8E8175; font-size: 15px; line-height: 1.45;">Fortify between waves. The enemies break your walls.</p>
+        <div style="margin-top: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #DED4C4;">Play →</div>
+      </a>
+      <a href="#play-dm" style="text-decoration: none; display: flex; flex-direction: column; gap: 10px; background: #1E1917; border: 1px solid {{accent}}; box-shadow: inset 0 0 0 1px {{accent}}; padding: 20px 20px 18px; min-height: 210px; position: relative;">
+        <div style="position: absolute; top: 14px; right: -34px; transform: rotate(35deg); background: {{accent}}; color: #fff; font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: .18em; text-transform: uppercase; padding: 4px 40px;">Most played</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #E5A02E;">PvP</div>
+        <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 38px; line-height: 1; text-transform: uppercase;">Deathmatch</div>
+        <p style="margin: 0; color: #8E8175; font-size: 15px; line-height: 1.45;">32 players, 7 weapons, rockets that reshape the map.</p>
+        <div style="margin-top: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #DED4C4;">Play →</div>
+      </a>
+    </div>
+  </div>
+
+  <!-- ============ SCREENS + WHY ============ -->
+  <div style="display: grid; grid-template-columns: 1.35fr 1fr; gap: 28px; padding: 64px 56px 0; align-items: start;">
+    <figure style="margin: 0; background: #0C0A09; border: 2px solid #463731; border-top-color: #6B5347; border-left-color: #6B5347; box-shadow: 10px 10px 0 #000;">
+      <img src="ours-08-combat.jpg" style="display: block; width: 100%; height: auto;" alt="In-game: voxel corridor, pistol viewmodel, corner HUD">
+      <figcaption style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: #8E8175; padding: 10px 14px; border-top: 1px solid #463731;">Deathmatch · captured from the live build, not a render</figcaption>
+    </figure>
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <h2 style="margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 40px; line-height: .95; text-transform: uppercase;">Why it feels different</h2>
+      <div style="display: flex; flex-direction: column; gap: 10px;">
+        <div style="display: grid; grid-template-columns: 44px 1fr; gap: 12px; align-items: start; background: #1E1917; border: 1px solid #463731; padding: 14px 16px;">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#E5A02E" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"></path></svg>
+          <div><div style="font-weight: 600; font-size: 17px;">Doom speed, not Minecraft speed</div><div style="color: #8E8175; font-size: 14px; line-height: 1.45;">~9.5 m/s, instant acceleration, air-strafe, one-block step-up. Other voxel shooters walk.</div></div>
+        </div>
+        <div style="display: grid; grid-template-columns: 44px 1fr; gap: 12px; align-items: start; background: #1E1917; border: 1px solid #463731; padding: 14px 16px;">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#E0431C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="3"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3"></path></svg>
+          <div><div style="font-weight: 600; font-size: 17px;">Gunfeel</div><div style="color: #8E8175; font-size: 14px; line-height: 1.45;">Muzzle flash, kick, screen shake, hit markers, a live crosshair. The competition's viewmodel doesn't move one pixel.</div></div>
+        </div>
+        <div style="display: grid; grid-template-columns: 44px 1fr; gap: 12px; align-items: start; background: #1E1917; border: 1px solid #463731; padding: 14px 16px;">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#86C232" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1"></rect><path d="M3 10h18M8 4v16"></path></svg>
+          <div><div style="font-weight: 600; font-size: 17px;">Arenas, not scenery</div><div style="color: #8E8175; font-size: 14px; line-height: 1.45;">Rockets reshape the map. Build cover in Horde, then watch it get chewed.</div></div>
+        </div>
+        <div style="display: grid; grid-template-columns: 44px 1fr; gap: 12px; align-items: start; background: #1E1917; border: 1px solid #463731; padding: 14px 16px;">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#DED4C4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"></rect><path d="M11 18h2"></path></svg>
+          <div><div style="font-weight: 600; font-size: 17px;">Your phone, either way up</div><div style="color: #8E8175; font-size: 14px; line-height: 1.45;">Portrait and landscape, a real fire button, auto-fire and aim assist. The bar tells you to rotate your screen.</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ WHAT'S NEW (patch framework feed) ============ -->
+  <div id="news" style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; padding: 64px 56px 0;">
+    <div style="grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid #463731; padding-bottom: 12px;">
+      <h2 style="margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 40px; text-transform: uppercase;">What's new</h2>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: #5C5249;">fed from the release feed · build <b style="color: #8E8175; font-weight: 600;">[BUILD ID]</b></span>
+    </div>
+    <div style="background: #1E1917; border: 1px solid #463731; border-left: 4px solid #86C232; padding: 16px 18px;">
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #86C232;">Levels</div>
+      <div style="font-weight: 600; font-size: 18px; margin-top: 6px;">[PACK NAME] — episode [N]</div>
+      <div style="color: #8E8175; font-size: 14px; line-height: 1.45; margin-top: 6px;">[one line from the release note]</div>
+    </div>
+    <div style="background: #1E1917; border: 1px solid #463731; border-left: 4px solid #E5A02E; padding: 16px 18px;">
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #E5A02E;">Weapons</div>
+      <div style="font-weight: 600; font-size: 18px; margin-top: 6px;">[balance change]</div>
+      <div style="color: #8E8175; font-size: 14px; line-height: 1.45; margin-top: 6px;">[one line from the release note]</div>
+    </div>
+    <div style="background: #1E1917; border: 1px solid #463731; border-left: 4px solid #E0431C; padding: 16px 18px;">
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #E0431C;">Event</div>
+      <div style="font-weight: 600; font-size: 18px; margin-top: 6px;">[weekend tournament]</div>
+      <div style="color: #8E8175; font-size: 14px; line-height: 1.45; margin-top: 6px;">[dates · prize · how to enter]</div>
+    </div>
+  </div>
+
+  <!-- ============ SPONSOR BAND ============ -->
+  <div id="sponsors" style="margin: 72px 56px 0; display: grid; grid-template-columns: 1.2fr 1fr; gap: 28px; align-items: center; background: #1E1917; border: 1px solid #463731; padding: 34px 36px;">
+    <div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #E5A02E;">For sponsors and advertisers</div>
+      <h2 style="margin: 8px 0 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 40px; line-height: .95; text-transform: uppercase;">Be seen where the attention already is. Measured, not claimed.</h2>
+      <p style="margin: 12px 0 0; color: #8E8175; font-size: 16px; line-height: 1.5; max-width: 56ch;">Reserved menu slots, a mode-tile badge, the intermission card, sponsored tournaments. Every impression measured to MRC viewability and reported to you line by line. Zero in-game frame cost — we author the shape, you buy the surface.</p>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 12px; align-items: flex-start;">
+      <a href="#sponsor-apply" style="text-decoration: none; display: inline-flex; align-items: center; gap: 12px; background: #DED4C4; color: #131010; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 26px; text-transform: uppercase; letter-spacing: .04em; padding: 16px 24px; box-shadow: 6px 6px 0 #000;">Apply to sponsor
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+      </a>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .1em; color: #5C5249;">Rate card and inventory forecast on request · [CONTACT EMAIL]</div>
+    </div>
+  </div>
+
+  <!-- ============ COMMUNITY + FINAL CTA ============ -->
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 28px; padding: 64px 56px 0; align-items: center;">
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      <h2 style="margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 40px; line-height: .95; text-transform: uppercase;">Bring a friend. Beat their time.</h2>
+      <p style="margin: 0; color: #8E8175; font-size: 16px; line-height: 1.5; max-width: 52ch;">Share a level with your ghost time baked in; they drop straight into it. Recruit players who actually play and you both earn Scrap.</p>
+      <div style="display: flex; gap: 10px; margin-top: 6px;">
+        <a href="#discord" style="text-decoration: none; display: inline-flex; align-items: center; gap: 8px; padding: 10px 14px; border: 1px solid #6B5347; color: #DED4C4; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: .12em; text-transform: uppercase;">Discord [LINK]</a>
+        <a href="#reddit" style="text-decoration: none; display: inline-flex; align-items: center; gap: 8px; padding: 10px 14px; border: 1px solid #6B5347; color: #DED4C4; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: .12em; text-transform: uppercase;">Reddit [LINK]</a>
+        <a href="#source" style="text-decoration: none; display: inline-flex; align-items: center; gap: 8px; padding: 10px 14px; border: 1px solid #6B5347; color: #DED4C4; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: .12em; text-transform: uppercase;">Source on GitHub</a>
+      </div>
+    </div>
+    <figure style="margin: 0; background: #0C0A09; border: 2px solid #463731; box-shadow: 10px 10px 0 #000;">
+      <img src="ours-00-menu.jpg" style="display: block; width: 100%; height: auto;" alt="Main menu over a live in-engine voxel scene">
+      <figcaption style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: #8E8175; padding: 10px 14px; border-top: 1px solid #463731;">Menu · the background is the renderer running</figcaption>
+    </figure>
+  </div>
+
+  <div style="text-align: center; padding: 96px 56px 72px;">
+    <h2 style="margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 88px; line-height: .9; text-transform: uppercase; text-shadow: 4px 4px 0 {{accent}};">Stop reading.</h2>
+    <p style="margin: 12px 0 26px; color: #8E8175; font-size: 18px;">It loads in under half a second. You'll know in ten.</p>
+    <a href="#play" style="display: inline-flex; align-items: center; gap: 14px; text-decoration: none; background: {{accent}}; color: #fff; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 36px; text-transform: uppercase; letter-spacing: .04em; line-height: 1; padding: 20px 36px; box-shadow: 0 0 0 2px #000, 8px 8px 0 #000;">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3l14 9-14 9z"></path></svg>
+      Play Doomcraft
+    </a>
+  </div>
+
+  <div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 22px; padding: 22px 56px 40px; border-top: 1px solid #463731; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .06em; color: #5C5249;">
+    <span>Doomcraft · open alpha · <a href="#privacy" style="color: #8E8175; text-decoration: none;">Privacy</a> · <a href="#terms" style="color: #8E8175; text-decoration: none;">Terms</a> · <a href="#sponsors" style="color: #8E8175; text-decoration: none;">Sponsors</a></span>
+    <span>Not affiliated with id Software or Mojang. DOOM and Minecraft are trademarks of their owners.</span>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"accent":{"editor":"color","default":"#E0431C","options":["#E0431C","#FF5A2E","#E5A02E","#86C232"]},"motion":{"editor":"boolean","default":true},"$preview":{"width":1440,"height":2560}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const palette = ['#4F7A2A', '#5E8F2F', '#6B4A2E', '#7A5636', '#4A4541', '#5A5550', '#3E3A36', '#E0431C'];
+    const blocks = [];
+    for (let i = 0; i < 96; i++) {
+      const c = i % 17 === 5 ? palette[7] : palette[(i * 7 + Math.floor(i / 24)) % 7];
+      blocks.push({ color: c, delay: (((i * 37) % 96) * 0.028).toFixed(2) + 's' });
+    }
+    return {
+      accent: this.props.accent ?? '#E0431C',
+      motion: this.props.motion === false ? 'false' : 'true',
+      blocks,
+    };
+  }
+}
+</script>
+</body>
+</html>

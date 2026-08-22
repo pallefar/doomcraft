@@ -1,0 +1,156 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600&display=swap">
+  <style>
+    body { margin: 0; background: #131010; color: #DED4C4; font-family: Barlow, "Helvetica Neue", Arial, sans-serif; }
+    a { color: #DED4C4; } a:hover { color: #FF5A2E; }
+    @keyframes sweep { 0% { transform: translateX(-110%); } 100% { transform: translateX(110%); } }
+  </style>
+</helmet>
+<div style="width: 1440px; min-height: 2080px; background: #131010; color: #DED4C4;">
+
+  <!-- top bar -->
+  <div style="display: flex; align-items: center; justify-content: space-between; padding: 22px 56px; border-bottom: 1px solid #463731;">
+    <div style="display: flex; align-items: baseline; gap: 14px;">
+      <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 34px; text-transform: uppercase; text-shadow: 3px 3px 0 {{accent}};">Doomcraft</div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .24em; text-transform: uppercase; color: #8E8175;">for sponsors</div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 28px; font-weight: 500; font-size: 15px;">
+      <a href="#surfaces" style="text-decoration: none; color: #8E8175;">Surfaces</a>
+      <a href="#measurement" style="text-decoration: none; color: #8E8175;">Measurement</a>
+      <a href="#apply" style="text-decoration: none; display: inline-flex; align-items: center; padding: 10px 16px; background: #DED4C4; color: #131010; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 600;">Apply</a>
+    </div>
+  </div>
+
+  <!-- hero -->
+  <div style="display: grid; grid-template-columns: 1.15fr 1fr; gap: 40px; padding: 72px 56px 0; align-items: center;">
+    <div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: #E5A02E;">Sponsorship · advertising · tournaments</div>
+      <h1 style="margin: 12px 0 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 92px; line-height: .88; text-transform: uppercase; text-shadow: 5px 5px 0 {{accent}};">Attention you can audit.</h1>
+      <p style="margin: 22px 0 0; color: #B9AE9F; font-size: 20px; line-height: 1.5; max-width: 56ch; text-wrap: pretty;">Players sit in our menu choosing a mode, and between rounds. Those are the moments we sell — never inside the fight. Every impression is measured to the MRC viewability standard and reported to you line by line, with the caveats written down.</p>
+      <div style="display: flex; gap: 12px; margin-top: 28px;">
+        <a href="#apply" style="text-decoration: none; display: inline-flex; align-items: center; gap: 12px; background: {{accent}}; color: #fff; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 30px; text-transform: uppercase; letter-spacing: .04em; line-height: 1; padding: 18px 30px; box-shadow: 0 0 0 2px #000, 6px 6px 0 #000;">Apply to sponsor</a>
+        <a href="#deck" style="text-decoration: none; display: inline-flex; align-items: center; padding: 16px 20px; border: 2px solid #6B5347; color: #DED4C4; font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; font-size: 20px; text-transform: uppercase; letter-spacing: .06em;">Rate card [PDF]</a>
+      </div>
+    </div>
+    <!-- the menu, with the slots outlined -->
+    <figure style="margin: 0; position: relative; background: #0C0A09; border: 2px solid #463731; box-shadow: 10px 10px 0 #000; overflow: hidden;">
+      <img src="ours-00-menu.jpg" style="display: block; width: 100%; height: auto; filter: brightness(.72);" alt="Doomcraft menu with the reserved ad slots highlighted">
+      <div style="position: absolute; left: 6%; right: 6%; top: 5%; height: 10%; border: 2px dashed #E5A02E; background: rgba(229,160,46,.12); display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: #E5A02E;">S1 · 728×90 top</div>
+      <div style="position: absolute; right: 4%; top: 28%; width: 26%; height: 34%; border: 2px dashed #E5A02E; background: rgba(229,160,46,.12); display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: #E5A02E; text-align: center;">S1 · 300×250</div>
+      <div style="position: absolute; left: 20%; top: 52%; width: 22%; height: 9%; border: 2px dashed #86C232; background: rgba(134,194,50,.14); display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: #86C232;">S3 · mode badge</div>
+      <div style="position: absolute; left: 0; top: 0; width: 40%; height: 100%; background: linear-gradient(90deg, rgba(222,212,196,0), rgba(222,212,196,.08), rgba(222,212,196,0)); animation: sweep 3.6s ease-in-out infinite; pointer-events: none;"></div>
+      <figcaption style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: #8E8175; padding: 10px 14px; border-top: 1px solid #463731;">Reserved slots. The page never reflows when they fill.</figcaption>
+    </figure>
+  </div>
+
+  <!-- the four facts -->
+  <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: #463731; border: 1px solid #463731; margin: 56px 56px 0;">
+    <div style="background: #1E1917; padding: 20px 20px 16px;"><div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #5C5249;">Frame cost in play</div><div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; font-size: 44px; line-height: 1; margin-top: 6px; color: #86C232;">0.000<span style="font: 500 14px Barlow, sans-serif; color: #8E8175;"> ms</span></div><div style="color: #8E8175; font-size: 13px; margin-top: 4px;">menu and between-round surfaces only</div></div>
+    <div style="background: #1E1917; padding: 20px 20px 16px;"><div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #5C5249;">Viewability standard</div><div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; font-size: 44px; line-height: 1; margin-top: 6px;">MRC</div><div style="color: #8E8175; font-size: 13px; margin-top: 4px;">50% of pixels for 1 s, event-driven, three buckets reported</div></div>
+    <div style="background: #1E1917; padding: 20px 20px 16px;"><div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #5C5249;">Clicks</div><div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; font-size: 44px; line-height: 1; margin-top: 6px;">signed</div><div style="color: #8E8175; font-size: 13px; margin-top: 4px;">single-use HMAC redirect, 7-day click / 1-day view window</div></div>
+    <div style="background: #1E1917; padding: 20px 20px 16px;"><div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #5C5249;">Creative policy</div><div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; font-size: 44px; line-height: 1; margin-top: 6px; color: #E5A02E;">reviewed</div><div style="color: #8E8175; font-size: 13px; margin-top: 4px;">static images, content-addressed, no third-party script in the game</div></div>
+  </div>
+
+  <!-- surfaces -->
+  <div id="surfaces" style="padding: 64px 56px 0;">
+    <div style="display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid #463731; padding-bottom: 12px; margin-bottom: 20px;">
+      <h2 style="margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 40px; text-transform: uppercase;">What you can buy</h2>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .16px; text-transform: uppercase; color: #5C5249;">phase one · live now</span>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px;">
+      <div style="background: #1E1917; border: 1px solid #463731; padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 8px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #E5A02E;">S1 · display</div>
+        <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 28px; line-height: 1; text-transform: uppercase;">Menu slots</div>
+        <div style="color: #8E8175; font-size: 14px; line-height: 1.45;">728×90 top and bottom, 300×250 side. IAB sizes, programmatic-eligible, long dwell while players choose a mode.</div>
+        <div style="margin-top: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #5C5249;">from [RATE] CPM</div>
+      </div>
+      <div style="background: #1E1917; border: 1px solid #463731; padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 8px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #86C232;">S3 · highest intent</div>
+        <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 28px; line-height: 1; text-transform: uppercase;">Mode-tile badge</div>
+        <div style="color: #8E8175; font-size: 14px; line-height: 1.45;">A sponsored ribbon on a real mode tile — exactly where the click is already going. Never a fake tile.</div>
+        <div style="margin-top: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #5C5249;">[RATE] per day</div>
+      </div>
+      <div style="background: #1E1917; border: 1px solid #463731; padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 8px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #DED4C4;">S12 · between rounds</div>
+        <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 28px; line-height: 1; text-transform: uppercase;">Intermission card</div>
+        <div style="color: #8E8175; font-size: 14px; line-height: 1.45;">A 728×90 in the results panel. The player is idle by definition; attention is high.</div>
+        <div style="margin-top: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #5C5249;">from [RATE] CPM</div>
+      </div>
+      <div style="background: #1E1917; border: 1px solid {{accent}}; box-shadow: inset 0 0 0 1px {{accent}}; padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 8px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: {{accent}};">S32 · the real deal</div>
+        <div style="font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 28px; line-height: 1; text-transform: uppercase;">Sponsored tournament</div>
+        <div style="color: #8E8175; font-size: 14px; line-height: 1.45;">Your name on a bracket, a prize pool you fund, winners determined by the server, prize claim handled. Skill-based by default.</div>
+        <div style="margin-top: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #5C5249;">quote · legal review for cash prizes</div>
+      </div>
+    </div>
+    <div style="margin-top: 14px; display: flex; gap: 18px; flex-wrap: wrap; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .08em; color: #5C5249;">
+      <span><b style="color: #8E8175; font-weight: 600;">Later:</b> in-arena hoarding ring (1 draw call, measured server-side), sponsored weapon skins, branded levels.</span>
+      <span><b style="color: #8E8175; font-weight: 600;">Never:</b> the kill feed, the respawn screen, the sky, a fake mode tile.</span>
+    </div>
+  </div>
+
+  <!-- measurement -->
+  <div id="measurement" style="display: grid; grid-template-columns: 1fr 1fr; gap: 28px; padding: 64px 56px 0; align-items: start;">
+    <div>
+      <h2 style="margin: 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 40px; line-height: .95; text-transform: uppercase;">What we report, and what we don't pretend to know</h2>
+      <p style="margin: 14px 0 0; color: #8E8175; font-size: 16px; line-height: 1.5;">You get rendered, viewable and blocked counts as three separate buckets; viewable rate; clicks with a signed redirect; dwell; and a caveat block on every report. Billing is never off our own player-reward events — those are capped, decaying, and a headless farm can fake the signals behind them. That is exactly why they are not the invoice.</p>
+    </div>
+    <div style="background: #0C0A09; border: 1px solid #463731; padding: 18px 20px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; line-height: 1.7; color: #B9AE9F;">
+      <div style="color: #5C5249; letter-spacing: .16em; text-transform: uppercase; font-size: 10px; margin-bottom: 8px;">sample report row · [SPONSOR]</div>
+      <div style="display: grid; grid-template-columns: 1fr auto; gap: 2px 16px;">
+        <span>rendered</span><span style="color: #DED4C4;">[N]</span>
+        <span>viewable (MRC 50% / 1 s)</span><span style="color: #86C232;">[N] · [rate]%</span>
+        <span>blocked</span><span style="color: #E5A02E;">[N]</span>
+        <span>clicks (signed)</span><span style="color: #DED4C4;">[N]</span>
+        <span>median dwell</span><span style="color: #DED4C4;">[s]</span>
+        <span>caveats</span><span style="color: #8E8175;">visibility is a client claim; see note</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- apply -->
+  <div id="apply" style="margin: 72px 56px 0; display: grid; grid-template-columns: 1fr 1.2fr; gap: 36px; background: #1E1917; border: 2px solid #463731; border-top-color: #6B5347; border-left-color: #6B5347; padding: 36px; box-shadow: 10px 10px 0 #000;">
+    <div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #E5A02E;">Apply</div>
+      <h2 style="margin: 8px 0 0; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 44px; line-height: .95; text-transform: uppercase;">Tell us who you are. We reply with inventory and a rate card.</h2>
+      <p style="margin: 14px 0 0; color: #8E8175; font-size: 15px; line-height: 1.5;">Business verification before anything is bookable. Prepaid only in v1. Creative is reviewed by a human before it serves; anything that mimics the HUD is refused.</p>
+      <div style="margin-top: 18px; display: flex; flex-direction: column; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .08em; color: #5C5249;">
+        <span>① apply → ② verification → ③ pick surfaces, see the forecast → ④ upload creative → ⑤ live, with reports</span>
+      </div>
+    </div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+      <label style="display: flex; flex-direction: column; gap: 6px;"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #8E8175;">Company</span><input value="" placeholder="Legal name" style="font: 500 16px Barlow, sans-serif; color: #DED4C4; background: #0C0A09; border: 1px solid #6B5347; padding: 12px 14px; outline: none; min-height: 46px;"></label>
+      <label style="display: flex; flex-direction: column; gap: 6px;"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #8E8175;">Country</span><input value="" placeholder="ISO code, e.g. DK" style="font: 500 16px Barlow, sans-serif; color: #DED4C4; background: #0C0A09; border: 1px solid #6B5347; padding: 12px 14px; outline: none; min-height: 46px;"></label>
+      <label style="display: flex; flex-direction: column; gap: 6px; grid-column: 1 / -1;"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #8E8175;">Work email</span><input value="" placeholder="you@company.com" style="font: 500 16px Barlow, sans-serif; color: #DED4C4; background: #0C0A09; border: 1px solid #6B5347; padding: 12px 14px; outline: none; min-height: 46px;"></label>
+      <label style="display: flex; flex-direction: column; gap: 6px;"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #8E8175;">Monthly budget</span><input value="" placeholder="[range]" style="font: 500 16px Barlow, sans-serif; color: #DED4C4; background: #0C0A09; border: 1px solid #6B5347; padding: 12px 14px; outline: none; min-height: 46px;"></label>
+      <label style="display: flex; flex-direction: column; gap: 6px;"><span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #8E8175;">Interested in</span><input value="" placeholder="menu · badge · tournament" style="font: 500 16px Barlow, sans-serif; color: #DED4C4; background: #0C0A09; border: 1px solid #6B5347; padding: 12px 14px; outline: none; min-height: 46px;"></label>
+      <a href="#send" style="grid-column: 1 / -1; text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 12px; background: {{accent}}; color: #fff; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 28px; text-transform: uppercase; letter-spacing: .04em; line-height: 1; padding: 16px; box-shadow: 0 0 0 2px #000, 6px 6px 0 #000; min-height: 54px;">Send application
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+      </a>
+      <div style="grid-column: 1 / -1; font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .08em; color: #5C5249; line-height: 1.5;">Goes to [CONTACT EMAIL] today; the self-serve console comes later. We answer within two business days.</div>
+    </div>
+  </div>
+
+  <div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 22px; padding: 40px 56px 40px; margin-top: 56px; border-top: 1px solid #463731; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .06em; color: #5C5249;">
+    <span>Doomcraft · sponsors · <a href="#privacy" style="color: #8E8175; text-decoration: none;">Privacy</a> · <a href="#terms" style="color: #8E8175; text-decoration: none;">Ad terms</a></span>
+    <span>Unknown-age players see contextual-only fills and no third-party tag. That is the default, not a setting.</span>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"accent":{"editor":"color","default":"#E0431C","options":["#E0431C","#FF5A2E","#E5A02E","#86C232"]},"$preview":{"width":1440,"height":2080}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? '#E0431C' };
+  }
+}
+</script>
+</body>
+</html>

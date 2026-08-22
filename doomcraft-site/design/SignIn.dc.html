@@ -1,0 +1,106 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600&display=swap">
+  <style>
+    body { margin: 0; background: #131010; color: #DED4C4; font-family: Barlow, "Helvetica Neue", Arial, sans-serif; }
+    a { color: #DED4C4; } a:hover { color: #FF5A2E; }
+    @keyframes rise { 0% { transform: translateY(18px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+  </style>
+</helmet>
+<div style="width: 1440px; height: 900px; position: relative; overflow: hidden; background: #0C0A09; color: #DED4C4;">
+  <!-- the game, dimmed behind the dialog -->
+  <img src="ours-00-menu.jpg" style="position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; filter: blur(6px) brightness(.45) saturate(.8);" alt="">
+  <div style="position: absolute; inset: 0; background: radial-gradient(60% 60% at 50% 45%, rgba(224,67,28,.18), rgba(12,10,9,0) 70%);"></div>
+
+  <!-- dialog -->
+  <div style="position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 560px; background: #1E1917; border: 2px solid #463731; border-top-color: #6B5347; border-left-color: #6B5347; box-shadow: 12px 12px 0 #000; animation: rise .5s ease-out both;">
+    <!-- tabs -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr;">
+      <sc-if value="{{isSignIn}}" hint-placeholder-val="{{ true }}">
+        <button onClick="{{ pickSignIn }}" style="appearance: none; border: 0; cursor: pointer; padding: 18px; background: #1E1917; color: #DED4C4; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 24px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 3px solid {{accent}};">Sign in</button>
+        <button onClick="{{ pickCreate }}" style="appearance: none; border: 0; cursor: pointer; padding: 18px; background: #131010; color: #8E8175; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 24px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 3px solid #463731;">Create account</button>
+      </sc-if>
+      <sc-if value="{{isCreate}}" hint-placeholder-val="{{ false }}">
+        <button onClick="{{ pickSignIn }}" style="appearance: none; border: 0; cursor: pointer; padding: 18px; background: #131010; color: #8E8175; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 24px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 3px solid #463731;">Sign in</button>
+        <button onClick="{{ pickCreate }}" style="appearance: none; border: 0; cursor: pointer; padding: 18px; background: #1E1917; color: #DED4C4; font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 24px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 3px solid {{accent}};">Create account</button>
+      </sc-if>
+    </div>
+
+    <div style="padding: 26px 28px 24px; display: flex; flex-direction: column; gap: 16px;">
+      <!-- device-progress claim: the thing every other game's login screen forgets -->
+      <div style="display: grid; grid-template-columns: 40px 1fr; gap: 12px; align-items: center; background: #0C0A09; border: 1px solid #463731; border-left: 4px solid #86C232; padding: 12px 14px;">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#86C232" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7l-9 9-4-4"></path><rect x="3" y="3" width="18" height="18" rx="1"></rect></svg>
+        <div style="font-size: 14px; line-height: 1.4; color: #B9AE9F;"><b style="color: #DED4C4; font-weight: 600;">This browser already has progress</b> — level 7, 3 h 12 m played, 1,240 Scrap. It follows your account the moment you sign in. Nothing is lost.</div>
+      </div>
+
+      <label style="display: flex; flex-direction: column; gap: 6px;">
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #8E8175;">Player name</span>
+        <input value="" placeholder="3–32 characters · a-z 0-9 _ -" style="font: 500 18px Barlow, sans-serif; color: #DED4C4; background: #0C0A09; border: 1px solid #6B5347; padding: 14px 14px; outline: none; min-height: 48px;">
+      </label>
+      <label style="display: flex; flex-direction: column; gap: 6px;">
+        <span style="display: flex; justify-content: space-between; font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #8E8175;"><span>Passphrase</span><span style="color: #5C5249;">12+ characters · a sentence is easiest</span></span>
+        <input type="password" value="" placeholder="correct horse battery staple" style="font: 500 18px Barlow, sans-serif; color: #DED4C4; background: #0C0A09; border: 1px solid #6B5347; padding: 14px 14px; outline: none; min-height: 48px;">
+      </label>
+
+      <sc-if value="{{isSignIn}}" hint-placeholder-val="{{ true }}">
+        <a href="#go" style="text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 12px; background: {{accent}}; color: #fff; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 30px; text-transform: uppercase; letter-spacing: .04em; line-height: 1; padding: 18px; box-shadow: 0 0 0 2px #000, 6px 6px 0 #000; min-height: 56px;">Sign in and play
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3l14 9-14 9z"></path></svg>
+        </a>
+      </sc-if>
+      <sc-if value="{{isCreate}}" hint-placeholder-val="{{ false }}">
+        <a href="#go" style="text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 12px; background: {{accent}}; color: #fff; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 30px; text-transform: uppercase; letter-spacing: .04em; line-height: 1; padding: 18px; box-shadow: 0 0 0 2px #000, 6px 6px 0 #000; min-height: 56px;">Create and play
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3l14 9-14 9z"></path></svg>
+        </a>
+      </sc-if>
+
+      <div style="display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #5C5249;">
+        <span style="height: 1px; background: #463731;"></span><span>or</span><span style="height: 1px; background: #463731;"></span>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+        <a href="#google" style="text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px; border: 1px solid #463731; color: #8E8175; font-weight: 500; font-size: 15px; min-height: 48px;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v8M8 12h8"></path></svg>
+          Google · soon
+        </a>
+        <a href="#discord" style="text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px; border: 1px solid #463731; color: #8E8175; font-weight: 500; font-size: 15px; min-height: 48px;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7a3 3 0 013-3h10a3 3 0 013 3v8a3 3 0 01-3 3H9l-5 3z"></path></svg>
+          Discord · soon
+        </a>
+      </div>
+
+      <a href="#guest" style="text-decoration: none; text-align: center; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: #8E8175; padding: 6px;">Skip — keep playing as a guest on this device →</a>
+    </div>
+    <div style="padding: 12px 28px; border-top: 1px solid #463731; font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .08em; color: #5C5249; line-height: 1.5;">No email needed. Forgot your passphrase? Your recovery code is in Profile → Account. We never see your passphrase; it is hashed on the server.</div>
+  </div>
+
+  <!-- corner brand -->
+  <div style="position: absolute; left: 40px; top: 28px; font-family: 'Big Shoulders Display', sans-serif; font-weight: 900; font-size: 30px; text-transform: uppercase; text-shadow: 3px 3px 0 {{accent}};">Doomcraft</div>
+  <a href="#close" style="position: absolute; right: 36px; top: 28px; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; color: #8E8175; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: .12em; text-transform: uppercase;">Esc · back to game
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+  </a>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"accent":{"editor":"color","default":"#E0431C","options":["#E0431C","#FF5A2E","#E5A02E","#86C232"]},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(props) { super(props); this.state = { tab: 'signin' }; }
+  renderVals() {
+    const tab = this.state.tab;
+    return {
+      accent: this.props.accent ?? '#E0431C',
+      isSignIn: tab === 'signin',
+      isCreate: tab === 'create',
+      pickSignIn: () => this.setState({ tab: 'signin' }),
+      pickCreate: () => this.setState({ tab: 'create' }),
+    };
+  }
+}
+</script>
+</body>
+</html>
