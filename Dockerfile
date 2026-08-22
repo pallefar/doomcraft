@@ -75,8 +75,11 @@ COPY --from=build /app/content ./content
 # The saved-profile store. A named volume here is what keeps XP across a deploy;
 # without one, every restart is a fresh device table and that is a data loss the
 # player notices.
+# No `VOLUME` instruction: Railway rejects the Dockerfile outright ("docker VOLUME
+# is not supported, use Railway Volumes") and on plain Docker an anonymous volume
+# here would only hide a missing `-v`. The mount is the orchestrator's job; this
+# line just makes sure the directory exists and node can write it.
 RUN mkdir -p /data && chown -R node:node /data
-VOLUME ["/data"]
 
 USER node
 EXPOSE 8080
