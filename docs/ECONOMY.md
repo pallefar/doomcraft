@@ -132,3 +132,26 @@ Player-to-player, server-authoritative, with the failure modes designed for rath
 - Menu: Loadout tab (equip skins/variants), Store tab (spend Scrap), Competitions tab, Trade tab,
   Profile with emblems, titles and trophies.
 - Persistence: rides the existing schema-versioned save with server-side entitlements.
+
+**As built, and shipping dark.** The client never computes any of this. `S2C.MATCH_AWARD` (id 12,
+appended — `protocolFingerprint()` did not move) carries the delta *after* the trust table, the
+per-match ceiling, the day cap and the ladder have all had their say, plus the balances the server
+just wrote; `NetClient.onMatchAward` is the only writer of the four fields the surfaces read.
+
+| Surface | Where | Note |
+|---|---|---|
+| Two more `.dc-chip` plates under the minimap, `XP` and `SCRAP` | `client/src/hud/hud.ts` | Reuses the existing chip helper, so no new CSS rule and nothing for `hud.test.ts`'s plate scan to catch |
+| Two more counted rows on the Quest intermission | `client/src/modes/quest/intermission.ts` `intermissionRows` | The DELTA since the level started, so "+120 XP" means this level |
+| `+120 XP · +14 SCRAP` on the Deathmatch scoreboard's footer line | `client/src/modes/deathmatch/deathmatch.ts` `fillHeader` | Deathmatch hides `.dc-chips` outright (`#hud[data-dm="1"]`), so the chips are not an option there; a real end-of-match card is A2 |
+
+**Two flags, and the surfaces need both.** `Feature.ECONOMY` (`shared/src/features.ts`, default
+**false**, admin switch in Settings › Admin) is the product gate and lives in localStorage, so
+anyone with devtools can flip it — which is why it is only ever ANDed with `economy_scrap`, the
+server-resolved kill switch that arrives on `S2C.SESSION_CONFIG`. `economySurfacesOn()` is the one
+place the two meet. The accrual is gated on **neither**: `shared/src/flags.ts` says turning
+`economy_scrap` off must hide the surfaces and never delete a balance.
+
+The in-tab Worker room answers `economy_scrap` from the page's own product flag
+(`localServer.ts` `localFlagBits`). It is not a second party — it runs in this tab, it has
+`store: null`, and it grants nothing — so the chips it unlocks read `XP 0 · SCRAP 0`, which is
+exactly the truth about an offline match.

@@ -59,7 +59,7 @@ import {
   type Level,
 } from '@doomcraft/shared/level';
 import { CONTENT_VERSION, contentHashFor } from '@doomcraft/shared/version';
-import { defaultFlagBits } from '@doomcraft/shared/flags';
+import { defaultFlagBits, flagOn } from '@doomcraft/shared/flags';
 import { BotDriver, MonsterManager, botSkillFor } from './bots.js';
 import { HordeDirector } from './horde.js';
 import {
@@ -77,7 +77,7 @@ import {
 } from './modes.js';
 import { Connection, NetHub, sanitiseChat } from './net.js';
 import type { NetHost, NetTransport } from './net.js';
-import type { PersistenceStore } from './persistence.js';
+import type { AppliedRewards, PersistenceStore, StoredProfile } from './persistence.js';
 import { applyMatchResult } from './persistence.js';
 import {
   EntitlementGuard,
@@ -1424,12 +1424,18 @@ export class Room implements NetHost {
     const result = toMatchResult(verdict);
     if (result === null) return;
 
+    // The connection is captured NOW. `store.update` awaits, and a player who
+    // rage-quits during the end screen has a torn-down `member.conn` by the
+    // time it resolves.
+    const conn = member.conn;
     try {
-      await this.store.update(deviceId, (profile) => {
-        applyMatchResult(profile, result);
+      let landed = { xp: 0, scrap: 0 };
+      const updated = await this.store.update(deviceId, (profile) => {
+        landed = applyMatchResult(profile, result);
         profile.progress.lastSeed = this.seed;
         if (profile.progress.name.length === 0) profile.progress.name = p.name;
       });
+      this.tellPlayerWhatLanded(conn, landed, updated, verdict.code);
     } catch {
       // A failed save must never take the match down.
     }
@@ -1478,6 +1484,31 @@ export class Room implements NetHost {
       blocksBroken: p.blocksBroken,
       favouriteWeapon: p.weapon,
     });
+  }
+
+  /**
+   * Tell one player what the round actually paid them, once the write is done.
+   *
+   * Behind the server-resolved kill switch, NOT behind the client's own product
+   * flag: `shared/src/features.ts` says in its own header that it is not a
+   * security boundary, and a message is a thing this process chooses to send.
+   * A client with the surface switched off simply ignores the packet; a client
+   * with it switched on and the kill switch off is never sent one.
+   *
+   * The amounts are `AppliedRewards` — post-ladder, post-day-cap. Sending the
+   * asked-for number instead would put a figure on the player's screen that
+   * their profile does not contain, which is the one lie an economy cannot
+   * afford.
+   */
+  private tellPlayerWhatLanded(
+    conn: Connection, landed: Pick<AppliedRewards, 'xp' | 'scrap'>,
+    updated: StoredProfile, code: number,
+  ): void {
+    if (!flagOn(conn.flagBits, 'economy_scrap')) return;
+    if (!conn.ready || conn.closed) return;
+    this.net.sendMatchAwardTo(
+      conn, landed.xp, landed.scrap, updated.progress.xp, updated.economy.scrap, code,
+    );
   }
 
   /**

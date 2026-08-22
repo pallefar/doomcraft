@@ -31,6 +31,8 @@
 import { TransportState, type ClientTransport, type ServerTransport } from './transport.js';
 import type { Level } from '@shared/level';
 import type { ContentResolver } from '@doomcraft/server/src/modes.js';
+import { FLAG_ORDER, MAX_FLAG_BITS, defaultFlagBits } from '@shared/flags';
+import { Feature, isEnabled } from '@shared/features';
 
 /* ------------------------------------------------------------------------ *
  * The campaign, for the Worker room
@@ -120,6 +122,13 @@ interface StartMessage {
   maxPlayers?: number;
   /** Skip `room.start()`; the caller drives `advance()`. Inline only. */
   manual?: boolean;
+  /**
+   * The flag bits this room hands its players in `S2C.SESSION_CONFIG`.
+   *
+   * Computed on the PAGE, because that is where localStorage and the query
+   * string are; the worker has neither. See `localFlagBits()`.
+   */
+  flagBits?: number;
 }
 interface StopMessage { t: 'stop' }
 interface StatusRequest { t: 'status' }
@@ -308,6 +317,13 @@ async function createRoomHost(
     eagerWorld: false,
     clock: clock ?? (() => nowMs()),
     name: 'local',
+    // The worker room is not a second party. It runs in this tab, it grants
+    // nothing (`store: null` above), and there is no operator on the other end
+    // to pull a kill switch — so the only honest answer it can give a client
+    // asking "are the reward surfaces on?" is the page's own preference, which
+    // the page computed and sent. A remote server ignores all of this and
+    // resolves its own bits from the flag service (server/src/index.ts).
+    resolveFlags: () => (options.flagBits ?? defaultFlagBits()) >>> 0,
     // The campaign, so a Quest `SELECT` makes this room's world BE the level
     // instead of leaving the level on the client and the collision on a hill.
     levels: createBundledLevels(),
@@ -500,6 +516,27 @@ class LocalTransport implements ClientTransport {
 }
 
 /**
+ * What the in-tab room tells its own player about the feature flags.
+ *
+ * Only a flag whose subject is entirely inside this tab may be answered from a
+ * client-side preference. `economy_scrap` qualifies *for this room* because
+ * this room pays nobody — `store: null`, no gate, no grant — so the surfaces it
+ * unlocks show zeroes, which is exactly the truth about an offline match. Every
+ * other bit keeps its shipped default, `online_play` above all: that one is
+ * about reaching a machine this tab does not own, and no preference in here can
+ * make that machine exist.
+ *
+ * Takes the answer rather than reading it, so it can be tested. `isEnabled`
+ * wants `localStorage` and `location`; this function wants neither.
+ */
+export function localFlagBits(economyProduct: boolean): number {
+  let bits = defaultFlagBits();
+  const i = FLAG_ORDER.indexOf('economy_scrap');
+  if (i >= 0 && i < MAX_FLAG_BITS && economyProduct) bits |= 1 << i;
+  return bits >>> 0;
+}
+
+/**
  * Start the authoritative server for this tab.
  *
  * The returned transport is already usable: packets sent before the worker
@@ -518,6 +555,7 @@ export function createLocalServer(options: LocalServerOptions = {}): LocalServer
     allWeapons: options.allWeapons,
     maxPlayers: options.maxPlayers,
     manual: options.manual === true && options.inline === true,
+    flagBits: localFlagBits(isEnabled(Feature.ECONOMY)),
   };
 
   let worker: Worker | null = null;

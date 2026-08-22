@@ -20,7 +20,10 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { C2S, CLIENT_TIMEOUT_MS, EntityType, GameMode, RemoveReason, quantizePos } from '@shared';
+import {
+  C2S, CLIENT_TIMEOUT_MS, EntityType, GameMode, PacketWriter, RemoveReason,
+  encodeKill, encodeMatchAward, quantizePos,
+} from '@shared';
 import { Room } from '@doomcraft/server/src/room.js';
 import type { NetTransport } from '@doomcraft/server/src/net.js';
 
@@ -500,5 +503,66 @@ describe('delta-encoded entities', () => {
 
     const after = f.net.entities.filter((v) => v.active).length;
     expect(after).toBe(before);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The reward fields — written by the server, never by the client
+ *
+ * `docs/ECONOMY.md` decision 1 is "the server grants every reward; the client
+ * never does". On this class that reduces to a claim a test can actually make:
+ * the four numbers move on `S2C.MATCH_AWARD` and on nothing else. The offline
+ * single-player ledger in `client/src/main.ts` — which DOES add
+ * `XP_PER_KILL * gained` into localStorage — is a different number for a
+ * different purpose, and these tests are what keeps the two disjoint.
+ * ------------------------------------------------------------------------ */
+
+describe('what the server says a round paid', () => {
+  const w = new PacketWriter(64);
+
+  it('accumulates the deltas and adopts the balances, on the award and only '
+    + 'on the award', () => {
+    const f = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(f, 60);
+    expect(f.net.sessionXp).toBe(0);
+    expect(f.net.awardsSeen).toBe(0);
+
+    f.link.client.onmessage?.(encodeMatchAward(w, 120, 14, 4200, 860, 0).copy());
+    expect(f.net.sessionXp).toBe(120);
+    expect(f.net.sessionScrap).toBe(14);
+    expect(f.net.balanceXp).toBe(4200);
+    expect(f.net.balanceScrap).toBe(860);
+    expect(f.net.awardsSeen).toBe(1);
+
+    // A second round adds its delta and REPLACES the balances, because the
+    // balance is the server's and a client that added to it would drift.
+    f.link.client.onmessage?.(encodeMatchAward(w, 80, 6, 4280, 866, 0).copy());
+    expect(f.net.sessionXp).toBe(200);
+    expect(f.net.sessionScrap).toBe(20);
+    expect(f.net.balanceXp).toBe(4280);
+    expect(f.net.balanceScrap).toBe(866);
+
+    // A kill is worth XP on the SERVER. It is worth nothing here.
+    f.link.client.onmessage?.(encodeKill(w, f.net.playerId, 99, 1, 0, 3).copy());
+    playFor(f, 120);
+    expect(f.net.sessionXp).toBe(200);
+    expect(f.net.sessionScrap).toBe(20);
+    expect(f.net.awardsSeen).toBe(2);
+  });
+
+  it('ignores a message id it has never heard of, which is the whole reason a '
+    + 'new one costs no protocol bump', () => {
+    const f = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(f, 60);
+    const before = f.net.status;
+
+    // Id 99 is what MATCH_AWARD looks like to a client built before it existed.
+    const alien = new Uint8Array([99, 1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(() => f.link.client.onmessage?.(alien)).not.toThrow();
+
+    playFor(f, 120);
+    expect(f.net.status).toBe(before);
+    expect(f.net.sessionXp).toBe(0);
+    expect(f.net.awardsSeen).toBe(0);
   });
 });

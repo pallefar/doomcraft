@@ -1123,6 +1123,16 @@ addToggle('Online multiplayer',
     setOverride(Feature.SHARED_WORLDS, on);
     location.reload();
   });
+/* The reward surfaces ship dark. This switch only decides whether the numbers are
+ * SHOWN — the server decides whether they exist, twice over (the trust table, and the
+ * `economy_scrap` kill switch it resolves per player). With this on and that off, the
+ * chips stay hidden and that is the correct answer, not a bug. */
+addToggle('Economy (points & scrap)',
+  () => isEnabled(Feature.ECONOMY),
+  (on) => {
+    setOverride(Feature.ECONOMY, on);
+    location.reload();
+  });
 
 
 const resumeBtn = button('Resume', 'dc-primary', () => closePause());

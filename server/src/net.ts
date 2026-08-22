@@ -75,6 +75,7 @@ import {
   encodeChunkZ,
   encodeDamage,
   encodeKill,
+  encodeMatchAward,
   encodePong,
   encodeSnapshot,
   encodeSessionConfig,
@@ -1324,6 +1325,22 @@ export class NetHub {
   sendChatTo(conn: Connection, senderId: number, channel: number, text: string): void {
     const w = this.shared;
     encodeChatS2C(w, senderId, channel, text);
+    conn.send(w.copy());
+  }
+
+  /**
+   * Tell one player what their round paid and what they now hold.
+   *
+   * Never broadcast: a balance is one player's business. The caller has already
+   * written the profile, so every number here is what LANDED rather than what
+   * was asked for.
+   */
+  sendMatchAwardTo(
+    conn: Connection, deltaXp: number, deltaScrap: number,
+    totalXp: number, totalScrap: number, code: number,
+  ): void {
+    const w = this.shared;
+    encodeMatchAward(w, deltaXp, deltaScrap, totalXp, totalScrap, code);
     conn.send(w.copy());
   }
 

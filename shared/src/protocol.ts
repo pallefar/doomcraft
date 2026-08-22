@@ -113,6 +113,19 @@ export enum S2C {
    * ~$10.8k/month).
    */
   SESSION_CONFIG = 11,
+  /**
+   * "This is what the round was worth, and this is what you now hold."
+   *
+   * Sent once per player per round, right after the server has written the
+   * profile — so the numbers on it are what LANDED, after the trust table, the
+   * per-match ceiling, the per-day cap and the diminishing-returns ladder have
+   * all had their say. The client never computes any of it; it renders this.
+   *
+   * Additive, and therefore NOT a protocol bump: `protocolFingerprint()` lists
+   * the ids frozen at v3 by name, and `client/src/net/client.ts` has always had
+   * `default: break` on an unknown id, so a v2 client ignores this entirely.
+   */
+  MATCH_AWARD = 12,
 }
 
 /* ------------------------------------------------------------------------ *
@@ -851,6 +864,61 @@ export function decodeSessionConfig(r: PacketReader, out: SessionConfigMessage):
   out.flags = r.u32();
   out.buildId = r.str();
   return out;
+}
+
+/**
+ * What one round paid, and what the profile holds now.
+ *
+ * `xp`/`scrap` are the DELTA this round produced *after* every server-side
+ * reduction; `totalXp`/`totalScrap` are the balances the server just wrote. The
+ * client renders both and computes neither — `docs/ECONOMY.md` decision 1.
+ *
+ * `code` is the entitlement guard's `RejectCode`, 0 = accepted. It rides along
+ * so a client can eventually say WHY a match paid nothing ("this room is
+ * private") instead of showing a silent zero. Nothing branches on it yet.
+ */
+export interface MatchAwardMessage {
+  xp: number;
+  scrap: number;
+  totalXp: number;
+  totalScrap: number;
+  code: number;
+}
+export function createMatchAwardMessage(): MatchAwardMessage {
+  return { xp: 0, scrap: 0, totalXp: 0, totalScrap: 0, code: 0 };
+}
+/**
+ * Clamped rather than masked. `x & 0xffff` turns 70 000 into 4 464, which is a
+ * plausible-looking lie about money; `Math.min` turns it into the ceiling,
+ * which is visibly wrong and therefore reportable.
+ */
+export function encodeMatchAward(
+  w: PacketWriter, xp: number, scrap: number,
+  totalXp: number, totalScrap: number, code: number,
+): PacketWriter {
+  w.reset();
+  w.u8(S2C.MATCH_AWARD);
+  w.u16(clampU(xp, 0xffff));
+  w.u16(clampU(scrap, 0xffff));
+  w.u32(clampU(totalXp, 0xffffffff));
+  w.u32(clampU(totalScrap, 0xffffffff));
+  w.u8(clampU(code, 0xff));
+  return w;
+}
+export function decodeMatchAward(r: PacketReader, out: MatchAwardMessage): MatchAwardMessage {
+  r.u8();
+  out.xp = r.u16();
+  out.scrap = r.u16();
+  out.totalXp = r.u32();
+  out.totalScrap = r.u32();
+  out.code = r.u8();
+  return out;
+}
+
+function clampU(v: number, max: number): number {
+  if (!Number.isFinite(v)) return 0;
+  const n = Math.round(v);
+  return n < 0 ? 0 : n > max ? max : n;
 }
 
 export interface ChunkMessage {

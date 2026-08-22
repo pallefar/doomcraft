@@ -119,6 +119,7 @@ import {
 } from '@/modes/quest/levelRuntime';
 import { QuestHud } from '@/modes/quest/hud';
 import { QuestIntermission } from '@/modes/quest/intermission';
+import { economySurfacesOn } from '@/hud/hud';
 
 /* ------------------------------------------------------------------------ *
  * Content discovery
@@ -385,6 +386,9 @@ class QuestMode implements ModeInstance {
 
   /* --- run state -------------------------------------------------------- */
   private elapsed = 0;
+  /** `net.sessionXp` / `sessionScrap` at `enter()`. See the note there. */
+  private awardMarkXp = 0;
+  private awardMarkScrap = 0;
   private deaths = 0;
   private placed = false;
   private wasDead = false;
@@ -545,6 +549,12 @@ class QuestMode implements ModeInstance {
   enter(): void {
     const host = this.ctx.host;
     host.setStatus(`${this.level.meta.name} — ${SKILL_SHORT_NAMES[this.runtime.skill]}`);
+    // Where the session's server-granted totals stood when this level started.
+    // The intermission shows the DIFFERENCE, so "+120 XP" means this level and
+    // not "everything since you opened the tab". Subtracting two numbers the
+    // server sent is not computing a balance; inventing either of them would be.
+    this.awardMarkXp = host.game.net.sessionXp;
+    this.awardMarkScrap = host.game.net.sessionScrap;
     this.sendSelect();
     this.markAttempt();
   }
@@ -968,6 +978,11 @@ class QuestMode implements ModeInstance {
       episodeName: episode?.name ?? this.level.meta.episodeName,
       nextLevelName: this.catalog.names.get(next) ?? prettyId(next),
       endsEpisode,
+      // Both gates, resolved once by the HUD's own helper. An offline run has
+      // no server, so the room reports the kill switch off and no rows appear.
+      economy: economySurfacesOn(game.economyProduct, game.net.flagBits),
+      xp: Math.max(0, game.net.sessionXp - this.awardMarkXp),
+      scrap: Math.max(0, game.net.sessionScrap - this.awardMarkScrap),
       onAdvance: () => { this.advance(next, endsEpisode); },
       onRestart: () => { this.restart(); },
       onQuit: () => { this.ctx.host.requestExit('quest-quit'); },

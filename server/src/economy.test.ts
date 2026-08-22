@@ -26,6 +26,7 @@ import { join as joinPath } from 'node:path';
 import {
   GameMode,
   MATCH_DURATION_MS,
+  PacketReader,
   PacketWriter,
   S2C,
   SCRAP_PER_KILL,
@@ -36,9 +37,12 @@ import {
   XP_PER_KILL,
   XP_PER_MINUTE,
   XP_PER_WIN,
+  createMatchAwardMessage,
+  decodeMatchAward,
   encodeHello,
   encodeInput,
 } from '@doomcraft/shared';
+import { FLAG_ORDER, defaultFlagBits } from '@doomcraft/shared/flags';
 import { ModeId } from '@doomcraft/shared/modes';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 
@@ -110,6 +114,8 @@ interface RoomSpec {
   sessionIntent?: MatchType;
   name?: string;
   plan?: ModeSimPlan;
+  /** What the room tells its players in SESSION_CONFIG. Default: the shipped bits. */
+  flagBits?: number;
 }
 
 /**
@@ -142,6 +148,7 @@ function makeRoom(spec: RoomSpec): Room {
     sessionOrigin: spec.sessionOrigin,
     sessionIntent: spec.sessionIntent,
     plan: spec.plan,
+    resolveFlags: () => spec.flagBits ?? defaultFlagBits(),
   });
 }
 
@@ -212,6 +219,16 @@ function expectedXp(kills: number, won: boolean, ticks: number): number {
 function expectedScrap(kills: number, won: boolean, ticks: number): number {
   const seconds = (ticks * TICK_MS) / 1000;
   return Math.round(kills * SCRAP_PER_KILL + (won ? SCRAP_PER_WIN : 0) + (seconds / 60) * SCRAP_PER_MINUTE);
+}
+
+/** The shipped bits with the reward kill switch flipped on, as an operator would. */
+const SCRAP_ON = (defaultFlagBits() | (1 << FLAG_ORDER.indexOf('economy_scrap'))) >>> 0;
+
+/** Every MATCH_AWARD this socket was sent, decoded. */
+function awards(client: Client): ReturnType<typeof createMatchAwardMessage>[] {
+  return client.socket.packets
+    .filter((p) => p.length > 0 && p[0] === S2C.MATCH_AWARD)
+    .map((p) => decodeMatchAward(new PacketReader(p), createMatchAwardMessage()));
 }
 
 const DEVICE = 'device-aaaa0001';
@@ -969,5 +986,121 @@ describe('one payout per device per round', () => {
     });
     expect(again.accepted).toBe(false);
     expect(toMatchResult(again)).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * 5. Telling the player, without letting them tell themselves
+ *
+ * `S2C.MATCH_AWARD` is the only way a number the server wrote reaches a screen.
+ * Three things have to be true about it and each one is a separate way to get
+ * this wrong: it must carry what LANDED rather than what was asked for, it must
+ * be gated on the server-resolved kill switch rather than on anything the
+ * client can set, and it must arrive once.
+ * ------------------------------------------------------------------------ */
+
+describe('what the player is told', () => {
+  it('sends exactly one award, carrying both the delta and the new balances', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard, flagBits: SCRAP_ON });
+
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+    // The award is sent after `store.update` resolves, so let the microtask the
+    // barrier above queued actually run before reading the socket.
+    await Promise.resolve();
+
+    const profile = await store.ensure(DEVICE);
+    const sent = awards(client);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].xp).toBe(profile.progress.xp);
+    expect(sent[0].scrap).toBe(profile.economy.scrap);
+    expect(sent[0].totalXp).toBe(profile.progress.xp);
+    expect(sent[0].totalScrap).toBe(profile.economy.scrap);
+    expect(sent[0].code).toBe(RejectCode.OK);
+    expect(sent[0].xp).toBeGreaterThan(0);
+  });
+
+  it('says nothing when the server has the kill switch off, and still pays', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    // The shipped bits: economy_scrap is `defaultOn: false` in flags.ts.
+    const room = makeRoom({ store, guard });
+
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+    await Promise.resolve();
+
+    const profile = await store.ensure(DEVICE);
+    // The ledger keeps accruing — flags.ts's own blast radius for this switch
+    // says turning it off must hide the surfaces and never delete a balance.
+    expect(profile.progress.xp).toBeGreaterThan(0);
+    expect(profile.economy.scrap).toBeGreaterThan(0);
+    // But nothing was said about it.
+    expect(awards(client)).toEqual([]);
+  });
+
+  it('reports the metered amount, not the amount the room asked for', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard, flagBits: SCRAP_ON });
+
+    // Ten XP left in today's bucket. `applyMatchResult` reads the wall clock,
+    // so the bucket has to be stamped with the wall clock's day or it rolls.
+    await store.update(DEVICE, (p) => {
+      p.economy.day = utcDay(Date.now());
+      p.economy.dayXp = DAY_XP_CAP - 10;
+      p.economy.dayScrap = DAY_SCRAP_CAP;
+    });
+
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+    await Promise.resolve();
+
+    const profile = await store.ensure(DEVICE);
+    const sent = awards(client);
+    expect(sent).toHaveLength(1);
+    // The round was worth hundreds. The player is told what they actually got.
+    expect(expectedXp(KILLS, true, PLAY_TICKS + 1)).toBeGreaterThan(100);
+    expect(sent[0].xp).toBe(10);
+    expect(sent[0].scrap).toBe(0);
+    expect(sent[0].totalXp).toBe(profile.progress.xp);
+    expect(profile.progress.xp).toBe(10);
+  });
+
+  it('is never sent to a device that was refused, because there is nothing to '
+    + 'report', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    // A coded room. The trust table says REWARD_NONE for DM/PRIVATE.
+    const room = makeRoom({
+      store, guard, flagBits: SCRAP_ON,
+      name: 'dm~coded', sessionOrigin: SessionOrigin.SERVER_INVITE,
+      sessionIntent: MatchType.PRIVATE,
+    });
+
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+    await Promise.resolve();
+
+    expect((await store.ensure(DEVICE)).progress.xp).toBe(0);
+    expect(awards(client)).toEqual([]);
   });
 });

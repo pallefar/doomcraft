@@ -68,6 +68,7 @@ import {
   createChunkZHeader,
   createDamageEvent,
   createKillEvent,
+  createMatchAwardMessage,
   createPongMessage,
   createSessionConfigMessage,
   createUpdateRequiredMessage,
@@ -77,6 +78,7 @@ import {
   decodeChunkZHeader,
   decodeDamage,
   decodeKill,
+  decodeMatchAward,
   decodePong,
   decodeSessionConfig,
   decodeSnapshot,
@@ -122,7 +124,7 @@ import {
 } from '@shared/version';
 import { defaultFlagBits, flagOn } from '@shared/flags';
 import type {
-  ChatMessage, DamageEvent, KillEvent, SessionConfigMessage, SolidAt,
+  ChatMessage, DamageEvent, KillEvent, MatchAwardMessage, SessionConfigMessage, SolidAt,
   UpdateRequiredMessage, WelcomeMessage,
 } from '@shared';
 import { createMoveState, eyeHeightOf, moveStep } from '@doomcraft/server/src/sim.js';
@@ -641,6 +643,12 @@ export interface NetClientEvents {
    */
   onSessionConfig?(config: SessionConfigMessage): void;
   /**
+   * What the server granted for the round that just ended, and the balances it
+   * wrote. The record is REUSED — read it now. Fires only when the server has
+   * the `economy_scrap` kill switch on for this player.
+   */
+  onMatchAward?(award: MatchAwardMessage): void;
+  /**
    * The server refused this connection and said why. Fires BEFORE the close,
    * so the shell can show the right thing rather than "connection lost".
    *
@@ -904,6 +912,24 @@ export class NetClient {
   serverBuildId = '';
   /** Feature flags the server resolved for this player. Read with `flag()`. */
   flagBits = defaultFlagBits();
+
+  /* --- what the server says this session has been worth --------------- *
+   *
+   * Written in exactly one place, `onMatchAward`, and read by the HUD and the
+   * end-of-match panels. Nothing on the client adds a kill to a total: the
+   * offline single-player ledger in `client/src/main.ts` is a SEPARATE,
+   * localStorage-only counter and the two never meet. `docs/ECONOMY.md`
+   * decision 1 — the server grants every reward, the client never does.
+   */
+
+  /** Granted to this player since this connection opened. */
+  sessionXp = 0;
+  sessionScrap = 0;
+  /** The balances the server last wrote. 0 until the first award lands. */
+  balanceXp = 0;
+  balanceScrap = 0;
+  /** Awards received. The honest "have we ever been paid" test. */
+  awardsSeen = 0;
   /**
    * Why the server refused us, if it did. Sticky across the close so the shell
    * can still read it in `onStatus('closed')`.
@@ -922,6 +948,7 @@ export class NetClient {
   private readonly welcome = createWelcomeMessage();
   private readonly sessionConfig = createSessionConfigMessage();
   private readonly updateMsg = createUpdateRequiredMessage();
+  private readonly matchAward = createMatchAwardMessage();
   private readonly damage = createDamageEvent();
   private readonly kill = createKillEvent();
   private readonly chat = createChatMessage();
@@ -1285,6 +1312,13 @@ export class NetClient {
     this.modeStateSeen = false;
     this.modeContextSeen = false;
     this.modeState.reset();
+    // A reconnect is a new session by this class's own definition of the word,
+    // and the server will re-state the balances with the next award anyway.
+    this.sessionXp = 0;
+    this.sessionScrap = 0;
+    this.balanceXp = 0;
+    this.balanceScrap = 0;
+    this.awardsSeen = 0;
   }
 
   private setStatus(s: NetStatus, detail?: string): void {
@@ -1500,6 +1534,7 @@ export class NetClient {
       case S2C_MODE.EVENT: this.onModeEvent(r); break;
       case S2C_MODE.CONTEXT: this.onModeContext(r); break;
       case S2C.SESSION_CONFIG: this.onSessionConfig(r); break;
+      case S2C.MATCH_AWARD: this.onMatchAward(r); break;
       case S2C.UPDATE_REQUIRED: this.onUpdateRequired(r); break;
       // An unknown id is a message from a NEWER server. Ignoring it is what
       // makes an additive protocol change free — do not turn this into an
@@ -1531,6 +1566,24 @@ export class NetClient {
     this.serverBuildId = c.buildId;
     this.flagBits = c.flags >>> 0;
     this.events.onSessionConfig?.(c);
+  }
+
+  /**
+   * The only writer of the four reward fields on this class.
+   *
+   * Adds the delta the server says it granted and adopts the balances the
+   * server says it wrote. It does not check them, reconcile them, or fill a gap
+   * with an estimate — a client that computes a balance is a client that can be
+   * argued with.
+   */
+  private onMatchAward(r: PacketReader): void {
+    const m = decodeMatchAward(r, this.matchAward);
+    this.sessionXp += m.xp;
+    this.sessionScrap += m.scrap;
+    this.balanceXp = m.totalXp;
+    this.balanceScrap = m.totalScrap;
+    this.awardsSeen++;
+    this.events.onMatchAward?.(m);
   }
 
   private onUpdateRequired(r: PacketReader): void {

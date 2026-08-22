@@ -27,8 +27,9 @@ import {
   STATUS_OFF, STATUS_SIGHTLINE, STATUS_CORNER, STATUS_DEATH,
   weaponGlyph, WEAPON_GLYPH_FALLBACK, foveaHealthFrac,
   RAIL_MAX_CELLS, railSpecs, railStringCount, type RailCellSpec,
-  HUD_CSS,
+  HUD_CSS, economySurfacesOn, awardText,
 } from './hud';
+import { FLAG_ORDER, defaultFlagBits } from '@shared/flags';
 import {
   AMMO_TYPE_COUNT, WEAPON_COUNT, WEAPON_MAG_SIZE, WeaponId, ammoTypeOf,
 } from '@shared/weapons';
@@ -667,5 +668,61 @@ describe('misc read-outs', () => {
     const s = createHudState();
     expect(s.reserveByType.length).toBe(AMMO_TYPE_COUNT);
     for (let i = 0; i < AMMO_TYPE_COUNT; i++) expect(s.reserveByType[i]).toBe(-1);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The reward surfaces
+ * ------------------------------------------------------------------------ */
+
+describe('who is allowed to see a balance', () => {
+  const SCRAP_BIT = 1 << FLAG_ORDER.indexOf('economy_scrap');
+  const withScrap = (defaultFlagBits() | SCRAP_BIT) >>> 0;
+
+  it('needs BOTH the product flag and the server kill switch, so neither one '
+    + 'alone can put a number on the screen', () => {
+    expect(economySurfacesOn(false, 0)).toBe(false);
+    // The half anybody with devtools can flip. On its own it buys nothing.
+    expect(economySurfacesOn(true, 0)).toBe(false);
+    expect(economySurfacesOn(true, defaultFlagBits())).toBe(false);
+    // The half the server owns. On its own it buys nothing either.
+    expect(economySurfacesOn(false, withScrap)).toBe(false);
+    expect(economySurfacesOn(true, withScrap)).toBe(true);
+  });
+
+  it('reads the kill switch out of the bit the server actually sends, not a '
+    + 'position this file guessed at', () => {
+    // FLAG_ORDER is append-only and the bit index IS the wire format. If a flag
+    // were ever inserted ahead of economy_scrap, this catches it here rather
+    // than by showing one player somebody else's feature.
+    const i = FLAG_ORDER.indexOf('economy_scrap');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(economySurfacesOn(true, 1 << i)).toBe(true);
+    for (let other = 0; other < FLAG_ORDER.length; other++) {
+      if (other === i) continue;
+      expect(economySurfacesOn(true, 1 << other)).toBe(false);
+    }
+  });
+
+  it('ships dark: a fresh HUD state shows nothing and claims nothing', () => {
+    const s = createHudState();
+    expect(s.economy).toBe(false);
+    expect(s.xp).toBe(0);
+    expect(s.scrap).toBe(0);
+  });
+});
+
+describe('the one-line award string', () => {
+  it('drops a zero rather than printing it, because "+0 SCRAP" reads as a bug '
+    + 'and a Builder round genuinely pays none', () => {
+    expect(awardText(120, 14)).toBe('+120 XP · +14 SCRAP');
+    expect(awardText(120, 0)).toBe('+120 XP');
+    expect(awardText(0, 14)).toBe('+14 SCRAP');
+    expect(awardText(0, 0)).toBe('');
+  });
+
+  it('never prints a negative or a fraction', () => {
+    expect(awardText(-50, -3)).toBe('');
+    expect(awardText(120.6, 13.4)).toBe('+121 XP · +13 SCRAP');
   });
 });

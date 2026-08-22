@@ -24,13 +24,17 @@ import {
   PROTOCOL_VERSION,
   PacketReader,
   PacketWriter,
+  S2C,
   createHelloMessage,
+  createMatchAwardMessage,
   createSessionConfigMessage,
   createUpdateRequiredMessage,
   decodeHello,
+  decodeMatchAward,
   decodeSessionConfig,
   decodeUpdateRequired,
   encodeHello,
+  encodeMatchAward,
   encodeSessionConfig,
   encodeUpdateRequired,
   encodeWelcome,
@@ -182,6 +186,18 @@ describe('the protocol ratchet', () => {
   it('is stable across calls, so it can be compared between hosts', () => {
     expect(protocolFingerprint()).toBe(protocolFingerprint());
   });
+
+  it('holds while an id is APPENDED, which is the whole reason the fingerprint '
+    + 'lists the frozen ids by name instead of hashing the enum', () => {
+    // S2C.MATCH_AWARD arrived after v3 froze. If it had been slotted into the
+    // middle of the enum every id after it would have shifted and the number
+    // above would have moved — so this is the assertion that says WHERE the new
+    // id went, not merely that one exists.
+    expect(S2C.MATCH_AWARD).toBe(12);
+    expect(S2C.MATCH_AWARD).toBeGreaterThan(S2C.CHUNK_Z);
+    expect(S2C.MATCH_AWARD).toBeGreaterThan(S2C.SESSION_CONFIG);
+    expect(protocolFingerprint()).toBe(0x04e8d61f);
+  });
 });
 
 describe('the content ratchet', () => {
@@ -225,6 +241,23 @@ describe('golden wire vectors', () => {
       .toBe('0b03020100efbeadde0102000006616263313233');
   });
 
+  it('MATCH_AWARD encodes to the frozen bytes', () => {
+    expect(hex(encodeMatchAward(w, 120, 14, 4200, 860, 0).copy()))
+      .toBe('0c78000e00681000005c03000000');
+  });
+
+  it('clamps a money field instead of masking it, because 70 000 & 0xffff is a '
+    + 'plausible-looking lie about somebody\'s balance', () => {
+    const m = decodeMatchAward(
+      new PacketReader(encodeMatchAward(w, 70_000, -3, 4200, 860, 9).copy()),
+      createMatchAwardMessage(),
+    );
+    // Masked it would read 4 464 — a number a player could believe.
+    expect(m.xp).toBe(0xffff);
+    expect(m.scrap).toBe(0);
+    expect(m.code).toBe(9);
+  });
+
   it('round-trips every one of them', () => {
     const u = decodeUpdateRequired(
       new PacketReader(bytes('0a010302010007746f6f206f6c64')), createUpdateRequiredMessage(),
@@ -233,6 +266,11 @@ describe('golden wire vectors', () => {
       reason: UpdateReason.PROTOCOL_TOO_OLD, serverProtocol: 3, serverMinProtocol: 2,
       contentVersion: 1, detail: 'too old',
     });
+
+    const a = decodeMatchAward(
+      new PacketReader(bytes('0c78000e00681000005c03000000')), createMatchAwardMessage(),
+    );
+    expect(a).toEqual({ xp: 120, scrap: 14, totalXp: 4200, totalScrap: 860, code: 0 });
 
     const c = decodeSessionConfig(
       new PacketReader(bytes('0b03020100efbeadde0102000006616263313233')), createSessionConfigMessage(),

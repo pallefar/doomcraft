@@ -142,6 +142,7 @@ import {
   type CrosshairStyle,
 } from '@shared/constants';
 import { minimapColor, BLOCK_LIQUID } from '@shared/blocks';
+import { flagOn } from '@shared/flags';
 import {
   WEAPON_COUNT, WEAPON_SHORT_NAMES, WEAPON_NAMES, AMMO_NAMES, AMMO_COLORS,
   AMMO_TYPE_COUNT, WEAPON_MAG_SIZE, ammoTypeOf, ownsWeapon,
@@ -188,6 +189,19 @@ export interface HudState {
   playersAlive: number;
   matchSeconds: number;
 
+  /**
+   * Are the reward surfaces on for this player? BOTH gates, resolved by
+   * `economySurfacesOn` — the localStorage product flag AND the server's
+   * `economy_scrap` kill switch. False hides the two chips entirely.
+   */
+  economy: boolean;
+  /**
+   * Granted by the SERVER this session. The HUD renders these; it never adds
+   * to them, and nothing in `hud.ts` knows what a kill is worth.
+   */
+  xp: number;
+  scrap: number;
+
   dead: boolean;
   /** Centre status line. Empty hides it. */
   status: string;
@@ -227,6 +241,7 @@ export function createHudState(): HudState {
     reserveByType,
     spread: 0, reloading: false, reloadFrac: 0,
     kills: 0, deaths: 0, playersAlive: 1, matchSeconds: 0,
+    economy: false, xp: 0, scrap: 0,
     dead: false, status: '', subStatus: '',
     fps: 0, ping: 0, showFps: true,
     camX: 0, camZ: 0, camYaw: 0,
@@ -598,6 +613,44 @@ export function formatClock(secs: number): string {
   const v = Math.max(0, Math.floor(secs));
   const m = Math.floor(v / 60);
   return `${m}:${String(v - m * 60).padStart(2, '0')}`;
+}
+
+/* ---- the reward surfaces -------------------------------------------------
+ *
+ * Two gates, on purpose, and this is the only place they are ANDed together.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * May this player see a balance?
+ *
+ * `product` is `isEnabled(Feature.ECONOMY)` — localStorage, flippable from
+ * devtools, and therefore a preference and nothing more. `flagBits` is what the
+ * SERVER resolved for this player and sent in `S2C.SESSION_CONFIG`; it is the
+ * kill switch, and `shared/src/flags.ts` says turning it off must hide the
+ * surfaces without touching a balance.
+ *
+ * Both, or nothing. A player who flips the localStorage key against a server
+ * with the switch off sees no chips — correct, because there is nothing there
+ * to show them: that server is not sending awards either.
+ */
+export function economySurfacesOn(product: boolean, flagBits: number): boolean {
+  return product && flagOn(flagBits, 'economy_scrap');
+}
+
+/**
+ * `+120 XP · +14 SCRAP`, or `''` when there is nothing to report.
+ *
+ * The one-line form, for the string channels that already exist on the
+ * end-of-match surfaces. Zeroes are dropped rather than printed: "+0 SCRAP" on
+ * a Builder round is technically true and reads as a bug.
+ */
+export function awardText(xp: number, scrap: number): string {
+  const bits: string[] = [];
+  const x = Math.max(0, Math.round(xp));
+  const s = Math.max(0, Math.round(scrap));
+  if (x > 0) bits.push(`+${x} XP`);
+  if (s > 0) bits.push(`+${s} SCRAP`);
+  return bits.join(' · ');
 }
 
 /* ---- the match rail ------------------------------------------------------
@@ -1395,6 +1448,10 @@ export class Hud {
   private elChipAlive!: HTMLElement;
   private elChipKills!: HTMLElement;
   private elChipTime!: HTMLElement;
+  private elChipXp!: HTMLElement;
+  private elChipScrap!: HTMLElement;
+  /** The two `.dc-chip` plates themselves, which is what gets hidden. */
+  private elEconomyChips: HTMLElement[] = [];
   private elPerf!: HTMLElement;
   private elFeed!: HTMLElement;
   private elHint!: HTMLElement;
@@ -1447,6 +1504,7 @@ export class Hud {
   private cHealth = -1; private cArmor = -1; private cMag = -1; private cRes = -1;
   private cWeapon = -1; private cOwned = -1; private cKills = -1; private cDeaths = -1;
   private cAlive = -1; private cTime = -1; private cStatus = ''; private cSub = '';
+  private cXp = -1; private cScrap = -1; private cEconomy: boolean | null = null;
   private cStatusDead = false;
   private cFps = -1; private cPing = -1; private cPerfShown = true;
   private cTier = -1; private cAmmoCls = '';
@@ -1589,6 +1647,17 @@ export class Hud {
     this.elChipAlive = chip(chips, 'ALIVE', 'ALV', '1');
     this.elChipKills = chip(chips, 'KILLS', 'K/D', '0');
     this.elChipTime = chip(chips, 'TIME', 'T', '0:00');
+    /* Two more of exactly the same plate. Reusing `.dc-chip` is the point: the
+       CSS scan in hud.test.ts rejects any new plate that mints its own radius
+       or keyline, and the reward surfaces are not special enough to earn one.
+       They start hidden — `Feature.ECONOMY` ships false. */
+    this.elChipXp = chip(chips, 'XP', 'XP', '0');
+    this.elChipScrap = chip(chips, 'SCRAP', 'SCR', '0');
+    this.elEconomyChips = [
+      this.elChipXp.parentElement as HTMLElement,
+      this.elChipScrap.parentElement as HTMLElement,
+    ];
+    for (const c of this.elEconomyChips) c.classList.add('dc-hide');
     map.appendChild(chips);
     /* Where an over-budget status line goes instead of onto the sightline:
        one more chip in the top-left stack, directly under the match clock. */
@@ -2153,6 +2222,19 @@ export class Hud {
     if (secs !== this.cTime) {
       this.cTime = secs;
       this.elChipTime.textContent = formatClock(secs);
+    }
+    if (s.economy !== this.cEconomy) {
+      this.cEconomy = s.economy;
+      for (const c of this.elEconomyChips) c.classList.toggle('dc-hide', !s.economy);
+    }
+    if (s.economy) {
+      const xp = Math.max(0, Math.round(s.xp));
+      const scrap = Math.max(0, Math.round(s.scrap));
+      if (xp !== this.cXp) { this.cXp = xp; this.elChipXp.textContent = String(xp); }
+      if (scrap !== this.cScrap) {
+        this.cScrap = scrap;
+        this.elChipScrap.textContent = String(scrap);
+      }
     }
 
     /* --- perf ---------------------------------------------------------- */

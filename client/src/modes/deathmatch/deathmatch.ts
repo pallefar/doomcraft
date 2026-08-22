@@ -79,7 +79,7 @@ import {
   type ModeHost,
   type ModeInstance,
 } from '@/modes/registry';
-import { MatchRail, type RailCellSpec } from '@/hud/hud';
+import { MatchRail, awardText, economySurfacesOn, type RailCellSpec } from '@/hud/hud';
 
 import { Killfeed, type KillfeedEvent } from './killfeed';
 import {
@@ -680,6 +680,18 @@ export class DeathmatchMode implements ModeInstance {
     h.note = v.humans < v.bodies
       ? `${v.bodies - v.humans} bots holding slots${cap}`
       : `All human${cap}`;
+    /* Deathmatch has no end-of-match card — the mode retitles this board and
+     * that is the whole ceremony. So the reward goes on the one free string
+     * channel the board already has (`header.note` -> `footRight`) rather than
+     * onto the sightline, where `statusInk()` would price it over budget and
+     * demote it to a corner chip anyway. A real card is A2.
+     *
+     * `awardText` returns '' until the server has actually paid something, so
+     * an offline match reads exactly as it did before this existed. */
+    const paid = awardText(this.host.game.net.sessionXp, this.host.game.net.sessionScrap);
+    if (paid !== '' && economySurfacesOn(this.host.game.economyProduct, this.host.game.net.flagBits)) {
+      h.note = `${h.note} · ${paid}`;
+    }
   }
 
   /* ---------------------------------------------------------------- *

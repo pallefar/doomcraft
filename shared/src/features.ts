@@ -22,12 +22,26 @@ export const enum Feature {
   ONLINE_MULTIPLAYER = 'onlineMultiplayer',
   /** Persistent shared Builder worlds — needs the same server as multiplayer. */
   SHARED_WORLDS = 'sharedWorlds',
+  /**
+   * The reward surfaces: the XP/Scrap chips on the HUD and the amounts on the
+   * end-of-match panels.
+   *
+   * A PRODUCT gate and nothing more. It decides whether a player is SHOWN a
+   * balance; it cannot decide whether one is granted, because it lives in this
+   * tab's localStorage. The grant is gated twice on the far side — the trust
+   * table via `server/src/entitlementGuard.ts`, and the server-resolved
+   * `economy_scrap` kill switch in `shared/src/flags.ts`, which the surfaces
+   * ALSO require. Turning this on against a server that has the kill switch off
+   * shows nothing, which is the correct answer.
+   */
+  ECONOMY = 'economy',
 }
 
-/** Shipped defaults. Both off until there is a server to talk to. */
+/** Shipped defaults. All off: two want a server to talk to, the third wants one to pay. */
 const DEFAULTS: Readonly<Record<string, boolean>> = Object.freeze({
   [Feature.ONLINE_MULTIPLAYER]: false,
   [Feature.SHARED_WORLDS]: false,
+  [Feature.ECONOMY]: false,
 });
 
 /** What the badge says on a gated tile. Kept here so it is changed in one place. */

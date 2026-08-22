@@ -84,9 +84,11 @@ import {
 } from '@/net/session';
 
 import {
-  Hud, createHudState, BLIP_ENEMY, BLIP_PLAYER, BLIP_PICKUP, MAX_BLIPS, MAX_BOARD_ROWS,
+  Hud, createHudState, economySurfacesOn,
+  BLIP_ENEMY, BLIP_PLAYER, BLIP_PICKUP, MAX_BLIPS, MAX_BOARD_ROWS,
   type HudState,
 } from '@/hud/hud';
+import { Feature, isEnabled } from '@shared/features';
 import { MobileControls } from '@/hud/mobile';
 
 import { AudioEngine } from '@/audio/engine';
@@ -335,6 +337,17 @@ export class Game {
 
   readonly hudState: HudState = createHudState();
   readonly events: GameEvents;
+
+  /**
+   * The player's own preference on seeing a balance, read ONCE.
+   *
+   * `isEnabled` hits localStorage, which is synchronous and must not be on the
+   * frame path. The other half of the gate — the server's `economy_scrap` bit —
+   * is a bit test on `net.flagBits` and is re-read every frame, so a room that
+   * arrives with the switch off hides the chips the moment SESSION_CONFIG lands
+   * without any event wiring.
+   */
+  readonly economyProduct: boolean = isEnabled(Feature.ECONOMY);
 
   /** True once the world is drawable and the local player exists. */
   ready = false;
@@ -1878,6 +1891,12 @@ export class Game {
       : 0;
     s.kills = net.local.kills;
     s.deaths = net.local.deaths;
+    /* Server truth, straight through. `net.sessionXp` moves only in
+       `NetClient.onMatchAward`; the offline localStorage ledger in main.ts is a
+       different number for a different purpose and never reaches this line. */
+    s.economy = economySurfacesOn(this.economyProduct, net.flagBits);
+    s.xp = net.sessionXp;
+    s.scrap = net.sessionScrap;
     s.dead = net.local.dead;
     s.fps = 1 / Math.max(1e-3, dt);
     s.ping = net.rttMs;

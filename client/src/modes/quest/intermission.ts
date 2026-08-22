@@ -106,21 +106,87 @@ export interface QuestIntermissionOptions {
   nextLevelName: string;
   /** True when this exit ends the episode. */
   endsEpisode: boolean;
+  /**
+   * Show the two reward rows. Both gates already ANDed by the caller
+   * (`economySurfacesOn`); this panel does not re-decide policy.
+   */
+  economy?: boolean;
+  /**
+   * What the SERVER granted, straight off `S2C.MATCH_AWARD`. The panel counts
+   * these up; it never computes them. An offline run has no server and
+   * therefore no rows.
+   */
+  xp?: number;
+  scrap?: number;
   onAdvance(): void;
   onRestart(): void;
   onQuit(): void;
 }
 
-/** Percentage points per second while a row counts. */
+/** Percentage points per second while a percentage row counts. */
 const COUNT_RATE = 92;
+/** How long any row takes to count all the way up, seconds. */
+const COUNT_SECONDS = 100 / COUNT_RATE;
 /** Beat between rows, seconds. */
 const ROW_PAUSE = 0.3;
 
-const ROW_KILLS = 0;
-const ROW_ITEMS = 1;
-const ROW_SECRETS = 2;
-const ROW_TIME = 3;
-const ROW_DONE = 4;
+/** The first row. Every other index is now derived from `intermissionRows()`. */
+const ROW_FIRST = 0;
+
+/**
+ * One counted row, decided before any DOM exists.
+ *
+ * Pulled out of the constructor so the *contents* of this screen can be tested
+ * in a runner with no DOM at all — which is what this repo has. The class
+ * builds whatever this returns and knows nothing else about what a row means.
+ */
+export interface IntermissionRow {
+  label: string;
+  /** The value the count walks to. */
+  target: number;
+  /** Rendered as `${prefix}${value}${suffix}`. */
+  prefix: string;
+  suffix: string;
+  /** Units per second. Every row takes the same ~1.1 s whatever its scale. */
+  rate: number;
+  /** At or above this the row is styled `perfect`. Infinity = never. */
+  perfectAt: number;
+}
+
+/**
+ * The rows this screen will count, in order.
+ *
+ * The three DOOM percentages always; the two reward rows only when the caller
+ * says both gates are open. A zero reward row is still SHOWN when the economy
+ * is on — "+0 XP" after a full level is a fact the player is owed (they hit the
+ * day cap, or the room was private), and hiding it would make a real refusal
+ * look like a missing feature.
+ */
+export function intermissionRows(
+  stats: IntermissionStats, economy = false, xp = 0, scrap = 0,
+): IntermissionRow[] {
+  const pct = (label: string, target: number): IntermissionRow => ({
+    label, target, prefix: '', suffix: '%', rate: COUNT_RATE, perfectAt: 100,
+  });
+  const rows: IntermissionRow[] = [
+    pct('Kills', percentOf(stats.kills, stats.killsTotal)),
+    pct('Items', percentOf(stats.items, stats.itemsTotal)),
+    pct('Secrets', percentOf(stats.secrets, stats.secretsTotal)),
+  ];
+  if (!economy) return rows;
+  const earned = (label: string, target: number): IntermissionRow => ({
+    label,
+    target: Math.max(0, Math.round(target)),
+    prefix: '+',
+    suffix: '',
+    // Same wall-clock as a percentage row, so a 900 XP level does not sit there
+    // ticking for ten seconds.
+    rate: Math.max(COUNT_RATE, Math.max(0, Math.round(target)) / COUNT_SECONDS),
+    perfectAt: Infinity,
+  });
+  rows.push(earned('XP', xp), earned('Scrap', scrap));
+  return rows;
+}
 
 /* ------------------------------------------------------------------------ *
  * QuestIntermission
@@ -130,7 +196,11 @@ export class QuestIntermission {
   readonly element: HTMLElement;
 
   private readonly stats: IntermissionStats;
-  private readonly targets: Int32Array = new Int32Array(3);
+  private readonly rows: readonly IntermissionRow[];
+  /** Index of the "reveal the clock" phase. One past the last counted row. */
+  private readonly rowTime: number;
+  /** Index of the finished phase. `rowTime + 1`. */
+  private readonly rowDone: number;
   private readonly rowEls: HTMLElement[] = [];
   private readonly valueEls: HTMLElement[] = [];
   private readonly elTime: HTMLElement;
@@ -141,10 +211,10 @@ export class QuestIntermission {
 
   private readonly onAdvance: () => void;
 
-  private phase = ROW_KILLS;
+  private phase = ROW_FIRST;
   private value = 0;
   private pause = 0.45;
-  private shown: Int32Array = new Int32Array([-1, -1, -1]);
+  private readonly shown: number[] = [];
   private disposed = false;
 
   private readonly onKey: (e: KeyboardEvent) => void;
@@ -154,9 +224,9 @@ export class QuestIntermission {
     const s = opts.stats;
     this.stats = s;
     this.onAdvance = opts.onAdvance;
-    this.targets[ROW_KILLS] = percentOf(s.kills, s.killsTotal);
-    this.targets[ROW_ITEMS] = percentOf(s.items, s.itemsTotal);
-    this.targets[ROW_SECRETS] = percentOf(s.secrets, s.secretsTotal);
+    this.rows = intermissionRows(s, opts.economy === true, opts.xp ?? 0, opts.scrap ?? 0);
+    this.rowTime = this.rows.length;
+    this.rowDone = this.rowTime + 1;
 
     const wrap = div('dcqi');
     const panel = div('dcqi-panel');
@@ -170,9 +240,7 @@ export class QuestIntermission {
     panel.append(ep, name, fin);
 
     const rows = div('dcqi-rows');
-    this.buildRow(rows, 'Kills');
-    this.buildRow(rows, 'Items');
-    this.buildRow(rows, 'Secrets');
+    for (const r of this.rows) this.buildRow(rows, r);
     panel.appendChild(rows);
 
     const time = div('dcqi-time');
@@ -220,18 +288,19 @@ export class QuestIntermission {
     this.setRowState();
   }
 
-  private buildRow(host: HTMLElement, label: string): void {
+  private buildRow(host: HTMLElement, spec: IntermissionRow): void {
     const row = div('dcqi-row');
     const k = document.createElement('span');
     k.className = 'k';
-    k.textContent = label;
+    k.textContent = spec.label;
     const v = document.createElement('span');
     v.className = 'v';
-    v.textContent = '0%';
+    v.textContent = `${spec.prefix}0${spec.suffix}`;
     row.append(k, v);
     host.appendChild(row);
     this.rowEls.push(row);
     this.valueEls.push(v);
+    this.shown.push(-1);
   }
 
   /* -------------------------------------------------------------------- *
@@ -240,39 +309,42 @@ export class QuestIntermission {
 
   /** Drive from the mode's frame loop. Cheap and idempotent once finished. */
   update(dt: number): void {
-    if (this.disposed || this.phase >= ROW_DONE) return;
+    if (this.disposed || this.phase >= this.rowDone) return;
 
     if (this.pause > 0) {
       this.pause -= dt;
       return;
     }
 
-    if (this.phase === ROW_TIME) {
+    if (this.phase === this.rowTime) {
       this.revealTime();
       return;
     }
 
-    const target = this.targets[this.phase];
-    this.value += COUNT_RATE * dt;
-    if (this.value >= target) {
-      this.value = target;
-      this.writeRow(this.phase, target);
+    const spec = this.rows[this.phase];
+    this.value += spec.rate * dt;
+    if (this.value >= spec.target) {
+      this.value = spec.target;
+      this.writeRow(this.phase, spec.target);
       this.finishRow(this.phase);
       return;
     }
     this.writeRow(this.phase, Math.floor(this.value));
   }
 
-  private writeRow(row: number, pct: number): void {
-    if (this.shown[row] === pct) return;
-    this.shown[row] = pct;
-    this.valueEls[row].textContent = `${pct}%`;
+  private writeRow(row: number, value: number): void {
+    if (this.shown[row] === value) return;
+    this.shown[row] = value;
+    const spec = this.rows[row];
+    this.valueEls[row].textContent = `${spec.prefix}${value}${spec.suffix}`;
   }
 
   private finishRow(row: number): void {
     this.rowEls[row].classList.remove('live');
     this.rowEls[row].classList.add('done');
-    if (this.targets[row] >= 100) this.rowEls[row].classList.add('perfect');
+    if (this.rows[row].target >= this.rows[row].perfectAt) {
+      this.rowEls[row].classList.add('perfect');
+    }
     this.phase = row + 1;
     this.value = 0;
     this.pause = ROW_PAUSE;
@@ -295,7 +367,7 @@ export class QuestIntermission {
       this.elTime.classList.toggle('over', !under);
     }
     this.elNote.innerHTML = this.noteHtml();
-    this.phase = ROW_DONE;
+    this.phase = this.rowDone;
     this.setRowState();
   }
 
@@ -320,7 +392,7 @@ export class QuestIntermission {
    */
   advance(): void {
     if (this.disposed) return;
-    if (this.phase < ROW_DONE) {
+    if (this.phase < this.rowDone) {
       this.skipAll();
       return;
     }
@@ -330,20 +402,22 @@ export class QuestIntermission {
   /** Snap every row to its final value. */
   skipAll(): void {
     if (this.disposed) return;
-    for (let row = 0; row < 3; row++) {
+    for (let row = 0; row < this.rowTime; row++) {
       if (this.phase > row) continue;
-      this.writeRow(row, this.targets[row]);
+      this.writeRow(row, this.rows[row].target);
       this.rowEls[row].classList.remove('live');
       this.rowEls[row].classList.add('done');
-      if (this.targets[row] >= 100) this.rowEls[row].classList.add('perfect');
+      if (this.rows[row].target >= this.rows[row].perfectAt) {
+        this.rowEls[row].classList.add('perfect');
+      }
     }
-    this.phase = ROW_TIME;
+    this.phase = this.rowTime;
     this.pause = 0;
     this.value = 0;
     this.revealTime();
   }
 
-  get finished(): boolean { return this.phase >= ROW_DONE; }
+  get finished(): boolean { return this.phase >= this.rowDone; }
 
   destroy(): void {
     if (this.disposed) return;

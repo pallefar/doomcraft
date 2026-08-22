@@ -17,6 +17,8 @@ import { ModeId } from '@shared/modes';
 import { GameSession, ONLINE_MODES } from './session.js';
 import type { ClientTransport } from './transport.js';
 import type { LocalServer, LocalServerOptions } from './localServer.js';
+import { localFlagBits } from './localServer.js';
+import { FLAG_ORDER, defaultFlagBits, flagOn } from '@shared/flags';
 import type { ServerHealth } from './matchmaker.js';
 import {
   gameSocketUrl,
@@ -380,5 +382,37 @@ describe('one room at a time', () => {
     expect(built[0].stopped).toBe(true);
     await session.start({ modeId: ModeId.DEATHMATCH });
     expect(built).toHaveLength(1);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * What the in-tab room tells its own player
+ *
+ * The reward surfaces need BOTH the localStorage product flag and the SERVER's
+ * `economy_scrap` bit. Offline there is no server — the room is a Worker in
+ * this tab — so without this the surfaces are unreachable in the only build
+ * that actually ships, and the whole of Task 4 would be dead code the moment it
+ * left a test.
+ * ------------------------------------------------------------------------ */
+
+describe('the flag bits the Worker room hands its player', () => {
+  it('is the shipped default set when the player has asked for nothing', () => {
+    expect(localFlagBits(false)).toBe(defaultFlagBits());
+    expect(flagOn(localFlagBits(false), 'economy_scrap')).toBe(false);
+  });
+
+  it('opens the reward kill switch when the page has the product flag on, '
+    + 'because in this room there is no second party to withhold it', () => {
+    expect(flagOn(localFlagBits(true), 'economy_scrap')).toBe(true);
+  });
+
+  it('opens NOTHING else — least of all online play, which is about a machine '
+    + 'this tab does not own', () => {
+    const bits = localFlagBits(true);
+    for (const key of FLAG_ORDER) {
+      if (key === 'economy_scrap') continue;
+      expect(flagOn(bits, key), key).toBe(flagOn(defaultFlagBits(), key));
+    }
+    expect(flagOn(bits, 'online_play')).toBe(false);
   });
 });

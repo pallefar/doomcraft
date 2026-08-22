@@ -333,6 +333,37 @@ describe('feature flags are resolved by the server and transmitted', () => {
 });
 
 /* ------------------------------------------------------------------------ *
+ * Appending a message id
+ * ------------------------------------------------------------------------ */
+
+describe('a message id added after the window opened', () => {
+  it('goes to a client from BEFORE it existed without disturbing the session', () => {
+    const room = makeRoom();
+    // A real v2 handshake — the oldest version still inside the window, and
+    // therefore a client whose dispatch switch cannot possibly have a case for
+    // an id invented afterwards.
+    const c = new Client(room).hello(PROTOCOL_MIN_SUPPORTED);
+    expect(c.welcomed).toBe(true);
+    const before = c.messages.length;
+
+    room.net.sendMatchAwardTo(c.conn, 120, 14, 4200, 860, 0);
+
+    // It went out, it is the trailing id, and the session is untouched: not
+    // closed, still ready, still being served frames.
+    expect(c.messages.length).toBe(before + 1);
+    expect(readMessageId(c.messages[c.messages.length - 1])).toBe(S2C.MATCH_AWARD);
+    expect(S2C.MATCH_AWARD).toBeGreaterThan(S2C.CHUNK_Z);
+    expect(c.close).toBeNull();
+    expect(c.conn.ready).toBe(true);
+
+    const after = c.messages.length;
+    room.advance(50);
+    expect(c.messages.length).toBeGreaterThan(after);
+    expect(c.close).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------------ *
  * Draining, at the socket
  * ------------------------------------------------------------------------ */
 
