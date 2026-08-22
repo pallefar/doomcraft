@@ -85,6 +85,13 @@ import {
   type ModeSelectLevel,
 } from '@/ui/modeSelect';
 import { avatarButtonLabel, createAvatarEditor, type AvatarEditor } from '@/ui/avatarEditor';
+/* TYPE-ONLY, both of them, and that is the point: `verbatimModuleSyntax` is
+ * false, so these are erased and the profile overlay reaches the browser only
+ * through the `import('@/ui/profile')` below. It is 36 kB of source — a third of
+ * it `matchType.ts`, which was tree-shaken away entirely while it was orphaned —
+ * and no player pays for it until they press the button. */
+import type { ProfileScreen } from '@/ui/profile';
+import type { ProfileInputs } from '@/ui/profileModel';
 import { installUpdates, shouldPromptUpdate, type UpdateSnapshot } from '@/boot/updates';
 import { UpdateReason } from '@shared/version';
 import { AVATAR_PALETTE, legacySkinFromAvatar, unpackAvatar, writeAvatar } from '@/characters/avatar';
@@ -444,6 +451,18 @@ const mode: number = legacyGameMode(bootParams.modeId);
 let avatarEditor: AvatarEditor | null = null;
 
 /**
+ * The profile overlay. Same nullable-until-built discipline as the locker, and
+ * for the same reason: `setScreen()` runs during boot and asks both of them to
+ * shut before either exists.
+ *
+ * It is deliberately NOT a fifth `Screen` value. `boot/updates.ts` watches
+ * `#ui[data-screen]` through a `MutationObserver` and can answer a change with
+ * `location.reload()`; a profile screen wired into that machine would be a
+ * profile screen that occasionally throws the player out of the menu.
+ */
+let profileScreen: ProfileScreen | null = null;
+
+/**
  * Where the game server is, if anywhere.
  *
  * Empty on the shipped static build, and everything downstream is written so
@@ -728,6 +747,7 @@ const lockerDot = el('i');
 const lockerLabel = el('span', undefined, 'Locker');
 lockerBtn.append(lockerDot, lockerLabel);
 menuRow.appendChild(lockerBtn);
+menuRow.appendChild(button('Profile', 'dc-ghost', () => { void openProfile(); }));
 menuRow.appendChild(button('Settings', 'dc-ghost', () => openSettings('menu')));
 const removeAdsBtn = button(`Remove ads — $${IAP_PRICE_USD.toFixed(2)}`, 'dc-ghost', () => purchaseRemoveAds());
 menuRow.appendChild(removeAdsBtn);
@@ -776,11 +796,69 @@ avatarEditor = createAvatarEditor({
 });
 
 function openLocker(): void {
+  // Two overlays at z-index 5 would stack; the second one to open wins the
+  // clicks and the first keeps a GL context alive behind it.
+  profileScreen?.close();
   avatarEditor?.setAvatar(save.profile.avatar);
   avatarEditor?.open();
 }
 
 refreshLockerButton();
+
+
+/* ------------------------------------------------------------------------ *
+ * The profile — `client/src/ui/profile.ts`
+ *
+ * Everything it shows is already in this scope: `save` is the schema-versioned
+ * per-mode document, `progress` is the legacy flat blob that holds the only
+ * live counters, and the balances are whatever the SERVER last granted this
+ * session. There is no new plumbing and no new storage key.
+ *
+ * `inputs` is a callback rather than a value because both of those move while
+ * the overlay is shut. `remote` is null and stays null until C4 binds an
+ * account: this build talks to no host for a profile, and the model renders
+ * that as a sentence rather than as a row of zeroes.
+ * ------------------------------------------------------------------------ */
+
+function profileInputs(): ProfileInputs {
+  return {
+    save,
+    progress,
+    remote: null,
+    liveBalance: { xp: game.net.balanceXp, scrap: game.net.balanceScrap },
+    // The same `economyProduct` the HUD chips read, not a second `isEnabled`
+    // call — one surface deciding differently from another is the bug.
+    economyProduct: game.economyProduct,
+    flagBits: game.net.flagBits,
+    // No CredentialProvider is bound on this build. The model renders that as
+    // a sentence; it is the true answer, not a placeholder.
+    account: null,
+    nowMs: Date.now(),
+  };
+}
+
+/** In flight, so a double-click builds one overlay rather than two. */
+let profileLoading: Promise<ProfileScreen> | null = null;
+
+async function openProfile(): Promise<void> {
+  // Two overlays at z-index 5 would stack; the second to open wins the clicks
+  // and the first keeps its resources alive behind it.
+  avatarEditor?.close();
+  if (profileScreen === null) {
+    profileLoading ??= import('@/ui/profile')
+      .then((m) => m.createProfileScreen({ root: uiRoot!, inputs: profileInputs }));
+    try {
+      profileScreen = await profileLoading;
+    } catch {
+      // A chunk that will not load is not a crash. The player is on the menu
+      // with a button that did nothing, which is recoverable; a thrown promise
+      // out of a click handler is not.
+      profileLoading = null;
+      return;
+    }
+  }
+  profileScreen.open();
+}
 
 
 /* ------------------------------------------------------------------------ *
@@ -1330,7 +1408,7 @@ function setScreen(s: Screen): void {
   // The locker is an overlay above every screen, so nothing else can be trusted
   // to have taken it down. Leaving it up would keep a second GL context alive
   // for the whole match.
-  if (s !== 'menu') avatarEditor?.close();
+  if (s !== 'menu') { avatarEditor?.close(); profileScreen?.close(); }
   uiRoot!.dataset.screen = s;
   if (adsRoot !== null) {
     adsRoot.dataset.mode = settings.showAds === false || progress.adsRemoved
@@ -1523,6 +1601,9 @@ window.addEventListener('resize', () => {
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape') {
     if (avatarEditor?.isOpen === true) { avatarEditor.close(); e.preventDefault(); }
+    // Before `openPause()`, or an overlay opened over a running match cannot be
+    // dismissed at all: Escape would pause the game behind it and leave it up.
+    else if (profileScreen?.isOpen === true) { profileScreen.close(); e.preventDefault(); }
     else if (game.playing) { openPause(); e.preventDefault(); }
     else if (uiRoot!.dataset.screen === 'paused') { closePause(); e.preventDefault(); }
     return;
@@ -1530,7 +1611,7 @@ window.addEventListener('keydown', (e) => {
   if (!game.ready) return;
   // Space is "start the match" on the menu, and it must not fire through an
   // open locker — the player is pressing buttons in a dialog, not queueing up.
-  if (avatarEditor?.isOpen === true) return;
+  if (avatarEditor?.isOpen === true || profileScreen?.isOpen === true) return;
   if (uiRoot!.dataset.screen === 'menu' && (e.code === 'Enter' || e.code === 'Space')) {
     startPlaying();
     e.preventDefault();
@@ -1582,7 +1663,7 @@ document.addEventListener('pointerlockchange', () => {
 let unlockedLookMode = false;
 canvas.addEventListener('click', () => {
   if (!game.ready) return;
-  if (avatarEditor?.isOpen === true) return;
+  if (avatarEditor?.isOpen === true || profileScreen?.isOpen === true) return;
   if (uiRoot!.dataset.screen === 'menu') { startPlaying(); return; }
   if (game.playing && document.pointerLockElement === null && !unlockedLookMode) {
     window.setTimeout(() => {
@@ -1825,6 +1906,12 @@ window.addEventListener('pagehide', () => {
   openLocker(): void { openLocker(); },
   closeLocker(): void { avatarEditor?.close(); },
   get lockerOpen(): boolean { return avatarEditor?.isOpen === true; },
+  /** The profile overlay, for tools/capture-ours.mjs. */
+  openProfile(): Promise<void> { return openProfile(); },
+  closeProfile(): void { profileScreen?.close(); },
+  get profileOpen(): boolean { return profileScreen?.isOpen === true; },
+  /** What the overlay is currently showing. Read-only; never a recovery code. */
+  profileView(): unknown { return profileScreen?.view ?? null; },
   get avatar(): number { return save.profile.avatar >>> 0; },
   setAvatarPacked(v: number): void {
     avatarEditor?.setAvatar(v >>> 0);

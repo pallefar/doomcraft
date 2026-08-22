@@ -71,6 +71,17 @@ const LAND = has('--landscape');
 const HEADED = has('--headed');
 const PROD = has('--prod');
 const NO_SERVE = has('--no-serve');
+/**
+ * Photograph the profile overlay before entering the match.
+ *
+ * Off by default and deliberately so: the baseline set every critic holds is
+ * the twelve shots of the deathmatch A/B, and a run that silently grew a
+ * thirteenth would stop lining up 1:1 with `ours-<tag>-NN-*.png`. With the flag
+ * the overlay is opened through `window.__DC__.openProfile()` — the same
+ * automation surface `enterMode` uses — shot, and closed again, so the match
+ * that follows is the one the metrics describe.
+ */
+const SHOOT_PROFILE = has('--profile');
 const KEEP = has('--keep');
 const THROTTLE = Number(val('--throttle', MOBILE ? '4' : '1'));
 const VIEWPORT_TAG = MOBILE ? (LAND ? 'mobileland' : 'mobile') : 'desktop';
@@ -242,6 +253,27 @@ async function main() {
     await page.screenshot({ path: path.join(OUT, `ours-${TAG}-${name}.png`) });
   };
   await shot('00-menu');
+
+  if (SHOOT_PROFILE) {
+    // `openProfile()` returns a promise: the overlay is a lazy chunk, so it is
+    // fetched here and NOT on the boot path the byte count measures.
+    const opened = await page.evaluate(async () => {
+      await window.__DC__.openProfile();
+      return window.__DC__.profileOpen === true;
+    });
+    if (!opened) throw new Error('__DC__.openProfile() did not open the profile overlay');
+    // The overlay is one screen value away from being a reload trigger; assert
+    // it did NOT become one, on the real build, not just in a unit test.
+    const screen = await page.evaluate(() => window.__DC__.screen);
+    if (screen !== 'menu') throw new Error(`the profile changed data-screen to "${screen}"`);
+    await shot('00b-profile');
+    const panels = await page.evaluate(() => {
+      const v = window.__DC__.profileView();
+      return v === null ? null : { panels: v.panels.length, source: v.source, note: v.sourceNote };
+    });
+    log('PROFILE ' + JSON.stringify(panels));
+    await page.evaluate(() => window.__DC__.closeProfile());
+  }
 
   /* --- verify the throttle is real, the way BAR.md did --- */
   const spinMs = await page.evaluate(() => {
@@ -789,6 +821,20 @@ async function main() {
     () => performance.getEntriesByType('resource').reduce((a, r) => a + (r.transferSize || 0), 0),
   );
   log('TRANSFER_BYTES ' + bytes);
+
+  if (SHOOT_PROFILE) {
+    // The same overlay again, AFTER a real match, so the shot shows the screen
+    // doing its job rather than an empty one. Deliberately after the byte
+    // count: the overlay's chunk is lazy and must not be attributed to boot.
+    await page.evaluate(async () => { await window.__DC__.openProfile(); });
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(OUT, `ours-${TAG}-12-profile-played.png`) });
+    log('PROFILE_AFTER ' + JSON.stringify(await page.evaluate(() => {
+      const v = window.__DC__.profileView();
+      return v === null ? null : v.tiles.map((t) => `${t.label} ${t.value}`);
+    })));
+    await page.evaluate(() => window.__DC__.closeProfile());
+  }
 
   const text = await page.evaluate(() => document.body.innerText.replace(/\n{2,}/g, '\n').slice(0, 4000));
   fs.writeFileSync(path.join(OUT, `ours-${TAG}-uitext.txt`), text);

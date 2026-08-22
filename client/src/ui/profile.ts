@@ -1,0 +1,420 @@
+/**
+ * DOOMCRAFT — the profile screen. The DOM half, and nothing else.
+ *
+ * Every decision this file could make has already been made in
+ * `client/src/ui/profileModel.ts`, which is pure and therefore tested. What is
+ * left here is `document.createElement` and one stylesheet, which vitest cannot
+ * see under `environment: 'node'` — so the rule is that if a line in this file
+ * looks like it is *choosing* something, it belongs in the model instead.
+ *
+ * FOUR THINGS THAT ARE NOT ARBITRARY
+ *
+ * 1. **It is an overlay, not a fifth `data-screen`.** `client/src/main.ts`
+ *    installs a `MutationObserver` with `attributeFilter: ['data-screen']` that
+ *    feeds `boot/updates.ts`, and that path ends in `location.reload()`. A
+ *    profile screen that set `uiRoot.dataset.screen = 'profile'` would be a
+ *    screen that sometimes reloads the page out from under the player. So this
+ *    mounts as a direct child of `#ui` and toggles its own `.is-open`, exactly
+ *    as `avatarEditor.ts` does — and `wiring.test.ts` asserts the string
+ *    `dataset.screen` never appears in this file.
+ *
+ * 2. **`#ui button{font:inherit}` (main.ts) beats every class rule**, because
+ *    an id in the selector outranks any number of classes. `modeSelect.ts` never
+ *    restated its button typography and that is why the shipped PLAY button is
+ *    14 px system-ui instead of the 19 px Arial Black its rule asks for. The
+ *    `#ui .dcp-*` block at the bottom of the sheet is the fix, not a duplicate.
+ *
+ * 3. **New prefix, own sheet, refcounted.** `SHELL_CSS` already declares
+ *    `.dc-note` twice with two different meanings; a fourth `.dc-` block here
+ *    would be a third. `ensureStyle`/`releaseStyle` are the pattern from
+ *    `avatarEditor.ts:301-315`, so opening the profile and the locker together
+ *    and closing one does not strip the other's stylesheet.
+ *
+ * 4. **The view is rebuilt on every `open()`.** `ProfileScreenOptions.inputs`
+ *    is a callback, not a value, because the balance and the save both move
+ *    while this screen is closed. A screen built once at boot would show the
+ *    numbers from boot, which is the kind of bug nobody reports and everybody
+ *    notices.
+ *
+ * `--safe-t/-b/-l/-r` (client/index.html) are consumed in the padding so the
+ * overlay clears a notch, and `.dc-panel`/`.dc-actions`/`.dc-ghost` from
+ * `SHELL_CSS` are reused verbatim where they fit rather than restyled.
+ */
+
+import { AVATAR_PALETTE, avatarLabel, unpackAvatar } from '@/characters/avatar';
+import { MatchTypeNotice } from '@/ui/matchType';
+import {
+  buildProfileView,
+  type ProfileInputs,
+  type ProfilePanel,
+  type ProfileView,
+} from '@/ui/profileModel';
+
+/* ------------------------------------------------------------------------ *
+ * Options
+ * ------------------------------------------------------------------------ */
+
+export interface ProfileScreenOptions {
+  /** Where the overlay mounts. Must be `#ui` itself, not one of its screens. */
+  root: HTMLElement;
+  /** Read fresh on every open. See rule 4 above. */
+  inputs(): ProfileInputs;
+  /** Fired on every close path: the button, Escape, and `setScreen`. */
+  onClose?(): void;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Styles — one sheet, refcounted, scoped to `.dcp-`
+ * ------------------------------------------------------------------------ */
+
+const STYLE_ID = 'dc-profile-css';
+let styleUsers = 0;
+
+export const PROFILE_CSS = `
+.dcp{--dcp-ink:#e8e6e3;--dcp-dim:#938e89;--dcp-line:rgba(255,255,255,.13);
+  --dcp-panel:rgba(10,10,14,.86);--dcp-hell:#e03c1c;
+  position:absolute;inset:0;z-index:5;display:none;overflow:auto;overscroll-behavior:contain;
+  font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  color:var(--dcp-ink);text-align:left;
+  background:
+    radial-gradient(78% 58% at 50% 0%,rgba(46,14,7,.62),rgba(0,0,0,0) 68%),
+    rgba(5,5,8,.94);
+  -webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);
+  padding:calc(24px + var(--safe-t,0px)) calc(22px + var(--safe-r,0px))
+    calc(24px + var(--safe-b,0px)) calc(22px + var(--safe-l,0px))}
+.dcp.is-open{display:grid;place-items:safe center;align-content:safe center}
+.dcp *{box-sizing:border-box}
+@media (max-width:900px){
+  .dcp{padding:calc(12px + var(--safe-t,0px)) calc(11px + var(--safe-r,0px))
+    calc(12px + var(--safe-b,0px)) calc(11px + var(--safe-l,0px))}
+}
+
+.dcp-shell{width:min(1060px,100%);margin:0 auto;display:flex;flex-direction:column;gap:11px}
+
+/* ---- header ---- */
+.dcp-head{display:flex;align-items:center;gap:14px}
+/* Named rather than a .dcp-head>div child selector: the look chip is a div
+   too, and that selector stretched it across the whole header. */
+.dcp-titles{flex:1;min-width:0}
+.dcp-head h2{margin:0;font:900 clamp(20px,3vw,30px)/0.95 "Arial Black",Impact,system-ui,sans-serif;
+  letter-spacing:.06em;text-transform:uppercase;color:#f4f1ee;
+  text-shadow:0 2px 0 #6d1707,0 10px 26px rgba(224,60,28,.30);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dcp-head h2 span{color:var(--dcp-hell)}
+.dcp-since{margin:5px 0 0;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:#6f6a66}
+.dcp-source{margin:6px 0 0;font-size:12px;color:#b4aea8}
+.dcp-x{width:44px;height:44px;flex:0 0 44px;border:1px solid var(--dcp-line);border-radius:3px;
+  background:rgba(255,255,255,.04);color:#b4aea8;font:400 20px/1 system-ui;cursor:pointer}
+.dcp-x:hover{border-color:rgba(255,255,255,.42);color:#fff}
+
+/* ---- the look, without a GL context ----
+   The locker owns the 3D preview and the whole point of that module is that its
+   context only exists while it is open. Two swatches and the packed name say
+   which marine this is for a few bytes and no draw calls. */
+.dcp-look{display:flex;align-items:center;gap:9px;padding:7px 12px;border-radius:2px;
+  border:1px solid var(--dcp-line);background:rgba(255,255,255,.03);flex:0 0 auto}
+.dcp-look i{width:13px;height:13px;border-radius:50%;flex:0 0 13px;
+  box-shadow:0 0 0 1px rgba(0,0,0,.6),0 0 0 2px rgba(255,255,255,.18)}
+.dcp-look span{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#b4aea8;
+  white-space:nowrap}
+.dcp-look span.dcp-cap{color:#6f6a66;letter-spacing:.2em}
+@media (max-width:700px){ .dcp-look{display:none} }
+
+/* ---- tiles ---- */
+.dcp-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+@media (max-width:640px){ .dcp-tiles{grid-template-columns:repeat(2,1fr)} }
+.dcp-tile{padding:12px 14px;border:1px solid var(--dcp-line);border-radius:3px;
+  background:var(--dcp-panel)}
+.dcp-tile b{display:block;font:800 clamp(20px,3.4vw,28px)/1 "Arial Black",Impact,sans-serif;
+  color:#f4f1ee;font-variant-numeric:tabular-nums}
+.dcp-tile em{display:block;margin-top:6px;font:600 10px/1.2 system-ui;font-style:normal;
+  letter-spacing:.18em;text-transform:uppercase;color:#8d8781}
+.dcp-tile small{display:block;margin-top:3px;font-size:11px;color:#6f6a66}
+
+/* ---- level bar ---- */
+.dcp-level{padding:12px 14px;border:1px solid var(--dcp-line);border-radius:3px;
+  background:var(--dcp-panel)}
+.dcp-level-top{display:flex;justify-content:space-between;gap:12px;font-size:11px;
+  letter-spacing:.16em;text-transform:uppercase;color:#8d8781}
+.dcp-track{margin-top:8px;height:8px;border-radius:2px;overflow:hidden;
+  background:rgba(255,255,255,.07)}
+.dcp-fill{height:100%;background:linear-gradient(90deg,#8f1a08,#e03c1c);
+  transition:width .18s ease-out}
+@media (prefers-reduced-motion:reduce){ .dcp-fill{transition:none} }
+
+/* ---- panels ---- */
+.dcp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(304px,1fr));gap:11px;
+  align-items:start}
+.dcp-panel{border:1px solid var(--dcp-line);border-radius:3px;background:var(--dcp-panel);
+  padding:12px 14px 13px}
+.dcp-panel h3{margin:0 0 9px;font:700 11px/1.2 system-ui;letter-spacing:.2em;
+  text-transform:uppercase;color:#8d8781}
+.dcp-line{display:flex;gap:12px;justify-content:space-between;align-items:baseline;
+  padding:4px 0;border-top:1px solid rgba(255,255,255,.06)}
+.dcp-line:first-of-type{border-top:0}
+.dcp-line b{font-weight:600;color:#e2ddd8;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.dcp-line span{color:#9d968f;text-align:right;font-variant-numeric:tabular-nums;
+  font-size:12.5px;flex:0 1 auto}
+.dcp-line.is-dim b{font-weight:400;color:#8d8781;padding-left:10px}
+.dcp-line.is-dim span{color:#7d7873}
+.dcp-caveat{margin:9px 0 0;font-size:11.5px;line-height:1.5;color:#7d7873}
+.dcp-caveat b{color:#b4aea8;font-weight:600}
+
+/* ---- the trust notice ---- */
+.dcp-worth{border:1px solid var(--dcp-line);border-radius:3px;background:var(--dcp-panel);
+  padding:12px 14px 13px}
+.dcp-worth h3{margin:0 0 9px;font:700 11px/1.2 system-ui;letter-spacing:.2em;
+  text-transform:uppercase;color:#8d8781}
+
+.dcp-foot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+  border-top:1px solid rgba(255,255,255,.09);padding-top:13px}
+.dcp-foot p{margin:0;flex:1;min-width:200px;font-size:11.5px;color:#7d7873}
+.dcp-done{padding:12px 30px;border-radius:2px;text-transform:uppercase}
+
+/* The shell sets \`#ui button{font:inherit}\` (client/src/main.ts) and an id in
+   the selector outranks any number of classes, so every button rule above
+   silently loses its typography without these. Deliberate duplicates: the class
+   rules still stand if this component is ever mounted outside #ui. */
+#ui .dcp-x{font:400 20px/1 system-ui}
+#ui .dcp-done{font:800 14px/1 "Arial Black",Impact,sans-serif;letter-spacing:.16em;
+  padding:12px 30px;text-transform:uppercase}
+`;
+
+function ensureStyle(): void {
+  if (document.getElementById(STYLE_ID) === null) {
+    const node = document.createElement('style');
+    node.id = STYLE_ID;
+    node.textContent = PROFILE_CSS;
+    document.head.appendChild(node);
+  }
+  styleUsers++;
+}
+
+function releaseStyle(): void {
+  styleUsers = Math.max(0, styleUsers - 1);
+  if (styleUsers > 0) return;
+  document.getElementById(STYLE_ID)?.remove();
+}
+
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K, cls?: string, text?: string,
+): HTMLElementTagNameMap[K] {
+  const n = document.createElement(tag);
+  if (cls !== undefined) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function hexCss(hex: number): string {
+  return `#${(hex >>> 0).toString(16).padStart(6, '0')}`;
+}
+
+/* ------------------------------------------------------------------------ *
+ * The screen
+ * ------------------------------------------------------------------------ */
+
+export class ProfileScreen {
+  readonly element: HTMLDivElement;
+
+  private readonly opts: ProfileScreenOptions;
+  private readonly nameEl: HTMLElement;
+  private readonly sinceEl: HTMLElement;
+  private readonly sourceEl: HTMLElement;
+  private readonly lookEl: HTMLElement;
+  private readonly lookTint: HTMLElement;
+  private readonly lookAccent: HTMLElement;
+  private readonly lookName: HTMLElement;
+  private readonly tilesEl: HTMLElement;
+  private readonly levelTop: HTMLElement;
+  private readonly levelXp: HTMLElement;
+  private readonly fillEl: HTMLElement;
+  private readonly worthEl: HTMLElement;
+  private readonly worthHead: HTMLElement;
+  private readonly notice: MatchTypeNotice;
+  private readonly gridEl: HTMLElement;
+  private readonly closeBtn: HTMLButtonElement;
+
+  private opened = false;
+  private destroyed = false;
+  private last: ProfileView | null = null;
+
+  constructor(opts: ProfileScreenOptions) {
+    this.opts = opts;
+    ensureStyle();
+
+    this.element = el('div', 'dcp');
+    this.element.setAttribute('role', 'dialog');
+    this.element.setAttribute('aria-modal', 'true');
+    this.element.setAttribute('aria-label', 'Player profile');
+
+    const shell = el('div', 'dcp-shell');
+    this.element.appendChild(shell);
+
+    /* ---- header ---- */
+    const head = el('div', 'dcp-head');
+    const titles = el('div', 'dcp-titles');
+    this.nameEl = el('h2');
+    this.sinceEl = el('p', 'dcp-since');
+    this.sourceEl = el('p', 'dcp-source');
+    titles.append(this.nameEl, this.sinceEl, this.sourceEl);
+    head.appendChild(titles);
+
+    this.lookEl = el('div', 'dcp-look');
+    this.lookTint = el('i');
+    this.lookAccent = el('i');
+    this.lookName = el('span');
+    this.lookEl.append(el('span', 'dcp-cap', 'Look'), this.lookTint, this.lookAccent, this.lookName);
+    this.lookEl.setAttribute('title', 'Change it in the Locker');
+    head.appendChild(this.lookEl);
+
+    this.closeBtn = el('button', 'dcp-x', '✕');
+    this.closeBtn.type = 'button';
+    this.closeBtn.setAttribute('aria-label', 'Close profile');
+    this.closeBtn.addEventListener('click', (e) => { e.preventDefault(); this.close(); });
+    head.appendChild(this.closeBtn);
+    shell.appendChild(head);
+
+    /* ---- tiles ---- */
+    this.tilesEl = el('div', 'dcp-tiles');
+    shell.appendChild(this.tilesEl);
+
+    /* ---- level ---- */
+    const level = el('div', 'dcp-level');
+    const top = el('div', 'dcp-level-top');
+    this.levelTop = el('span');
+    this.levelXp = el('span');
+    top.append(this.levelTop, this.levelXp);
+    const track = el('div', 'dcp-track');
+    this.fillEl = el('div', 'dcp-fill');
+    track.appendChild(this.fillEl);
+    level.append(top, track);
+    shell.appendChild(level);
+
+    /* ---- what a match is worth: `matchType.ts`, which decides nothing ---- */
+    this.worthEl = el('div', 'dcp-worth');
+    this.worthHead = el('h3');
+    this.worthEl.appendChild(this.worthHead);
+    // Seeded from the same model field it is repainted from, so there is never
+    // a first frame showing a mode the player did not last play.
+    const seed = buildProfileView(opts.inputs());
+    this.notice = new MatchTypeNotice(seed.worth.modeId, seed.worth.matchType);
+    this.worthEl.appendChild(this.notice.element);
+    shell.appendChild(this.worthEl);
+
+    /* ---- panels ---- */
+    this.gridEl = el('div', 'dcp-grid');
+    shell.appendChild(this.gridEl);
+
+    /* ---- footer ---- */
+    const foot = el('div', 'dcp-foot');
+    foot.appendChild(el(
+      'p', undefined,
+      'Everything above is read from this browser unless a line says otherwise.',
+    ));
+    const done = el('button', 'dc-primary dcp-done', 'Done');
+    done.type = 'button';
+    done.addEventListener('click', (e) => { e.preventDefault(); this.close(); });
+    foot.appendChild(done);
+    shell.appendChild(foot);
+
+    opts.root.appendChild(this.element);
+    this.paint(seed);
+  }
+
+  get isOpen(): boolean { return this.opened; }
+
+  /** The view last painted. The harness reads it; nothing else should. */
+  get view(): ProfileView | null { return this.last; }
+
+  open(): void {
+    if (this.opened || this.destroyed) return;
+    this.opened = true;
+    this.paint(buildProfileView(this.opts.inputs()));
+    this.element.classList.add('is-open');
+    this.element.scrollTop = 0;
+    this.closeBtn.focus({ preventScroll: true });
+  }
+
+  close(): void {
+    if (!this.opened) return;
+    this.opened = false;
+    this.element.classList.remove('is-open');
+    this.opts.onClose?.();
+  }
+
+  toggle(): void { if (this.opened) this.close(); else this.open(); }
+
+  /** Repaint in place. Cheap; the whole view is ~40 rows of text. */
+  refresh(): void {
+    if (this.destroyed) return;
+    this.paint(buildProfileView(this.opts.inputs()));
+  }
+
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.opened = false;
+    this.element.classList.remove('is-open');
+    this.notice.destroy();
+    this.element.remove();
+    releaseStyle();
+  }
+
+  /* -------------------------------------------------------------------- *
+   * Painting — no decisions, only placement
+   * -------------------------------------------------------------------- */
+
+  private paint(v: ProfileView): void {
+    this.last = v;
+
+    this.nameEl.replaceChildren();
+    this.nameEl.append(document.createTextNode(v.name), el('span', undefined, ' · PROFILE'));
+    this.sinceEl.textContent = v.since;
+    this.sourceEl.textContent = v.sourceNote;
+
+    const cfg = unpackAvatar(v.avatarPacked);
+    this.lookTint.style.background = hexCss(AVATAR_PALETTE[cfg.tint]?.hex ?? 0xffffff);
+    this.lookAccent.style.background = hexCss(AVATAR_PALETTE[cfg.accent]?.hex ?? 0xffffff);
+    this.lookName.textContent = avatarLabel(cfg);
+
+    this.tilesEl.replaceChildren();
+    for (const t of v.tiles) {
+      const tile = el('div', 'dcp-tile');
+      tile.append(
+        el('b', undefined, t.value),
+        el('em', undefined, t.label),
+        el('small', undefined, t.hint),
+      );
+      this.tilesEl.appendChild(tile);
+    }
+
+    this.levelTop.textContent = `Level ${v.level}`;
+    this.levelXp.textContent = v.xpForLevel === 0
+      ? 'level cap'
+      : `${v.xpIntoLevel} / ${v.xpForLevel} XP`;
+    this.fillEl.style.width = `${Math.round(v.levelFraction * 1000) / 10}%`;
+
+    this.worthHead.textContent = v.worth.heading;
+    this.notice.update(v.worth.modeId, v.worth.matchType);
+
+    this.gridEl.replaceChildren();
+    for (const p of v.panels) this.gridEl.appendChild(this.panelEl(p));
+  }
+
+  private panelEl(p: ProfilePanel): HTMLElement {
+    const box = el('div', 'dcp-panel');
+    box.appendChild(el('h3', undefined, p.title));
+    for (const r of p.rows) {
+      const line = el('div', r.dim ? 'dcp-line is-dim' : 'dcp-line');
+      line.append(el('b', undefined, r.left), el('span', undefined, r.right));
+      box.appendChild(line);
+    }
+    if (p.caveat !== '') box.appendChild(el('p', 'dcp-caveat', p.caveat));
+    return box;
+  }
+}
+
+export function createProfileScreen(opts: ProfileScreenOptions): ProfileScreen {
+  return new ProfileScreen(opts);
+}

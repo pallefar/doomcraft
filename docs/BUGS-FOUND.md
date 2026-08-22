@@ -251,3 +251,55 @@ no rows *and* no balance, so `Σ delta == balance` still holds for them. The inv
 *refused* payout and only catches a *misrecorded* one. `server/src/journal.test.ts` therefore counts
 the rows as well: `expect(j.status().appended).toBe(payouts * 2)`, which fails with
 `expected 20000 to be 50000` under the document's key.
+
+## 7. Three more fields that read zero forever, and the profile screen is what found them — MEDIUM, TWO NAMED, ONE FIXED
+
+`docs/PLATFORM.md` §0.1 and §13 item 9 already record one of these: `SaveFile.profile.{xp, level,
+secondsPlayed, adsRemoved}` are set by `createSaveFile()` and written by nothing, so any UI that
+renders them shows a permanent zero. The fix given there is "do not render those four fields", and
+that is a fix for four fields.
+
+Building the profile screen — the first surface in the game that reads the save for *display* rather
+than for resume — turned up three more of exactly the same shape. The general check that finds them
+is mechanical and lives in `client/src/ui/profileModel.test.ts`:
+
+> Every `progress.<field>` this screen renders must have a writer in `client/src/main.ts`, and every
+> `record*` exported from `shared/src/saves.ts` must have a caller under `client/src`.
+
+Run over the source, it produced three names in one pass.
+
+**1. `recordDeathmatch` has no caller anywhere.** `shared/src/saves.ts:1077`. `recordQuestLevel`
+(`quest.ts:1089`), `recordBuilderSession` (`builder.ts:974`) and `recordHordeRun` (`horde.ts:1311`)
+are all called from their modes; this one never was. So `save.deathmatch` — `matches`, `wins`,
+`bestStreak`, `headshots`, `damageDealt` and the `weaponKills[]` histogram — is `{0, 0, …}` on every
+device that has ever run this game. `docs/PLATFORM.md` §6.2 names that histogram as the profile's
+one genuinely interesting panel and cites `saves.ts:172` as its source; the source is never written.
+
+*Status: NAMED, NOT FIXED.* The panel renders no rows and a sentence saying per-match records are not
+being written, rather than a column of zeroes that reads as data loss. Wiring it properly needs
+`deathmatch.ts` to accumulate per-weapon kills, a best streak and headshots across a match, which is
+a mode change. It is listed in `UNWRITTEN` in `profileModel.test.ts`, with the reason, and the test
+fails if a fifth recorder ever joins it unnamed **or** if `recordDeathmatch` gains a caller and
+nobody takes it off the list.
+
+**2. `progress.wins` is never written — and it was one line from shipping.** `progress.gamesPlayed++`
+fires in `startMode`; `kills`, `deaths`, `xp`, `level` and `secondsPlayed` are written by the save
+loop. `wins`, `bestKillstreak`, `blocksPlaced`, `blocksBroken` and `favouriteWeapon` are written by
+nothing. The first draft of the Matches tile read `hint: \`${groupInt(progress.wins)} won\``, which
+would have put a permanent **"0 won"** under everybody's match count. *Status: FIXED before it
+shipped.* The hint now says `entered on this device`, which is also the honest word for a counter
+incremented at `startMode` rather than at a result.
+
+**3. There is no name entry anywhere in the shipped UI.** Neither `progress.name` nor
+`save.profile.name` is assigned by any file under `client/src`. `main.ts` reads
+`name: progress.name || 'Marine'` into `new Game(...)`, so **every player in this game is called
+Marine** — in the scoreboard, on the wire, and in the profile header. It renders as a sensible
+default rather than as a zero, which is why nobody noticed. *Status: NAMED, NOT FIXED*, in
+`UNWRITTEN_PROGRESS`. Adding an editor means deciding whether a mid-session rename reaches the room,
+and `Game` has no `setName` — that is a protocol question, not a profile-screen one.
+
+**The lesson worth keeping.** The screenshot found the first of these, not the test suite: the
+Matches tile said `1` while the Deathmatch panel said "No matches on this device yet", one above the
+other, and the contradiction was visible in a way that 1,700 green tests were not. The test that
+generalises it was written afterwards and is red against each of the three. **A screen is a
+different kind of assertion about the data than a test is, and this repo had never made one.**

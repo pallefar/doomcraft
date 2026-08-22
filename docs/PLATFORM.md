@@ -21,7 +21,7 @@ Verified at HEAD **`41d4a94`**, working tree clean. Every anchor below was read 
 | An account system | `accountId` is a **client-supplied free string** and `POST /api/account/link` hands the caller a durable credential on **any** device id it names, unauthenticated | `server/src/index.ts:1090-1101` |
 | A server profile | **Write-only.** `grep -rn "/api/" client/src` returns 20 lines and **none of them is `/api/profile`**. `StoredStats`, `StoredEconomy` and `entitlements` accumulate and have never been read back into any UI. | `client/src/main.ts:1620`, `client/src/net/matchmaker.ts:153/205/214/234`, `client/src/modes/quest/quest.ts:244/308` |
 | A flag control plane | **8 of the 10 flags have zero readers.** Only `economy_scrap` (3) and `client_update_prompt` (2) are consumed. `online_play` has none — the shipped online gate is the localStorage `Feature.ONLINE_MULTIPLAYER`. | `shared/src/flags.ts:79-90` vs `client/src/hud/hud.ts:636`, `server/src/room.ts:1507`, `client/src/main.ts:2055` |
-| A local profile with XP in it | `SaveFile.profile.{xp, level, secondsPlayed, adsRemoved}` are **never written by anything**. `grep -rn "save\.profile" client/src` shows only `avatar`, `skin` and `lastMode` are live. They read 0 forever. | `shared/src/saves.ts:314-322`, `client/src/main.ts:427/476/1219/1831` |
+| A local profile with XP in it | `SaveFile.profile.{xp, level, secondsPlayed, adsRemoved}` are **never written by anything**. `grep -rn "save\.profile" client/src` shows only `avatar`, `skin` and `lastMode` are live. They read 0 forever. **C1 found three more of the same kind, see §13 item 11: `progress.wins`, the whole `save.deathmatch` section, and the player's own name.** | `shared/src/saves.ts:314-322`, `client/src/main.ts:427/476/1219/1831` |
 
 Two more that matter to the wiring:
 
@@ -1055,6 +1055,26 @@ Plus one existing route to decide: **`GET /api/status` is not admin-gated** (`in
 
 ### 6.1 Structure
 
+> **AS BUILT (C1, this commit).** Three deviations from the sketch below, each
+> deliberate:
+>
+> 1. **`ProfileInputs.account` is `AccountView | null`.** `null` means "no
+>    `CredentialProvider` is bound", which is the shipped static site, and the
+>    model renders it through `deviceOnlyAccount()`. Nullable so the SHELL never
+>    imports a *value* from `profileModel.ts` — `main.ts` holds both new modules
+>    as types only, which is what keeps the whole overlay in a lazy chunk.
+> 2. **`ProfileView` gained `levelFraction` and `worth`.** The first is the bar
+>    width, clamped, and the divide that produces it is its own exported
+>    function (`barFraction`) so the divide-by-zero guard is something a test
+>    can drive rather than defensive code nobody can prove works. The second is
+>    the `(modeId, matchType)` pair `MatchTypeNotice` is pointed at.
+> 3. **`import('@/ui/profile')`, not a static import.** Static, the three new
+>    modules put **36.3 kB** into `dist/a/index-*.js` (644.97 → 681.28 kB) and
+>    **+11,928 transfer bytes** on the boot path, a third of it `matchType.ts`
+>    which was tree-shaken away entirely while it was orphaned. Lazy, `index`
+>    grows 0.89 kB and `dist/a/profile-*.js` (25.1 kB) is fetched the first time
+>    somebody presses the button. §6.4's trace is the dynamic form.
+
 `client/src/ui/profile.ts` — a full-screen overlay, direct child of `#ui`, `z-index: 5`, `display:none` / `.is-open{display:grid}`, copying `client/src/ui/avatarEditor.ts:116-138` exactly. Mutually exclusive with the locker by two lines, the same discipline `setScreen` already applies at `main.ts:1333`.
 
 Split along the only testable line — `vitest.config.ts` sets `environment: 'node'` with no jsdom, which is why `client/src/ui/` holds four files and **zero tests**:
@@ -1120,14 +1140,14 @@ export function buildProfileView(i: ProfileInputs): ProfileView;
 | Panel | Source | Needs a server? |
 |---|---|---|
 | Header: name, avatar, "Marine since …" | `save.profile.{name, avatar, createdMs}` (`saves.ts:50-75`) | No |
-| Four tiles: kills · deaths · matches · level | `progress.{kills,deaths,gamesPlayed,level}` — the same four the menu already prints at `main.ts:713-718` | No |
+| Four tiles: kills · deaths · matches · level | `progress.{kills,deaths,gamesPlayed,level}` — the same four the menu already prints at `main.ts:713-718`. **NOT `progress.wins`**, which the draft of this table implied for the Matches hint and which nothing in the tree writes (§13 item 11). `gamesPlayed` is incremented in `startMode`, so it counts matches *entered*, and the hint says so. | No |
 | Level bar | `progress.{xp,level}` + `xpForLevel`/`levelForXp` (`shared/src/constants.ts:602-611`) | No |
 | **Quest** — 6 slots, per-level bests | `save.quest` → `QuestSlot` (`saves.ts:108`) + `QuestLevelRecord` (`:76`) | No |
 | **Builder** — worlds, sizes, last played | `save.builder` → `BuilderWorld` (`:130`) | No |
 | **Horde** — per-map best wave | `save.horde` → `HordeMapRecord` (`:155`) | No |
-| **Deathmatch** — per-weapon kills | `save.deathmatch` (`:172`) | No |
+| **Deathmatch** — per-weapon kills | ~~`save.deathmatch` (`:172`)~~ — **WRONG, and it is the same bug this section warns about.** `recordDeathmatch` (`saves.ts:1077`) is the only one of the four per-mode recorders with **no caller anywhere**; Quest, Builder and Horde all write their sections from their modes. `save.deathmatch` is `{matches: 0, …}` on every device in the world, so this panel renders **no rows and a sentence saying the records are not being written**. Ratcheted by `UNWRITTEN` in `profileModel.test.ts`. | No |
 | **Lifetime (authoritative)** — matches, wins, K/D, damage, blocks, `weaponKills[]`, `favouriteWeapon` | `StoredStats` (`persistence.ts:70-84`) via `GET /api/profile`. The weapon histogram is the one genuinely interesting panel already in storage. | **Yes** |
-| **Scrap** — balance, lifetime, today's headroom vs `DAY_XP_CAP`/`DAY_SCRAP_CAP`/`DR_LADDER` | `StoredEconomy`; live values from `NetClient.balanceXp`/`balanceScrap` (`client/src/net/client.ts:929-930`, set at `:1583-1584`) | **Yes** |
+| **Scrap** — balance, lifetime, **and what the server says was earned today** | `StoredEconomy`; live values from `NetClient.balanceXp`/`balanceScrap` (`client/src/net/client.ts:929-930`, set at `:1583-1584`). **The headroom is NOT rendered:** `DAY_XP_CAP`, `DAY_SCRAP_CAP` and `DR_LADDER` are declared in `server/src/persistence.ts`, a client cannot import them, and copying the numbers into the bundle would publish the anti-farm thresholds to the people they exist to stop *and* create a second source of truth that drifts the first time they are tuned. Today's earned totals come from the server and say the same thing from the side that is allowed to have an opinion. | **Yes** |
 | **Account** | §2 | **Yes** |
 
 **Two rules the model must obey:**
@@ -1148,18 +1168,18 @@ export function buildProfileView(i: ProfileInputs): ProfileView;
 
 | Step | Existing anchor | Profile equivalent |
 |---|---|---|
-| import | `main.ts:87` `import { …createAvatarEditor… } from '@/ui/avatarEditor'` | `import { createProfileScreen, type ProfileScreen } from '@/ui/profile'` |
+| import | `main.ts:87` `import { …createAvatarEditor… } from '@/ui/avatarEditor'` | **`import type { ProfileScreen } from '@/ui/profile'` + `import('@/ui/profile')` inside `openProfile()`.** A static value import would put 36 kB back on the boot path; see the AS BUILT note in §6.1. `wiring.test.ts` strips `import type` before walking the graph precisely because a type import is erased and is not evidence that anything ships. |
 | handle | `main.ts:444` `let avatarEditor: AvatarEditor \| null = null` | `let profileScreen: ProfileScreen \| null = null` |
 | **menu button** | `main.ts:726` `lockerBtn`, appended into `menuRow` (`:725`) before Settings (`:731`) | one more `button('Profile', 'dc-ghost', () => openProfile())` into the same `.dc-row`. **It is already a three-button launcher; a fourth is a 3-line diff and no layout rework.** |
-| construction | `main.ts:763` `createAvatarEditor({ root: uiRoot, … })` | `createProfileScreen({ root: uiRoot, … })` — `root` must be `uiRoot` itself |
+| construction | `main.ts:763` `createAvatarEditor({ root: uiRoot, … })` | `createProfileScreen({ root: uiRoot!, inputs: profileInputs })`, inside the `.then()` of the dynamic import — `root` must be `uiRoot` itself. An in-flight `profileLoading` promise guards the double-click: without it two clicks before the chunk lands append two overlays to `#ui` and the first is unreachable and permanently on top of the menu. |
 | open | `main.ts:778-780` | `openProfile()`, which first calls `avatarEditor?.close()` |
 | screen machine | `main.ts:1333` `if (s !== 'menu') avatarEditor?.close()` | add `profileScreen?.close()` on the same line |
 | **Escape** | `main.ts:1525` locker takes priority over `openPause()` | same priority — **forgetting this is how a modal becomes unclosable under pointer lock** |
 | Enter/Space swallow | `main.ts:1533` | same guard, or typing a recovery code with a space starts a match |
 | canvas click swallow | `main.ts:1585` | same guard |
-| automation | `main.ts:1825-1827` `openLocker/closeLocker/lockerOpen` | `openProfile/closeProfile/profileOpen`. **Never the recovery code** — `__DC__` is read by `tools/capture-ours.mjs` and lands in screenshots. |
+| automation | `main.ts:1825-1827` `openLocker/closeLocker/lockerOpen` | `openProfile/closeProfile/profileOpen`, plus `profileView()`. **`openProfile()` returns a Promise** because the chunk is lazy, and `tools/capture-ours.mjs --profile` awaits it. **Never the recovery code** — `__DC__` is read by the capture harness and lands in screenshots; `wiring.test.ts` scans the `__DC__` literal for `/recovery|secret/i`. |
 
-**Free reuse:** `client/src/ui/matchType.ts` is 566 lines of built, styled `MatchTypeBadge` / `MatchTypeNotice` / `MatchTypePicker`, **imported by nothing**, and asserted to exist by `shared/src/trust.test.ts:72-77`. A profile panel that says what a mode's matches are worth should render `MatchTypeNotice` (`:361`) rather than reinventing it — that gives an orphaned feature a live import path for free, and it is the only correct way to state a per-mode reward without tripping trap 1.
+**Free reuse — DONE.** `client/src/ui/matchType.ts` is 566 lines of built, styled `MatchTypeBadge` / `MatchTypeNotice` / `MatchTypePicker`, **which was imported by nothing** and is asserted to exist by `shared/src/trust.test.ts:72-77`. It is now live: `profileModel.ts` calls `defaultMatchTypeFor()` and `profile.ts` mounts a `MatchTypeNotice`, so `KNOWN_UNWIRED` in `client/src/ui/wiring.test.ts` is **`['worldBrowser.ts']` only**. Reverting `main.ts` puts `matchType.ts` straight back on the orphan list, which is how that was proven. A profile panel that says what a mode's matches are worth should render `MatchTypeNotice` (`:361`) rather than reinventing it — that gives an orphaned feature a live import path for free, and it is the only correct way to state a per-mode reward without tripping trap 1.
 
 ---
 
@@ -1349,7 +1369,10 @@ Route tests use the existing child-process harness at `server/src/deploy.test.ts
 **Import trace:** `limits.ts` → `index.ts` `handleApi` at the top of each named route; `adminIdentity` replaces `adminAuthorised` at all three existing call sites (`:902`, `:909`, `:925`).
 **Node tier:** runs on `npm run dev:server`; **matters only when deployed**. **Third-party account: none.**
 
-### Phase C1 — The profile overlay, device source, live
+### Phase C1 — The profile overlay, device source, live — **DONE**
+**Shipped:** `client/src/ui/profileModel.ts` (pure, 46 tests), `client/src/ui/profile.ts` (DOM, 16 tests against a hand-rolled document), `client/src/ui/wiring.test.ts` (15 tests), the ten `main.ts` touch points as a **lazy** import, and `MatchTypeNotice`'s first live mount. `client/src/ui/` went from 4 files and **zero** tests to 4 files and **three** test files. Two ratchets landed with it: `KNOWN_UNWIRED = ['worldBrowser.ts']` (a UI module nobody imports) and `UNWRITTEN = ['recordDeathmatch']` + `UNWRITTEN_PROGRESS = ['name']` (a field nobody writes). The second one is what caught §13 item 11 — the doc's own §6.2 named a dead source.
+
+**Original plan, for the diff:**
 **Ships (client only, to `doomcraft.vercel.app`):** `client/src/ui/profileModel.ts` + `client/src/ui/profile.ts`; the ten `main.ts` touch points in §6.4; `MatchTypeNotice` gets its first live import; **`client/src/ui/wiring.test.ts` lands in the same commit.**
 **Tests:** (1) `profileModel.test.ts` — on a fresh `createSaveFile()` no rendered string contains `NaN`, `Infinity` or `undefined`; 6 quest slots produce 6 rows; `economyVisible === false` when `economySurfacesOn(false, bits)`; **`buildProfileView` never reads `save.profile.xp`** (asserted by feeding a fixture with `xp: 999` and requiring it does not appear). (2) **The wiring ratchet** — it scans every file under `client/src/ui/` for *any* import of it from a shell file, **not for a `create*` export**, because `matchType.ts` exports zero `create*` functions and would otherwise pass silently while being 100% unwired; `KNOWN_UNWIRED = ['worldBrowser.ts']` is named explicitly and adding a name requires a deliberate edit. Red today for `matchType.ts`. (3) `openProfile()` is reachable from `window.__DC__`, mounts a direct child of `#ui`, and **does not change `uiRoot.dataset.screen`** — the anti-reload assertion; red if it is made a screen value.
 **Import trace:** `main.ts:87` import → `:444` handle → `:726` button in `menuRow` → `:763` construction → `:1333` `setScreen` → `:1525` Escape → `:1825` `__DC__`. **Enforced by test (2).**
@@ -1417,6 +1440,13 @@ Ordered by how badly each would mislead.
 8. **`HANDOVER.md:142-143` says `tsc -b` fails on Vercel *"because the root tsconfig references `server/`"*. Not reproducible** — `npx tsc -b --pretty false` exits 0 at HEAD, and `.vercelignore` does not exclude `server/`. The load-bearing fact is unchanged and **worse** than the stated one: the production deploy gate is bundling only, vite does not typecheck, and **there is no `.github/` directory at all**, so `tsc` and `vitest` run nowhere in CI. A Phase C panel typed against server types can be red locally and green on `doomcraft.vercel.app`.
 9. **New, and it belongs in `docs/BUGS-FOUND.md`: `SaveFile.profile.{xp, level, secondsPlayed, adsRemoved}` are dead fields.** Set by `createSaveFile` (`shared/src/saves.ts:319-322`) and never written again — `grep -rn "save\.profile" client/src` shows only `avatar`, `skin` and `lastMode` are live. Any UI rendering them shows a permanent zero. Fix is one line in the two places that already write `progress`, or delete the fields at the next `SAVES_VERSION` bump.
 10. **New: `sessionId` is not unique.** `` `${room.name}#${round}` `` (`room.ts:1155`) with `name` defaulting to `'doomcraft'` (`:332`) repeats across a restart. Anything using it as an idempotency key needs `HOST_ID` in front of it. §4.2. **And that is not enough** — it also repeats when the router reaps a room and rebuilds it under the same key, whose rounds start at 1 again, so a `roomInstanceId` is needed as well. Both are now in `Room.payoutSourceId()`; the ledger's own `sessionId` is unchanged.
+
+11. **New, from C1, and it is the same bug as item 9 three more times — §6.2 of THIS document named one of them as a data source.** The profile screen is the first surface that reads the save for display rather than for resume, and it found:
+    - **`recordDeathmatch` (`shared/src/saves.ts:1077`) has no caller anywhere.** `recordQuestLevel`, `recordBuilderSession` and `recordHordeRun` are all called from their modes; this one never was. So `save.deathmatch` — `matches`, `wins`, `bestStreak`, `headshots`, `damageDealt` and the `weaponKills[]` histogram §6.2 calls "the one genuinely interesting panel already in storage" — is all zeroes on every device that has ever run this game. It also means `save.profile.secondsPlayed` and `save.profile.lastMode`, which `recordDeathmatch` writes, never get written *by that path*. Fixing it needs `deathmatch.ts` to track per-weapon kills, best streak and headshots for a match; that is a mode change, not a profile-screen change, and it is listed in `UNWRITTEN` in `client/src/ui/profileModel.test.ts` until somebody does it.
+    - **`progress.wins` is never written.** `progress.gamesPlayed++` fires in `startMode` (`main.ts`), `kills`/`deaths`/`xp`/`level`/`secondsPlayed` are written by the save loop, and `wins`, `bestKillstreak`, `blocksPlaced`, `blocksBroken` and `favouriteWeapon` are written by nothing. The first draft of the Matches tile printed `${progress.wins} won` and would have shipped a permanent "0 won" to everybody.
+    - **There is no name entry anywhere in the shipped UI.** Neither `progress.name` nor `save.profile.name` is assigned by any file under `client/src`, so every player is called `Marine` — in the scoreboard, on the wire, and in this screen's header. It reads as a sensible default rather than as a zero, which is why it survived this long. Giving it an editor means deciding whether a mid-session rename reaches the room (`Game` has no `setName`), which is a protocol question.
+
+    The general lesson, and the reason the C1 ratchet is written the way it is: **item 9's fix was "do not render those four fields", and that is a fix for four fields.** The check that generalises is *"every field this screen renders must have a writer, and every save writer must have a caller"* — mechanical, run over the source, with a named-and-explained exemption list. That check found all three of the above in one run.
 
 **Phase 1 items from `docs/INFRASTRUCTURE.md` §8 that are genuinely still open, and are the real prerequisites:** #1 brotli/ETag in `serveStatic` — `index.ts:739-784` still emits `content-length` + `cache-control` only, no `content-encoding`, no `etag`, no `last-modified`, and `/c/*` and `/characters/*` get `no-cache` **with no validator**; note the asymmetry, `vercel.json` fixes this for the static host and the Node origin does not. #4 rate-limit HELLO — still absent, and now partly addressed by C0's limiter but not on the socket path. #8 `server/src/world.ts:72`'s equality assert — the line that already took the server down once. #9 retire `JsonFileStore` — LATER by decision, §4.3.
 
