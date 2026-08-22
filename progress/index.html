@@ -135,8 +135,8 @@
 
   <div class="phasestrip">
     <span class="lbl">Phase</span>
-    <span class="now">Handover planned</span>
-    <span class="note">Live and playable. Upgrade framework done. Economy, sponsors and platform are specced but unbuilt — plan and sequence in HANDOVER.md.</span>
+    <span class="now">Server tier live · economy spine + console shipped</span>
+    <span class="note">Node origin deployed to Railway (document + rooms, one origin). Reward spine wired (was dead code), Scrap + anti-farm + journal, five live security holes closed, PACKS phase 0, profile overlay, admin console. Gauntlet still 0/23 — no blind A/B yet for any piece.</span>
   </div>
 
   <div class="cols">
@@ -272,7 +272,7 @@
         <div class="piece is-pending">
           <div>
             <div class="nm">Advertiser ad platform</div>
-            <div class="note">In-world voxel billboards + ad server, inventory, impressions, buyer console. Untrusted creative needs sandboxing; real payments need explicit setup.</div>
+            <div class="note">Phase-one slice specced (S1/S3/S4/S12). Nonce CSP now live on the Node origin — the prerequisite. Not built.</div>
             
           </div>
           <div class="rounds">0 rounds</div>
@@ -296,14 +296,14 @@
           <div class="rounds">0 rounds</div>
           <div class="chip v-pending">PENDING</div>
         </div>
-        <div class="piece is-pending">
+        <div class="piece is-building">
           <div>
             <div class="nm">Points &amp; progression</div>
-            <div class="note">Two currencies: XP (never spent, gates unlocks) + Scrap (spendable). Server-granted only, with per-match and per-day anti-farm caps.</div>
-            
+            <div class="note">Server-granted XP + Scrap through the entitlement guard; caps, day buckets, DR ladder, idle refusal; journal. Built + audited, dark behind Feature.ECONOMY. No blind A/B yet.</div>
+            <div class="gap"><b>Biggest remaining gap</b>Built and server-verified; no admissible blind comparison yet.</div>
           </div>
           <div class="rounds">0 rounds</div>
-          <div class="chip v-pending">PENDING</div>
+          <div class="chip v-building">BUILDING</div>
         </div>
         <div class="piece is-pending">
           <div>
@@ -415,6 +415,10 @@
   <section>
     <div class="shead"><h2>Run log</h2><span class="meta">newest first</span></div>
     <div class="log">
+      <div><time>12:01</time><span>Server tier LIVE on Railway: doomcraft-production.up.railway.app — document + rooms from one origin; /api/version folds level hashes; /api/levels mounted; admin console at /admin behind the bearer.</span></div>
+      <div><time>12:01</time><span>Two decision docs: docs/PACKS.md (content packs; CONTENT_VERSION gates nothing today) and docs/PLATFORM.md (accounts, console, profile).</span></div>
+      <div><time>12:01</time><span>Audit found a proven __proto__ self-grant past guardProfileWrite (1e9 XP), Math.random() account secrets, an unauthenticated account-link, a join-code leak. All closed; exploits re-run against the real binary.</span></div>
+      <div><time>12:01</time><span>A1 reward spine: EntitlementGuard + trust.ts (1,766 lines) were imported by nothing. Now on every live match. 1503 → 1562 tests.</span></div>
       <div><time>2026-08-22</time><span>Handover plan written: Phase A economy, B sponsors/ads, C platform, D defects. GitHub push blocked until tools/.profile-mc (Cookies + Login Data) is purged from 2 commits of history.</span></div>
       <div><time>03:40</time><span>Both real bugs fixed: net pump off rAF (tab-background no longer disconnects), CSP added. Regression to fix: quest tile floor went 4.03 -&gt; 2.56 because seam strength was cut.</span></div>
       <div><time>03:35</time><span>Found the metric is scale-dependent: voxiom own sand reads 1.80 at nose, 3.32 mid, 8.51 far. The &quot;3.32 band&quot; was one slice of a curve. Our depth curve now sits on theirs.</span></div>
@@ -440,5 +444,5 @@
     </div>
   </section>
 
-  <footer>Updated 2026-08-20 16:40:00 UTC · exit condition is winning the blind comparison, not a round count</footer>
+  <footer>Updated 2026-08-22 10:01:11 UTC · exit condition is winning the blind comparison, not a round count</footer>
 </div>

@@ -1,7 +1,7 @@
 {
-  "updated": "2026-08-20T16:40:00Z",
-  "phase": "Handover planned",
-  "phaseNote": "Live and playable. Upgrade framework done. Economy, sponsors and platform are specced but unbuilt \u2014 plan and sequence in HANDOVER.md.",
+  "updated": "2026-08-22T10:01:11Z",
+  "phase": "Server tier live \u00b7 economy spine + console shipped",
+  "phaseNote": "Node origin deployed to Railway (document + rooms, one origin). Reward spine wired (was dead code), Scrap + anti-farm + journal, five live security holes closed, PACKS phase 0, profile overlay, admin console. Gauntlet still 0/23 \u2014 no blind A/B yet for any piece.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -140,7 +140,7 @@
       "rounds": 0,
       "verdict": "pending",
       "gap": "Not started.",
-      "note": "In-world voxel billboards + ad server, inventory, impressions, buyer console. Untrusted creative needs sandboxing; real payments need explicit setup."
+      "note": "Phase-one slice specced (S1/S3/S4/S12). Nonce CSP now live on the Node origin \u2014 the prerequisite. Not built."
     },
     {
       "id": "gta",
@@ -162,9 +162,9 @@
       "id": "points",
       "name": "Points & progression",
       "rounds": 0,
-      "verdict": "pending",
-      "gap": "Queued behind modes.",
-      "note": "Two currencies: XP (never spent, gates unlocks) + Scrap (spendable). Server-granted only, with per-match and per-day anti-farm caps."
+      "verdict": "building",
+      "gap": "Built and server-verified; no admissible blind comparison yet.",
+      "note": "Server-granted XP + Scrap through the entitlement guard; caps, day buckets, DR ladder, idle refusal; journal. Built + audited, dark behind Feature.ECONOMY. No blind A/B yet."
     },
     {
       "id": "items",
@@ -295,6 +295,22 @@
     {
       "t": "2026-08-22",
       "m": "Handover plan written: Phase A economy, B sponsors/ads, C platform, D defects. GitHub push blocked until tools/.profile-mc (Cookies + Login Data) is purged from 2 commits of history."
+    },
+    {
+      "t": "12:01",
+      "m": "A1 reward spine: EntitlementGuard + trust.ts (1,766 lines) were imported by nothing. Now on every live match. 1503 \u2192 1562 tests."
+    },
+    {
+      "t": "12:01",
+      "m": "Audit found a proven __proto__ self-grant past guardProfileWrite (1e9 XP), Math.random() account secrets, an unauthenticated account-link, a join-code leak. All closed; exploits re-run against the real binary."
+    },
+    {
+      "t": "12:01",
+      "m": "Two decision docs: docs/PACKS.md (content packs; CONTENT_VERSION gates nothing today) and docs/PLATFORM.md (accounts, console, profile)."
+    },
+    {
+      "t": "12:01",
+      "m": "Server tier LIVE on Railway: doomcraft-production.up.railway.app \u2014 document + rooms from one origin; /api/version folds level hashes; /api/levels mounted; admin console at /admin behind the bearer."
     }
   ],
   "bars": [
