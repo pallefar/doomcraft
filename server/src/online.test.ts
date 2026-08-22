@@ -499,7 +499,12 @@ describe('POST /api/admin/drain converges instead of waiting out the deadline', 
     await until(() => resident.gotWelcome, 20_000, 'the resident to be welcomed');
     const before = resident.snapshots;
 
-    const drain = await fetch(`${srv.origin}/api/admin/drain`, { method: 'POST', headers: drainAdmin });
+    const drain = await fetch(`${srv.origin}/api/admin/drain`, {
+      method: 'POST',
+      headers: { ...drainAdmin, 'content-type': 'application/json' },
+      // Every mutating admin route requires both fields now — docs/PLATFORM.md §5.7.
+      body: JSON.stringify({ actor: 'online-test', reason: 'draining this host for the rollout test' }),
+    });
     expect(drain.status).toBe(200);
     await drain.text();
 
@@ -546,7 +551,11 @@ describe('POST /api/admin/drain converges instead of waiting out the deadline', 
     expect(quickBefore.status).toBe(200);
     expect((await quickBefore.json() as Record<string, unknown>).ticket).toBeTruthy();
 
-    await (await fetch(`${srv.origin}/api/admin/drain`, { method: 'POST', headers: drainAdmin })).text();
+    await (await fetch(`${srv.origin}/api/admin/drain`, {
+      method: 'POST',
+      headers: { ...drainAdmin, 'content-type': 'application/json' },
+      body: JSON.stringify({ actor: 'online-test', reason: 'draining this host for the directory test' }),
+    })).text();
 
     /* After: both endpoints report the LIFECYCLE state, not the shutdown flag.
      * They used to answer `draining:false` and hand out a ticket at a host

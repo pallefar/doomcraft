@@ -363,3 +363,56 @@ describe('the profile overlay is wired the whole way', () => {
     expect(/recovery|secret|accountSecret/i.test(dc)).toBe(false);
   });
 });
+
+/* ------------------------------------------------------------------------ *
+ * The server's flags reach the client
+ *
+ * `shared/src/features.ts` documents a four-step resolution order whose THIRD
+ * step — "the server's flag payload, when online" — had never executed in any
+ * shipped build. `applyServerFlags` had zero callers repo-wide: it was the
+ * seventh instance of the failure this whole file exists to catch, except that
+ * unlike the others it was not merely unimported, it was *documented as
+ * working* at the top of its own module.
+ *
+ * `shared/src/features.test.ts` proves the bridge translates and that
+ * `isEnabled` changes its answer. Nothing there proves the shell CALLS it, so
+ * that is asserted here, as source, in the file that already owns the "is this
+ * actually wired" question.
+ * ------------------------------------------------------------------------ */
+
+describe('the server\'s flags are adopted, not ignored', () => {
+  const main = code(ENTRY);
+
+  it('assigns a SESSION_CONFIG handler on the live NetClient', () => {
+    // Beside onModeState / onModeEvent / onModeContext, on `game.net.events` —
+    // the same object the three mode messages already use, so a room that never
+    // sends one costs nothing.
+    expect(main).toMatch(/game\.net\.events\.onSessionConfig = \(config\) => \{/);
+  });
+
+  it('calls applyServerFlags THROUGH the bridge, not with the server\'s own keys', () => {
+    // `applyServerFlags(config.flags)` would compile, run, and do absolutely
+    // nothing: the server's record is keyed by FLAG_ORDER names and `isEnabled`
+    // reads Feature ids. That is the version that looks fixed.
+    expect(main).toMatch(/applyServerFlags\(featureFlagsFromBits\(config\.flags\)\)/);
+    expect(main).not.toMatch(/applyServerFlags\(config\.flags\)/);
+  });
+
+  it('imports both halves from shared/src/features.ts and nowhere else', () => {
+    expect(main).toMatch(/import \{[\s\S]*?applyServerFlags,[\s\S]*?featureFlagsFromBits,[\s\S]*?\} from '@shared\/features';/);
+  });
+
+  it('does NOT treat it as a kill switch, which would be the dangerous reading', () => {
+    // A product gate decides what a player is SHOWN and may be overridden by
+    // that player; a kill switch decides what the server DOES and may not.
+    // Anything that grants value reads the server-resolved bits a second time
+    // through `economySurfacesOn`, which no browser can reach — so the handler
+    // must not start gating a reward on `isEnabled`.
+    const handler = main.slice(
+      main.indexOf('game.net.events.onSessionConfig'),
+      main.indexOf('game.net.events.onModeState'),
+    );
+    expect(handler.length).toBeGreaterThan(0);
+    expect(/grant|award|scrap|balance/i.test(handler)).toBe(false);
+  });
+});

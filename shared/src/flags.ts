@@ -455,3 +455,332 @@ export function defaultFlagBits(): number {
   }
   return bits >>> 0;
 }
+
+/* ------------------------------------------------------------------------ *
+ * Reviewing a write before it fires
+ *
+ * Everything below exists so that the admin console's HTML can stay dumb.
+ * `server/src/admin/console.ts` is a template literal: it is outside `tsc` and
+ * outside `vitest`, so it is the one surface in this repo where "it compiles
+ * and the tests pass" is not even on offer. The rule that follows from that,
+ * stated once here and enforced by keeping these functions pure:
+ *
+ *   **Nothing that can be WRONG may live in the HTML.** The panel renders a
+ *   diff, a risk verdict, a delay and a warning list; it computes none of them.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * `docs/PATCHING.md` §5's rollout ladder, and the ONLY five values a rollout
+ * may take without an explicit override.
+ *
+ * `docs/PLATFORM.md` §5.8 item 4: "A rollout you cannot type freehand is a
+ * rollout you cannot fat-finger from 500 to 5000." The ladder is enforced on
+ * the SERVER (`POST /api/admin/flags` refuses an off-ladder value unless the
+ * body carries `allowCustomRollout: true`), not merely offered as five buttons
+ * in a panel — a guard that lives only in the UI is a guard an operator with
+ * curl does not have.
+ */
+export const ROLLOUT_LADDER: readonly number[] = Object.freeze([0, 100, 500, 2500, 10000]);
+
+/** True when this basis-point value is one of the five rungs. */
+export function onLadder(bp: number): boolean {
+  return ROLLOUT_LADDER.includes(bp);
+}
+
+/** The nearest rung, for a stepper that cannot land between two of them. */
+export function snapToLadder(bp: number): number {
+  const n = Number.isFinite(bp) ? Math.round(bp) : 0;
+  let best = ROLLOUT_LADDER[0];
+  let bestGap = Math.abs(n - best);
+  for (const rung of ROLLOUT_LADDER) {
+    const gap = Math.abs(n - rung);
+    // `<` and not `<=`: a tie goes to the LOWER rung, because the tie only ever
+    // happens on the way up and less exposure is the safer half of a mistake.
+    if (gap < bestGap) { best = rung; bestGap = gap; }
+  }
+  return best;
+}
+
+/**
+ * How much of the player base this flag reaches under this document, in basis
+ * points, with the freeze taken into account.
+ *
+ * This is `resolveFlag` read as a population rather than as one player, and it
+ * has to match it exactly or every risk verdict below is a guess. The three
+ * cases people get wrong, all of them straight out of `resolveFlag`:
+ *
+ *   - **No rule at all is not zero.** It is the flag's `defaultOn`, and
+ *     `client_update_prompt` ships ON.
+ *   - **A rule with `force: null, rolloutBp: 0` IS zero**, even for a flag
+ *     whose default is on. Writing the rule is how you turn a default off
+ *     without forcing it.
+ *   - **The freeze only touches a PARTIAL rollout**, and it sends it to the
+ *     flag's default — which for a `defaultOn` flag is UP, not down. Freezing
+ *     is not universally a reduction and this function will say so.
+ */
+export function exposureBp(key: string, cfg: FlagConfig): number {
+  const def = FLAGS[key];
+  if (def === undefined) return 0;
+  const rule = cfg.rules[key];
+  if (rule === undefined) return def.defaultOn ? 10000 : 0;
+  if (rule.force === true) return 10000;
+  if (rule.force === false) return 0;
+  if (rule.rolloutBp <= 0) return 0;
+  if (rule.rolloutBp >= 10000) return 10000;
+  return cfg.frozen ? (def.defaultOn ? 10000 : 0) : rule.rolloutBp;
+}
+
+/** One line of a human-readable diff between two documents. */
+export interface FlagDiffRow {
+  /** The flag key, or `''` for a document-level field. */
+  readonly key: string;
+  readonly field: 'force' | 'rolloutBp' | 'frozen' | 'revision' | 'rule';
+  readonly before: string;
+  readonly after: string;
+  /** Change in reach, in basis points. Positive means more players. */
+  readonly exposureDeltaBp: number;
+}
+
+function forceText(v: boolean | null | undefined): string {
+  return v === true ? 'ON (forced)' : v === false ? 'OFF (forced)' : 'defer to rollout';
+}
+
+/**
+ * What changed, field by field, in `FLAG_ORDER`.
+ *
+ * Written for a human about to press a button, so a rule that appears or
+ * disappears is one row saying so rather than two rows about fields that had
+ * no previous value.
+ */
+export function diffFlagDocuments(before: FlagConfig, after: FlagConfig): FlagDiffRow[] {
+  const out: FlagDiffRow[] = [];
+  if (before.frozen !== after.frozen) {
+    out.push({
+      key: '', field: 'frozen',
+      before: String(before.frozen), after: String(after.frozen),
+      exposureDeltaBp: 0,
+    });
+  }
+  if (before.revision !== after.revision) {
+    out.push({
+      key: '', field: 'revision',
+      before: String(before.revision), after: String(after.revision),
+      exposureDeltaBp: 0,
+    });
+  }
+  for (const key of FLAG_ORDER) {
+    const a = before.rules[key];
+    const b = after.rules[key];
+    const delta = exposureBp(key, after) - exposureBp(key, before);
+    if (a === undefined && b === undefined) continue;
+    if (a === undefined || b === undefined) {
+      const had = a ?? b as FlagRule;
+      out.push({
+        key, field: 'rule',
+        before: a === undefined ? 'no rule (registry default)' : `${forceText(had.force)}, ${had.rolloutBp} bp`,
+        after: b === undefined ? 'no rule (registry default)' : `${forceText(had.force)}, ${had.rolloutBp} bp`,
+        exposureDeltaBp: delta,
+      });
+      continue;
+    }
+    if (a.force !== b.force) {
+      out.push({ key, field: 'force', before: forceText(a.force), after: forceText(b.force), exposureDeltaBp: delta });
+    }
+    if (a.rolloutBp !== b.rolloutBp) {
+      out.push({
+        key, field: 'rolloutBp',
+        before: `${a.rolloutBp} bp`, after: `${b.rolloutBp} bp`,
+        exposureDeltaBp: a.force === null && b.force === null ? delta : 0,
+      });
+    }
+  }
+  // The freeze moves reach without touching a single rule, so a freeze-only
+  // write would otherwise diff as one boolean and look like nothing.
+  if (before.frozen !== after.frozen) {
+    for (const key of FLAG_ORDER) {
+      const delta = exposureBp(key, after) - exposureBp(key, before);
+      if (delta === 0) continue;
+      if (out.some((r) => r.key === key)) continue;
+      out.push({
+        key, field: 'frozen',
+        before: `${exposureBp(key, before)} bp reach`,
+        after: `${exposureBp(key, after)} bp reach`,
+        exposureDeltaBp: delta,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Which way a write moves the blast radius.
+ *
+ * `expands` is the direction that needs a delay; `reduces` is the incident
+ * response and must never be delayed. See `confirmDelayMs`.
+ */
+export type FlagWriteRisk = 'expands' | 'reduces' | 'neutral';
+
+export function flagWriteRisk(before: FlagConfig, after: FlagConfig): FlagWriteRisk {
+  let up = 0;
+  let down = 0;
+  for (const key of FLAG_ORDER) {
+    const delta = exposureBp(key, after) - exposureBp(key, before);
+    if (delta > 0) up += delta;
+    else if (delta < 0) down -= delta;
+  }
+  if (up > 0) return 'expands';
+  return down > 0 ? 'reduces' : 'neutral';
+}
+
+/** The mandatory pause between arming a write and being allowed to fire it. */
+export const CONFIRM_DELAY_MS = 60_000;
+
+/**
+ * How long the operator must wait between arming and confirming.
+ *
+ * **This is a deliberate departure from `docs/PLATFORM.md` §5.8, which asks for
+ * "60 s for a flag at ≤500 bp" without saying which direction.** A blanket
+ * delay puts the emergency stop behind a minute-long countdown, and the switch
+ * an operator reaches for at 3 a.m. is always the one that turns something OFF.
+ * Delaying that is not caution, it is an outage extended by policy.
+ *
+ * So the pause is on EXPANSION only. Anything that reaches more players waits;
+ * anything that reaches fewer — a force-off, a rollout stepped down, the
+ * freeze — fires as soon as the operator has typed the subject back. Both paths
+ * still write the same audit row with the same required `reason`.
+ */
+export function confirmDelayMs(risk: FlagWriteRisk): number {
+  return risk === 'expands' ? CONFIRM_DELAY_MS : 0;
+}
+
+/** A write, reviewed: what it does, what it costs, and what to be afraid of. */
+export interface FlagPlan {
+  /** False only for a compare-and-swap miss; the document is then unchanged. */
+  readonly ok: boolean;
+  readonly document: FlagConfig;
+  readonly conflict: FlagWriteConflict | null;
+  readonly touched: readonly string[];
+  readonly diff: readonly FlagDiffRow[];
+  /** Rendered inline by the console, never behind a hover. */
+  readonly warnings: readonly string[];
+  readonly risk: FlagWriteRisk;
+  readonly delayMs: number;
+  /** Rule keys whose resulting `rolloutBp` is not one of the five rungs. */
+  readonly offLadder: readonly string[];
+  /**
+   * The string the operator must type back before the write is allowed —
+   * `docs/PLATFORM.md` §5.8 item 2, the control that makes `rm -rf` survivable.
+   */
+  readonly subject: string;
+}
+
+/**
+ * Review a patch without applying it: the exact document to submit, a diff, and
+ * the warnings that belong in the confirm dialog.
+ *
+ * Pure, and that is the whole point of it existing. `POST /api/admin/flags/plan`
+ * is this function over HTTP; the console renders what it returns and posts
+ * `document` back verbatim under `rules`, so the risky logic is tested here
+ * rather than being untested JavaScript inside an HTML string.
+ */
+export function planFlagWrite(current: FlagConfig, patch: unknown): FlagPlan {
+  const write = nextFlagDocument(current, patch);
+  if (!write.ok) {
+    return {
+      ok: false, document: write.document, conflict: write.conflict, touched: [],
+      diff: [], warnings: ['Somebody else edited this document. Reload before writing.'],
+      risk: 'neutral', delayMs: 0, offLadder: [], subject: '',
+    };
+  }
+  const diff = diffFlagDocuments(current, write.document);
+  const risk = flagWriteRisk(current, write.document);
+  const offLadder: string[] = [];
+  for (const key of write.touched) {
+    const rule = write.document.rules[key];
+    if (rule !== undefined && !onLadder(rule.rolloutBp)) offLadder.push(key);
+  }
+
+  const warnings: string[] = [];
+  /* The two the console must print, and they are not hypothetical: `FlagService`
+   * holds the document in one process's memory and `load()` reads
+   * `DOOMCRAFT_FLAGS` at boot, so this write survives exactly as long as the
+   * process does. */
+  warnings.push(
+    'This write reaches ONE process. Every other host in the fleet keeps the document it has, '
+    + 'and this host reverts to its DOOMCRAFT_FLAGS boot document when it restarts.',
+  );
+  if (current.frozen !== write.document.frozen) {
+    warnings.push(write.document.frozen
+      ? 'FREEZE: every PARTIAL rollout (0 < bp < 10000) now resolves to the flag\'s registry default. '
+        + 'Finished rollouts and explicit force values are left exactly as they are.'
+      : 'UNFREEZE: every partial rollout resumes bucketing players again, at the value it still holds.');
+  }
+  for (const key of write.touched) {
+    const def = FLAGS[key];
+    if (def === undefined) continue;
+    const delta = exposureBp(key, write.document) - exposureBp(key, current);
+    if (delta <= 0) continue;
+    // Verbatim, inline, never behind a hover: shared/src/flags.test.ts holds
+    // `blastRadius` above 40 characters precisely so a human dares flip the
+    // switch, and hiding it defeats the registry.
+    warnings.push(`${key} — BLAST RADIUS: ${def.blastRadius}`);
+  }
+  for (const key of offLadder) {
+    warnings.push(
+      `${key} is being set to ${write.document.rules[key]?.rolloutBp ?? 0} bp, which is not on the `
+      + `${ROLLOUT_LADDER.join(' / ')} ladder. A custom rollout needs its own reason.`,
+    );
+  }
+  // Freezing can RAISE reach for a flag whose registry default is on. Nobody
+  // expects the emergency stop to turn something on, so it is named.
+  if (write.document.frozen && !current.frozen) {
+    for (const key of FLAG_ORDER) {
+      if (exposureBp(key, write.document) > exposureBp(key, current)) {
+        warnings.push(`${key} REACHES MORE PLAYERS after this freeze: its registry default is ON, `
+          + 'and freezing sends a partial rollout to the default.');
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    document: write.document,
+    conflict: null,
+    touched: write.touched,
+    diff,
+    warnings,
+    risk,
+    delayMs: confirmDelayMs(risk),
+    subject: write.touched.length === 1 ? write.touched[0] : `revision ${current.revision}`,
+    offLadder,
+  };
+}
+
+/**
+ * What a caller with NO IDENTITY resolves to.
+ *
+ * `GET /api/flags` has no device id for a menu that has not connected yet, and
+ * it used to hash the literal string `'anonymous'` for all of them. That is
+ * precisely the failure `server/src/deploy.ts`'s `stableIdFor` says it is
+ * avoiding on the socket path: one bucket for the whole anonymous population
+ * turns a 1% rollout into an all-or-nothing coin flip on all of them, decided
+ * once, at random, by the flag key — and it lands the same way on every host in
+ * the fleet, forever, because the hash has no per-process input.
+ *
+ * The answer is NOT `defaultFlagBits()`, which `docs/PLATFORM.md` §5.5(d)
+ * proposes. That throws away the operator's explicit decisions along with the
+ * gamble: a `force: false` kill switch pulled at 3 a.m. would still show the
+ * feature to every device-less caller, which is the opposite of what the switch
+ * is for. What must not happen is the GAMBLE, not the document.
+ *
+ * So: resolve the real document with the freeze rule applied. A force is
+ * honoured, a finished rollout (10000) is honoured, an empty one (0) is
+ * honoured, and only a PARTIAL rollout — the one case that needs a player to
+ * bucket — falls back to the flag's registry default. That is `frozen`'s
+ * existing, tested meaning, reused rather than restated, and it makes the
+ * result independent of the stable id, which is the property that matters when
+ * there isn't one.
+ */
+export function anonymousFlagBits(cfg: FlagConfig): number {
+  return resolveFlagBits({ ...cfg, frozen: true }, '');
+}

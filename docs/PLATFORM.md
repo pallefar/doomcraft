@@ -806,6 +806,56 @@ So the journal is split at write time, not at delete time:
 
 ## 5. The admin console
 
+> ### AS BUILT — read this before the rest of §5
+>
+> **Shipped in C3.** `server/src/admin/console.ts` (the page), `server/src/admin/model.ts`
+> (redaction, rollup, the honesty list), `server/src/adminAudit.ts` (the NDJSON action log), and
+> `planFlagWrite` / `exposureBp` / `ROLLOUT_LADDER` / `anonymousFlagBits` in `shared/src/flags.ts`.
+> Six tabs: Fleet, Flags, Refusals, Player, Metrics, Audit. Anchors below are from `c9a1e21` and have
+> moved — re-locate by content.
+>
+> **Seven places the design below is WRONG, or was changed on purpose. Each is argued at the point it
+> matters; this is the index.**
+>
+> 1. **§5.8's mandatory delay is on EXPANSION only, not on every write.** A blanket 60 s puts the
+>    emergency stop behind a countdown, and the switch reached for at 3 a.m. is always the one that
+>    turns something *off*. `flagWriteRisk` classifies a write by the reach it moves and
+>    `confirmDelayMs` waits only when that number goes up. Delaying the kill switch is not caution,
+>    it is an outage extended by policy.
+> 2. **There is NO DRAIN BUTTON**, though §5.4 lists one. `HostLifecycle` has no path back to
+>    `ADMITTING`, so undoing a drain costs a process restart; a one-way door with no undo does not
+>    belong one mis-click from a flag row. The console prints the state, prints the warning, and
+>    prints the exact `curl`.
+> 3. **§5.5(d) is wrong about the anonymous flag bucket.** Returning `defaultFlagBits()` throws away
+>    the operator's explicit decisions along with the gamble — a `force: false` kill switch would
+>    still show the feature to every device-less caller. `anonymousFlagBits` resolves the real
+>    document with the freeze rule applied: forces and finished rollouts are honoured, and only a
+>    PARTIAL rollout, the one case that needs a player to bucket, falls back to the registry default.
+> 4. **`/api/status` did NOT move behind the gate.** It is the public ops surface and several things
+>    read it unauthenticated. The one field §5.9 actually indicts — the room `seed`, a matchmaking-
+>    abuse surface — is cut from the public row instead, and the full row plus the signalling and
+>    connection rollups live on the new gated `GET /api/admin/status`. Gating the whole route is a
+>    separate decision with its own blast radius.
+> 5. **The ladder is enforced at the ROUTE, not offered as five buttons.** An off-ladder `rolloutBp`
+>    is a `400` unless the body says `allowCustomRollout: true`. A guard that lives in the panel is a
+>    guard `curl` skips by accident.
+> 6. **The console posts the PATCH it planned, not the plan's `document`.** `expectRevision`
+>    guarantees the base document has not moved, so re-planning the same patch server-side produces
+>    the byte-identical result — a stronger guarantee than echoing a document back, and one that
+>    cannot desynchronise from the merge rules.
+> 7. **User management is LOOKUP ONLY, and the console says so out loud.** `MISSING_CAPABILITIES` in
+>    `server/src/admin/model.ts` is §5.6's table as data: eight verbs, each with the reason there is
+>    no storage behind it and the phase that builds it. It is returned with every player lookup, so
+>    no screen can render without it. Deleting a row is part of building that verb.
+>
+> **And one thing §5 does not mention that turned out to matter more than any of them:**
+> `GET /api/admin/entitlement` was serving `guard.recent(64)` **verbatim**, and every row in that
+> ring carries a full device id *and* a `sessionId` of the form `"<room key>#<round>"` — which for a
+> private room **is the live join code**. The surface built to watch for somebody probing the reward
+> gate was handing out the stable identifier of every player who tripped it, out of the same door
+> `redactRoomRow` was written to close. Both fields are redacted now, and a live-binary test scans
+> every `/api/admin/*` response for a full device id.
+
 ### 5.1 Exactly where it runs, and what makes it privileged
 
 **It runs on the Node origin, at `GET /admin`, from a TypeScript module bundled into `server/dist/server.mjs`.** It is never in `dist/`, never on `doomcraft.vercel.app`, never in a player's browser.
@@ -1384,7 +1434,22 @@ Route tests use the existing child-process harness at `server/src/deploy.test.ts
 **Import trace:** `journal.ts` → `new JsonJournal(dataRoot)` in `index.ts` beside `store` → passed to every `Room` in the router's `create` callback → `has()`/`append()` called from inside the `store.update` callback in `Room.persistMember` → read by `GET /api/admin/journal`.
 **Node tier: yes** to matter; buildable and testable without. **Third-party account: none.**
 
-### Phase C3 — The admin console, read + flags + drain
+### Phase C3 — The admin console, read + flags + drain — **DONE**
+**Shipped:** `server/src/admin/console.ts` (one self-contained HTML page, 29.8 kB, served at
+`GET /admin` and 404 without a token), `server/src/admin/model.ts` (redaction, the connection rollup,
+`MISSING_CAPABILITIES`, `flagRegistryView`), `server/src/adminAudit.ts` (append-only NDJSON with
+before/after and the moderation-retention split), and in `shared/src/flags.ts` the pure
+`planFlagWrite` / `diffFlagDocuments` / `flagWriteRisk` / `exposureBp` / `snapToLadder` /
+`anonymousFlagBits`. Routes added: `GET /admin`, `/api/admin/whoami`, `/api/admin/status`,
+`GET /api/admin/flags`, `POST /api/admin/flags/plan`, `GET /api/admin/audit`,
+`GET /api/admin/player`; `actor` + `reason` + the ladder guard + an audit row on
+`POST /api/admin/flags` and `POST /api/admin/drain`; the guard ring redacted; the room `seed` cut
+from the public `/api/status`. **The rider landed too**: `SERVER_FLAG_FOR` +
+`featureFlagsFromBits` in `shared/src/features.ts`, called from `game.net.events.onSessionConfig` in
+`client/src/main.ts` — `applyServerFlags`'s first live caller in the history of the repository.
+**Read the AS-BUILT block at the top of §5 for the seven deliberate departures.**
+
+**Original plan, for the diff:**
 **Ships:** `server/src/admin/console.ts` (HTML as a template literal), the `/admin` route, `GET /api/admin/flags`, `/flags/plan` + 409, `reason` + `actor` on every mutation, `server/src/adminAudit.ts`, Screens 1 and 2, `SignalHub.stats()` and aggregated `ConnectionStats` added to `/api/status`, `/api/status` moved behind the gate. **Plus the four flag wirings of §5.5** — `SERVER_FLAG_FOR`, the `applyServerFlags` call from `onSessionConfig` (`client/src/net/client.ts:1568`), `online_play`'s reader in `session.ts`, and `defaultFlagBits()` for the anonymous HTTP bucket.
 **Tests:** (1) `GET /api/admin/flags` without a token → 404 **and `content-type: application/json`, not `text/html`** — today it falls through the SPA fallback and returns the game HTML with 200. (2) `POST /api/admin/flags` with `revision <= current` → 409; red today. (3) Every mutating route with `reason` under 10 chars → 400 **and writes no audit row**. (4) Every `/api/admin/*` response body matched against `/[A-Za-z0-9_-]{12,64}/` contains no full device id; red today at `index.ts:927`. (5) `nextFlagDocument` in `shared/src/flags.test.ts` — an omitted rule survives at its current value; a non-monotonic revision throws; freeze leaves `force` alone; the stepper snaps to the ladder. (6) `GET /admin` with no token → 404 with a JSON content-type. (7) Every `Feature` appears in `SERVER_FLAG_FOR`.
 **Import trace:** `ADMIN_CONSOLE_HTML` → the `/admin` branch in `handleApi`, placed before `serveStatic`; `AdminAudit` → constructed in `index.ts` beside `guard` (`:433-444`) → written by every mutating route → read by `GET /api/admin/audit`; `nextFlagDocument` → `POST /api/admin/flags/plan` → the console renders its diff and posts its `document` verbatim; `SERVER_FLAG_FOR` → `applyServerFlags` → `isEnabled` (`features.ts:73`), its **first live path**.
@@ -1447,6 +1512,23 @@ Ordered by how badly each would mislead.
     - **There is no name entry anywhere in the shipped UI.** Neither `progress.name` nor `save.profile.name` is assigned by any file under `client/src`, so every player is called `Marine` — in the scoreboard, on the wire, and in this screen's header. It reads as a sensible default rather than as a zero, which is why it survived this long. Giving it an editor means deciding whether a mid-session rename reaches the room (`Game` has no `setName`), which is a protocol question.
 
     The general lesson, and the reason the C1 ratchet is written the way it is: **item 9's fix was "do not render those four fields", and that is a fix for four fields.** The check that generalises is *"every field this screen renders must have a writer, and every save writer must have a caller"* — mechanical, run over the source, with a named-and-explained exemption list. That check found all three of the above in one run.
+
+12. **New, from C3, and it is item 9's shape at the level of a whole subsystem.** `applyServerFlags`
+    (`shared/src/features.ts`) had **zero callers repo-wide**, so step 3 of the resolution order
+    written at the top of its own module had never once executed — and wiring the call would not have
+    fixed it, because the function takes a record keyed by `Feature` ids while the only producer in
+    the tree hands back one keyed by `FLAG_ORDER` names. **The two namespaces had never met.** The
+    dangerous version of this fix is the one that adds `applyServerFlags(config.flags)`, compiles,
+    runs on every connection, writes keys nothing reads, and closes the ticket. The general rule, and
+    it is the one C1's ratchet was already circling: **"is it imported" and "does it do anything" are
+    different questions, and a function whose parameter type is `Record<string, boolean>` cannot tell
+    you that you are passing the wrong dictionary.** Both halves are in `docs/BUGS-FOUND.md` §9.
+
+13. **New, from C3: `docs/PLATFORM.md` §5.9's recommendation to move `/api/status` behind the gate
+    names the wrong remedy for the right problem.** The dangerous field is the room `seed` — offline
+    world generation, i.e. map knowledge before joining — and it is one `delete` away. Gating the
+    whole route breaks every existing unauthenticated reader of a public ops surface to fix one
+    field. Read §5.9's recommendation as "cut the seed", which is what shipped.
 
 **Phase 1 items from `docs/INFRASTRUCTURE.md` §8 that are genuinely still open, and are the real prerequisites:** #1 brotli/ETag in `serveStatic` — `index.ts:739-784` still emits `content-length` + `cache-control` only, no `content-encoding`, no `etag`, no `last-modified`, and `/c/*` and `/characters/*` get `no-cache` **with no validator**; note the asymmetry, `vercel.json` fixes this for the static host and the Node origin does not. #4 rate-limit HELLO — still absent, and now partly addressed by C0's limiter but not on the socket path. #8 `server/src/world.ts:72`'s equality assert — the line that already took the server down once. #9 retire `JsonFileStore` — LATER by decision, §4.3.
 

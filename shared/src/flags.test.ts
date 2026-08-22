@@ -18,17 +18,24 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CONFIRM_DELAY_MS,
   FLAGS,
   FLAG_ORDER,
   MAX_FLAG_BITS,
+  ROLLOUT_LADDER,
+  anonymousFlagBits,
   createFlagConfig,
   defaultFlagBits,
+  exposureBp,
   flagBucket,
   flagConfigETag,
   flagOn,
   hostBucket,
   nextFlagDocument,
+  onLadder,
   parseFlagConfig,
+  planFlagWrite,
+  snapToLadder,
   resolveFlag,
   resolveFlagBits,
   unpackFlags,
@@ -398,5 +405,192 @@ describe('nextFlagDocument', () => {
       expect(write.ok).toBe(true);
       expect(write.document.rules.share_cards).toEqual({ force: true, rolloutBp: 10000 });
     }
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Reviewing a write before it fires
+ *
+ * `planFlagWrite` is what the admin console's confirm dialog renders. The
+ * console's HTML is a template literal — outside `tsc`, outside `vitest` — so
+ * every judgement it makes has to be made here, where it can be wrong out loud.
+ * ------------------------------------------------------------------------ */
+
+describe('the rollout ladder', () => {
+  it('is exactly the five rungs docs/PATCHING.md §5 names', () => {
+    expect([...ROLLOUT_LADDER]).toEqual([0, 100, 500, 2500, 10000]);
+  });
+
+  it('knows a value that is not on it', () => {
+    expect(onLadder(500)).toBe(true);
+    // The one an operator reaches by typing an extra zero.
+    expect(onLadder(5000)).toBe(false);
+    expect(onLadder(1)).toBe(false);
+  });
+
+  it('snaps a tie DOWN, because less exposure is the safer half of a mistake', () => {
+    // 300 is equidistant from 100 and 500.
+    expect(snapToLadder(300)).toBe(100);
+    expect(snapToLadder(1500)).toBe(500);
+    expect(snapToLadder(9000)).toBe(10000);
+    expect(snapToLadder(Number.NaN)).toBe(0);
+  });
+});
+
+describe('how far a flag reaches under a document', () => {
+  it('reads NO RULE as the registry default, not as zero', () => {
+    // `client_update_prompt` ships ON. A console that renders 0% for it is a
+    // console that will talk somebody into "turning on" a live feature.
+    const empty = createFlagConfig();
+    expect(exposureBp('client_update_prompt', empty)).toBe(10000);
+    expect(exposureBp('economy_scrap', empty)).toBe(0);
+  });
+
+  it('reads a rule at 0 bp as OFF even for a flag whose default is on', () => {
+    const off = cfg({ client_update_prompt: { force: null, rolloutBp: 0 } });
+    expect(exposureBp('client_update_prompt', off)).toBe(0);
+    expect(resolveFlag('client_update_prompt', off, 'device-a')).toBe(false);
+  });
+
+  it('agrees with resolveFlag across the whole population, which is the only thing that makes it a reach', () => {
+    const c = cfg({ economy_scrap: { force: null, rolloutBp: 2500 } });
+    let on = 0;
+    for (const p of PLAYERS) if (resolveFlag('economy_scrap', c, p)) on++;
+    const measured = Math.round((on / PLAYERS.length) * 10000);
+    // Within 2 percentage points of the stated reach on 4000 players.
+    expect(Math.abs(measured - exposureBp('economy_scrap', c))).toBeLessThan(200);
+  });
+
+  it('sends a PARTIAL rollout to the default when frozen, and leaves the finished ones', () => {
+    const c = cfg({
+      economy_scrap: { force: null, rolloutBp: 2500 },
+      share_cards: { force: null, rolloutBp: 10000 },
+    }, true);
+    expect(exposureBp('economy_scrap', c)).toBe(0);
+    expect(exposureBp('share_cards', c)).toBe(10000);
+  });
+});
+
+describe('planFlagWrite', () => {
+  const base = cfg({ economy_scrap: { force: null, rolloutBp: 500 } });
+
+  it('calls a rollout step UP an expansion, and makes it wait', () => {
+    const plan = planFlagWrite(base, { rules: { economy_scrap: { rolloutBp: 2500 } } });
+    expect(plan.ok).toBe(true);
+    expect(plan.risk).toBe('expands');
+    expect(plan.delayMs).toBe(CONFIRM_DELAY_MS);
+    expect(plan.subject).toBe('economy_scrap');
+  });
+
+  it('does NOT delay a write that reaches fewer players — the kill switch is never behind a countdown', () => {
+    const down = planFlagWrite(base, { rules: { economy_scrap: { rolloutBp: 0 } } });
+    expect(down.risk).toBe('reduces');
+    expect(down.delayMs).toBe(0);
+
+    const off = planFlagWrite(base, { rules: { economy_scrap: { force: false } } });
+    expect(off.risk).toBe('reduces');
+    expect(off.delayMs).toBe(0);
+
+    const freeze = planFlagWrite(base, { frozen: true });
+    expect(freeze.risk).toBe('reduces');
+    expect(freeze.delayMs).toBe(0);
+  });
+
+  it('quotes the blast radius VERBATIM when a write expands, and only then', () => {
+    const up = planFlagWrite(base, { rules: { economy_scrap: { rolloutBp: 2500 } } });
+    const radius = FLAGS.economy_scrap.blastRadius;
+    expect(up.warnings.some((w) => w.includes(radius))).toBe(true);
+
+    const down = planFlagWrite(base, { rules: { economy_scrap: { rolloutBp: 0 } } });
+    expect(down.warnings.some((w) => w.includes(radius))).toBe(false);
+  });
+
+  it('always says the write reaches one process and dies with it', () => {
+    const plan = planFlagWrite(base, { frozen: true });
+    expect(plan.warnings.some((w) => /ONE process/.test(w))).toBe(true);
+    expect(plan.warnings.some((w) => /DOOMCRAFT_FLAGS/.test(w))).toBe(true);
+  });
+
+  it('NAMES a flag the freeze turns ON — the emergency stop is not always a reduction', () => {
+    // `client_update_prompt` defaults ON, so freezing a partial rollout of it
+    // sends it UP to the default. Nobody expects the panic button to enable
+    // something, which is exactly why it has to be said out loud.
+    const partial = cfg({ client_update_prompt: { force: null, rolloutBp: 2500 } });
+    const plan = planFlagWrite(partial, { frozen: true });
+    expect(plan.risk).toBe('expands');
+    expect(plan.warnings.some((w) => /REACHES MORE PLAYERS after this freeze/.test(w))).toBe(true);
+  });
+
+  it('flags an off-ladder rollout by name, and refuses to call it a rung', () => {
+    const plan = planFlagWrite(base, { rules: { economy_scrap: { rolloutBp: 5000 } } });
+    expect([...plan.offLadder]).toEqual(['economy_scrap']);
+    expect(plan.warnings.some((w) => /not on the/.test(w))).toBe(true);
+  });
+
+  it('CHANGES NOTHING and returns the conflict on a stale expectRevision', () => {
+    const plan = planFlagWrite(base, { expectRevision: 99, rules: { economy_scrap: { force: true } } });
+    expect(plan.ok).toBe(false);
+    expect(plan.conflict).toEqual({ expected: 99, actual: base.revision });
+    expect(plan.document).toBe(base);
+    expect(plan.diff).toEqual([]);
+    expect(plan.delayMs).toBe(0);
+  });
+
+  it('diffs a rollout change with the reach it actually moves', () => {
+    const plan = planFlagWrite(base, { rules: { economy_scrap: { rolloutBp: 2500 } } });
+    const row = plan.diff.find((d) => d.key === 'economy_scrap');
+    expect(row?.field).toBe('rolloutBp');
+    expect(row?.before).toBe('500 bp');
+    expect(row?.after).toBe('2500 bp');
+    expect(row?.exposureDeltaBp).toBe(2000);
+  });
+
+  it('diffs a FREEZE per flag, not as one boolean — otherwise it looks like nothing', () => {
+    const plan = planFlagWrite(base, { frozen: true });
+    expect(plan.diff.some((d) => d.key === '' && d.field === 'frozen')).toBe(true);
+    const perFlag = plan.diff.find((d) => d.key === 'economy_scrap');
+    expect(perFlag, 'the freeze moved economy_scrap from 500 bp to 0 and the diff did not say so').toBeDefined();
+    expect(perFlag?.exposureDeltaBp).toBe(-500);
+  });
+
+  it('never hands back the document it was given to edit', () => {
+    const plan = planFlagWrite(base, { rules: { economy_scrap: { force: true } } });
+    expect(plan.document).not.toBe(base);
+    expect(base.rules.economy_scrap.force).toBeNull();
+  });
+});
+
+describe('a caller with no identity', () => {
+  it('does not gamble: a PARTIAL rollout resolves to the registry default', () => {
+    const c = cfg({ economy_scrap: { force: null, rolloutBp: 100 } });
+    expect(flagOn(anonymousFlagBits(c), 'economy_scrap')).toBe(false);
+  });
+
+  it('still honours an operator FORCE, which defaultFlagBits() would have thrown away', () => {
+    // The reason this is not `defaultFlagBits()`: a kill switch pulled at 3 a.m.
+    // has to reach the device-less caller too, and a force-on that an operator
+    // set deliberately is not a gamble to be undone.
+    const on = cfg({ share_cards: { force: true, rolloutBp: 0 } });
+    expect(flagOn(anonymousFlagBits(on), 'share_cards')).toBe(true);
+    expect(flagOn(defaultFlagBits(), 'share_cards')).toBe(false);
+
+    const killed = cfg({ client_update_prompt: { force: false, rolloutBp: 10000 } });
+    expect(flagOn(anonymousFlagBits(killed), 'client_update_prompt')).toBe(false);
+  });
+
+  it('honours a FINISHED rollout, because 10000 bp needs no bucket', () => {
+    const c = cfg({ economy_scrap: { force: null, rolloutBp: 10000 } });
+    expect(flagOn(anonymousFlagBits(c), 'economy_scrap')).toBe(true);
+  });
+
+  it('gives every anonymous caller the same answer, which is the whole point', () => {
+    // The old code hashed the literal string 'anonymous', so a 1% rollout was
+    // one coin flip for the entire device-less population — decided once, by
+    // the flag key, identically on every host forever. This is deterministic
+    // for a different and better reason: no bucket is consulted at all.
+    const c = cfg({ economy_scrap: { force: null, rolloutBp: 9999 } });
+    const bits = anonymousFlagBits(c);
+    expect(flagOn(bits, 'economy_scrap')).toBe(false);
+    expect(anonymousFlagBits(c)).toBe(bits);
   });
 });

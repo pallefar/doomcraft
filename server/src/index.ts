@@ -45,7 +45,7 @@ import { MODE_KEYS, ModeId } from '@doomcraft/shared/modes';
 import { SIGNAL_PATH } from '@doomcraft/shared/signal';
 import { Room } from './room.js';
 import { setChunkCompressor } from './net.js';
-import type { NetTransport } from './net.js';
+import type { ConnectionStats, NetTransport } from './net.js';
 import {
   DEFAULT_MAX_ROOMS,
   DEFAULT_ROOM_IDLE_MS,
@@ -80,8 +80,28 @@ import {
   JsonJournal,
   redactPlayerId,
 } from './journal.js';
+import {
+  AdminAuditLog,
+  DEFAULT_AUDIT_DAYS,
+  redactProfileKey,
+  requireMutationFields,
+} from './adminAudit.js';
+import { ADMIN_CONSOLE_HTML } from './admin/console.js';
+import {
+  connectionRollup,
+  consoleCapabilities,
+  flagRegistryView,
+  playerLookup,
+  redactGuardAudit,
+} from './admin/model.js';
 import { CONTENT_VERSION, contentHashFor } from '@doomcraft/shared/version';
-import { flagConfigETag } from '@doomcraft/shared/flags';
+import {
+  ROLLOUT_LADDER,
+  anonymousFlagBits,
+  flagConfigETag,
+  planFlagWrite,
+  unpackFlags,
+} from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
 import { JsonFileStore, isValidDeviceId, migrateProfile, publicProfile } from './persistence.js';
@@ -505,8 +525,30 @@ void journal.ready();
 /* Retention. One sweep at boot and one every six hours: a day file is the unit,
  * so there is nothing to do more often than that. */
 void journal.sweep();
-const journalSweeper = setInterval(() => { void journal.sweep(); }, 6 * 60 * 60 * 1000);
+const journalSweeper = setInterval(() => {
+  void journal.sweep();
+  void auditLog.sweep();
+}, 6 * 60 * 60 * 1000);
 if (typeof journalSweeper.unref === 'function') journalSweeper.unref();
+
+/**
+ * THE ADMIN ACTION LOG. Append-only NDJSON beside the reward journal.
+ *
+ * Every mutating admin route writes one row with its `before` and `after`
+ * state, so `docs/PLATFORM.md` §5.8's "undo is the real reviewer" is a property
+ * of the file rather than a slogan: the operator can read what the document was
+ * and put it back.
+ *
+ * Constructed here rather than inside the console module on purpose. The
+ * console is a page; the log is a fact about this process, and it must exist
+ * whether or not anybody ever opens the page — `curl` writes rows too.
+ */
+const auditLog = new AdminAuditLog(dataRoot, {
+  clock: () => Date.now(),
+  days: envDays('DOOMCRAFT_AUDIT_DAYS', DEFAULT_AUDIT_DAYS),
+});
+void auditLog.ready();
+void auditLog.sweep();
 
 function envDays(name: string, fallback: number): number {
   const raw = Number(process.env[name] ?? '');
@@ -742,6 +784,81 @@ function refuseAdmin(res: ServerResponse, verdict: AdminVerdict, cors: string | 
   sendJson(res, 404, { error: 'not found' }, cors);
 }
 
+/** Correlates an audit row with the response the operator saw. */
+function newRequestId(): string {
+  return randomBytes(6).toString('hex');
+}
+
+/**
+ * Every live connection's counters, for the console's metrics screen.
+ *
+ * `ConnectionStats` is maintained on every connection and, until this call
+ * site, was aggregated nowhere and served nowhere — the bandwidth-per-player
+ * and reconciliation-correction numbers `docs/INFRASTRUCTURE.md` calls the
+ * metrics nobody instruments were already in memory. Reading them costs one
+ * pass over the room table and emits no event.
+ */
+function allConnectionStats(): ConnectionStats[] {
+  const out: ConnectionStats[] = [];
+  for (const key of router.keys()) {
+    const room = router.get(key);
+    if (room === null) continue;
+    for (const conn of room.net.connections) out.push(conn.stats);
+  }
+  return out;
+}
+
+/**
+ * The operator's view of this host.
+ *
+ * Deliberately a SUPERSET of the public `/api/status` rather than a replacement
+ * for it: `/api/status` stays public because it is this project's ops surface
+ * and several things already read it, and the extra detail an operator wants —
+ * the signalling hub's counters, the per-connection rollup, the two store
+ * statuses — lands here, behind the bearer, where it costs nothing to be
+ * generous.
+ */
+function adminStatusDocument(): Record<string, unknown> {
+  return {
+    draining: notAdmitting(),
+    shutdown: draining,
+    deploy: lifecycle.report(),
+    fleet: fleetStatus(),
+    directory: directory.status(),
+    rooms: router.status().map(redactRoomRow),
+    entitlement: guard.status(),
+    signal: signalHub.stats(),
+    connections: connectionRollup(allConnectionStats()),
+    journal: journal.status(),
+    audit: auditLog.status(),
+    uptimeMs: Date.now() - bootMs,
+  };
+}
+
+/**
+ * The guard on every mutating admin route, applied BEFORE anything is changed.
+ *
+ * `docs/PLATFORM.md` §5.8 argues that the confirm ritual is the review for a
+ * one-person team. A ritual the panel performs is a ritual `curl` skips, so the
+ * two fields that make an audit row worth having are checked here, at the
+ * route, where no client can decline to send them. Returns the refusal body, or
+ * null when the request may proceed.
+ */
+async function refuseUnaudited(
+  res: ServerResponse,
+  body: unknown,
+  cors: string | null,
+): Promise<{ actor: string; reason: string } | null> {
+  const check = requireMutationFields(body);
+  if (check.ok) return check.value;
+  // No audit row on purpose: a request that never named an actor has nothing to
+  // attribute, and writing one would fill the log with unattributable noise any
+  // unauthenticated-looking scanner could generate. The refusal is counted in
+  // the gate's own counters, which is where a flood shows up.
+  sendJson(res, 400, { error: check.error }, cors);
+  return null;
+}
+
 /**
  * "Is this host taking anybody new?" — the ONE question every matchmaking
  * surface has to answer, and the one they used to get wrong.
@@ -782,6 +899,27 @@ function redactRoomRow(row: Record<string, unknown>): Record<string, unknown> {
   if (typeof out.name === 'string' && out.name.includes(PRIVATE_KEY_MARK)) {
     out.name = out.name.slice(0, out.name.indexOf(PRIVATE_KEY_MARK));
   }
+  return out;
+}
+
+/**
+ * The same row, minus the world seed, for the UNAUTHENTICATED `/api/status`.
+ *
+ * `docs/PLATFORM.md` §5.9 names the seed as the reason it recommends moving
+ * `/api/status` behind the admin gate: it is a matchmaking-abuse surface —
+ * anybody who can read it can generate the room's world offline and know the
+ * map before they join it.
+ *
+ * Gating the whole route was the other option and was not taken: `/api/status`
+ * is this project's public ops surface, several tests and any external monitor
+ * read it unauthenticated, and a wholesale gate is a separate decision with its
+ * own blast radius. Cutting the one field that is actually dangerous costs
+ * nothing — nothing in the tree reads it from here — and the operator still has
+ * it, on `/api/admin/status`, behind the bearer.
+ */
+function publicRoomRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out = redactRoomRow(row);
+  delete out.seed;
   return out;
 }
 
@@ -944,7 +1082,15 @@ function pickRoom(key: string | null): { key: string; room: Room } | null {
   return best;
 }
 
-async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+async function handleApi(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  /* This response's CSP nonce. Only `/admin` uses it — the console is the one
+   * document this function serves, and it is stamped with the same function
+   * `serveStatic` uses for the game so the two can never drift. */
+  nonce: string,
+): Promise<boolean> {
   const path = url.pathname;
   const cors = corsOrigin(req);
 
@@ -1009,8 +1155,24 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
    * --------------------------------------------------------------------- */
   if (path === '/api/flags') {
     const device = url.searchParams.get('device') ?? '';
-    const id = isValidDeviceId(device) ? device : 'anonymous';
-    const etag = `W/${flagConfigETag(flags.document).slice(0, -1)}-${id.slice(0, 8)}"`;
+    /*
+     * A CALLER WITH NO IDENTITY DOES NOT GET BUCKETED, IT GETS THE DEFAULTS.
+     *
+     * This used to hash the literal string 'anonymous' for every device-less
+     * HTTP caller — which is exactly the failure `deploy.ts`'s `stableIdFor`
+     * says it is avoiding on the socket path: one bucket for the whole
+     * anonymous population turns a 1% rollout into an all-or-nothing coin flip
+     * on all of them, decided once, at random, by the flag key.
+     *
+     * `anonymousFlagBits` is the fix and it is NOT `defaultFlagBits()`, which
+     * is what `docs/PLATFORM.md` §5.5(d) asks for: the defaults throw away the
+     * operator's explicit forces along with the gamble, so a kill switch pulled
+     * at 3 a.m. would still show the feature to every device-less caller. Only
+     * the PARTIAL rollouts fall back. See the function.
+     */
+    const anonymous = !isValidDeviceId(device);
+    const id = anonymous ? '' : device;
+    const etag = `W/${flagConfigETag(flags.document).slice(0, -1)}-${anonymous ? 'default' : id.slice(0, 8)}"`;
     if (req.headers['if-none-match'] === etag) {
       res.writeHead(304, { etag, 'cache-control': 'public, max-age=60, stale-while-revalidate=600' });
       res.end();
@@ -1026,7 +1188,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const body = JSON.stringify({
       revision: flags.document.revision,
       frozen: flags.frozen,
-      flags: flags.resolveFor(id),
+      flags: anonymous ? unpackFlags(anonymousFlagBits(flags.document)) : flags.resolveFor(id),
     });
     headers['content-length'] = String(Buffer.byteLength(body));
     res.writeHead(200, headers);
@@ -1089,8 +1251,126 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (path === '/api/admin/drain' && req.method === 'POST') {
     const verdict = admitAdmin(req, path);
     if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const who = await refuseUnaudited(res, await readBody(req), cors);
+    if (who === null) return true;
+    const before = JSON.stringify(lifecycle.report());
     lifecycle.beginDrain();
-    sendJson(res, 200, { deploy: lifecycle.report() }, cors);
+    const action = await auditLog.record({
+      ms: Date.now(), actor: who.actor, verb: 'drain', subject: HOST_ID, reason: who.reason,
+      before, after: JSON.stringify(lifecycle.report()),
+      outcome: 'applied', requestId: newRequestId(),
+    });
+    sendJson(res, 200, { deploy: lifecycle.report(), action: action.id }, cors);
+    return true;
+  }
+
+  /* --- the console shell ------------------------------------------------ *
+   * A page, not an API. It ships no data and holds no secret: the token is
+   * typed in and kept in `sessionStorage`, and every /api/admin/* call it makes
+   * is gated. This route is therefore NOT token-gated — but it does not exist
+   * at all without a token, matching the 404 philosophy of the gate itself, so
+   * an unconfigured deployment advertises no admin surface.
+   *
+   * Handled HERE rather than by `serveStatic`, because the SPA fallback would
+   * otherwise hand out the game's index.html with a 200 for this path — the
+   * exact failure `/api/levels` had for months.
+   * --------------------------------------------------------------------- */
+  if (path === '/admin' && (req.method === 'GET' || req.method === 'HEAD')) {
+    if (!adminGate.configured) { sendJson(res, 404, { error: 'not found' }, cors); return true; }
+    const body = Buffer.from(stampNonce(ADMIN_CONSOLE_HTML, nonce), 'utf8');
+    const headers: Record<string, string> = {
+      'content-type': 'text/html; charset=utf-8',
+      'content-length': String(body.length),
+      'cache-control': 'no-store',
+      'x-robots-tag': 'noindex, nofollow',
+      // A console is never framed and never linked out of; both are cheap here
+      // and neither is negotiable on a page that can drain a host.
+      'referrer-policy': 'no-referrer',
+    };
+    if (req.method === 'HEAD') { res.writeHead(200, headers); res.end(); return true; }
+    res.writeHead(200, headers);
+    res.end(body);
+    return true;
+  }
+
+  /* --- what this host is, and what the console may do to it ------------- */
+  if (path === '/api/admin/whoami' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    sendJson(res, 200, {
+      version: versionDocument(contentHash, { deploy: lifecycle.report() }),
+      uptimeMs: Date.now() - bootMs,
+      draining: notAdmitting(),
+      shutdown: draining,
+      // The honest half. `docs/PLATFORM.md` §5.6 finds that most operator verbs
+      // have no storage behind them at all; the console renders this list
+      // rather than a row of buttons that do nothing.
+      capabilities: consoleCapabilities(),
+      auth: { denied: adminGate.denied, throttled: adminGate.throttled },
+    }, cors);
+    return true;
+  }
+
+  /* --- the operator's fleet view ---------------------------------------- */
+  if (path === '/api/admin/status' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    sendJson(res, 200, adminStatusDocument(), cors);
+    return true;
+  }
+
+  /* --- READING the flag document ---------------------------------------- *
+   * There was no GET. A GET fell through `handleApi` to `serveStatic`'s SPA
+   * fallback and returned the game's index.html with a 200, so the flag
+   * document was readable only as a side effect of WRITING it — which is the
+   * one operation an operator inspecting a live fleet must not have to perform.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/admin/flags' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    sendJson(res, 200, {
+      host: HOST_ID,
+      revision: flags.document.revision,
+      frozen: flags.frozen,
+      etag: flags.etag,
+      ladder: ROLLOUT_LADDER,
+      registry: flagRegistryView(flags.registry(), flags.document),
+    }, cors);
+    return true;
+  }
+
+  /* --- REVIEWING a write before it fires -------------------------------- *
+   * The POST below is destructive in one direction and irreversible in none,
+   * but it is still the request that turns a feature on for everybody. `/plan`
+   * returns the exact document that would result, a diff, the confirm delay and
+   * the warning list — computed by `planFlagWrite`, a pure function in
+   * `shared/src/flags.ts` with tests, rather than by untested JavaScript inside
+   * an HTML string.
+   *
+   * It writes NOTHING, including no audit row: planning is reading.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/admin/flags/plan' && req.method === 'POST') {
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const plan = planFlagWrite(flags.document, await readBody(req));
+    if (!plan.ok) {
+      sendJson(res, 409, {
+        error: 'revision conflict — somebody else edited the document',
+        expected: plan.conflict?.expected ?? -1,
+        revision: plan.conflict?.actual ?? flags.document.revision,
+      }, cors);
+      return true;
+    }
+    sendJson(res, 200, {
+      document: plan.document,
+      touched: plan.touched,
+      diff: plan.diff,
+      warnings: plan.warnings,
+      risk: plan.risk,
+      delayMs: plan.delayMs,
+      offLadder: plan.offLadder,
+      subject: plan.subject,
+    }, cors);
     return true;
   }
 
@@ -1107,9 +1387,46 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (path === '/api/admin/flags' && req.method === 'POST') {
     const verdict = admitAdmin(req, path);
     if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
-    const write = flags.apply(await readBody(req));
+    const body = await readBody(req);
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+
+    /*
+     * THE LADDER, enforced on the SERVER and not merely offered as five buttons.
+     *
+     * `docs/PATCHING.md` §5 has one rollout ladder — 0 / 100 / 500 / 2500 /
+     * 10000 — and `docs/PLATFORM.md` §5.8 makes it the review: "a rollout you
+     * cannot type freehand is a rollout you cannot fat-finger from 500 to
+     * 5000". A guard that lives in the panel is a guard an operator with `curl`
+     * skips by accident, so a value off the ladder is refused here unless the
+     * request says `allowCustomRollout` in so many words. That is the "custom
+     * demands its own reason string" rule, made into a field rather than a
+     * habit — and it applies to the console exactly as it applies to a script.
+     */
+    const plan = planFlagWrite(flags.document, body);
+    const allowCustom = (body as Record<string, unknown> | null)?.allowCustomRollout === true;
+    if (plan.ok && plan.offLadder.length > 0 && !allowCustom) {
+      sendJson(res, 400, {
+        error: 'rollout is not on the ladder — resend with allowCustomRollout: true and say why in the reason',
+        ladder: ROLLOUT_LADDER,
+        offLadder: plan.offLadder,
+      }, cors);
+      return true;
+    }
+
+    const before = JSON.stringify(flags.document);
+    const wasFrozen = flags.frozen;
+    const write = flags.apply(body);
     if (!write.ok) {
       const c = write.conflict;
+      /* A refused write IS an admin action and gets a row. A 409 that leaves no
+       * trace is how two operators discover afterwards that they were both
+       * editing, having each seen only their own half of it. */
+      await auditLog.record({
+        ms: Date.now(), actor: who.actor, verb: 'flags.set',
+        subject: `revision ${c?.expected ?? -1}`, reason: who.reason,
+        before, after: before, outcome: 'refused', requestId: newRequestId(),
+      });
       sendJson(res, 409, {
         error: 'revision conflict — somebody else edited the document',
         expected: c?.expected ?? -1,
@@ -1118,12 +1435,75 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       return true;
     }
     const doc = write.document;
+    const verb = wasFrozen === doc.frozen
+      ? 'flags.set'
+      : (doc.frozen ? 'flags.freeze' : 'flags.unfreeze');
+    const action = await auditLog.record({
+      ms: Date.now(), actor: who.actor, verb,
+      /* The SAME string `/plan` told the operator to type back, so the row and
+       * the confirm dialog cannot describe two different things. */
+      subject: plan.subject,
+      reason: who.reason,
+      before, after: JSON.stringify(doc),
+      outcome: 'applied', requestId: newRequestId(),
+    });
     // Everyone already connected keeps the flags they were resolved with for
     // the life of their session. That is deliberate: a feature appearing or
     // vanishing under a player mid-match is the thing flags exist to prevent.
     sendJson(res, 200, {
-      revision: doc.revision, frozen: doc.frozen, touched: write.touched, registry: flags.registry(),
+      revision: doc.revision,
+      frozen: doc.frozen,
+      touched: write.touched,
+      action: action.id,
+      registry: flagRegistryView(flags.registry(), doc),
     }, cors);
+    return true;
+  }
+
+  /* --- the admin action log --------------------------------------------- *
+   * Read-only. Every mutation above wrote a row here with its before and after
+   * state, which is what makes an undo one paste rather than an archaeology
+   * project. Rows whose verb starts with `player.` are moderation records and
+   * outlive the ordinary retention window — see `server/src/adminAudit.ts`.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/admin/audit' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const sinceRaw = Number(url.searchParams.get('since') ?? '0');
+    const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
+    const limitRaw = Number(url.searchParams.get('limit') ?? '100');
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.floor(limitRaw))) : 100;
+    sendJson(res, 200, {
+      rows: await auditLog.read(since, limit),
+      status: auditLog.status(),
+    }, cors);
+    return true;
+  }
+
+  /* --- one player, and what cannot be done to them ---------------------- *
+   * LOOKUP ONLY, and the response says so. `docs/PLATFORM.md` §5.6 walks every
+   * operator verb and finds most of them have no storage behind them: no
+   * moderation field, no `Room.kick`, no currency method, no `unlink`. The
+   * `missing` array is that list, returned with every lookup so the console
+   * cannot render a screen that lies about its own powers.
+   *
+   * The device id goes IN — an operator has it from a support ticket — and
+   * never comes back OUT: everything in the response is keyed by the same
+   * eight-character handle the journal uses.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/admin/player' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const verdict = admitAdmin(req, path);
+    if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
+    const key = url.searchParams.get('key') ?? '';
+    if (!isValidDeviceId(key)) { sendJson(res, 400, { error: 'key must be a device id' }, cors); return true; }
+    const limitRaw = Number(url.searchParams.get('limit') ?? '100');
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.floor(limitRaw))) : 100;
+    sendJson(res, 200, playerLookup({
+      key,
+      profile: await store.load(key),
+      rows: await journal.read(key, 0, limit),
+      sums: await journal.balances(key),
+    }), cors);
     return true;
   }
 
@@ -1138,7 +1518,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     if (verdict !== AdminVerdict.OK) { refuseAdmin(res, verdict, cors); return true; }
     sendJson(res, 200, {
       status: guard.status(),
-      recent: guard.recent(64),
+      /*
+       * REDACTED, and it had not been. Every row in the guard's ring carries a
+       * FULL device id, and this route returned them verbatim — so the surface
+       * built to watch for somebody probing the reward gate was itself handing
+       * out the stable identifier of every player who tripped it. `sessionId`
+       * goes too: it is `"<room key>#<round>"`, and a private room's key IS its
+       * join code, which is the leak `redactRoomRow` was written to close.
+       */
+      recent: redactGuardAudit(guard.recent(64)),
       // The other half of "an operator can see the gate running": until now a
       // refused bearer was counted nowhere and logged nowhere.
       auth: { denied: adminGate.denied, throttled: adminGate.throttled },
@@ -1205,7 +1593,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       deploy: lifecycle.report(),
       fleet: fleetStatus(),
       directory: directory.status(),
-      rooms: router.status().map(redactRoomRow),
+      rooms: router.status().map(publicRoomRow),
       // A healthy fleet shows a rising `accepted` and an all-but-empty `codes`
       // map. `violations` climbing is the number worth an alert.
       entitlement: guard.status(),
@@ -1432,7 +1820,7 @@ const httpServer = createServer((req, res) => {
   // below — JSON, plain text, static, and the error paths — inherits it.
   const nonce = randomBytes(16).toString('base64');
   applySecurityHeaders(res, nonce);
-  handleApi(req, res, url)
+  handleApi(req, res, url, nonce)
     .then((handled) => {
       if (handled) return;
       if (req.method !== 'GET' && req.method !== 'HEAD') { sendText(res, 405, 'method not allowed'); return; }
@@ -1721,6 +2109,7 @@ async function shutdown(signal: string): Promise<void> {
   // After the store, because the journal's own writes are already on disk by
   // then: this only closes the append handles.
   try { await journal.close(); } catch { /* best effort */ }
+  try { await auditLog.close(); } catch { /* best effort */ }
   await new Promise<void>((done) => { wss.close(() => done()); });
   // Only now: every match is over and there is nothing left to tell anybody.
   await new Promise<void>((done) => { httpServer.close(() => done()); });

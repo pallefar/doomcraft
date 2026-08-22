@@ -303,3 +303,105 @@ Matches tile said `1` while the Deathmatch panel said "No matches on this device
 other, and the contradiction was visible in a way that 1,700 green tests were not. The test that
 generalises it was written afterwards and is red against each of the three. **A screen is a
 different kind of assertion about the data than a test is, and this repo had never made one.**
+
+---
+
+## 8. The surface built to watch for probes was leaking the players who tripped it — HIGH, FIXED
+
+Found while building the admin console (C3), by writing the test `docs/PLATFORM.md` §5.7 asks for and
+pointing it at every `/api/admin/*` route at once rather than at the one route the section was about.
+
+`GET /api/admin/entitlement` returned `guard.recent(64)` **verbatim**. Every row in that ring
+(`server/src/entitlementGuard.ts`, `AuditEntry`) carries two fields nobody thought about on the way
+out:
+
+- **`deviceId`, in full.** The stable identifier of a player, for every player who has tripped the
+  reward gate — which is exactly the population an attacker would like a list of. The ring exists so
+  an operator can see somebody probing; it was also a list of everybody who had been probed at.
+- **`sessionId`, which is `` `${room.name}#${round}` ``.** For a **private** room the key is
+  `${roomKey}~${code}`, so the session id **contains a live join code**. `redactRoomRow` was written
+  in an earlier stage to stop `/api/status` handing private codes to anybody with curl; this was the
+  same leak, through a door nobody had looked at, gated only by the bearer.
+
+Both are now reduced to the journal's own 8-character handle by `redactGuardAudit`
+(`server/src/admin/model.ts`), and the check is not a review item:
+
+```
+ FAIL  deploy.test.ts > no admin response carries a full identifier
+       > is true of EVERY /api/admin/* route, including the one that was leaking
+AssertionError: /api/admin/entitlement put a full device id on the wire:
+  expected '{"status":{"sessions":0,"accepted":0,…' not to contain 'device-consoletest01'
+```
+
+The test walks seven routes, not one. **That is the whole finding**: §5.7 states the rule as a
+property of "every admin serialiser", and a test written per-route would have been green on the six
+that were fine and never written for the seventh.
+
+**Two smaller ones from the same pass:**
+
+- **`/api/status` published every room's world `seed`, unauthenticated.** A seed lets anybody
+  generate the room's world offline and know the map before joining it. `docs/PLATFORM.md` §5.9 names
+  it as the reason it wants the whole route gated; the route stays public — several things read it —
+  and the seed is cut from the public row instead. The operator's copy keeps it, behind the bearer,
+  on `GET /api/admin/status`.
+- **`operatorProfileView` is an allowlist, not a strip.** `publicProfile` removes three secrets and
+  keeps the full device id, which is right for the owner of that device and wrong for a console. A
+  spread-and-delete version of the operator view was written first and the red proof shows what it
+  emitted: `accountSecret`, `accountId`, the entire settings blob and the receipt. The shipped one
+  names the fields it wants, so a field added to `StoredProfile` tomorrow is absent until somebody
+  decides it belongs.
+
+---
+
+## 9. `applyServerFlags` had zero callers, and could not have worked if it had one — MEDIUM, FIXED
+
+`shared/src/features.ts` documents a four-step resolution order at the top of the file. Step 3 is
+*"the server's flag payload, when online (set via `applyServerFlags`)"*. `grep -rn applyServerFlags`
+over the whole tree returned its own declaration and that comment. **It had never executed in any
+build**, so a server-side flag reached the client only through the one bit test in
+`economySurfacesOn` and nowhere else.
+
+That is the ordinary version of this repo's recurring failure. The interesting half is the second
+one: **wiring the call would not have fixed it.**
+
+```ts
+export function applyServerFlags(flags: Readonly<Record<string, boolean>>): void  // Feature ids
+FlagService.resolveFor(stableId): Record<string, boolean>                         // FLAG_ORDER names
+```
+
+`applyServerFlags` writes into a record that `isEnabled(Feature.ECONOMY)` reads by the key
+`'economy'`. The only producer in the tree hands back `{ online_play: true, economy_scrap: false }`.
+**The two namespaces have never met.** A change that added `applyServerFlags(config.flags)` to the
+`SESSION_CONFIG` handler would compile, run on every connection, write keys nothing reads, and look
+exactly like a fix — which is worse than the hole, because the hole is at least visible to `grep`.
+
+Shipped: `SERVER_FLAG_FOR` (the map, one entry per `Feature`, with `null` a real answer meaning "no
+server flag exists — say nothing rather than say false") and `featureFlagsFromBits`, called from
+`game.net.events.onSessionConfig` in `client/src/main.ts`. The test that pins the bug is the one that
+asserts the *old* shape does nothing:
+
+```
+ × the wire, end to end — the thing that had zero callers
+   > lets the server turn a feature ON for a player who has never touched the toggle
+   → expected false to be true
+```
+
+and, at HEAD, green:
+
+```ts
+it('does NOTHING when handed the server\'s own key names — the bug, pinned', () => {
+  applyServerFlags({ online_play: true, economy_scrap: true });
+  expect(isEnabled(Feature.ONLINE_MULTIPLAYER)).toBe(false);
+});
+```
+
+**And a third one in the same file.** `GET /api/flags` hashed the literal string `'anonymous'` for
+every caller with no device id — the menu, before it has connected to anything. That is precisely the
+failure `server/src/deploy.ts`'s `stableIdFor` says in its own comment that it is avoiding on the
+socket path: one bucket for the whole device-less population turns a 1% rollout into an
+all-or-nothing coin flip on all of them, decided once, at random, by the flag key, and landing the
+same way on every host in the fleet forever. `docs/PLATFORM.md` §5.5(d) proposes returning
+`defaultFlagBits()`; that is also wrong, because it discards the operator's explicit forces along
+with the gamble — a kill switch pulled at 3 a.m. would still show the feature to every anonymous
+caller. `anonymousFlagBits` resolves the real document with the freeze rule applied, so only the
+partial rollouts fall back. *Status: FIXED.*

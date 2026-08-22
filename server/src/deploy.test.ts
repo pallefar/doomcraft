@@ -41,7 +41,13 @@ async function freePort(): Promise<number> {
   });
 }
 
-interface Booted { child: ChildProcess; origin: string; data: string }
+interface Booted {
+  child: ChildProcess;
+  origin: string;
+  data: string;
+  /** Everything the process has written to stderr so far. */
+  err(): string;
+}
 
 async function boot(env: Record<string, string> = {}): Promise<Booted> {
   const port = await freePort();
@@ -65,6 +71,14 @@ async function boot(env: Record<string, string> = {}): Promise<Booted> {
     },
   });
 
+  /* Collected because a REFUSED admin bearer is supposed to leave a line, and
+   * "there is no trace of a brute-force attempt anywhere in the tree" was the
+   * fourth defect `adminAuth.ts` was written to fix. A counter alone can be
+   * satisfied by a counter that nobody reads. */
+  let errText = '';
+  child.stderr?.on('data', (b: Buffer) => { errText += b.toString('utf8'); });
+  child.stdout?.on('data', () => { /* drained so the pipe cannot fill and stall */ });
+
   const origin = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + 40_000;
   for (;;) {
@@ -77,10 +91,28 @@ async function boot(env: Record<string, string> = {}): Promise<Booted> {
     if (Date.now() > deadline) throw new Error('server did not start');
     await new Promise((r) => setTimeout(r, 200));
   }
-  return { child, origin, data };
+  return { child, origin, data, err: (): string => errText };
 }
 
 const admin = { Authorization: `Bearer ${ADMIN_TOKEN}` };
+const adminJson = { ...admin, 'content-type': 'application/json' };
+
+/**
+ * Every mutating admin route now REQUIRES an `actor` and a `reason` of at least
+ * ten characters (`docs/PLATFORM.md` §5.7), so the tests below that are about
+ * merge semantics and the drain say so once here rather than eleven times.
+ *
+ * The guards themselves are tested against the route directly, further down, by
+ * sending bodies that are missing each field — never through this helper, which
+ * would only ever prove that the helper fills them in.
+ */
+function audited(body: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    actor: 'deploy-test',
+    reason: 'exercising the documented admin path from the test suite',
+    ...body,
+  });
+}
 
 /* ------------------------------------------------------------------------ *
  * The version document
@@ -203,8 +235,8 @@ describe('the admin surface', () => {
 
       const res = await fetch(`${server.origin}/api/admin/flags`, {
         method: 'POST',
-        headers: { ...admin, 'content-type': 'application/json' },
-        body: JSON.stringify({ revision: 9, rules: { economy_scrap: { force: true } } }),
+        headers: adminJson,
+        body: audited({ revision: 9, rules: { economy_scrap: { force: true } } }),
       });
       expect(res.status).toBe(200);
       await res.text();
@@ -224,19 +256,23 @@ describe('the admin surface', () => {
     try {
       await (await fetch(`${server.origin}/api/admin/flags`, {
         method: 'POST',
-        headers: { ...admin, 'content-type': 'application/json' },
-        body: JSON.stringify({
+        headers: adminJson,
+        /* 5000 bp is deliberately NOT on the docs/PATCHING.md ladder, so this
+         * body has to say so — which is the guard doing its job, not noise. */
+        body: audited({
           revision: 2,
+          allowCustomRollout: true,
           rules: { share_cards: { rolloutBp: 10000 }, economy_scrap: { rolloutBp: 5000 } },
         }),
       })).text();
 
       await (await fetch(`${server.origin}/api/admin/flags`, {
         method: 'POST',
-        headers: { ...admin, 'content-type': 'application/json' },
-        body: JSON.stringify({
+        headers: adminJson,
+        body: audited({
           revision: 3,
           frozen: true,
+          allowCustomRollout: true,
           rules: { share_cards: { rolloutBp: 10000 }, economy_scrap: { rolloutBp: 5000 } },
         }),
       })).text();
@@ -268,7 +304,9 @@ describe('POST /api/admin/drain takes a host out of rotation', () => {
       expect(before.status).toBe(200);
       await before.text();
 
-      const drain = await fetch(`${server.origin}/api/admin/drain`, { method: 'POST', headers: admin });
+      const drain = await fetch(`${server.origin}/api/admin/drain`, {
+        method: 'POST', headers: adminJson, body: audited(),
+      });
       expect(drain.status).toBe(200);
       const body = await drain.json() as { deploy: { state: string; admitting: boolean } };
       expect(body.deploy.admitting).toBe(false);
@@ -289,7 +327,9 @@ describe('POST /api/admin/drain takes a host out of rotation', () => {
       expect(server.child.exitCode).toBeNull();
 
       // A second drain is idempotent, not an error.
-      const again = await fetch(`${server.origin}/api/admin/drain`, { method: 'POST', headers: admin });
+      const again = await fetch(`${server.origin}/api/admin/drain`, {
+        method: 'POST', headers: adminJson, body: audited(),
+      });
       expect(again.status).toBe(200);
       await again.text();
     } finally {
@@ -492,17 +532,32 @@ describe('GET /api/levels is a route and not the SPA', () => {
  * ------------------------------------------------------------------------ */
 
 describe('POST /api/admin/flags merges, and refuses a stale write', () => {
-  /** The exact body `docs/PATCHING.md` tells an operator to paste. */
-  const DOCUMENTED_FREEZE = '{"revision":9,"frozen":true}';
+  /**
+   * The exact body `docs/PATCHING.md` tells an operator to paste, plus the two
+   * fields every mutation now requires.
+   *
+   * The runbook's shape is what is under test — a patch naming ONLY `revision`
+   * and `frozen`, which under the old full-replace deleted every force and
+   * every rolloutBp on the host. `actor` and `reason` are audit metadata and
+   * name no rule, so adding them does not weaken the case; the runbook itself
+   * is corrected in `docs/PATCHING.md`.
+   */
+  const DOCUMENTED_FREEZE = JSON.stringify({
+    revision: 9,
+    frozen: true,
+    actor: 'deploy-test',
+    reason: 'pausing every rollout while we look at the error rate',
+  });
 
   it('leaves every rule intact when sent the freeze command from the runbook', async () => {
     const server = await boot();
     try {
       const seeded = await (await fetch(`${server.origin}/api/admin/flags`, {
         method: 'POST',
-        headers: { ...admin, 'content-type': 'application/json' },
-        body: JSON.stringify({
+        headers: adminJson,
+        body: audited({
           revision: 2,
+          allowCustomRollout: true,
           rules: {
             share_cards: { force: true, rolloutBp: 10000 },
             economy_scrap: { rolloutBp: 5000 },
@@ -517,7 +572,7 @@ describe('POST /api/admin/flags merges, and refuses a stale write', () => {
       // destructive call in the API was the one the documentation prescribed.
       const res = await fetch(`${server.origin}/api/admin/flags`, {
         method: 'POST',
-        headers: { ...admin, 'content-type': 'application/json' },
+        headers: adminJson,
         body: DOCUMENTED_FREEZE,
       });
       expect(res.status).toBe(200);
@@ -554,14 +609,14 @@ describe('POST /api/admin/flags merges, and refuses a stale write', () => {
     try {
       await (await fetch(`${server.origin}/api/admin/flags`, {
         method: 'POST',
-        headers: { ...admin, 'content-type': 'application/json' },
-        body: JSON.stringify({ revision: 4, rules: { economy_scrap: { rolloutBp: 2500 } } }),
+        headers: adminJson,
+        body: audited({ revision: 4, rules: { economy_scrap: { rolloutBp: 2500 } } }),
       })).text();
 
       const stale = await fetch(`${server.origin}/api/admin/flags`, {
         method: 'POST',
-        headers: { ...admin, 'content-type': 'application/json' },
-        body: JSON.stringify({ expectRevision: 3, rules: { economy_scrap: { rolloutBp: 10000 } } }),
+        headers: adminJson,
+        body: audited({ expectRevision: 3, rules: { economy_scrap: { rolloutBp: 10000 } } }),
       });
       expect(stale.status).toBe(409);
       const conflict = await stale.json() as { expected: number; revision: number };
@@ -571,8 +626,8 @@ describe('POST /api/admin/flags merges, and refuses a stale write', () => {
       // Nothing moved: not the rule, not the revision.
       const fresh = await fetch(`${server.origin}/api/admin/flags`, {
         method: 'POST',
-        headers: { ...admin, 'content-type': 'application/json' },
-        body: JSON.stringify({ expectRevision: 4 }),
+        headers: adminJson,
+        body: audited({ expectRevision: 4 }),
       });
       expect(fresh.status).toBe(200);
       const doc = await fresh.json() as {
@@ -662,5 +717,407 @@ describe('the reward journal, in the real binary', () => {
     expect(open.headers.get('content-type')).toContain('application/json');
     const bad = await fetch(`${server.origin}/api/admin/journal?player=../etc`, { headers: admin });
     expect(bad.status).toBe(400);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * THE ADMIN CONSOLE, against the real binary
+ *
+ * `server/src/admin/console.ts` is an HTML string. `console.test.ts` proves it
+ * parses and that its decisions are imported rather than computed; nothing
+ * there proves the SERVER serves it, gates it, or refuses the writes it is
+ * supposed to refuse. That is what these do, over real HTTP, against a spawned
+ * process — the only honest way to test an HTTP surface in this repo.
+ *
+ * The static root holds a real index.html on purpose. Every route added here
+ * would otherwise fall through `handleApi` to `serveStatic`'s SPA fallback and
+ * answer 200 with the GAME, which is exactly how `/api/levels` was broken for
+ * months and how `GET /api/admin/flags` was broken until this commit. A missing
+ * route must be provable as a missing route, not masked by a 404.
+ * ------------------------------------------------------------------------ */
+
+function consoleStatic(): string {
+  const root = mkdtempSync(join(tmpdir(), 'dc-admin-static-'));
+  writeFileSync(join(root, 'index.html'), SPA_HTML, 'utf8');
+  return root;
+}
+
+describe('GET /admin serves the console, and only when there is a token', () => {
+  it('DOES NOT EXIST without a token — and answers JSON, not the game', async () => {
+    const server = await boot({ DOOMCRAFT_ADMIN_TOKEN: '', DOOMCRAFT_STATIC: consoleStatic() });
+    try {
+      const res = await fetch(`${server.origin}/admin`);
+      expect(res.status).toBe(404);
+      const type = res.headers.get('content-type') ?? '';
+      expect(type).toContain('application/json');
+      const text = await res.text();
+      // An unconfigured deployment must not advertise an admin surface, and it
+      // must not hand back the SPA either — a 200 with the game in it reads as
+      // "the console is there, you are just not logged in".
+      expect(text).not.toContain('DOOMCRAFT');
+      expect(text).not.toContain('operator console');
+    } finally {
+      server.child.kill('SIGKILL');
+    }
+  }, 60_000);
+
+  it('serves the shell with a token configured, uncacheable and unindexed', async () => {
+    const server = await boot({ DOOMCRAFT_STATIC: consoleStatic() });
+    try {
+      // Note: NO bearer on this request. The page is a shell that ships no data
+      // and asks for the token itself; every /api/admin/* call it makes is gated.
+      const res = await fetch(`${server.origin}/admin`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toContain('noindex');
+      const html = await res.text();
+      expect(html).toContain('operator console');
+      // It is NOT the game's index.html.
+      expect(html).not.toBe(SPA_HTML);
+      // And it carries no secret.
+      expect(html).not.toContain(ADMIN_TOKEN);
+    } finally {
+      server.child.kill('SIGKILL');
+    }
+  }, 60_000);
+
+  it('is stamped with this response\'s CSP nonce, so its own script can run', async () => {
+    const server = await boot({ DOOMCRAFT_STATIC: consoleStatic() });
+    try {
+      const res = await fetch(`${server.origin}/admin`);
+      const csp = res.headers.get('content-security-policy') ?? '';
+      const html = await res.text();
+      const nonce = /'nonce-([^']+)'/.exec(csp)?.[1] ?? '';
+      expect(nonce.length).toBeGreaterThan(8);
+      // Both the style and the script must carry it, or the page renders
+      // unstyled and dead — and `script-src` has no 'unsafe-inline' to fall
+      // back on, which is the entire point of the game's CSP.
+      expect(html).toContain(`<script nonce="${nonce}"`);
+      expect(html).toContain(`<style nonce="${nonce}"`);
+      // Two responses, two nonces: a stamped document can never be cached into
+      // a page whose nonce no longer matches its header.
+      const again = await fetch(`${server.origin}/admin`);
+      const csp2 = again.headers.get('content-security-policy') ?? '';
+      await again.text();
+      expect(/'nonce-([^']+)'/.exec(csp2)?.[1]).not.toBe(nonce);
+    } finally {
+      server.child.kill('SIGKILL');
+    }
+  }, 60_000);
+});
+
+describe('the admin bearer, over real HTTP', () => {
+  let server: Booted;
+  beforeAll(async () => { server = await boot({ DOOMCRAFT_STATIC: consoleStatic() }); }, 60_000);
+  afterAll(() => { server?.child.kill('SIGKILL'); });
+
+  async function attempt(headers: Record<string, string>): Promise<number> {
+    const res = await fetch(`${server.origin}/api/admin/flags`, { headers });
+    await res.text();
+    return res.status;
+  }
+
+  it('answers the five wrong ways to ask identically, and in JSON', async () => {
+    const cases: Array<[string, Record<string, string>]> = [
+      ['no header at all', {}],
+      ['a wrong token', { Authorization: 'Bearer definitely-not-the-token' }],
+      /* THE LENGTH ORACLE. The version this replaced returned early on a length
+       * mismatch, so one request per guess told an attacker exactly how long the
+       * secret is. Both sides are sha256'd now: there is no length left to
+       * branch on, and a 1-character guess costs what a 10,000-character one does. */
+      ['a wrong token of the RIGHT length', { Authorization: `Bearer ${'x'.repeat(ADMIN_TOKEN.length)}` }],
+      ['a wrong token of the wrong length', { Authorization: `Bearer ${ADMIN_TOKEN}xxxxxxxxxxxxxxxx` }],
+      ['a bare token with no scheme', { Authorization: ADMIN_TOKEN }],
+    ];
+    for (const [what, headers] of cases) {
+      const res = await fetch(`${server.origin}/api/admin/flags`, { headers });
+      const type = res.headers.get('content-type') ?? '';
+      expect(res.status, `${what} should be refused`).toBe(404);
+      /* JSON and not the SPA. Before `/api/admin/flags` had a GET at all, this
+       * request fell through to the static fallback and answered 200 with the
+       * game's index.html — so the flag document was readable only as a side
+       * effect of WRITING it. */
+      expect(type, `${what} answered ${type}`).toContain('application/json');
+      expect(await res.text()).not.toContain('DOOMCRAFT');
+    }
+  });
+
+  it('takes the scheme in any case, because RFC 7235 says it is case-insensitive', async () => {
+    expect(await attempt({ authorization: `bearer ${ADMIN_TOKEN}` })).toBe(200);
+    expect(await attempt({ Authorization: `BEARER ${ADMIN_TOKEN}` })).toBe(200);
+  });
+
+  it('counts every refusal and writes a line for it — a brute force used to leave no trace', async () => {
+    const before = await (await fetch(`${server.origin}/api/admin/entitlement`, { headers: admin }))
+      .json() as { auth: { denied: number; throttled: number } };
+    await attempt({ Authorization: 'Bearer wrong-again' });
+    await attempt({});
+    const after = await (await fetch(`${server.origin}/api/admin/entitlement`, { headers: admin }))
+      .json() as { auth: { denied: number; throttled: number } };
+    expect(after.auth.denied).toBeGreaterThanOrEqual(before.auth.denied + 2);
+    // And the operator can see it without the console: one line per refusal,
+    // naming the reason and the path.
+    const log = server.err();
+    expect(log).toContain('[admin] denied bad-token');
+    expect(log).toContain('[admin] denied no-credential');
+    expect(log).toContain('/api/admin/flags');
+    // The token itself is NEVER in the log.
+    expect(log).not.toContain(ADMIN_TOKEN);
+  });
+
+  it('429s a client that has burned its budget, and still admits the RIGHT token', async () => {
+    for (let i = 0; i < 30; i++) await attempt({ Authorization: `Bearer guess-${i}` });
+    expect(await attempt({ Authorization: 'Bearer one-more-guess' })).toBe(429);
+    // An attack is not a reason to disarm the defender: the credential is
+    // checked BEFORE the bucket, so the operator is never locked out of their
+    // own console while somebody on the same address is guessing.
+    expect(await attempt(admin)).toBe(200);
+  });
+});
+
+describe('the mutation guards, called directly rather than through the panel', () => {
+  let server: Booted;
+  beforeAll(async () => { server = await boot({ DOOMCRAFT_STATIC: consoleStatic() }); }, 60_000);
+  afterAll(() => { server?.child.kill('SIGKILL'); });
+
+  async function post(path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+    const res = await fetch(`${server.origin}${path}`, {
+      method: 'POST', headers: adminJson, body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    let parsed: Record<string, unknown> = {};
+    try { parsed = JSON.parse(text) as Record<string, unknown>; } catch { parsed = { text }; }
+    return { status: res.status, body: parsed };
+  }
+  async function auditRows(): Promise<Array<Record<string, unknown>>> {
+    const res = await fetch(`${server.origin}/api/admin/audit?limit=200`, { headers: admin });
+    return (await res.json() as { rows: Array<Record<string, unknown>> }).rows;
+  }
+  async function revision(): Promise<number> {
+    const res = await fetch(`${server.origin}/api/admin/flags`, { headers: admin });
+    return (await res.json() as { revision: number }).revision;
+  }
+
+  /**
+   * THE POINT OF THIS BLOCK. `docs/PLATFORM.md` §5.8 argues that the confirm
+   * ritual is the review for a one-person team — but a ritual the panel
+   * performs is a ritual `curl` skips by accident. None of these requests come
+   * from the console; they are what an operator, a script or an attacker with
+   * the bearer can actually send.
+   */
+  it('refuses a write with no reason, no short reason and no actor — and writes NO audit row', async () => {
+    const rowsBefore = (await auditRows()).length;
+    const revBefore = await revision();
+
+    const noActor = await post('/api/admin/flags', { reason: 'a perfectly adequate reason' });
+    expect(noActor.status).toBe(400);
+    expect(String(noActor.body.error)).toContain('actor');
+
+    const shortReason = await post('/api/admin/flags', { actor: 'me', reason: 'oops' });
+    expect(shortReason.status).toBe(400);
+    expect(String(shortReason.body.error)).toContain('reason');
+
+    const noReason = await post('/api/admin/flags', { actor: 'me', rules: { share_cards: { force: true } } });
+    expect(noReason.status).toBe(400);
+
+    const shortActor = await post('/api/admin/flags', { actor: 'm', reason: 'a perfectly adequate reason' });
+    expect(shortActor.status).toBe(400);
+
+    // Nothing happened, in either place: no rule moved, no revision moved, and
+    // the log is not full of unattributable noise a scanner can generate.
+    expect(await revision()).toBe(revBefore);
+    expect((await auditRows()).length).toBe(rowsBefore);
+  });
+
+  it('refuses the same four on the DRAIN route, and the host keeps admitting', async () => {
+    const bad = await post('/api/admin/drain', { actor: 'me' });
+    expect(bad.status).toBe(400);
+    const health = await fetch(`${server.origin}/health`);
+    expect(health.status).toBe(200);
+    await health.text();
+  });
+
+  it('refuses a rollout that is not on the docs/PATCHING.md ladder', async () => {
+    const off = await post('/api/admin/flags', {
+      actor: 'me', reason: 'stepping the rollout somewhere in between',
+      rules: { economy_scrap: { rolloutBp: 5000 } },
+    });
+    expect(off.status).toBe(400);
+    expect(String(off.body.error)).toContain('ladder');
+    expect(off.body.ladder).toEqual([0, 100, 500, 2500, 10000]);
+    expect(off.body.offLadder).toEqual(['economy_scrap']);
+  });
+
+  it('takes the same off-ladder write when the request says so in as many words', async () => {
+    const ok = await post('/api/admin/flags', {
+      actor: 'me', reason: 'holding at 50 percent for the weekend on purpose',
+      allowCustomRollout: true,
+      rules: { economy_scrap: { rolloutBp: 5000 } },
+    });
+    expect(ok.status).toBe(200);
+    const registry = ok.body.registry as Array<{ key: string; rolloutBp: number; onLadder: boolean }>;
+    const row = registry.find((r) => r.key === 'economy_scrap');
+    expect(row?.rolloutBp).toBe(5000);
+    // And the row still says it is off the ladder, so the console keeps saying so.
+    expect(row?.onLadder).toBe(false);
+  });
+
+  it('writes an audit row with the BEFORE and AFTER state, which is what makes undo one paste', async () => {
+    const rev = await revision();
+    const applied = await post('/api/admin/flags', {
+      actor: 'karsten', expectRevision: rev,
+      reason: 'turning share cards on for everybody',
+      rules: { share_cards: { force: true } },
+    });
+    expect(applied.status).toBe(200);
+    const rows = await auditRows();
+    const row = rows.find((r) => r.id === applied.body.action);
+    expect(row, 'the response named an audit row that is not in the log').toBeDefined();
+    expect(row?.actor).toBe('karsten');
+    expect(row?.verb).toBe('flags.set');
+    expect(row?.subject).toBe('share_cards');
+    expect(row?.outcome).toBe('applied');
+    expect(row?.reason).toBe('turning share cards on for everybody');
+    // The undo is readable off the row: this is what the document WAS.
+    const before = JSON.parse(String(row?.before)) as { rules: Record<string, { force: boolean | null } | undefined> };
+    const after = JSON.parse(String(row?.after)) as { rules: Record<string, { force: boolean | null }> };
+    expect(after.rules.share_cards.force).toBe(true);
+    expect(before.rules.share_cards?.force ?? null).not.toBe(true);
+  });
+
+  it('409s a stale write AND records the refusal, so two operators can see they collided', async () => {
+    const stale = await post('/api/admin/flags', {
+      actor: 'karsten', expectRevision: 0,
+      reason: 'racing myself from a second tab on purpose',
+      rules: { share_cards: { force: false } },
+    });
+    expect(stale.status).toBe(409);
+    const rows = await auditRows();
+    const refused = rows.find((r) => r.outcome === 'refused');
+    expect(refused, 'a 409 that leaves no trace is how a collision goes unnoticed').toBeDefined();
+    expect(refused?.reason).toBe('racing myself from a second tab on purpose');
+  });
+
+  it('plans a write without changing anything, including the audit log', async () => {
+    const rev = await revision();
+    const rowsBefore = (await auditRows()).length;
+    const plan = await post('/api/admin/flags/plan', {
+      expectRevision: rev, rules: { economy_scrap: { rolloutBp: 10000 } },
+    });
+    expect(plan.status).toBe(200);
+    expect(plan.body.risk).toBe('expands');
+    expect(plan.body.delayMs).toBe(60_000);
+    expect(plan.body.subject).toBe('economy_scrap');
+    const warnings = plan.body.warnings as string[];
+    // The blast radius, verbatim and inline, is what makes a human dare.
+    expect(warnings.some((w) => w.includes('Player balances'))).toBe(true);
+    expect(warnings.some((w) => w.includes('ONE process'))).toBe(true);
+    // Planning is reading.
+    expect(await revision()).toBe(rev);
+    expect((await auditRows()).length).toBe(rowsBefore);
+  });
+
+  it('409s a stale PLAN rather than showing a diff against a document that moved', async () => {
+    const plan = await post('/api/admin/flags/plan', { expectRevision: 0, frozen: true });
+    expect(plan.status).toBe(409);
+  });
+});
+
+describe('no admin response carries a full identifier', () => {
+  let server: Booted;
+  const DEVICE = 'device-consoletest01';
+  beforeAll(async () => {
+    server = await boot({ DOOMCRAFT_STATIC: consoleStatic() });
+    // A profile, and a refused write so the guard's ring has a row in it.
+    await (await fetch(`${server.origin}/api/profile`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: DEVICE, settings: { fov: 95 } }),
+    })).text();
+    await (await fetch(`${server.origin}/api/profile`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: DEVICE, progress: { xp: 999999999 } }),
+    })).text();
+  }, 60_000);
+  afterAll(() => { server?.child.kill('SIGKILL'); });
+
+  /**
+   * `docs/PLATFORM.md` §5.7: no admin serialiser may put a full device id on
+   * the wire. `GET /api/admin/entitlement` did — `guard.recent(64)` carries one
+   * on every row — so the surface built to watch for somebody probing the
+   * reward gate was itself handing out the stable identifier of every player
+   * who tripped it.
+   */
+  it('is true of EVERY /api/admin/* route, including the one that was leaking', async () => {
+    const paths = [
+      '/api/admin/whoami',
+      '/api/admin/status',
+      '/api/admin/flags',
+      '/api/admin/entitlement',
+      '/api/admin/audit',
+      `/api/admin/journal?player=${DEVICE}`,
+      `/api/admin/player?key=${DEVICE}`,
+    ];
+    for (const path of paths) {
+      const res = await fetch(`${server.origin}${path}`, { headers: admin });
+      expect(res.status, path).toBe(200);
+      const text = await res.text();
+      expect(text, `${path} put a full device id on the wire`).not.toContain(DEVICE);
+    }
+  });
+
+  it('still answers the operator\'s question — the refusal is visible, the player is not', async () => {
+    const body = await (await fetch(`${server.origin}/api/admin/entitlement`, { headers: admin }))
+      .json() as { status: { violations: number }; recent: Array<{ device: string; stripped: string[] }> };
+    expect(body.status.violations).toBeGreaterThan(0);
+    expect(body.recent.length).toBeGreaterThan(0);
+    expect(body.recent[0].device.length).toBe(8);
+    expect(body.recent[0].stripped).toContain('progress.xp');
+  });
+
+  it('looks a player up by exact id and answers with a reconciliation', async () => {
+    const body = await (await fetch(`${server.origin}/api/admin/player?key=${DEVICE}`, { headers: admin }))
+      .json() as {
+        onThisHost: boolean;
+        reconcile: { xp: { stored: number | null; journal: number } };
+        missing: Array<{ verb: string }>;
+      };
+    expect(body.onThisHost).toBe(true);
+    expect(body.reconcile.xp.stored).toBe(0);
+    expect(body.reconcile.xp.journal).toBe(0);
+    // And it says, with every lookup, what it cannot do.
+    expect(body.missing.length).toBeGreaterThan(5);
+    expect(body.missing.map((m) => m.verb).join(' ')).toContain('Ban');
+  });
+
+  it('refuses a lookup key that is not a device id, in JSON', async () => {
+    const res = await fetch(`${server.origin}/api/admin/player?key=../../etc/passwd`, { headers: admin });
+    expect(res.status).toBe(400);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    await res.text();
+  });
+
+  it('serves the operator MORE than the public status, and the public one loses the seed', async () => {
+    const open = await (await fetch(`${server.origin}/api/status`)).json() as Record<string, unknown>;
+    const gated = await (await fetch(`${server.origin}/api/admin/status`, { headers: admin }))
+      .json() as Record<string, unknown>;
+
+    // A room seed lets anybody generate the world offline and know the map
+    // before they join it. docs/PLATFORM.md §5.9 names it as the reason it
+    // wants /api/status gated; cutting the one dangerous field costs nothing.
+    const openRooms = open.rooms as Array<Record<string, unknown>>;
+    expect(openRooms.length).toBeGreaterThan(0);
+    for (const r of openRooms) expect(Object.keys(r)).not.toContain('seed');
+    expect(open.signal, 'the public route grew an operator field').toBeUndefined();
+    expect(open.connections).toBeUndefined();
+
+    // The operator gets both, plus the two counters that were computed every
+    // second and served nowhere.
+    const gatedRooms = gated.rooms as Array<Record<string, unknown>>;
+    expect(Object.keys(gatedRooms[0])).toContain('seed');
+    expect(gated.signal).toBeTruthy();
+    expect((gated.connections as Record<string, unknown>).violations).toBeTruthy();
+    expect(gated.journal).toBeTruthy();
+    expect(gated.audit).toBeTruthy();
   });
 });

@@ -66,7 +66,13 @@ import {
   type RoomRow,
 } from '@/net/matchmaker';
 import { AudioMixer, mountAudioSettings } from '@/audio/settings';
-import { Feature, isEnabled, setOverride } from '@shared/features';
+import {
+  Feature,
+  applyServerFlags,
+  featureFlagsFromBits,
+  isEnabled,
+  setOverride,
+} from '@shared/features';
 import { DEFAULT_PALETTE, MODE_PALETTES, applyModePalette, applyPalette } from '@/engine/palette';
 import {
   ModeRegistry,
@@ -1321,6 +1327,24 @@ registry.register(
  * `Game` owns the NetClient; the three mode messages are handed straight to
  * whichever mode is live. A room that never sends them costs nothing.
  * --------------------------------------------------------------------- */
+/*
+ * THE SERVER'S FLAGS, ADOPTED. Step 3 of the resolution order in
+ * `shared/src/features.ts` — "the server's flag payload, when online" — has
+ * never executed in a shipped build: `applyServerFlags` had zero callers
+ * repo-wide, and it took a record keyed by `Feature` ids while the only
+ * producer handed back one keyed by `FLAG_ORDER` names. This is the call, and
+ * `featureFlagsFromBits` is the bridge.
+ *
+ * Here rather than in a fetch on boot because the bits are already on a packet
+ * this client was going to receive anyway — 4 bytes on `S2C.SESSION_CONFIG` —
+ * so wiring it costs no request. It is deliberately NOT a kill switch: a
+ * player's own localStorage override still beats it, by design, because these
+ * are product gates. Anything that grants value is gated a second time on the
+ * server-resolved bits (`economySurfacesOn`), which no browser can override.
+ */
+game.net.events.onSessionConfig = (config) => {
+  applyServerFlags(featureFlagsFromBits(config.flags));
+};
 game.net.events.onModeState = (state) => { registry.dispatchState(state); };
 game.net.events.onModeEvent = (event) => { registry.dispatchEvent(event); };
 game.net.events.onModeContext = (context) => {

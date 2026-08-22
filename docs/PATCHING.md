@@ -317,20 +317,46 @@ This is the point of building the patch system before the economy and the sponso
 5. **Kill it** with `force: false`, which beats a rollout that already reached everybody.
 
 ```bash
+# READ the document first. There is now a GET; there did not used to be, and a
+# GET fell through to the SPA fallback and answered 200 with the game's HTML.
+curl -H "Authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" https://host/api/admin/flags
+
+# REVIEW the write before firing it: the resulting document, a diff, the
+# blast radius verbatim, and how long the console will make you wait.
+curl -XPOST -H "Authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" \
+  -d '{"expectRevision":8,"rules":{"economy_scrap":{"rolloutBp":2500}}}' \
+  https://host/api/admin/flags/plan
+
 # turn one on for everybody
 curl -XPOST -H "Authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" \
-  -d '{"revision":8,"rules":{"economy_scrap":{"force":true}}}' \
+  -d '{"revision":8,"actor":"you","reason":"scrap held clean for a week at 25%",
+       "rules":{"economy_scrap":{"force":true}}}' \
   https://host/api/admin/flags
 
 # FREEZE ALL ROLLOUTS — the one toggle, reachable from a phone
 curl -XPOST -H "Authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" \
-  -d '{"revision":9,"frozen":true}' https://host/api/admin/flags
+  -d '{"revision":9,"frozen":true,"actor":"you","reason":"error rate spiked at 21:40"}' \
+  https://host/api/admin/flags
 
 # ...and the same thing safely from a script that read the document first:
 # refused with 409 if anybody else edited it in between.
 curl -XPOST -H "Authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" \
-  -d '{"expectRevision":8,"frozen":true}' https://host/api/admin/flags
+  -d '{"expectRevision":8,"frozen":true,"actor":"you","reason":"error rate spiked at 21:40"}' \
+  https://host/api/admin/flags
 ```
+
+**`actor` and `reason` are REQUIRED on every mutating admin route**, including
+`POST /api/admin/drain`, and a request without them is a `400` that changes nothing and writes no
+audit row. `reason` must be at least 10 characters; `actor` at least 2. Neither is authentication —
+one shared bearer admits the request and `actor` is a label, so the row reads the day there are two
+operators. Every accepted write appends one line to `<DOOMCRAFT_DATA>/audit/<date>.ndjson` carrying
+the document **before and after**, which is what makes an undo a paste rather than an archaeology
+project. `GET /api/admin/audit?since=&limit=` reads them back.
+
+**A `rolloutBp` that is not one of `0 / 100 / 500 / 2500 / 10000` is refused with a `400`** unless
+the body also carries `"allowCustomRollout": true`. The ladder is the review — a rollout you cannot
+type freehand is a rollout you cannot fat-finger from 500 to 5000 — and it is enforced at the route
+rather than in the console, because a guard that lives in a panel is a guard `curl` skips by accident.
 
 **`POST /api/admin/flags` is a MERGE, and that is a correction, not a preference.** It used to be a
 full replace (`parseFlagConfig` starts from `createFlagConfig()`, whose `rules` are `{}`), which
@@ -448,8 +474,14 @@ handshake for every version in the window; the matrix job would cover a full ses
 | `GET /health` | Readiness. 503 while either drain is running. Carries `deploy` and `version` |
 | `GET /api/version` | All three axes plus `protocol.fingerprint`. Compare it **between hosts** — two hosts claiming the same protocol version but hashing differently is a mixed fleet, and that is the failure nobody thinks to look for |
 | `GET /api/flags` | The menu's copy, ETagged |
-| `POST /api/admin/drain` | Begin the deploy drain |
-| `POST /api/admin/flags` | Replace the flag document |
+| `POST /api/admin/drain` | Begin the deploy drain. Requires `actor` + `reason` |
+| `GET /api/admin/flags` | **Read** the document, plus per-flag reach and which client `Feature` each one drives |
+| `POST /api/admin/flags/plan` | Review a write: the resulting document, a diff, warnings, and the confirm delay. Writes nothing |
+| `POST /api/admin/flags` | **Merge** a patch into the document. Requires `actor` + `reason`; `409` on a stale `expectRevision` |
+| `GET /api/admin/status` | The operator's fleet view: the public status plus the signalling counters, the per-connection rollup, and both store statuses |
+| `GET /api/admin/audit` | The admin action log, newest first |
+| `GET /api/admin/player?key=` | One player, by exact device id, redacted, with the journal reconciliation |
+| `GET /admin` | The console itself. **404 when `DOOMCRAFT_ADMIN_TOKEN` is unset** |
 
 ---
 
