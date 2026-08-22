@@ -151,6 +151,21 @@ describe('AdminGate', () => {
     expect(gate.admit('Bearer guess5', '5.5.5.5')).toBe(AdminVerdict.DENIED);
   });
 
+  it('writes ONE denial line per throttled window, not one per request', () => {
+    // A sustained brute force must not be able to turn the denial log into a
+    // metered-disk attack: the counter is per request, the line is per window.
+    const { gate, log, tick } = gateWith(TOKEN);
+    for (let i = 0; i < 3; i++) gate.admit(`Bearer guess${i}`, '7.7.7.7');
+    const before = log.length;                    // three 'bad-token' lines
+    for (let i = 0; i < 50; i++) expect(gate.admit('Bearer still-guessing', '7.7.7.7')).toBe(AdminVerdict.THROTTLED);
+    expect(gate.throttled).toBe(50);              // every request is counted…
+    expect(log.length).toBe(before + 1);          // …and exactly one is written
+    expect(log[log.length - 1]!.reason).toBe('throttled');
+    tick(60_001);                                 // a new window logs again
+    gate.admit('Bearer guess-later', '7.7.7.7');
+    expect(log[log.length - 1]!.reason).toBe('bad-token');
+  });
+
   it('never throttles a CORRECT token, whoever else is guessing from that address', () => {
     // The operator reaches for the drain switch exactly when somebody is
     // attacking. A limiter that locks them out then is a limiter that helps

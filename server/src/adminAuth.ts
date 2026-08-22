@@ -218,7 +218,7 @@ export class AdminGate {
   private readonly resolveSession: SessionResolver;
   private readonly ownerCount: () => number;
   /** client address -> [failures, window start ms] */
-  private readonly failures = new Map<string, { n: number; since: number }>();
+  private readonly failures = new Map<string, { n: number; since: number; loggedThrottle?: boolean }>();
   private deniedCount = 0;
   private throttledCount = 0;
 
@@ -336,7 +336,13 @@ export class AdminGate {
     if (bucket !== undefined && now - bucket.since < this.windowMs && bucket.n >= this.limit) {
       if (record) {
         this.throttledCount++;
-        this.onDenied(Object.freeze({ ms: now, client, reason: 'throttled', path }));
+        // One line per window, not one per request: a brute force at line rate
+        // must not be able to turn the denial log into a disk-filling attack.
+        // The counter above still moves on every request, so `status()` sees it.
+        if (!bucket.loggedThrottle) {
+          bucket.loggedThrottle = true;
+          this.onDenied(Object.freeze({ ms: now, client, reason: 'throttled', path }));
+        }
       }
       return { verdict: AdminVerdict.THROTTLED, via: 'none', accountId: null };
     }
