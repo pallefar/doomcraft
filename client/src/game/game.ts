@@ -61,6 +61,7 @@ import { Viewmodel, createViewmodelInput, type ViewmodelInput } from '@/engine/v
 
 import { PlayerCamera } from '@/player/camera';
 import { InputManager } from '@/player/input';
+import { resolveBuildEdit } from '@/game/buildEdit';
 
 import {
   WeaponRuntime, createFireContext, createHitTargets, SWITCH_NONE,
@@ -445,6 +446,12 @@ export class Game {
   private lastEditMs = -1e9;
   private buildMode = false;
   private buildBlockIndex = 0;
+  /**
+   * On touch, build mode takes Fire/AltFire so the pad's FIRE hold and screen
+   * taps reach the edit path instead of a holstered gun (see `buildEdit.ts`).
+   * Desktop never sets this — the mouse keeps driving `isDown()` unchanged.
+   */
+  private buildTouchTaken = false;
   private renderDistance: number;
   private matchSeconds = 0;
   private hurtFlash = 0;
@@ -1624,6 +1631,8 @@ export class Game {
       }
     }
 
+    this.syncBuildTake();
+
     /* --- aim ----------------------------------------------------------- */
     const eyeX = this.driver.pos[0];
     const eyeY = this.driver.eyeY;
@@ -1669,12 +1678,29 @@ export class Game {
     input.endFrame();
   }
 
+  /**
+   * Keep Fire/AltFire taken exactly while a touch player is in build mode and
+   * in control, so the control pad's gestures reach `stepEdits` (a taken action
+   * reads released from every source, then back through
+   * `takenHeld`/`consumeTakenTap`). Released while dead so the FIRE disc still
+   * respawns, and never taken on desktop (`touchMode` false) so the mouse path
+   * is byte-for-byte unchanged. Toggled only on transition — re-asserting it
+   * would clear the tap latch a step before `stepEdits` consumes it.
+   */
+  private syncBuildTake(): void {
+    const want = this.touchMode && this.buildMode
+      && this.playing && !this.net.local.dead;
+    if (want === this.buildTouchTaken) return;
+    this.buildTouchTaken = want;
+    this.input.setActionTaken(InputAction.Fire, want);
+    this.input.setActionTaken(InputAction.AltFire, want);
+  }
+
   /** Break / place, rate limited, predicted through the net client. */
   private stepEdits(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): void {
     const nowMs = this.timeSeconds * 1000;
     if (nowMs - this.lastEditMs < EDIT_INTERVAL_MS) return;
-    const wantBreak = this.buildMode && this.input.isDown(InputAction.Fire);
-    const wantPlace = this.input.isDown(InputAction.AltFire);
+    const { wantBreak, wantPlace } = resolveBuildEdit(this.input, this.buildMode, this.buildTouchTaken);
     if (!wantBreak && !wantPlace) return;
 
     const reach = wantBreak ? REACH_BREAK : REACH_PLACE;

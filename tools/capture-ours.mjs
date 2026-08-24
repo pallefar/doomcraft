@@ -814,6 +814,62 @@ async function main() {
       await sweep(160, 0, 5);
     }
     await shot('10-killfeed');
+
+    // On the pad, Deathmatch shares game.ts's own build sub-mode, and its touch
+    // scheme is the same as Builder's: BLD toggles build mode, a screen tap
+    // places, the FIRE disc digs. Nothing on the pad drives AltFire, so before
+    // the fix a phone in build mode could dig but never place a single block.
+    // Enter build mode with the BLD glyph, aim at the floor, and place with
+    // real touch taps — then read the predicted world to prove a block landed.
+    if (MOBILE) {
+      await page.waitForFunction(
+        () => window.__DC__.playing && !window.__DC__.game.net.local.dead,
+        null, { timeout: 6000 },
+      ).catch(() => {});
+      await faceOpenGround();
+      const bld = await page.evaluate(() => {
+        for (const b of document.querySelectorAll('#hud b')) {
+          if (b.textContent.trim() === 'BLD') {
+            const r = (b.parentElement ?? b).getBoundingClientRect();
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+          }
+        }
+        return null;
+      });
+      log(`DM_BLD_GLYPH ${bld === null ? 'missing' : `${bld.x.toFixed(0)},${bld.y.toFixed(0)}`}`);
+      if (bld !== null) {
+        await page.touchscreen.tap(bld.x, bld.y);   // toggle build mode ON
+        await page.waitForTimeout(280);
+        await look(0, 190, 6);                       // aim down at the floor
+
+        // Count the solid voxels in a box around the player, in the predicted
+        // client world. A placement lands one of them; a dig would remove one.
+        const solidNear = () => page.evaluate(() => {
+          const g = window.__DC__.game, w = g.net.world, p = g.net.renderPos;
+          const bx = Math.floor(p[0]), by = Math.floor(p[1]), bz = Math.floor(p[2]);
+          let n = 0;
+          for (let x = bx - 4; x <= bx + 4; x++)
+            for (let y = by - 2; y <= by + 6; y++)
+              for (let z = bz - 4; z <= bz + 4; z++)
+                if (w.getBlock(x, y, z) !== 0) n++;   // 0 = AIR
+          return n;
+        });
+        const before = await solidNear();
+
+        // Tap in the LOOK region, off the stick's grab zone (x = w/2 in
+        // landscape) — same reasoning as the Builder drive. Each tap places one
+        // block at the crosshair; the tap point only routes the gesture.
+        const tapX = cx + Math.round(VIEWPORT.width * 0.12);
+        const tapY = cy - 30;
+        for (let i = 0; i < 4; i++) {
+          await page.touchscreen.tap(tapX, tapY);
+          await page.waitForTimeout(280);
+        }
+        const after = await solidNear();
+        log(`DM_TOUCH_PLACE before=${before} after=${after} delta=${after - before}`);
+        await page.screenshot({ path: path.join(OUT, `ours-${TAG}-11-touchplace.png`) });
+      }
+    }
   }
 
   const DRIVES = {
