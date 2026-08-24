@@ -33,7 +33,7 @@ export enum PackKind {
   CHARACTERS = 4,
   /** RESERVED. No producer, no PackDef, no gate check. Do not add one to make a test pass. */
   QUESTS = 5,
-  /** RESERVED. See docs/PACKS.md §7 — the ownership rule is written down before the producer exists. */
+  /** Producer: shared/src/items.ts + content/items.json. Ownership rule: docs/PACKS.md §7. */
   ITEMS = 6,
 }
 
@@ -75,6 +75,13 @@ export const PACKS: Readonly<Partial<Record<PackKind, PackDef>>> = Object.freeze
     kind: PackKind.CHARACTERS, key: 'characters', cls: 'build',
     blastRadius: 'How enemies look. Cosmetic and client-side: the server sends an EntityType byte '
       + 'and never reads this pack.',
+  },
+  [PackKind.ITEMS]: {
+    kind: PackKind.ITEMS, key: 'items', cls: 'data',
+    blastRadius: 'What can drop, and what every already-owned item resolves to. REMOVING an id is '
+      + 'the destructive direction: every owned copy goes dormant at the next read, silently, with '
+      + 'no profile write to notice — the gate counts them (items.dormanted) and the Review screen '
+      + 'renders the count.',
   },
 });
 
@@ -338,6 +345,7 @@ export const BUILTIN_FLAG_ORDER: readonly string[] = Object.freeze([
   'sponsor_rewarded',
   'ads_programmatic',
   'client_update_prompt',
+  'economy_items',
 ]);
 
 /** The protocol fingerprint this release was authored against (gate check `protocol.stable`). */
@@ -425,6 +433,23 @@ export function levelsPack(
     inputs: Object.freeze(inputs),
     digest: '',
     label: `levels@${version}`,
+  });
+}
+
+/**
+ * The items pack, from an items manifest's canonical input lines (one per
+ * item, id-sorted — shared/src/items.ts). Digest is filled by the server
+ * inventory and the verify tool, same as levels.
+ */
+export function itemsPack(inputs: readonly string[], version = 1): PackVersion {
+  return Object.freeze({
+    kind: PackKind.ITEMS,
+    key: 'items',
+    version,
+    fingerprint: fingerprint(inputs.join('|')),
+    inputs: Object.freeze([...inputs]),
+    digest: '',
+    label: `items@${version}`,
   });
 }
 

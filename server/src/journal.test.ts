@@ -124,6 +124,7 @@ function matchResultOf(xp: number, scrap: number): MatchResult {
   return {
     kills: 3, deaths: 1, won: true, bestStreak: 2, damageDealt: 400,
     blocksPlaced: 0, blocksBroken: 0, seconds: 180, xp, scrap, favouriteWeapon: 0,
+    drops: [],
   };
 }
 

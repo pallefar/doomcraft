@@ -17,6 +17,7 @@
  * it is pure and belongs beside the document it edits.
  */
 
+import { itemStateFor } from '@doomcraft/shared/items';
 import { SERVER_FLAG_FOR } from '@doomcraft/shared/features';
 import { exposureBp, onLadder, type FlagConfig } from '@doomcraft/shared/flags';
 import { redactProfileKey } from '../adminAudit.js';
@@ -248,6 +249,7 @@ export interface PlayerLookupInput {
   readonly profile: StoredProfile | null;
   readonly rows: readonly LedgerEntry[];
   readonly sums: { fromDay: string; rows: number; xp: number; scrap: number };
+  readonly liveItemIds: ReadonlySet<string>;
 }
 
 /**
@@ -265,10 +267,29 @@ export interface PlayerLookupInput {
  */
 export function playerLookup(input: PlayerLookupInput): Record<string, unknown> {
   const p = input.profile;
+  const revoked = new Set((p?.moderation.revokedItems ?? []).map((r) => r.ref));
   return {
     key: redactProfileKey(input.key),
     onThisHost: p !== null,
     profile: p === null ? null : operatorProfileView(p),
+    /* Item STATE is derived here, at read time, from the live release — the
+     * §7 rule made visible: the same inventory reads differently after a
+     * rollback, and nothing was written to make that happen. */
+    inventory: p === null ? null : {
+      equippedSkin: p.inventory.equippedSkin,
+      title: p.inventory.title,
+      items: p.inventory.items.map((it) => ({
+        ref: it.ref, ms: it.ms, source: it.source,
+        state: itemStateFor(it.ref, input.liveItemIds, revoked),
+      })),
+    },
+    moderation: p === null ? null : {
+      banned: p.moderation.banned,
+      bannedUntilMs: p.moderation.bannedUntilMs,
+      reason: p.moderation.reason,
+      revokedItems: p.moderation.revokedItems.length,
+    },
+    ageBand: p?.ageBand ?? 'unknown',
     rows: redactLedgerRows(input.rows),
     reconcile: {
       fromDay: input.sums.fromDay,

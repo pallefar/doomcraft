@@ -87,6 +87,7 @@ export const FLAG_ORDER: readonly string[] = Object.freeze([
   'sponsor_rewarded',
   'ads_programmatic',
   'client_update_prompt',
+  'economy_items',
 ]);
 
 /** Bit 31 is reserved: see the note on `SessionConfigMessage.flags`. */
@@ -176,6 +177,15 @@ export const FLAGS: Readonly<Record<string, FlagDef>> = Object.freeze({
       + 'updated. Turn it off if a release ships a broken prompt. Shipped ON — a control flag over '
       + 'behaviour that already exists, so turning the switch off is the change.',
     defaultOn: true,
+  },
+  economy_items: {
+    key: 'economy_items',
+    kind: 'feature',
+    what: 'Item drops at match end, from the live release\'s items pack (docs/ECONOMY.md Items).',
+    blastRadius: 'New drops only. Nothing already owned appears or vanishes with this switch — '
+      + 'ownership is derived from the live RELEASE, not from the flag — and no client surface '
+      + 'ships yet, so off is exactly today\'s behaviour.',
+    defaultOn: false,
   },
 });
 

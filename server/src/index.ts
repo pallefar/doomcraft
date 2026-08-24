@@ -106,7 +106,9 @@ import {
   redactGuardAudit,
 } from './admin/model.js';
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
-import { PackInventory, ReleaseService, releaseContentHash } from './packs.js';
+import { PackInventory, ReleaseService, releaseContentHash, rollMatchDrops } from './packs.js';
+import { PackKind } from '@doomcraft/shared/packs';
+import { flagOn } from '@doomcraft/shared/flags';
 import {
   ROLLOUT_LADDER,
   anonymousFlagBits,
@@ -660,6 +662,13 @@ function releaseView(): Record<string, unknown> {
   };
 }
 
+/** The live items pack's id set — what `itemStateFor` derives ACTIVE from. */
+function liveItemIdSet(): ReadonlySet<string> {
+  const decl = releases.live().packs.find((pk) => pk.kind === PackKind.ITEMS);
+  const installed = decl === undefined ? null : inventory.itemsAt(decl.version);
+  return new Set((installed?.manifest.items ?? []).map((i) => i.id));
+}
+
 /** The compact before/after an audit row carries; full state lives in releases.json. */
 function releaseSummary(): string {
   const doc = releases.document();
@@ -813,6 +822,17 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
        */
       admitting: () => !draining && lifecycle.admitting,
       resolveFlags: (conn) => flags.bitsFor(stableIdFor(conn)),
+      /* Item drops, from THIS room's pinned release — the room never learns
+       * the release tier exists. Dark until the economy_items flag resolves
+       * on for the member; reward.ts zeroes the roll for idle rounds. */
+      rollDrops: (ctx) => {
+        if (!flagOn(ctx.flagBits, 'economy_items')) return [];
+        const decl = release.packs.find((pk) => pk.kind === PackKind.ITEMS);
+        if (decl === undefined) return [];
+        const installed = inventory.itemsAt(decl.version);
+        if (installed === null) return [];
+        return rollMatchDrops(installed.manifest, decl.version, Math.random);
+      },
     });
     room.start();
     return room;
@@ -1837,6 +1857,23 @@ async function handleApi(
    * "what changed between Tuesday and the bug report" answerable from the
    * console's own history screen.
    * --------------------------------------------------------------------- */
+  /*
+   * The LIVE release's item definitions — what an owned ref resolves to. The
+   * client joins this against the profile's inventory; ownership never rides
+   * here and nothing about the caller is read, so it is public and cacheable
+   * like /api/levels.
+   */
+  if (path === '/api/items' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const live = releases.live();
+    const decl = live.packs.find((pk) => pk.kind === PackKind.ITEMS);
+    const installed = decl === undefined ? null : inventory.itemsAt(decl.version);
+    sendJson(res, 200, {
+      version: decl?.version ?? 0,
+      items: installed?.manifest.items ?? [],
+    }, cors);
+    return true;
+  }
+
   if (path === '/api/admin/release' && (req.method === 'GET' || req.method === 'HEAD')) {
     const gate = admitAdmin(req, path);
     if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
@@ -2020,6 +2057,7 @@ async function handleApi(
       profile: await store.load(key),
       rows: await journal.read(key, 0, limit),
       sums: await journal.balances(key),
+      liveItemIds: liveItemIdSet(),
     }), cors);
     return true;
   }

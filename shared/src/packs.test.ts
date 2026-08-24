@@ -90,13 +90,16 @@ describe('the builtin release', () => {
     }
   });
 
-  it('reserves QUESTS and ITEMS as numbers with NO PackDef', () => {
+  it('reserves QUESTS with NO PackDef; ITEMS graduated when its producer arrived', () => {
     // A green check on a pack kind with no content is exactly the green test
-    // that cannot fail (docs/PACKS.md §1.3). The kinds exist; nothing else may.
+    // that cannot fail (docs/PACKS.md §1.3). QUESTS still has no producer, so
+    // it stays a bare number; ITEMS gained one (shared/src/items.ts +
+    // content/items.json) and is a data pack now.
     expect(PackKind.QUESTS).toBe(5);
-    expect(PackKind.ITEMS).toBe(6);
     expect(PACKS[PackKind.QUESTS]).toBeUndefined();
-    expect(PACKS[PackKind.ITEMS]).toBeUndefined();
+    expect(PackKind.ITEMS).toBe(6);
+    expect(PACKS[PackKind.ITEMS]?.cls).toBe('data');
+    expect((PACKS[PackKind.ITEMS]?.blastRadius ?? '')).toContain('dormant');
   });
 
   it('is what a default room stamps on SESSION_CONFIG', () => {

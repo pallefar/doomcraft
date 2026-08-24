@@ -1,0 +1,40 @@
+{
+  "$schema": "doomcraft-items/1",
+  "manifestVersion": 1,
+
+  "//": [
+    "The items pack: cosmetics, titles and trophies as DATA (docs/PACKS.md",
+    "Rule A, docs/ECONOMY.md Items). Skins and trails are tint + emissive",
+    "numbers the renderer already knows how to wear — cosmetics must never",
+    "cost frames. Titles and trophies are never tradable.",
+    "",
+    "REMOVING an id from this file is the destructive direction: every owned",
+    "copy goes dormant at the next read. The gate counts them (items.dormanted).",
+    "A re-cut pack is a NEW version directory, never an in-place edit."
+  ],
+
+  "items": [
+    { "id": "skin-rust-marine", "kind": "skin", "name": "Rust Marine", "rarity": "common",
+      "tradable": true, "tint": [1.30, 0.95, 0.72], "emissive": [0, 0, 0] },
+    { "id": "skin-void-hazard", "kind": "skin", "name": "Void Hazard", "rarity": "uncommon",
+      "tradable": true, "tint": [0.78, 0.82, 1.35], "emissive": [0.10, 0.05, 0.30] },
+    { "id": "skin-ember-core", "kind": "skin", "name": "Ember Core", "rarity": "rare",
+      "tradable": true, "tint": [1.45, 0.80, 0.55], "emissive": [0.45, 0.12, 0.02] },
+    { "id": "skin-relic-bone", "kind": "skin", "name": "Relic of Bone", "rarity": "relic",
+      "tradable": true, "tint": [1.55, 1.48, 1.30], "emissive": [0.35, 0.32, 0.20] },
+    { "id": "emblem-imp-skull", "kind": "emblem", "name": "Imp Skull", "rarity": "common",
+      "tradable": true },
+    { "id": "emblem-keycard-blue", "kind": "emblem", "name": "Blue Keycard", "rarity": "uncommon",
+      "tradable": true },
+    { "id": "trail-coolant-leak", "kind": "trail", "name": "Coolant Leak", "rarity": "uncommon",
+      "tradable": true, "tint": [0.55, 1.30, 1.45], "emissive": [0.05, 0.35, 0.40] },
+    { "id": "trail-furnace-spark", "kind": "trail", "name": "Furnace Spark", "rarity": "epic",
+      "tradable": true, "tint": [1.50, 1.05, 0.40], "emissive": [0.50, 0.25, 0.05] },
+    { "id": "title-hangar-rat", "kind": "title", "name": "Hangar Rat", "rarity": "common",
+      "tradable": false, "text": "Hangar Rat" },
+    { "id": "title-knee-deep", "kind": "title", "name": "Knee-Deep", "rarity": "rare",
+      "tradable": false, "text": "Knee-Deep" },
+    { "id": "trophy-first-season", "kind": "trophy", "name": "Season Zero Veteran", "rarity": "epic",
+      "tradable": false }
+  ]
+}

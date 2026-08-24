@@ -43,6 +43,8 @@ function packsRoot(secondVersion = false): string {
   cpSync(CONTENT_LEVELS, join(root, 'levels', '1'), { recursive: true });
   mkdirSync(join(root, 'campaign', '1'), { recursive: true });
   cpSync(EPISODES, join(root, 'campaign', '1', 'episodes.json'));
+  mkdirSync(join(root, 'items', '1'), { recursive: true });
+  cpSync(join(repoRoot, 'content', 'items.json'), join(root, 'items', '1', 'items.json'));
   if (secondVersion) {
     cpSync(CONTENT_LEVELS, join(root, 'levels', '2'), { recursive: true });
     const f = join(root, 'levels', '2', 'e1m1-hangar.json');
@@ -83,7 +85,7 @@ describe('PackInventory', () => {
     expect(inv.campaignVersions()).toEqual([1]);
     const packs = inv.installedPacks();
     expect(packs.map((p) => p.label).sort())
-      .toEqual(['campaign@1', 'characters@1', 'core@1', 'levels@1', 'weapons@1']);
+      .toEqual(['campaign@1', 'characters@1', 'core@1', 'items@1', 'levels@1', 'weapons@1']);
     expect(packs.find((p) => p.label === 'levels@1')?.digest).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -320,6 +322,38 @@ function audited(body: Record<string, unknown> = {}): string {
   });
 }
 
+describe('items in the release machine', () => {
+  it('counts dormanted ids when a new items version drops one (docs/PACKS.md §7)', async () => {
+    const root = packsRoot();
+    const { svc } = service(root);
+    // First make items@1 LIVE — the dormant count is against what players
+    // currently resolve, which is the live release, not the disk's newest.
+    await stageOne(svc);
+    let doc = svc.document();
+    expect((await svc.promote(doc.revision)).ok).toBe(true);
+
+    // items@2 arrives: the shipped manifest minus one id — the destructive direction.
+    const manifest = JSON.parse(readFileSync(join(root, 'items', '1', 'items.json'), 'utf8')) as {
+      items: { id: string }[];
+    };
+    manifest.items = manifest.items.filter((i) => i.id !== 'skin-rust-marine');
+    mkdirSync(join(root, 'items', '2'), { recursive: true });
+    writeFileSync(join(root, 'items', '2', 'items.json'), JSON.stringify(manifest), 'utf8');
+
+    doc = svc.document();
+    await svc.createDraft(doc.revision); // drafts the NEWEST versions, items@2 included
+    doc = svc.document();
+    const gated = await svc.gateDraft(doc.revision);
+    expect(gated.ok).toBe(true);
+    const gate = gated.ok ? gated.release?.gate : null;
+    expect(gate?.ok).toBe(true); // dormanting is a WARNING with a count, not a refusal
+    const row = gate?.checks.find((c) => c.id === 'items.dormanted');
+    expect(row?.ok).toBe(true);
+    expect(row?.detail).toContain('1 item id(s)');
+    expect(row?.detail).toContain('skin-rust-marine');
+  });
+});
+
 describe('the release routes on the real binary', () => {
   it('runs draft → gate → approve → stage → promote → rollback over HTTP, and /api/version follows', async () => {
     const port = await freePort();
@@ -359,6 +393,13 @@ describe('the release routes on the real binary', () => {
       };
       expect(v0.release.ordinal).toBe(1);
       expect(v0.release.unsatisfied).toEqual([]);
+
+      // The live item definitions are public and joinable against a profile.
+      const itemsRes = await (await fetch(`${origin}/api/items`)).json() as {
+        version: number; items: { id: string }[];
+      };
+      expect(itemsRes.version).toBe(1);
+      expect(itemsRes.items.length).toBeGreaterThan(5);
 
       const step = async (sub: string, body: Record<string, unknown>): Promise<{ document: { revision: number }; release: { gate: { ok: boolean } | null } | null }> => {
         const res = await fetch(`${origin}/api/admin/release${sub}`, { method: 'POST', headers: adminJson, body: audited(body) });

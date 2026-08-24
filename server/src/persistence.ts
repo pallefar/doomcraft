@@ -13,6 +13,7 @@
  * this module is safe to import (as types) from browser code.
  */
 
+import { parseItemRef, type OwnedItem } from '@doomcraft/shared/items';
 import {
   DEFAULT_PROGRESS,
   DEFAULT_SETTINGS,
@@ -37,7 +38,7 @@ import { isPrototypePollutingKey } from '@doomcraft/shared/trust';
  * whitelist, so a migration step that adds a key the literal does not name is a
  * no-op with a version bump on it.
  */
-export const PERSIST_VERSION = 4;
+export const PERSIST_VERSION = 5;
 
 /** Hard ceiling on a stored balance. A bug, not a player, is what hits this. */
 export const MAX_SCRAP_BALANCE = 1_000_000_000;
@@ -104,6 +105,36 @@ export interface StoredEconomy {
   dayMatches: number;
 }
 
+/**
+ * What a player OWNS. `items` are granted refs with provenance; whether a
+ * given ref is wearable is NEVER stored — it is derived from the live
+ * release on read (docs/PACKS.md §7, `itemStateFor`), so a rollback
+ * recomputes ownership for every player at once and writes nothing.
+ * Duplicates are meaningful: crafting eats them (docs/ECONOMY.md).
+ */
+export interface StoredInventory {
+  items: OwnedItem[];
+  /** Item ref, or ''. Wearing is a claim; the renderer checks the state. */
+  equippedSkin: string;
+  title: string;
+}
+
+/**
+ * The operator's record — the C6 half of the v5 bump (docs/PLATFORM.md §12),
+ * landed WITH the inventory so the schema moves once, not twice.
+ * `revokedItems` is the only written item state there is: REVOKED means an
+ * operator explicitly took it back, with a logged reason.
+ */
+export interface StoredModeration {
+  banned: boolean;
+  bannedUntilMs: number;
+  reason: string;
+  revokedItems: { ref: string; ms: number; reason: string }[];
+}
+
+/** 'unknown' | 'u13' | '13-17' | '18plus' — consent gating reads this, nothing else does. */
+export type AgeBand = 'unknown' | 'u13' | '13-17' | '18plus';
+
 export interface StoredProfile {
   version: number;
   deviceId: string;
@@ -120,6 +151,9 @@ export interface StoredProfile {
   entitlements: StoredEntitlements;
   stats: StoredStats;
   economy: StoredEconomy;
+  inventory: StoredInventory;
+  moderation: StoredModeration;
+  ageBand: AgeBand;
   /**
    * THE DOWNGRADE GUARD. Top-level keys this build does not recognise, carried
    * through untouched and written back out by `serialiseProfile`.
@@ -147,7 +181,7 @@ export interface StoredProfile {
 export const KNOWN_PROFILE_KEYS: readonly string[] = Object.freeze([
   'version', 'deviceId', 'accountId', 'accountSecret', 'createdMs', 'updatedMs',
   'progress', 'settings', 'bindings', 'loadout', 'entitlements', 'stats',
-  'economy', '_unknown',
+  'economy', 'inventory', 'moderation', 'ageBand', '_unknown',
 ]);
 
 /**
@@ -170,6 +204,7 @@ export const KNOWN_PROFILE_KEYS: readonly string[] = Object.freeze([
  */
 export const GUARDED_PROFILE_SECTIONS: readonly string[] = Object.freeze([
   'progress', 'settings', 'loadout', 'entitlements', 'stats', 'economy',
+  'inventory', 'moderation',
 ]);
 
 /**
@@ -200,6 +235,15 @@ export interface MatchResult {
    */
   scrap: number;
   favouriteWeapon: number;
+  /**
+   * Item refs granted by the guard for this round. REQUIRED for the same
+   * reason `scrap` is: an optional field silently drops loot the day a
+   * producer forgets it. `toMatchResult` is the only producer; the drops it
+   * carries are already clamped to MAX_DROPS_PER_MATCH and gated by
+   * REWARD_ITEM_DROP. `applyMatchResult` ignores them — items land through
+   * `grantDrops`, beside it, under the same lock.
+   */
+  drops: readonly string[];
 }
 
 /**
@@ -284,7 +328,17 @@ export function createProfile(deviceId: string, nowMs = Date.now()): StoredProfi
     entitlements: { adsRemoved: false, product: null, receipt: null, purchasedMs: 0 },
     stats: defaultStats(),
     economy: defaultEconomy(),
+    inventory: defaultInventory(),
+    moderation: defaultModeration(),
+    ageBand: 'unknown',
   };
+}
+
+function defaultInventory(): StoredInventory {
+  return { items: [], equippedSkin: '', title: '' };
+}
+function defaultModeration(): StoredModeration {
+  return { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] };
 }
 
 type AnyRecord = Record<string, unknown>;
@@ -351,6 +405,18 @@ const MIGRATIONS: Array<(raw: AnyRecord) => AnyRecord> = [
     raw.version = 4;
     return raw;
   },
+  // 4 -> 5: inventory, moderation and the age band — the items pack's
+  // ownership store and the C6 operator fields, in ONE bump on purpose
+  // (docs/PLATFORM.md §12: a schema-touching release disables rollback, so
+  // it happens once). Reads what is there rather than overwriting it, same
+  // idempotency argument as 3 -> 4.
+  (raw) => {
+    raw.inventory = raw.inventory ?? { items: [], equippedSkin: '', title: '' };
+    raw.moderation = raw.moderation ?? { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] };
+    raw.ageBand = raw.ageBand ?? 'unknown';
+    raw.version = 5;
+    return raw;
+  },
 ];
 
 /** Bring any stored shape up to the current version and sanity-check it. */
@@ -372,6 +438,8 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
   const ent = asRecord(raw.entitlements);
   const stats = asRecord(raw.stats);
   const eco = asRecord(raw.economy);
+  const inv = asRecord(raw.inventory);
+  const mod = asRecord(raw.moderation);
 
   const out: StoredProfile = {
     version: PERSIST_VERSION,
@@ -438,6 +506,9 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
       dayScrap: clampInt(num(eco.dayScrap, 0), 0, DAY_SCRAP_CAP),
       dayMatches: clampInt(num(eco.dayMatches, 0), 0, 10_000),
     },
+    inventory: sanitiseInventory(inv),
+    moderation: sanitiseModeration(mod),
+    ageBand: ageBandOf(raw.ageBand),
   };
 
   /* The downgrade guard. `out.version` has just been stamped DOWN to what this
@@ -454,6 +525,85 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
   out.entitlements.adsRemoved = out.progress.adsRemoved;
   if (out.entitlements.adsRemoved) out.settings.showAds = false;
   return out;
+}
+
+/** Inventory hard cap. Further grants are refused, never silently rotated. */
+export const MAX_OWNED_ITEMS = 500;
+const MAX_REVOKED_ITEMS = 200;
+
+function ownedItemOf(v: unknown): OwnedItem | null {
+  const e = asRecord(v);
+  const ref = typeof e.ref === 'string' ? e.ref : '';
+  if (parseItemRef(ref) === null) return null;
+  return {
+    ref,
+    ms: num(e.ms, 0),
+    source: str(e.source, 'grant').slice(0, 16),
+    sourceId: str(e.sourceId, '').slice(0, 128),
+  };
+}
+
+function sanitiseInventory(inv: AnyRecord): StoredInventory {
+  const items: OwnedItem[] = [];
+  if (Array.isArray(inv.items)) {
+    for (const v of inv.items) {
+      if (items.length >= MAX_OWNED_ITEMS) break;
+      const it = ownedItemOf(v);
+      if (it !== null) items.push(it);
+    }
+  }
+  const refOrEmpty = (v: unknown): string =>
+    (typeof v === 'string' && parseItemRef(v) !== null ? v : '');
+  return { items, equippedSkin: refOrEmpty(inv.equippedSkin), title: refOrEmpty(inv.title) };
+}
+
+function sanitiseModeration(mod: AnyRecord): StoredModeration {
+  const revoked: { ref: string; ms: number; reason: string }[] = [];
+  if (Array.isArray(mod.revokedItems)) {
+    for (const v of mod.revokedItems) {
+      if (revoked.length >= MAX_REVOKED_ITEMS) break;
+      const e = asRecord(v);
+      const ref = typeof e.ref === 'string' ? e.ref : '';
+      if (parseItemRef(ref) === null) continue;
+      revoked.push({ ref, ms: num(e.ms, 0), reason: str(e.reason, '').slice(0, 200) });
+    }
+  }
+  return {
+    banned: bool(mod.banned, false),
+    bannedUntilMs: num(mod.bannedUntilMs, 0),
+    reason: str(mod.reason, '').slice(0, 200),
+    revokedItems: revoked,
+  };
+}
+
+function ageBandOf(v: unknown): AgeBand {
+  return v === 'u13' || v === '13-17' || v === '18plus' ? v : 'unknown';
+}
+
+/**
+ * Append match drops to the inventory, inside the SAME store.update callback
+ * that moved the balance — the idempotency check that guards the payout
+ * guards these too, so a replayed round grants nothing twice. Deliberately
+ * NOT part of applyMatchResult: that function is the economy's single
+ * writer, and an item is not a currency. Returns what actually landed (the
+ * cap can refuse).
+ */
+export function grantDrops(
+  profile: StoredProfile,
+  refs: readonly string[],
+  source: string,
+  sourceId: string,
+  nowMs = Date.now(),
+): OwnedItem[] {
+  const landed: OwnedItem[] = [];
+  for (const ref of refs) {
+    if (profile.inventory.items.length >= MAX_OWNED_ITEMS) break;
+    if (parseItemRef(ref) === null) continue;
+    const item: OwnedItem = { ref, ms: nowMs, source: source.slice(0, 16), sourceId: sourceId.slice(0, 128) };
+    profile.inventory.items.push(item);
+    landed.push(item);
+  }
+  return landed;
 }
 
 function clampInt(v: number, lo: number, hi: number): number {

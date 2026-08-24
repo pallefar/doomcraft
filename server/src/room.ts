@@ -78,7 +78,7 @@ import {
 import { Connection, NetHub, sanitiseChat } from './net.js';
 import type { NetHost, NetTransport } from './net.js';
 import type { AppliedRewards, PersistenceStore, StoredProfile } from './persistence.js';
-import { applyMatchResult, randomToken } from './persistence.js';
+import { applyMatchResult, grantDrops, randomToken } from './persistence.js';
 import type { Journal } from './journal.js';
 import { MATCH_PAYOUT, matchPayoutRows } from './journal.js';
 import {
@@ -112,6 +112,15 @@ export const MAX_CATCHUP_TICKS = 8;
 export const QUEST_MONSTER_CEILING = 64;
 
 export interface RoomOptions {
+  /**
+   * Roll this member's item drops for a paying round. Provided by the factory
+   * (it holds the room's pinned release; the room must not know the release
+   * tier exists). Never called for bots. Absent = no drops, which is the
+   * browser worker and every test that does not care.
+   */
+  rollDrops?: (ctx: {
+    deviceId: string; flagBits: number; kills: number; seconds: number; won: boolean;
+  }) => readonly string[];
   seed?: number;
   mode?: GameMode;
   maxPlayers?: number;
@@ -280,6 +289,7 @@ export class Room implements NetHost {
 
   private readonly allWeaponsAtBoot: boolean;
   private readonly levelsResolver: ContentResolver | null;
+  private readonly rollDrops: RoomOptions['rollDrops'];
   /**
    * The authored level this room's world currently holds, and its content hash.
    *
@@ -385,6 +395,7 @@ export class Room implements NetHost {
     this.net = new NetHub(this.sim, this.world, this, () => this.elapsedMs);
 
     this.levelsResolver = options.levels ?? null;
+    this.rollDrops = options.rollDrops;
     this.modeLocked = options.lockMode === true;
     this.contentVersion = options.contentVersion ?? CONTENT_VERSION;
     this.contentHash = options.contentHash ?? BUILTIN_CONTENT_HASH;
@@ -1488,6 +1499,10 @@ export class Room implements NetHost {
         if (journal !== null && await journal.has(MATCH_PAYOUT, sourceId, deviceId)) return;
         const before = { xp: profile.progress.xp, scrap: profile.economy.scrap };
         landed = applyMatchResult(profile, result);
+        /* Items land HERE, inside the same idempotency umbrella: the
+         * journal.has check above already refused a replayed round, so a
+         * granted drop can no more double than a balance can. */
+        if (result.drops.length > 0) grantDrops(profile, result.drops, 'drop', sourceId, Date.now());
         paid = true;
         profile.progress.lastSeed = this.seed;
         if (profile.progress.name.length === 0) profile.progress.name = p.name;
@@ -1562,12 +1577,26 @@ export class Room implements NetHost {
       kills,
       deaths,
       seconds,
+      drops: this.rollDropsSafe(member, deviceId, won, kills, seconds),
       bestStreak: p.bestStreak,
       damageDealt: p.damageDealt,
       blocksPlaced: p.blocksPlaced,
       blocksBroken: p.blocksBroken,
       favouriteWeapon: p.weapon,
     });
+  }
+
+  /** A drop roll must never take a payout down with it. */
+  private rollDropsSafe(
+    member: Membership, deviceId: string, won: boolean, kills: number, seconds: number,
+  ): readonly string[] {
+    const roll = this.rollDrops;
+    if (roll === undefined || member.conn === null) return [];
+    try {
+      return roll({ deviceId, flagBits: member.conn.flagBits, kills, seconds, won });
+    } catch {
+      return [];
+    }
   }
 
   /**

@@ -37,6 +37,7 @@ import {
   PACKS,
   PackKind,
   campaignPack,
+  itemsPack,
   levelsPack,
   packSetHash,
   releaseAt,
@@ -51,9 +52,18 @@ import {
 } from '@doomcraft/shared/packs';
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
 import { formatValidation, type Level } from '@doomcraft/shared/level';
+import {
+  ItemKind,
+  ItemRarity,
+  formatItemRef,
+  itemsFingerprintInputs,
+  parseItemsManifest,
+  type ItemsManifest,
+} from '@doomcraft/shared/items';
 
 import {
   DEFAULT_EPISODES_FILE,
+  DEFAULT_ITEMS_FILE,
   campaignDigest,
   checkCampaignRefs,
   checkFlagsOrder,
@@ -84,6 +94,8 @@ export interface PackInventoryOptions {
   levelsFallbackDir?: string;
   /** The version-1 fallback for the campaign. Defaults to `content/episodes.json`. */
   episodesFallbackFile?: string;
+  /** The version-1 fallback for items. Defaults to `content/items.json`. */
+  itemsFallbackFile?: string;
   log?: (line: string) => void;
 }
 
@@ -98,6 +110,7 @@ export class PackInventory {
   private readonly packsRoot: string | null;
   private readonly levelsFallbackDir: string;
   private readonly episodesFallbackFile: string;
+  private readonly itemsFallbackFile: string;
   private readonly log: (line: string) => void;
 
   /**
@@ -112,6 +125,7 @@ export class PackInventory {
     this.packsRoot = options.packsRoot ?? null;
     this.levelsFallbackDir = resolve(options.levelsFallbackDir ?? DEFAULT_LEVEL_DIR);
     this.episodesFallbackFile = resolve(options.episodesFallbackFile ?? DEFAULT_EPISODES_FILE);
+    this.itemsFallbackFile = resolve(options.itemsFallbackFile ?? DEFAULT_ITEMS_FILE);
     this.log = options.log ?? ((line) => { process.stderr.write(`${line}\n`); });
   }
 
@@ -127,6 +141,41 @@ export class PackInventory {
     // half-populated volume still behaves like an unconfigured deploy.
     if (version === 1 && existsSync(this.levelsFallbackDir)) return this.levelsFallbackDir;
     return null;
+  }
+
+  itemsFileFor(version: number): string | null {
+    if (this.packsRoot !== null) {
+      const file = join(this.packsRoot, 'items', String(version), 'items.json');
+      if (existsSync(file)) return file;
+    }
+    if (version === 1 && existsSync(this.itemsFallbackFile)) return this.itemsFallbackFile;
+    return null;
+  }
+
+  itemsVersions(): number[] {
+    const out = new Set<number>();
+    if (existsSync(this.itemsFallbackFile)) out.add(1);
+    if (this.packsRoot !== null) {
+      const root = join(this.packsRoot, 'items');
+      if (existsSync(root)) {
+        for (const name of readdirSync(root)) {
+          const v = Number(name);
+          if (Number.isInteger(v) && v >= 1 && this.itemsFileFor(v) !== null) out.add(v);
+        }
+      }
+    }
+    return [...out].sort((a, b) => a - b);
+  }
+
+  itemsAt(version: number): { pack: PackVersion; manifest: ItemsManifest } | null {
+    const file = this.itemsFileFor(version);
+    if (file === null) return null;
+    const parsed = parseItemsManifest(readFileSync(file, 'utf8'));
+    if (parsed.manifest === null) return null;
+    const inputs = itemsFingerprintInputs(parsed.manifest);
+    const base = itemsPack(inputs, version);
+    const digest = createHash('sha256').update(inputs.join('\n'), 'utf8').digest('hex');
+    return { pack: { ...base, digest }, manifest: parsed.manifest };
   }
 
   episodesFileFor(version: number): string | null {
@@ -241,6 +290,11 @@ export class PackInventory {
       const c = this.campaignAt(cv[cv.length - 1]);
       if (c !== null) out.push(c.pack);
     }
+    const iv = this.itemsVersions();
+    if (iv.length > 0) {
+      const i = this.itemsAt(iv[iv.length - 1]);
+      if (i !== null) out.push(i.pack);
+    }
     return out;
   }
 
@@ -253,6 +307,7 @@ export class PackInventory {
   summary(): {
     levels: { version: number; total: number; playable: number; fingerprint: number; digest: string; refused: { id: string; detail: string }[] }[];
     campaign: { version: number; episodes: number; fingerprint: number; digest: string }[];
+    items: { version: number; count: number; fingerprint: number; digest: string }[];
   } {
     const levels = this.levelsVersions().map((version) => {
       const record = this.recordFor(version);
@@ -282,7 +337,16 @@ export class PackInventory {
         digest: c?.pack.digest ?? '',
       };
     });
-    return { levels, campaign };
+    const items = this.itemsVersions().map((version) => {
+      const i = this.itemsAt(version);
+      return {
+        version,
+        count: i?.manifest.items.length ?? 0,
+        fingerprint: i?.pack.fingerprint ?? 0,
+        digest: i?.pack.digest ?? '',
+      };
+    });
+    return { levels, campaign, items };
   }
 
   /**
@@ -327,6 +391,11 @@ export class PackInventory {
       }
       if (p.kind === PackKind.CAMPAIGN) {
         const installed = this.campaignAt(p.version);
+        if (installed === null || (p.digest.length > 0 && installed.pack.digest !== p.digest)) out.push(p.label);
+        continue;
+      }
+      if (p.kind === PackKind.ITEMS) {
+        const installed = this.itemsAt(p.version);
         if (installed === null || (p.digest.length > 0 && installed.pack.digest !== p.digest)) out.push(p.label);
         continue;
       }
@@ -742,6 +811,39 @@ export class ReleaseService {
       }
     }
 
+    const itemsDecl = draft.packs.find((p) => p.kind === PackKind.ITEMS);
+    if (itemsDecl !== undefined) {
+      const installed = this.inventory.itemsAt(itemsDecl.version);
+      if (installed === null) {
+        checks.push({ id: 'packs.installed', ok: false, detail: `${itemsDecl.label} is not installed on this host (or its manifest does not parse)` });
+      } else {
+        if (itemsDecl.digest.length > 0 && installed.pack.digest !== itemsDecl.digest) {
+          checks.push({ id: 'packs.installed', ok: false, detail: `${itemsDecl.label}: digest mismatch` });
+        }
+        /*
+         * items.dormanted — docs/PACKS.md §7's named hazard: the FORWARD
+         * publish is the destructive direction. Every id present in the base
+         * release's items pack and absent here goes dormant in every
+         * inventory that holds it, silently, at the next read. Not a
+         * refusal — the operator may mean it — but the count is in the
+         * report and the Review screen renders it, so it cannot be missed.
+         */
+        const baseItems = base.packs.find((p) => p.kind === PackKind.ITEMS);
+        const baseInstalled = baseItems === undefined ? null : this.inventory.itemsAt(baseItems.version);
+        const now = new Set(installed.manifest.items.map((i) => i.id));
+        const gone = baseInstalled === null
+          ? []
+          : baseInstalled.manifest.items.map((i) => i.id).filter((id) => !now.has(id));
+        checks.push({
+          id: 'items.dormanted',
+          ok: true,
+          detail: gone.length === 0
+            ? ''
+            : `${gone.length} item id(s) from ${baseItems?.label} are absent from ${itemsDecl.label} — every owned copy goes dormant at the next read: ${gone.slice(0, 8).join(', ')}${gone.length > 8 ? '…' : ''}`,
+        });
+      }
+    }
+
     checks.push(checkProtocolStable());
     checks.push(checkFlagsOrder());
     const saves = checkSavesSchema();
@@ -870,6 +972,44 @@ function fnvOf(bytes: Uint8Array): number {
     h = Math.imul(h, 0x01000193);
   }
   return h >>> 0;
+}
+
+/**
+ * The drop roll: at most one item per paying round, weighted by rarity.
+ * Pure — the caller supplies the randomness — so the weights are testable
+ * and the distribution cannot quietly change with a refactor. Idle rounds
+ * never reach this (reward.ts zeroes drops with everything else).
+ */
+export const DROP_CHANCE = 0.22;
+export const DROP_RARITY_WEIGHTS: readonly number[] = Object.freeze([60, 25, 10, 4, 1]);
+
+export function rollMatchDrops(
+  manifest: ItemsManifest, version: number, rand: () => number,
+): string[] {
+  if (manifest.items.length === 0) return [];
+  if (rand() >= DROP_CHANCE) return [];
+  // Weight only the rarities that actually have items, so a pack with no
+  // relics cannot roll one and silently drop nothing.
+  const byRarity = new Map<ItemRarity, typeof manifest.items[number][]>();
+  for (const item of manifest.items) {
+    // Titles and trophies never DROP — they are earned (challenges, prizes).
+    if (item.kind === ItemKind.TITLE || item.kind === ItemKind.TROPHY) continue;
+    const list = byRarity.get(item.rarity) ?? [];
+    list.push(item);
+    byRarity.set(item.rarity, list);
+  }
+  let total = 0;
+  for (const [rarity] of byRarity) total += DROP_RARITY_WEIGHTS[rarity] ?? 0;
+  if (total <= 0) return [];
+  let pick = rand() * total;
+  for (const [rarity, list] of byRarity) {
+    pick -= DROP_RARITY_WEIGHTS[rarity] ?? 0;
+    if (pick < 0) {
+      const item = list[Math.min(list.length - 1, Math.floor(rand() * list.length))];
+      return [formatItemRef(version, item.id)];
+    }
+  }
+  return [];
 }
 
 /** The wire identity of a release, shared by the factory and /api/version. */

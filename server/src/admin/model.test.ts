@@ -170,6 +170,7 @@ describe('what the console cannot do', () => {
     const out = playerLookup({
       key: DEVICE, profile: null, rows: [],
       sums: { fromDay: '', rows: 0, xp: 0, scrap: 0 },
+      liveItemIds: new Set<string>(),
     });
     expect((out.missing as unknown[]).length).toBe(MISSING_CAPABILITIES.length);
   });
@@ -190,6 +191,7 @@ describe('one player', () => {
     const out = playerLookup({
       key: DEVICE, profile: null, rows: [],
       sums: { fromDay: '', rows: 0, xp: 0, scrap: 0 },
+      liveItemIds: new Set<string>(),
     });
     expect(out.onThisHost).toBe(false);
     expect(out.profile).toBeNull();
@@ -204,6 +206,7 @@ describe('one player', () => {
     const out = playerLookup({
       key: DEVICE, profile: p, rows: [ledgerRow()],
       sums: { fromDay: '2026-08-01', rows: 3, xp: 480, scrap: 40 },
+      liveItemIds: new Set<string>(),
     });
     const rec = out.reconcile as {
       xp: { stored: number; journal: number }; scrap: { stored: number; journal: number };
@@ -220,6 +223,7 @@ describe('one player', () => {
     const out = playerLookup({
       key: DEVICE, profile: createProfile(DEVICE), rows: [ledgerRow()],
       sums: { fromDay: '', rows: 1, xp: 0, scrap: 0 },
+      liveItemIds: new Set<string>(),
     });
     expect(JSON.stringify(out)).not.toContain(DEVICE);
   });

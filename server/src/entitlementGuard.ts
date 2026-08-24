@@ -603,6 +603,9 @@ export function toMatchResult(v: GuardVerdict): MatchResult | null {
     // downstream re-decides this.
     scrap: v.granted.scrap,
     favouriteWeapon: s.favouriteWeapon,
+    // Already gated by REWARD_ITEM_DROP and clamped to MAX_DROPS_PER_MATCH
+    // in step 8; nothing downstream re-decides this either.
+    drops: v.granted.drops,
   };
 }
 

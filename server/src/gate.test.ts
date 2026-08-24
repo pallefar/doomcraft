@@ -253,7 +253,7 @@ describe('runReleaseVerify over the shipped tree', () => {
     ]) expect(ids).toContain(required);
     // The pack set is the three build packs plus the two data packs, digests on.
     expect(packs.map((p) => p.key).sort())
-      .toEqual(['campaign', 'characters', 'core', 'levels', 'weapons']);
+      .toEqual(['campaign', 'characters', 'core', 'items', 'levels', 'weapons']);
     expect(packs.find((p) => p.key === 'levels')?.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(packs.find((p) => p.key === 'campaign')?.digest).toMatch(/^[0-9a-f]{64}$/);
   });

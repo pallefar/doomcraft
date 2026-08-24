@@ -29,9 +29,11 @@ import {
   validateLevel,
   type Level,
 } from '@doomcraft/shared/level';
+import { parseItemsManifest, itemsFingerprintInputs } from '@doomcraft/shared/items';
 import { sanitiseContentId } from '@doomcraft/shared/modes';
 import {
   BUILTIN_FLAG_ORDER,
+  itemsPack,
   BUILTIN_PACKS,
   BUILTIN_PROTOCOL_FINGERPRINT,
   PackKind,
@@ -56,6 +58,7 @@ import { PERSIST_VERSION } from './persistence.js';
 const here = fileURLToPath(import.meta.url);
 const repoRoot = resolve(here, '..', '..', '..');
 export const DEFAULT_EPISODES_FILE = join(repoRoot, 'content', 'episodes.json');
+export const DEFAULT_ITEMS_FILE = join(repoRoot, 'content', 'items.json');
 
 /**
  * The schema versions this release was authored against. When either moves,
@@ -64,7 +67,7 @@ export const DEFAULT_EPISODES_FILE = join(repoRoot, 'content', 'episodes.json');
  * rolled back (docs/PACKS.md §7, GateReport.schemaTouching), and that
  * property must be chosen, not discovered.
  */
-export const DECLARED_PERSIST_VERSION = 4;
+export const DECLARED_PERSIST_VERSION = 5;
 export const DECLARED_SAVES_VERSION = 4;
 
 /* ------------------------------------------------------------------------ *
@@ -313,6 +316,18 @@ export function parseEpisodesManifest(text: string): EpisodesManifest | null {
 }
 
 /**
+ * `items.validate` — the items manifest parses and every refusal the parser
+ * can make is surfaced verbatim. Input that makes it fail: a tradable title,
+ * a duplicate id, an off-range tint.
+ */
+export function checkItemsValidate(text: string | null): GateCheck {
+  if (text === null) return { id: 'items.validate', ok: true, detail: 'no items manifest installed — nothing to check' };
+  const parsed = parseItemsManifest(text);
+  if (parsed.manifest !== null) return ok('items.validate');
+  return fail('items.validate', parsed.errors.join('; '));
+}
+
+/**
  * `campaign.refs` — the manifest names only levels that exist, and no two
  * episodes share an id. The RUNTIME skips a dangling id so a work-in-progress
  * entry never breaks the campaign; a PUBLISH refuses it, same asymmetry as
@@ -403,6 +418,7 @@ export function checkSavesSchema(): { check: GateCheck; schemaTouching: boolean 
 export interface VerifyOptions {
   levelsDir?: string;
   episodesFile?: string;
+  itemsFile?: string;
   declaredPacks?: readonly PackVersion[];
   declaredProtocol?: number;
   declaredFlagOrder?: readonly string[];
@@ -437,6 +453,8 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
 
   const manifestText = existsSync(episodesFile) ? readFileSync(episodesFile, 'utf8') : '';
   const manifest = manifestText.length > 0 ? parseEpisodesManifest(manifestText) : null;
+  const itemsFile = options.itemsFile ?? DEFAULT_ITEMS_FILE;
+  const itemsText = existsSync(itemsFile) ? readFileSync(itemsFile, 'utf8') : null;
 
   const checks: GateCheck[] = [
     ...checkPacksDeclared(declared),
@@ -445,6 +463,7 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
     checkLevelsValidate(served.map((f) => ({ id: f.id, validation: validateLevel(f.level, f.level.meta.defaultSkill) }))),
     checkLevelsCanonical(files),
     checkCampaignRefs(manifest, installedIds),
+    checkItemsValidate(itemsText),
     checkProtocolStable(options.declaredProtocol),
     checkFlagsOrder(FLAG_ORDER, options.declaredFlagOrder),
   ];
@@ -479,6 +498,14 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
   if (manifest !== null) {
     const cp = campaignPack(manifest);
     packs.push({ ...cp, digest: sha256(Buffer.from(canonicalManifest(manifest), 'utf8')) });
+  }
+  if (itemsText !== null) {
+    const parsedItems = parseItemsManifest(itemsText);
+    if (parsedItems.manifest !== null) {
+      const inputs = itemsFingerprintInputs(parsedItems.manifest);
+      const ip = itemsPack(inputs);
+      packs.push({ ...ip, digest: sha256(Buffer.from(inputs.join('\n'), 'utf8')) });
+    }
   }
 
   const diff = diffAgainstDeclared(packs, declared);

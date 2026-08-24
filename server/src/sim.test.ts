@@ -824,7 +824,7 @@ describe('persistence', () => {
     };
     const migrated = migrateProfile(v3, 'v3-device-0001');
 
-    expect(migrated.version).toBe(4);
+    expect(migrated.version).toBe(PERSIST_VERSION);
     expect(migrated.economy.scrap).toBe(0);
     expect(migrated.economy.lifetimeScrap).toBe(0);
     expect(migrated.economy.day).toBe('');
@@ -899,19 +899,22 @@ describe('persistence', () => {
       deviceId: 'future-device-01',
       progress: { xp: 10 },
       economy: { scrap: 7 },
-      inventory: { items: ['skin.gold'], slots: 12 },
+      // The original fixture used `inventory` as its imaginary future field.
+      // Then v5 shipped a real one, this test went red, and the fixture moved
+      // to a key that is still fictional — which is the test working.
+      craftbench: { items: ['skin.gold'], slots: 12 },
       seasonPass: 'season-4',
     };
 
     const read = migrateProfile(fromTheFuture, 'future-device-01');
     expect(read.version).toBe(PERSIST_VERSION);
     expect(read.economy.scrap).toBe(7);
-    expect(read._unknown).toEqual({ inventory: { items: ['skin.gold'], slots: 12 }, seasonPass: 'season-4' });
+    expect(read._unknown).toEqual({ craftbench: { items: ['skin.gold'], slots: 12 }, seasonPass: 'season-4' });
 
     // And back out at the TOP level, where the newer build will look for it —
     // not nested inside a `_unknown` key it has never heard of.
     const written = serialiseProfile(read);
-    expect(written.inventory).toEqual({ items: ['skin.gold'], slots: 12 });
+    expect(written.craftbench).toEqual({ items: ['skin.gold'], slots: 12 });
     expect(written.seasonPass).toBe('season-4');
     expect(written._unknown).toBeUndefined();
     expect(written.version).toBe(PERSIST_VERSION);

@@ -45,6 +45,8 @@ export interface RoundTally {
   blocksBroken: number;
   /** WeaponId held at the end. */
   favouriteWeapon: number;
+  /** Item refs the room rolled for this member. Zeroed with everything else when the round does not pay. */
+  drops?: readonly string[];
 }
 
 /** XP for a round. The formula the room has always used, moved verbatim. */
@@ -157,6 +159,9 @@ export function buildSubmission(t: RoundTally): ResultSubmission {
     submittedBy: SubmitterKind.ROOM_SIM,
     xp: pays ? Math.min(xpForRound(t), MATCH_XP_CAP) : 0,
     scrap: pays ? Math.min(scrapForRound(t), MATCH_SCRAP_CAP) : 0,
+    // The same rule, deliberately: an idle round drops nothing, because "zero
+    // pay for zero play" is the anti-farm floor and loot is pay.
+    drops: pays ? (t.drops ?? []) : [],
     stats: {
       kills: t.kills,
       deaths: t.deaths,
