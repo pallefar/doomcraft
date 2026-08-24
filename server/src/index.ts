@@ -107,6 +107,7 @@ import {
 } from './admin/model.js';
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
 import { PackInventory, ReleaseService, releaseContentHash, rollMatchDrops } from './packs.js';
+import { StudioService } from './studio.js';
 import { PackKind } from '@doomcraft/shared/packs';
 import { flagOn } from '@doomcraft/shared/flags';
 import {
@@ -724,6 +725,17 @@ flags.loadJson(process.env.DOOMCRAFT_FLAGS);
  */
 const inventory = new PackInventory({ packsRoot: process.env.DOOMCRAFT_PACKS ?? null });
 const releases = new ReleaseService(dataRoot, inventory, { clock: () => Date.now() });
+/**
+ * THE CREATOR STUDIO (docs/STUDIO.md): the operator authors data packs from
+ * the panel; saves mint NEW version directories under DOOMCRAFT_PACKS and
+ * still walk the release machine to reach a player. Build-class designs
+ * (weapons, characters) land as drafts for the platform lane.
+ */
+const studio = new StudioService(inventory, {
+  packsRoot: process.env.DOOMCRAFT_PACKS ?? null,
+  dataRoot,
+  clock: () => Date.now(),
+});
 /** The fleet-agreement number: the LIVE release's identity, pending excluded. */
 const contentHash = (): number => releaseContentHash(releases.live());
 
@@ -1857,6 +1869,90 @@ async function handleApi(
    * "what changed between Tuesday and the bug report" answerable from the
    * console's own history screen.
    * --------------------------------------------------------------------- */
+  /* --- THE CREATOR STUDIO (docs/STUDIO.md S1) --------------------------- */
+  if (path === '/api/admin/studio' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    sendJson(res, 200, {
+      studio: studio.status(),
+      installed: inventory.summary(),
+      /* The editors seed from the NEWEST INSTALLED version, not the live
+       * release — you edit forward from the latest cut, whatever is live. */
+      seeds: {
+        items: ((): string => {
+          const v = inventory.itemsVersions().at(-1);
+          const f = v === undefined ? null : inventory.itemsFileFor(v);
+          return f === null ? '' : readFileSync(f, 'utf8');
+        })(),
+        campaign: ((): string => {
+          const v = inventory.campaignVersions().at(-1);
+          const f = v === undefined ? null : inventory.episodesFileFor(v);
+          return f === null ? '' : readFileSync(f, 'utf8');
+        })(),
+      },
+    }, cors);
+    return true;
+  }
+
+  /* The level lab's dry-run: the real validator's report, no write, no audit
+   * row — validating is reading, and filling the log with keystrokes would
+   * bury the rows that matter. */
+  if (path === '/api/admin/studio/level/validate' && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    sendJson(res, 200, studio.validateLevelSource(typeof body.source === 'string' ? body.source : ''), cors);
+    return true;
+  }
+
+  if (path.startsWith('/api/admin/studio/') && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = await readBody(req);
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+    const b = (body ?? {}) as Record<string, unknown>;
+
+    const sub = path.slice('/api/admin/studio/'.length);
+    let result: import('./studio.js').StudioResult & { diff?: string[] };
+    let verb: string;
+    switch (sub) {
+      case 'items':
+        verb = 'studio.items';
+        result = studio.saveItems(typeof b.manifest === 'string' ? b.manifest : '');
+        break;
+      case 'level':
+        verb = 'studio.level';
+        result = studio.saveLevel(typeof b.source === 'string' ? b.source : '');
+        break;
+      case 'campaign':
+        verb = 'studio.campaign';
+        result = studio.saveCampaign(typeof b.manifest === 'string' ? b.manifest : '');
+        break;
+      case 'draft':
+        verb = 'studio.draft';
+        result = studio.saveDraft(b.kind === 'characters' ? 'characters' : 'weapons', b.body ?? null);
+        break;
+      default:
+        sendJson(res, 404, { error: 'no such studio surface', surface: sub }, cors);
+        return true;
+    }
+
+    await auditLog.record({
+      ms: Date.now(), actor: who.actor, verb,
+      subject: result.ok ? result.label : 'refused',
+      reason: who.reason,
+      before: '', after: result.ok ? result.detail : result.error,
+      outcome: result.ok ? 'applied' : 'refused', requestId: newRequestId(),
+    });
+
+    if (!result.ok) { sendJson(res, result.status, { error: result.error }, cors); return true; }
+    sendJson(res, 200, result, cors);
+    return true;
+  }
+
   /*
    * The LIVE release's item definitions — what an owned ref resolves to. The
    * client joins this against the profile's inventory; ownership never rides

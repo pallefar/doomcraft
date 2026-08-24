@@ -345,6 +345,76 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         </div>
       </section>
 
+      <section id="tab-studio">
+        <div class="page-title">Studio</div>
+        <div class="note">
+          The Creator Studio (docs/STUDIO.md): author DATA content here — it lands as a NEW pack
+          version on the volume and still walks draft &rarr; gate &rarr; approve &rarr; promote on the
+          Review screen. Build-class designs (weapons, characters) save as <em>drafts</em> for the
+          platform lane: hand one to a Claude Code session and it ships as a commit.
+        </div>
+        <div class="warn" id="studio-warning"></div>
+        <div class="card">
+          <div class="card-head">items editor — skins, emblems, trails, titles, trophies</div>
+          <div class="card-body">
+            <div class="stack">
+              <textarea id="studio-items" spellcheck="false" rows="12"></textarea>
+            </div>
+            <div class="rowline">
+              <button id="studio-items-save" class="go">save as next items version</button>
+              <span class="muted" id="studio-items-state"></span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">level lab — quest maps, validated by the real solver</div>
+          <div class="card-body">
+            <div class="stack">
+              <textarea id="studio-level" spellcheck="false" rows="12"
+                placeholder='paste a level source JSON ("doomcraft-level-source/1") here'></textarea>
+            </div>
+            <div class="rowline">
+              <button id="studio-level-check">validate</button>
+              <button id="studio-level-save" class="go">save as next levels version</button>
+              <span class="muted" id="studio-level-state"></span>
+            </div>
+            <div class="tscroll mono" id="studio-level-report"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">campaign — the order levels are played in</div>
+          <div class="card-body">
+            <div class="stack">
+              <textarea id="studio-campaign" spellcheck="false" rows="8"></textarea>
+            </div>
+            <div class="rowline">
+              <button id="studio-campaign-save" class="go">save as next campaign version</button>
+              <span class="muted" id="studio-campaign-state"></span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">designers — weapons &amp; characters (drafts for the platform lane)</div>
+          <div class="card-body">
+            <div class="note">
+              These are BUILD-class: the client predicts from its compiled tables, so a change here
+              is a code change. Saving writes a structured draft under <code>DOOMCRAFT_DATA/studio/</code>
+              beside the current compiled values — the change request a Claude Code session applies.
+            </div>
+            <div class="stack">
+              <textarea id="studio-draft" spellcheck="false" rows="6"
+                placeholder='{"pistol": {"damage": 18, "note": "slug sidegrade"}}'></textarea>
+            </div>
+            <div class="rowline">
+              <button id="studio-draft-weapons">save weapons draft</button>
+              <button id="studio-draft-characters">save characters draft</button>
+              <span class="muted" id="studio-draft-state"></span>
+            </div>
+            <div class="tscroll mono" id="studio-drafts-list"></div>
+          </div>
+        </div>
+      </section>
+
       <section id="tab-flags">
         <div class="page-title">Flags</div>
         <div class="note mono" id="flags-head"></div>
@@ -544,7 +614,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   var MIN_REASON = ${MIN_REASON_CHARS};
   var MIN_ACTOR = ${MIN_ACTOR_CHARS};
   var TOKEN_KEY = 'dc.admin.token';
-  var TABS = ['fleet', 'packs', 'review', 'rhistory', 'flags', 'refusals', 'player', 'metrics', 'audit'];
+  var TABS = ['fleet', 'packs', 'review', 'rhistory', 'studio', 'flags', 'refusals', 'player', 'metrics', 'audit'];
 
   /* ---- tiny DOM helpers. Everything below builds nodes; nothing sets
      innerHTML from data, so no value on this page needs escaping. ---- */
@@ -1234,6 +1304,86 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     });
   }
 
+  /* ---- the Creator Studio ---- */
+  var studioSeeded = false;
+
+  function loadStudio() {
+    return api('/api/admin/studio').then(function (r) {
+      var warn = el('studio-warning');
+      if (r.status !== 200) { fail(warn, r); return; }
+      clear(warn);
+      var st = r.body.studio;
+      if (!st.writable) {
+        warn.appendChild(make('div', null, 'SAVES ARE REFUSED ON THIS HOST: ' + st.reason));
+      }
+      if (!studioSeeded) {
+        el('studio-items').value = r.body.seeds.items || '';
+        el('studio-campaign').value = r.body.seeds.campaign || '';
+        studioSeeded = true;
+      }
+      var list = el('studio-drafts-list');
+      clear(list);
+      var rows = [];
+      for (var i = 0; i < (st.drafts || []).length; i++) {
+        rows.push([st.drafts[i].kind, st.drafts[i].file, new Date(st.drafts[i].ms).toISOString()]);
+      }
+      if (rows.length === 0) list.appendChild(make('div', 'empty', 'no drafts yet'));
+      else list.appendChild(table(['kind', 'file', 'saved'], rows));
+    });
+  }
+
+  function studioPost(sub, body, state) {
+    state.textContent = 'saving…';
+    state.className = 'muted';
+    var actor = el('c-actor').value.trim() || 'operator';
+    api('/api/admin/studio/' + sub, 'POST', Object.assign({
+      actor: actor,
+      reason: 'authored in the creator studio: ' + sub,
+    }, body)).then(function (r) {
+      if (r.status === 200) {
+        state.textContent = 'saved ' + (r.body.label || '') + ' — ' + (r.body.detail || '');
+        state.className = 'ok';
+        loadStudio();
+        loadAudit();
+        return;
+      }
+      state.textContent = 'refused: ' + (r.body && r.body.error ? r.body.error : 'HTTP ' + r.status);
+      state.className = 'err';
+    });
+  }
+
+  el('studio-items-save').addEventListener('click', function () {
+    studioPost('items', { manifest: el('studio-items').value }, el('studio-items-state'));
+  });
+  el('studio-level-check').addEventListener('click', function () {
+    var report = el('studio-level-report');
+    clear(report);
+    api('/api/admin/studio/level/validate', 'POST', { source: el('studio-level').value }).then(function (r) {
+      if (r.status !== 200) { fail(report, r); return; }
+      var v = r.body;
+      report.appendChild(make('div', v.ok ? 'ok' : 'err', (v.ok ? 'WOULD PASS the gate — ' : 'WOULD BE REFUSED — ') + (v.report || (v.errors || []).join('; '))));
+    });
+  });
+  el('studio-level-save').addEventListener('click', function () {
+    studioPost('level', { source: el('studio-level').value }, el('studio-level-state'));
+  });
+  el('studio-campaign-save').addEventListener('click', function () {
+    studioPost('campaign', { manifest: el('studio-campaign').value }, el('studio-campaign-state'));
+  });
+  function draftSave(kind) {
+    var raw = el('studio-draft').value;
+    var parsed = null;
+    try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
+    if (parsed === null) {
+      el('studio-draft-state').textContent = 'the draft must be valid JSON';
+      el('studio-draft-state').className = 'err';
+      return;
+    }
+    studioPost('draft', { kind: kind, body: parsed }, el('studio-draft-state'));
+  }
+  el('studio-draft-weapons').addEventListener('click', function () { draftSave('weapons'); });
+  el('studio-draft-characters').addEventListener('click', function () { draftSave('characters'); });
+
   /* ---- refusals ---- */
   function loadRefusals() {
     return api('/api/admin/entitlement').then(function (r) {
@@ -1333,6 +1483,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     }
     if (name === 'flags') loadFlags();
     else if (name === 'packs' || name === 'review' || name === 'rhistory') loadRelease();
+    else if (name === 'studio') loadStudio();
     else if (name === 'refusals') loadRefusals();
     else if (name === 'audit') loadAudit();
     else loadFleet();
@@ -1357,7 +1508,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
      active-state loop are built from; GROUPS only decides order and labels. */
   var GROUPS = [
     { label: 'Live', tabs: ['fleet', 'player'] },
-    { label: 'Releases', tabs: ['packs', 'review', 'rhistory', 'flags'] },
+    { label: 'Releases', tabs: ['packs', 'review', 'rhistory', 'studio', 'flags'] },
     { label: 'Audit', tabs: ['refusals', 'audit'] },
     { label: 'Analytics', tabs: ['metrics'] },
   ];
@@ -1367,6 +1518,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     packs: { title: 'Inventory', d: 'M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12L4 7.5M12 12v9' },
     review: { title: 'Review', d: 'M9 11l2.5 2.5L16 9M12 3l7 2.5V11c0 4.5-3 7.9-7 9-4-1.1-7-4.5-7-9V5.5z' },
     rhistory: { title: 'History', d: 'M12 8v5l3 2M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4' },
+    studio: { title: 'Studio', d: 'M4 20l4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10zM13.5 7.5l3 3M4 20l1-4.5' },
     flags: { title: 'Flags', d: 'M6 21V4m0 1h11.5l-2.3 3.5 2.3 3.5H6' },
     refusals: { title: 'Refusals', d: 'M12 3l7 2.5V11c0 4.5-3 7.9-7 9-4-1.1-7-4.5-7-9V5.5zM9.5 9.5l5 5M14.5 9.5l-5 5' },
     audit: { title: 'Actions', d: 'M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5' },
