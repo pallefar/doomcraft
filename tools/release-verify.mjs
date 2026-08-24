@@ -14,7 +14,29 @@
  * checking the sources, not a copy of them.
  */
 
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+
 import { runReleaseVerify } from '../server/src/gate.ts';
+
+/*
+ * Refuse to verify somebody else's tree. Run from a git worktree (or any
+ * copy) without its own node_modules, Node resolves @doomcraft/shared UP the
+ * directory tree into the MAIN checkout's workspace symlink — and the gate
+ * then fingerprints sources that are not the ones being edited. The phase-1
+ * audit hit exactly this: a weapons edit "passed" because the gate was
+ * reading a different repo. A gate that quietly verifies the wrong tree is
+ * worse than no gate.
+ */
+const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..');
+const sharedPath = fileURLToPath(import.meta.resolve('@doomcraft/shared/package.json'));
+if (!resolve(sharedPath).startsWith(repoRoot + '/')) {
+  console.error('REFUSED: @doomcraft/shared resolves OUTSIDE this repo:');
+  console.error(`  tool root: ${repoRoot}`);
+  console.error(`  resolved : ${sharedPath}`);
+  console.error('Run npm install in THIS checkout first — otherwise the gate verifies a different tree.');
+  process.exit(2);
+}
 
 const { report, packs } = runReleaseVerify();
 

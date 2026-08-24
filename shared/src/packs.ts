@@ -17,13 +17,7 @@
  * `tools/release-verify.mjs` (phase 1).
  */
 
-import { charactersFingerprintInputs } from './characters.ts';
-import {
-  CONTENT_VERSION,
-  coreFingerprintInputs,
-  fingerprint,
-  weaponsFingerprintInputs,
-} from './version.ts';
+import { CONTENT_VERSION, fingerprint } from './version.ts';
 
 /**
  * APPEND ONLY. A retired kind's number is burned — the same rule as a
@@ -100,9 +94,11 @@ export interface PackVersion {
    * `- shotgun:8/9/2/90/…` / `+ shotgun:9/9/2/84/…` with no bespoke differ,
    * and the gate recomputes them from the running process.
    *
-   * For a BUILTIN pack the declared `fingerprint` is a checked-in literal and
-   * `inputs` is what THIS binary computes at load — the two agreeing is
-   * exactly gate check `packs.declared`, and the ratchet tests assert it.
+   * For a BUILTIN pack both `fingerprint` AND `inputs` are checked-in
+   * literals — the author-time declaration. The gate recomputes the inputs
+   * from the running binary and compares: agreement is check
+   * `packs.declared`, and a drift prints as a LINE DIFF of these strings,
+   * never as two bare hex numbers.
    */
   readonly inputs: readonly string[];
   /** sha256 hex of the canonical encoded bytes. Data packs only; '' for build packs. */
@@ -278,19 +274,51 @@ export function packBucket(roomInstanceId: string): number {
  * ------------------------------------------------------------------------ */
 
 /**
- * DECLARED per-pack identity of THIS build. The fingerprints are checked-in
- * literals on purpose: the ratchet tests and `npm run release:verify` fail
- * when the recomputed value drifts, with the input diff in the message. When
- * one fails: decide whether you meant to change that pack, bump its VERSION
- * here, and paste the new fingerprint — in the same commit. The point is that
- * the two move together and the diff is read by a human.
+ * DECLARED per-pack identity of THIS build. Both the fingerprints AND the
+ * input strings are checked-in literals on purpose: the input lists are what
+ * make a firing ratchet print a field-level LINE DIFF instead of two hex
+ * numbers — without them the old inputs live nowhere and no diff is possible
+ * (docs/PACKS.md: the reviewable artifact is the diff, not the hash). When a
+ * ratchet fails: read the diff `npm run release:verify` prints, decide
+ * whether you meant to change that pack, bump its VERSION here, and paste
+ * the new fingerprint and changed input lines — in the same commit.
  */
 export const CORE_PACK_VERSION = 1;
 export const CORE_FINGERPRINT = 0xc1ddfbcb;
+export const CORE_INPUTS: readonly string[] = Object.freeze([
+  'tick=50',
+  'match=480000',
+  'score=30',
+  'g=28',
+  'run=9.5',
+  'sprint=12.6',
+  'terrain=5',
+]);
+
 export const WEAPONS_PACK_VERSION = 1;
 export const WEAPONS_FINGERPRINT = 0x1834e116;
+export const WEAPONS_INPUTS: readonly string[] = Object.freeze([
+  '0:17/1/2/420/15/400/850/0/0/0/0.01/0.03/0.006',
+  '1:11/7/1.6/75/8/80/2400/0/0/0/0.09/0.11/0.01',
+  '2:9/1/1.8/700/100/400/3200/0/0/0/0.009/0.055/0.0038',
+  '3:92/1/1/88/5/40/2500/4.4/108/2.6/0/0/0',
+  '4:21/1/1.4/660/60/400/1900/0.9/8/0/0.014/0.03/0.0016',
+  '5:240/1/1/40/3/400/3400/9.5/400/5.5/0/0/0',
+  '6:26/1/1.3/480/0/0/0/0/0/0/0/0/0',
+]);
+
 export const CHARACTERS_PACK_VERSION = 1;
 export const CHARACTERS_FINGERPRINT = 0xe2ae60ab;
+export const CHARACTERS_INPUTS: readonly string[] = Object.freeze([
+  'rig=leg-left,leg-right,torso,arm-left,arm-right,head',
+  'atlas=3x2',
+  'Imp:0/1.3,1.02,0.86/1.75/63/1,1,1,1,1,1,1,1,1,0.94,0.94,0.94,0.92,1.22,0.92,0.92,1.22,0.92,1.05,1,1.05/0.2/010/0/0/1.25',
+  'Trooper:1/1.34,1.3,1.1/1.8/63/1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1/0.04/100/0/0/1',
+  'Baron:2/1.06,0.94,0.82/2.4/63/1,1,1,1.35,0.94,1.35,1.35,0.94,1.35,1.55,1.02,1.45,1.55,1.06,1.55,1.55,1.06,1.55,1.16,1,1.16/0.07/110/0/0/0.62',
+  'Cacodemon:3/1.45,0.72,0.62/1.7/60/1,1,1,1,1,1,1,1,1,1.95,1.42,1.95,0.8,0.62,0.8,0.8,0.62,0.8,1.42,1.3,1.42/0/001/0.22/0/1',
+  'Lost Soul:2/1.55,1.3,0.8/0.7/32/1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1/0/011/0.14/0/1',
+  'Marine:4/1.14,1.14,1.14/1.8/63/1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1/0/100/0/0/1',
+]);
 
 /**
  * The FLAG_ORDER this release was authored against (gate check `flags.order`).
@@ -335,9 +363,9 @@ function builtinPack(kind: PackKind, version: number, declared: number, inputs: 
  * loaded them — see `levelsPack()` and server/src/index.ts.
  */
 export const BUILTIN_PACKS: readonly PackVersion[] = Object.freeze([
-  builtinPack(PackKind.CORE, CORE_PACK_VERSION, CORE_FINGERPRINT, coreFingerprintInputs()),
-  builtinPack(PackKind.WEAPONS, WEAPONS_PACK_VERSION, WEAPONS_FINGERPRINT, weaponsFingerprintInputs()),
-  builtinPack(PackKind.CHARACTERS, CHARACTERS_PACK_VERSION, CHARACTERS_FINGERPRINT, charactersFingerprintInputs()),
+  builtinPack(PackKind.CORE, CORE_PACK_VERSION, CORE_FINGERPRINT, CORE_INPUTS),
+  builtinPack(PackKind.WEAPONS, WEAPONS_PACK_VERSION, WEAPONS_FINGERPRINT, WEAPONS_INPUTS),
+  builtinPack(PackKind.CHARACTERS, CHARACTERS_PACK_VERSION, CHARACTERS_FINGERPRINT, CHARACTERS_INPUTS),
 ]);
 
 /**
@@ -383,8 +411,11 @@ export const BUILTIN_CONTENT_HASH: number = packSetHash(BUILTIN_PACKS, CONTENT_V
 export function levelsPack(
   entries: readonly { id: string; hash: number }[], version = 1,
 ): PackVersion {
+  // Code-unit comparison, NOT localeCompare: ids are [a-z0-9_-] and this
+  // fingerprint must agree across hosts regardless of their locale — a
+  // collation-dependent sort is a false mixed-fleet alarm waiting to happen.
   const inputs = [...entries]
-    .sort((a, b) => a.id.localeCompare(b.id))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((e) => `${e.id}:${(e.hash >>> 0).toString(16).padStart(8, '0')}`);
   return Object.freeze({
     kind: PackKind.LEVELS,

@@ -50,7 +50,7 @@ import {
   weaponsFingerprintInputs,
 } from '@doomcraft/shared/version';
 
-import { DEFAULT_LEVEL_DIR } from './levels.js';
+import { DEFAULT_LEVEL_DIR, MAX_LEVEL_FILE_BYTES } from './levels.js';
 import { PERSIST_VERSION } from './persistence.js';
 
 const here = fileURLToPath(import.meta.url);
@@ -101,19 +101,32 @@ export function scanLevelDir(dir: string): GateLevelFile[] {
     let level: Level | null = null;
     let fromSource = false;
     let error = '';
-    try {
-      if (isLevelBinary(stored)) {
-        level = decodeLevel(stored.slice());
-      } else {
-        const src = parseLevelJson(raw.toString('utf8'));
-        if (src === null) throw new Error('not valid JSON and not a .dcl');
-        level = compileLevel(src);
-        fromSource = true;
+    // The SAME cap the loader enforces (server/src/levels.ts). Without it the
+    // gate certifies a level the host will silently refuse — the exact
+    // gate-passes-what-the-loader-refuses inversion packs.installed exists
+    // to prevent. Found by the phase-1 audit.
+    if (stored.length > MAX_LEVEL_FILE_BYTES) {
+      error = `file is ${stored.length} bytes, over the ${MAX_LEVEL_FILE_BYTES} cap the loader enforces`;
+    } else {
+      try {
+        if (isLevelBinary(stored)) {
+          level = decodeLevel(stored.slice());
+        } else {
+          const src = parseLevelJson(raw.toString('utf8'));
+          if (src === null) throw new Error('not valid JSON and not a .dcl');
+          level = compileLevel(src);
+          fromSource = true;
+        }
+      } catch (e) {
+        error = e instanceof Error ? e.message : String(e);
       }
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
     }
     const id = level === null ? '' : sanitiseContentId(level.meta.id);
+    // Mirror the loader EXACTLY: it writes the sanitised id back BEFORE
+    // encoding (levels.ts), so the id is inside the bytes it hashes. Hash
+    // different bytes here and the reviewed identity is not the served one —
+    // proven by the audit with a mixed-case meta.id splitting the two hashes.
+    if (level !== null && id.length > 0) level.meta.id = id;
     out.push({
       file,
       id,
@@ -150,21 +163,45 @@ export function checkPacksDeclared(declared: readonly PackVersion[] = BUILTIN_PA
     [PackKind.CHARACTERS]: charactersFingerprintInputs(),
   };
   const out: GateCheck[] = [];
+  // A declared list this check cannot fully verify is REFUSED, never skipped:
+  // silently passing an unknown kind would let a doctored release document
+  // sail through phase 2's runGate with zero scrutiny (audit finding). And a
+  // duplicate kind would quietly break packSetHash's order-insensitivity.
+  const seen = new Set<PackKind>();
+  let buildChecked = 0;
   for (const p of declared) {
+    if (seen.has(p.kind)) {
+      out.push(fail('packs.declared', `two declared packs share kind ${p.kind} (${p.label}) — a pack set names one version per kind`));
+      continue;
+    }
+    seen.add(p.kind);
     const inputs = computed[p.kind];
-    if (inputs === undefined) continue; // data packs are checked by packs.installed
+    if (inputs === undefined) {
+      out.push(fail('packs.declared',
+        `${p.label}: this binary has no compiled-in inputs for kind ${p.kind} — `
+        + 'a build pack it cannot recompute, or a data pack in the declared list; '
+        + 'refusing is safer than passing what cannot be verified'));
+      continue;
+    }
+    buildChecked++;
     const now = fingerprint(inputs.join('|'));
     if (now === (p.fingerprint >>> 0)) {
       out.push(ok(`packs.declared.${p.key}`));
     } else {
-      const changed = inputs.filter((l) => !p.inputs.includes(l));
+      const removed = p.inputs.filter((l) => !inputs.includes(l));
+      const added = inputs.filter((l) => !p.inputs.includes(l));
       out.push(fail(
         `packs.declared.${p.key}`,
         `${p.label} declares ${hex(p.fingerprint)} but this build computes ${hex(now)}; `
-        + `bump ${p.key.toUpperCase()}_PACK_VERSION and the fingerprint in shared/src/packs.ts together`
-        + (changed.length > 0 ? ` (changed: ${changed[0]})` : ''),
+        + `bump ${p.key.toUpperCase()}_PACK_VERSION and paste the new fingerprint and input lines in shared/src/packs.ts, in the same commit`
+        + (added.length + removed.length > 0
+          ? ` | ${[...removed.map((l) => `- ${l}`), ...added.map((l) => `+ ${l}`)].slice(0, 6).join(' | ')}`
+          : ''),
       ));
     }
+  }
+  if (buildChecked !== 3) {
+    out.push(fail('packs.declared', `expected the 3 build packs (core, weapons, characters) in the declared list, verified ${buildChecked}`));
   }
   return out;
 }
@@ -293,7 +330,14 @@ export function checkCampaignRefs(
     else if (seen.has(e.id)) bad.push(`two episodes declare the id "${e.id}"`);
     seen.add(e.id);
     for (const id of e.levels) {
-      if (!installedIds.has(sanitiseContentId(id))) bad.push(`${e.id} names "${id}", which is not installed`);
+      // The manifest's consumer is the CLIENT, and it matches ids with raw
+      // string comparison — a non-canonical entry that the gate helpfully
+      // sanitised into a match would still dangle at runtime. Refuse it.
+      if (id !== sanitiseContentId(id)) {
+        bad.push(`${e.id} names "${id}", which is not a canonical id (want "${sanitiseContentId(id)}")`);
+      } else if (!installedIds.has(id)) {
+        bad.push(`${e.id} names "${id}", which is not installed`);
+      }
     }
   }
   if (manifest.defaultEpisode.length > 0 && !seen.has(manifest.defaultEpisode)) {
@@ -410,10 +454,28 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
     ? fail('gate.nonempty', 'the gate ran no checks — an empty list is a failure, never a pass')
     : ok('gate.nonempty'));
 
-  // The pack set: the three declared build packs plus what this tree installs.
+  // The pack set this tree would release: the build packs AS THIS BINARY
+  // COMPUTES THEM (declared version, computed fingerprint + inputs — so the
+  // diff against the declaration shows real lines when they drift) plus the
+  // data packs this tree installs.
+  const computedInputs: Partial<Record<PackKind, readonly string[]>> = {
+    [PackKind.CORE]: coreFingerprintInputs(),
+    [PackKind.WEAPONS]: weaponsFingerprintInputs(),
+    [PackKind.CHARACTERS]: charactersFingerprintInputs(),
+  };
+  const computedBuild: PackVersion[] = declared
+    .filter((p) => computedInputs[p.kind] !== undefined)
+    .map((p) => {
+      const inputs = computedInputs[p.kind] as readonly string[];
+      return {
+        ...p,
+        fingerprint: fingerprint(inputs.join('|')),
+        inputs: Object.freeze([...inputs]),
+      };
+    });
   const lv = levelsPack(served.map((f) => ({ id: f.id, hash: fnvOf(f.bytes) })));
   const lvWithDigest: PackVersion = { ...lv, digest: levelsDigest(served) };
-  const packs: PackVersion[] = [...declared, lvWithDigest];
+  const packs: PackVersion[] = [...computedBuild, lvWithDigest];
   if (manifest !== null) {
     const cp = campaignPack(manifest);
     packs.push({ ...cp, digest: sha256(Buffer.from(canonicalManifest(manifest), 'utf8')) });
@@ -460,7 +522,7 @@ function fnvOf(bytes: Uint8Array): number {
 /** sha256 over one line per level, `id:sha256(bytes)`, sorted by id. */
 function levelsDigest(served: readonly { id: string; bytes: Uint8Array }[]): string {
   const lines = [...served]
-    .sort((a, b) => a.id.localeCompare(b.id))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((f) => `${f.id}:${sha256(f.bytes)}`);
   return sha256(Buffer.from(lines.join('\n'), 'utf8'));
 }

@@ -710,6 +710,41 @@ private code through **`name` as well as `key`** (the router builds rooms with `
 
 ### Phase 1 — pack identity, offline. **1 week. No node tier. This is the best value in the document.**
 
+> **STATUS: DONE**, commit `895442c`. Suite 67 files / 1989 tests; every §4 check proven to
+> refuse by feeding it the input its own row names. Four deliberate deviations, each an
+> extension rather than a cut: (1) the `CharacterLook` table moved to `shared/src/characters.ts`
+> (client registry re-exports) because phase 2's `runGate` must recompute the characters
+> fingerprint in the serving process, and a client-only table would have made `packs.declared`
+> a check the server cannot run; (2) the gate logic lives in `server/src/gate.ts` with
+> `tools/release-verify.mjs` as a thin CLI face, so phase 2 wires the same checks instead of
+> rewriting them; (3) `flags.order` and `saves.schema` compare against checked-in baselines
+> (`BUILTIN_FLAG_ORDER` in packs.ts, `DECLARED_PERSIST/SAVES_VERSION` in gate.ts) since no base
+> release document exists yet to record them; (4) the CI file — phase 3's last task — landed
+> now, because a gate nothing runs is 8.14's own definition of theatre. `resolveRelease`,
+> `packBucket` and the release document types shipped too (pure, tested, unconsumed until
+> phase 2 — named here so the wiring auditor knows it is deliberate).
+>
+> The adversarial audit that followed red-proved all seven new guards and found two real
+> bugs in the gate-vs-loader seam, both fixed with regression tests: the gate hashed level
+> bytes BEFORE sanitising `meta.id` while the loader re-encodes after (a mixed-case id split
+> the reviewed identity from the served one), and `scanLevelDir` missed the loader's
+> `MAX_LEVEL_FILE_BYTES` cap (the gate certified a level the host would refuse). Also fixed:
+> `packs.declared` now REFUSES unknown/duplicate/data kinds in a declared list instead of
+> silently skipping them (the phase-2 runGate seam), the declared input strings are
+> checked-in literals so a firing ratchet prints a real line diff, id sorts are code-unit
+> (bare `localeCompare` made the fleet-agreement fingerprint locale-dependent), and
+> `campaign.refs` refuses a non-canonical manifest id the client would match raw and drop.
+> **Phase 2 pre-commitments the audit filed:** enforce `MAX_PACK_INPUTS` /
+> `MAX_PACK_INPUT_BYTES` / `MAX_ORDINAL` (declared, enforced nowhere) plus
+> `ordinal.monotonic` in `ReleaseService`; make `gate.nonempty` load-bearing once the check
+> list is dynamic; store author-time inputs in the release document so data packs diff too.
+> Known and accepted: the in-browser room reports `BUILTIN_CONTENT_HASH` (no levels fold)
+> while a server room folds its levels pack — nothing compares the two, but a future
+> client-side comparison would trip on it. And `release:verify` refuses to run against a
+> tree whose `@doomcraft/shared` resolves outside the repo — run from a worktree without
+> its own `npm install`, Node's resolver otherwise walks up into the MAIN checkout and the
+> gate silently verifies a different tree than the one being edited.
+
 `shared/src/packs.ts`. Split `contentFingerprint()` (`shared/src/version.ts:331`) into `coreFingerprintInputs()` / `weaponsFingerprintInputs()` / `charactersFingerprintInputs()`, keeping every input string byte-identical so the split is mechanical, and adding `terrain=${TERRAIN_VERSION}` to `core`. `CONTENT_FINGERPRINT` (`:102`) becomes `CORE_FINGERPRINT` + `WEAPONS_FINGERPRINT` + `CHARACTERS_FINGERPRINT`. `BUILTIN_PACKS` and `BUILTIN_RELEASE`. `packSetHash` replaces `contentHashFor` at its four call sites. `CONTENT_VERSION` **stays**.
 
 Then `tools/release-verify.mjs`, wired to `npm run release:verify`, running `packs.declared`, `packs.installed`, `packs.unique`, `levels.validate` (with `W_REACH_SKIPPED` fatal), `levels.canonical`, `campaign.refs`, `protocol.stable`, `flags.order`, `gate.nonempty`, and printing the `PackDiff`.

@@ -205,10 +205,17 @@ describe('the log on disk', () => {
   });
 
   it('never throws when the write fails — an action that happened is still an action', async () => {
-    // A read-only root: `ready()` fails, every record is counted as failed, and
-    // the caller still gets its row back. Turning this into a 500 would leave
-    // the operator believing the action did not fire.
-    const log = new AdminAuditLog('/proc/definitely-not-writable');
+    // An unwritable root: `ready()` fails, every record is counted as failed,
+    // and the caller still gets its row back. Turning this into a 500 would
+    // leave the operator believing the action did not fire.
+    //
+    // The root is a path UNDER A REGULAR FILE, so mkdir fails ENOTDIR on
+    // every platform. It used to be '/proc/definitely-not-writable', which
+    // fails fast on macOS (no /proc) but stalled the whole 5 s test budget on
+    // the Linux CI runner — found by the first CI run this repo ever had.
+    const file = join(tempRoot(), 'a-file-not-a-directory');
+    writeFileSync(file, 'occupied', 'utf8');
+    const log = new AdminAuditLog(join(file, 'audit-root'));
     const a = await log.record(row());
     expect(a.actor).toBe('karsten');
     expect(log.status().failed).toBeGreaterThan(0);

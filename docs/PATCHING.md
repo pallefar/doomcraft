@@ -73,7 +73,8 @@ The client is *told* the room's content and adopts it (`NetClient.contentVersion
 disagrees is the one that is wrong, and it stays wrong for the life of that match rather than having
 the tables swapped mid-fight.
 
-`contentHashFor(levelHashes)` folds in the levels the host actually loaded, so two hosts on the same
+`packSetHash(installedPacks, CONTENT_VERSION)` (which replaced `contentHashFor(levelHashes)`)
+folds in the levels the host actually loaded via the levels pack, so two hosts on the same
 `CONTENT_VERSION` with different files on disk — a real operational mistake — produce different
 hashes and are visible in `/api/version`.
 
@@ -113,12 +114,18 @@ next return-to-menu (§4).
 
 ### 2.2 A content or balance change
 
+Content identity is per-pack since `docs/PACKS.md` phase 1: core (mode constants + terrain),
+weapons, characters — each with its own declared version and fingerprint on `BUILTIN_PACKS` in
+`shared/src/packs.ts`, plus the levels pack folded at boot from what is installed.
+
 1. Edit the tables (`shared/src/weapons.ts`, mode constants, `content/levels/*.json`).
-2. `npx vitest run shared/src/version.test.ts` — the **content ratchet** fails, with the old and new
-   fingerprints in the message.
-3. Bump `CONTENT_VERSION` in `shared/src/version.ts` and paste the new fingerprint into
-   `CONTENT_FINGERPRINT`, **in the same commit**. The ratchet exists so this cannot be forgotten; it
-   is not a formality to be silenced.
+2. `npm run release:verify` — the gate refuses, and prints **which pack** moved and the
+   field-level input diff (a levels edit refuses nothing: level files are data, their identity
+   rides the levels pack automatically).
+3. Bump `CONTENT_VERSION` in `shared/src/version.ts` and, for a build pack, bump that pack's
+   `*_PACK_VERSION` and paste its new fingerprint in `shared/src/packs.ts`, **in the same
+   commit**. The alarm's contents — the diff — are now the thing you read; the ratchet exists so
+   this cannot be forgotten and is not a formality to be silenced.
 4. Deploy as §2.1. New rooms get the new balance; live ones finish on the old.
 
 ### 2.3 A protocol change
@@ -439,7 +446,10 @@ drift — code review does not catch a reordered bitmask bit, and a type system 
 | Ratchet | Covers | On failure |
 |---|---|---|
 | `protocolFingerprint()` | quantisation scales, shipped message ids, `PF_ALL`/`EF_ALL`/`RF_ALL`, `CAP_INFLATE` | Was the change additive? Put it back at the end. Was it a real layout change? §2.3 |
-| `contentFingerprint()` | every weapon's damage/pellets/rpm/mag/splash/spread, tick, match length, score limit, movement speeds | §2.2 |
+| `weaponsFingerprint()` | every weapon's damage/pellets/rpm/mag/splash/spread | §2.2 |
+| `coreFingerprint()` | tick, match length, score limit, movement speeds, `TERRAIN_VERSION` | §2.2 |
+| `charactersFingerprint` (client test + gate) | the `CharacterLook` table — tints, heights, parts, stretch | §2.2 |
+| `npm run release:verify` | all of the above plus installed levels, canonical encoding, campaign refs, `FLAG_ORDER`, schema bumps | docs/PACKS.md §4 |
 
 The fix is **never** "update the number until it passes". It is "decide which axis you just moved,
 move it, and update the number in the same commit".

@@ -11,6 +11,12 @@ on:
     branches: [main]
   pull_request:
 
+# playwright is a required devDependency (it is the measuring apparatus for the
+# capture tools), but no vitest test opens a browser — skip the ~500 MB
+# browser download its postinstall would otherwise run on every CI job.
+env:
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
 jobs:
   ci:
     runs-on: ubuntu-latest

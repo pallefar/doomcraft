@@ -624,7 +624,7 @@ export const XP_PER_MINUTE = 12;
  * number is handed in. Builder is the worked example — infinite blocks and no
  * failure state, so it earns XP for time and no currency at all.
  *
- * Deliberately NOT in `contentFingerprint()` (`shared/src/version.ts`): two
+ * Deliberately NOT in the core pack fingerprint (`coreFingerprintInputs()`, `shared/src/version.ts`): two
  * builds that disagree about what a kill is worth still simulate the same
  * match, and the server's number is the only one that is ever banked.
  */

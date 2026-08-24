@@ -49,7 +49,7 @@ const SRC = path.join(ROOT, 'vendor/kenney-blocky-characters');
 const OUT = path.join(ROOT, 'client/public/characters');
 
 /* ------------------------------------------------------------------ *
- * What we ship. Keep in sync with client/src/characters/registry.ts.
+ * What we ship. Keep in sync with shared/src/characters.ts.
  * ------------------------------------------------------------------ */
 
 /** The rig donor. Geometry and clips are identical across the pack. */

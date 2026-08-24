@@ -28,7 +28,13 @@ import {
   type Release,
   type ReleaseDoc,
 } from './packs.ts';
-import { CONTENT_VERSION, fingerprint } from './version.ts';
+import {
+  CONTENT_VERSION,
+  coreFingerprintInputs,
+  fingerprint,
+  weaponsFingerprintInputs,
+} from './version.ts';
+import { charactersFingerprintInputs } from './characters.ts';
 
 const pack = (kind: PackKind, version: number, fp: number): PackVersion => ({
   kind, key: `k${kind}`, version, fingerprint: fp, inputs: [], digest: '', label: `k${kind}@${version}`,
@@ -53,14 +59,22 @@ describe('packSetHash', () => {
 });
 
 describe('the builtin release', () => {
-  it('declares fingerprints that match what this binary computes', () => {
-    // The compiled-in half of gate check `packs.declared`: each BUILTIN
-    // pack's checked-in literal must equal the FNV over the inputs the
-    // binary computes at load. When this fails, a pack changed without its
-    // declaration moving — bump its version and paste the new fingerprint in
-    // shared/src/packs.ts, in the same commit.
+  it('declares fingerprints AND input literals that match what this binary computes', () => {
+    // The compiled-in half of gate check `packs.declared`, both directions:
+    // the checked-in fingerprint must equal the FNV over the checked-in
+    // inputs (self-consistency), and the checked-in inputs must equal what
+    // the binary computes now — the literals are what let a firing ratchet
+    // print a LINE DIFF instead of two hex numbers. When this fails, a pack
+    // changed without its declaration moving: bump its version and paste the
+    // new fingerprint and changed lines in shared/src/packs.ts, same commit.
+    const computed: Record<number, readonly string[]> = {
+      [PackKind.CORE]: coreFingerprintInputs(),
+      [PackKind.WEAPONS]: weaponsFingerprintInputs(),
+      [PackKind.CHARACTERS]: charactersFingerprintInputs(),
+    };
     for (const p of BUILTIN_PACKS) {
       expect(fingerprint(p.inputs.join('|')), p.label).toBe(p.fingerprint);
+      expect([...p.inputs], p.label).toEqual([...computed[p.kind]]);
     }
   });
 
