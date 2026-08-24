@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in — Doomcraft</title>
+<meta name="description" content="Sign in to Doomcraft. Your progress on this device follows your account — nothing is lost.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+  :root{--ground:#131010;--panel:#1E1917;--sunk:#0C0A09;--rule:#463731;--rule-hi:#6B5347;--bone:#DED4C4;--bone-dim:#8E8175;--bone-faint:#5C5249;--hell:#E0431C;--hell-hi:#FF5A2E;--tox:#86C232;color-scheme:dark}
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100vh;background:var(--ground);color:var(--bone)}
+  body{font-family:Barlow,"Helvetica Neue",Arial,sans-serif;display:grid;place-items:center;padding:24px;position:relative;overflow:hidden}
+  a{color:inherit}
+  .bg{position:fixed;inset:0;background:url(ours-00-menu.jpg) center/cover;filter:blur(7px) brightness(.4) saturate(.8);z-index:-2}
+  .bgtint{position:fixed;inset:0;background:radial-gradient(60% 60% at 50% 42%,rgba(224,67,28,.18),rgba(12,10,9,.2) 70%);z-index:-1}
+  .top{position:fixed;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:22px clamp(20px,4vw,44px)}
+  .brand{font-family:"Big Shoulders Display",sans-serif;font-weight:900;font-size:28px;text-transform:uppercase;text-decoration:none;text-shadow:2px 2px 0 var(--hell)}
+  .back{display:inline-flex;align-items:center;gap:8px;text-decoration:none;color:var(--bone-dim);font:12px/1 "IBM Plex Mono",monospace;letter-spacing:.1em;text-transform:uppercase}
+  .back:hover{color:var(--bone)}
+  .card{width:min(520px,100%);background:var(--panel);border:2px solid var(--rule);border-top-color:var(--rule-hi);border-left-color:var(--rule-hi);box-shadow:12px 12px 0 #000;animation:rise .5s ease-out both}
+  @keyframes rise{0%{transform:translateY(18px);opacity:0}100%{transform:translateY(0);opacity:1}}
+  .cardhead{padding:24px 28px 6px}
+  .cardhead .lbl{font:600 10px/1 "IBM Plex Mono",monospace;letter-spacing:.18em;text-transform:uppercase;color:var(--bone-dim)}
+  .cardhead h1{margin:8px 0 0;font-family:"Big Shoulders Display",sans-serif;font-weight:800;font-size:40px;line-height:.95;text-transform:uppercase}
+  .body{padding:16px 28px 24px;display:flex;flex-direction:column;gap:16px}
+  .claim{display:grid;grid-template-columns:38px 1fr;gap:12px;align-items:center;background:var(--sunk);border:1px solid var(--rule);border-left:4px solid var(--tox);padding:13px 15px;font-size:14px;line-height:1.4;color:#B9AE9F}
+  .claim b{color:var(--bone);font-weight:600}
+  .primary{display:flex;align-items:center;justify-content:center;gap:12px;text-decoration:none;background:var(--hell);color:#fff;font-family:"Big Shoulders Display",sans-serif;font-weight:900;font-size:30px;text-transform:uppercase;letter-spacing:.04em;line-height:1;padding:18px;box-shadow:0 0 0 2px #000,6px 6px 0 #000;min-height:56px}
+  .primary:hover{background:var(--hell-hi)}
+  .guest{display:flex;align-items:center;justify-content:center;text-decoration:none;color:var(--bone);font-family:"Big Shoulders Display",sans-serif;font-weight:700;font-size:18px;text-transform:uppercase;letter-spacing:.05em;padding:14px;border:2px solid var(--rule-hi);background:var(--sunk);min-height:52px}
+  .guest:hover{border-color:var(--bone-dim)}
+  .what{display:flex;flex-direction:column;gap:8px}
+  .what .h{font:600 10px/1 "IBM Plex Mono",monospace;letter-spacing:.18em;text-transform:uppercase;color:var(--bone-faint)}
+  .what ul{margin:0;padding-left:18px;color:var(--bone-dim);font-size:14px;line-height:1.6}
+  .foot{padding:12px 28px;border-top:1px solid var(--rule);font:10px/1.6 "IBM Plex Mono",monospace;letter-spacing:.06em;color:var(--bone-faint)}
+  @media(prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+<div class="bg" aria-hidden="true"></div>
+<div class="bgtint" aria-hidden="true"></div>
+<div class="top">
+  <a class="brand" href="/">Doomcraft</a>
+  <a class="back" href="/"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 6l-6 6 6 6"></path></svg> Back</a>
+</div>
+
+<div class="card">
+  <div class="cardhead">
+    <div class="lbl">Account</div>
+    <h1>Sign in and keep your progress</h1>
+  </div>
+  <div class="body">
+    <div class="claim">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#86C232" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7l-9 9-4-4"></path><rect x="3" y="3" width="18" height="18" rx="1"></rect></svg>
+      <div><b>Your progress lives on the server.</b> Sign in with a name and a passphrase — no email needed — and your XP, Scrap and stats follow you to any device. Play as a guest and it stays on this browser.</div>
+    </div>
+
+    <a class="primary" href="https://doomcraft-production.up.railway.app/">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3l14 9-14 9z"></path></svg>
+      Continue to Doomcraft
+    </a>
+    <a class="guest" href="https://doomcraft.vercel.app/">Play as a guest instead</a>
+
+    <div class="what">
+      <div class="h">What you get with an account</div>
+      <ul>
+        <li>One profile across every device you play on</li>
+        <li>Server-saved XP, Scrap and match stats — never lost to a cleared browser</li>
+        <li>No email, no password reset chains — a name, a passphrase, and a recovery code you keep</li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot">Sign-in and account creation happen inside the game. We never see your passphrase; it is hashed on the server. Google and Discord sign-in are coming.</div>
+</div>
+</body>
+</html>
