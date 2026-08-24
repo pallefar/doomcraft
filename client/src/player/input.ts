@@ -251,6 +251,15 @@ export class InputManager implements TouchSurface {
    * stops meaning "switch it off". `setActionTaken` means it exactly.
    */
   private readonly taken = new Uint8Array(ACTION_COUNT);
+  /**
+   * One-shot pulses latched FOR the mode that took the action. `endFrame`
+   * clears `pulse` inside `game.tick`, and mode updates only run after that —
+   * so a touch tap routed into a taken action (the phone's tap-to-fire, a
+   * wheel notch) would otherwise be unreadable by the very mode that took it.
+   * That was the mobile-Builder bug: a whole session of taps, none of them
+   * placing a block. Latched here until `consumeTakenTap` reads it.
+   */
+  private readonly takenTap = new Uint8Array(ACTION_COUNT);
 
   private readonly codeToAction = new Map<string, number>();
   private readonly altCodeToAction = new Map<string, number>();
@@ -388,6 +397,9 @@ export class InputManager implements TouchSurface {
     this.padDown.fill(0);
     this.touchDown.fill(0);
     this.pulse.fill(0);
+    // A pause, blur or lock loss discards queued taps too: un-pausing must
+    // never spend an edit the player tapped a screen ago.
+    this.takenTap.fill(0);
     for (let i = 0; i < ACTION_COUNT; i++) {
       if (this.downState[i] !== 0) this.releaseEdge[i] = 1;
       this.downState[i] = 0;
@@ -486,12 +498,39 @@ export class InputManager implements TouchSurface {
     const id = actionId(action);
     if (id < 0) return;
     this.taken[id] = taken ? 1 : 0;
+    // A latch must never cross an ownership change: a stale tap from the
+    // previous owner is a phantom edit for the next one.
+    this.takenTap[id] = 0;
   }
 
   /** True while a mode is holding `action` hostage. */
   isActionTaken(action: InputAction): boolean {
     const id = actionId(action);
     return id >= 0 && this.taken[id] !== 0;
+  }
+
+  /**
+   * Raw held state of an action the caller has TAKEN, OR-ed across key, pad
+   * and touch. This is how a mode reads the button it masked: Builder takes
+   * Fire so the shotgun stays holstered, then reads the phone's FIRE pad —
+   * or the held mouse button — through here to run the dig.
+   */
+  takenHeld(action: InputAction): boolean {
+    const id = actionId(action);
+    if (id < 0 || !this.enabled || this.taken[id] === 0) return false;
+    return (this.keyDown[id] | this.padDown[id] | this.touchDown[id]) !== 0;
+  }
+
+  /**
+   * One latched tap (touch tap, wheel notch) on a taken action. Returns true
+   * at most once per tap. Only ever latched while the action is taken and the
+   * manager is enabled, so menu taps never queue up edits.
+   */
+  consumeTakenTap(action: InputAction): boolean {
+    const id = actionId(action);
+    if (id < 0 || this.takenTap[id] === 0) return false;
+    this.takenTap[id] = 0;
+    return true;
   }
 
   /**
@@ -675,6 +714,13 @@ export class InputManager implements TouchSurface {
   endFrame(): void {
     this.pressEdge.fill(0);
     this.releaseEdge.fill(0);
+    // Taken actions never reach downState, so their pulses would die right
+    // here, one call before the owning mode's update runs. Latch them.
+    if (this.enabled) {
+      for (let i = 0; i < ACTION_COUNT; i++) {
+        if (this.taken[i] !== 0 && this.pulse[i] !== 0) this.takenTap[i] = 1;
+      }
+    }
     this.pulse.fill(0);
     this.lookDx = 0;
     this.lookDy = 0;

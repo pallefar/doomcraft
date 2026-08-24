@@ -596,6 +596,56 @@ async function main() {
     await page.mouse.up();
     await page.waitForTimeout(220);
 
+    // On the pad the touch scheme is different by design: a screen tap places
+    // and holding the FIRE disc digs. The overlay swallows canvas clicks, so
+    // pressing the disc itself is the only honest way to photograph a touch
+    // dig. The cursor detour runs with input suspended, exactly like
+    // `recentre`, so the trip to the disc does not turn the camera.
+    if (MOBILE) {
+      const disc = await page.evaluate(() => {
+        for (const b of document.querySelectorAll('#hud b')) {
+          if (b.textContent.trim() === 'FIRE') {
+            const r = (b.parentElement ?? b).getBoundingClientRect();
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+          }
+        }
+        return null;
+      });
+      log(`BUILDER_FIRE_DISC ${disc === null ? 'missing' : `${disc.x.toFixed(0)},${disc.y.toFixed(0)}`}`);
+      if (disc !== null) {
+        await look(0, 150, 5);              // dig at the ground, not the sky
+        await page.evaluate(() => window.__DC__.suspendInput(true));
+        await page.mouse.move(disc.x, disc.y);
+        await page.evaluate(() => window.__DC__.suspendInput(false));
+        await page.mouse.down();
+        await page.waitForTimeout(700);
+        await page.screenshot({ path: path.join(OUT, `ours-${TAG}-05t-touchdig.png`) });
+        await page.mouse.up();
+        await recentre();
+      }
+    }
+
+    // And the other half of the touch scheme: a TAP places. Real touch
+    // pointers this time (`touchscreen.tap`), because that is what a phone
+    // sends — a synthetic mouse press would read as a dig. Aim at open floor
+    // first so the placement cell is not inside the player's own body.
+    if (MOBILE) {
+      await look(0, -60, 4);
+      // Tap in the LOOK region, not at dead centre: in landscape the thumb
+      // stick's grab zone reaches x = w/2, and a tap inside it grabs the
+      // joystick instead. The shot still places at the crosshair — the tap
+      // point only routes the gesture.
+      const tapX = cx + Math.round(VIEWPORT.width * 0.12);
+      const tapY = cy - 30;
+      await page.touchscreen.tap(tapX, tapY);
+      await page.waitForTimeout(260);
+      await page.touchscreen.tap(tapX, tapY);
+      await page.waitForTimeout(260);
+      await page.touchscreen.tap(tapX, tapY);
+      await page.waitForTimeout(320);
+      await page.screenshot({ path: path.join(OUT, `ours-${TAG}-05u-touchplace.png`) });
+    }
+
     await page.keyboard.press('KeyB');      // the creative palette
     await page.waitForTimeout(420);
     await shot('06-palette');

@@ -595,6 +595,69 @@ describe('a mode taking an action takes BOTH layers', () => {
 });
 
 /* ------------------------------------------------------------------------ *
+ * 6b. A taken action must stay readable BY THE MODE THAT TOOK IT
+ *
+ * The mobile-builder regression: on a phone every pointer lands on the touch
+ * overlay, which drives InputActions — and Builder had taken Fire, which made
+ * the action read released from every source for everyone, Builder included.
+ * The whole mobile capture ran with "0 placed · 0 broken". These tests pin the
+ * read-back path: raw held state through the mask, and taps latched across the
+ * frame boundary (modes update after `game.tick`, which has already cleared
+ * the per-frame pulses by then).
+ * ------------------------------------------------------------------------ */
+
+describe('a taken action is still readable by the mode that took it', () => {
+  it('reads a held touch button through the mask, without leaking to the game', () => {
+    const r = rig('modern');
+    r.input.setActionTaken(InputAction.Fire, true);
+    r.input.touch.setButton(InputAction.Fire, true);
+    r.step();
+    expect(r.input.isDown(InputAction.Fire)).toBe(false);   // the shotgun stays holstered
+    expect(r.input.takenHeld(InputAction.Fire)).toBe(true); // the dig still runs
+    r.input.touch.setButton(InputAction.Fire, false);
+    r.step();
+    expect(r.input.takenHeld(InputAction.Fire)).toBe(false);
+  });
+
+  it('latches a tap across the frame boundary that clears pulses', () => {
+    const r = rig('modern');
+    r.input.setActionTaken(InputAction.Fire, true);
+    r.input.touch.tap(InputAction.Fire);
+    // The shipped order inside game.tick: update() then endFrame(); only THEN
+    // does the mode's update run. The tap has to survive both.
+    r.input.update();
+    r.input.endFrame();
+    expect(r.input.consumeTakenTap(InputAction.Fire)).toBe(true);
+    expect(r.input.consumeTakenTap(InputAction.Fire)).toBe(false); // consumed once
+  });
+
+  it('latches a wheel notch into a taken action — Builder\'s hotbar wheel', () => {
+    const r = rig('modern');
+    r.input.setActionTaken(InputAction.NextWeapon, true);
+    r.wheel(120); // WheelDown is NextWeapon in the default table
+    r.input.update();
+    r.input.endFrame();
+    expect(r.input.consumeTakenTap(InputAction.NextWeapon)).toBe(true);
+  });
+
+  it('does not latch for actions nobody took, and clears on hand-back', () => {
+    const r = rig('modern');
+    r.input.touch.tap(InputAction.Fire); // not taken: this is the game's press
+    r.input.update();
+    expect(r.input.isDown(InputAction.Fire)).toBe(true);
+    r.input.endFrame();
+    expect(r.input.consumeTakenTap(InputAction.Fire)).toBe(false);
+
+    r.input.setActionTaken(InputAction.Fire, true);
+    r.input.touch.tap(InputAction.Fire);
+    r.input.update();
+    r.input.endFrame();
+    r.input.setActionTaken(InputAction.Fire, false); // mode exits before consuming
+    expect(r.input.consumeTakenTap(InputAction.Fire)).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
  * 7. What the settings panel prints
  * ------------------------------------------------------------------------ */
 

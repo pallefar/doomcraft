@@ -300,6 +300,15 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
   const held = new Set<string>();
   let wantBreak = false;
   let wantPlace = false;
+  /**
+   * Touch/pad intent this frame, read back through the taken-action mask.
+   * The pointer listeners below only ever see a mouse; on a phone every
+   * pointer lands on the control pad, which drives InputActions instead —
+   * and Builder has taken those. `takenHeld`/`consumeTakenTap` are the read
+   * path. Kept as state so `refreshHint` can name the touch refusal too.
+   */
+  let touchBreakHeld = false;
+  let touchPlaceHeld = false;
 
   /* --- bodies --------------------------------------------------------- */
   const bodies: BodyProbe = {
@@ -623,14 +632,6 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
     else if (e.button === 2) wantPlace = false;
   }
 
-  function onWheel(ev: Event): void {
-    if (picker.isOpen || !game.playing) return;
-    const e = ev as WheelEvent;
-    if (e.deltaY === 0) return;
-    e.preventDefault();
-    inventory.cycle(e.deltaY > 0 ? 1 : -1);
-  }
-
   function onKeyDown(ev: Event): void {
     const e = ev as KeyboardEvent;
     if (e.repeat) { held.add(e.code); return; }
@@ -646,12 +647,7 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
       case 'KeyB':
       case 'KeyE':
         e.preventDefault();
-        wantBreak = false; wantPlace = false;
-        // Releasing the lock here is deliberate — tell the shell before it
-        // happens or it pauses the game behind the palette.
-        host.suppressAutoPause?.(true);
-        game.input.exitPointerLock();
-        picker.show();
+        openPalette();
         break;
       case 'KeyF':
         e.preventDefault();
@@ -678,10 +674,23 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
     held.delete((ev as KeyboardEvent).code);
   }
 
+  /** Open the creative palette. Shared by KeyB/KeyE and the pad's BLD tap. */
+  function openPalette(): void {
+    if (picker.isOpen) return;
+    wantBreak = false; wantPlace = false;
+    // Releasing the lock here is deliberate — tell the shell before it
+    // happens or it pauses the game behind the palette.
+    host.suppressAutoPause?.(true);
+    game.input.exitPointerLock();
+    picker.show();
+  }
+
   function onBlur(): void {
     held.clear();
     wantBreak = false;
     wantPlace = false;
+    touchBreakHeld = false;
+    touchPlaceHeld = false;
     placement.cancelDig();
   }
 
@@ -699,14 +708,18 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
   /* --- HUD refresh (cold; only on change) -------------------------------- */
 
   let lastHint = -1;
-  let lastPlaced = -1;
+  let lastEdits = -1;
   let lastHistory = -1;
   let lastModeLabel = '';
 
   function refreshChips(): void {
     const placedShown = Math.max(placedThisSession, authoritativePlaced);
-    if (placedShown !== lastPlaced) {
-      lastPlaced = placedShown;
+    // Key on BOTH tallies: a session that only digs still has to move the
+    // chip. (The mobile capture caught this — "Undo 11" over "0 placed ·
+    // 0 broken", because breaks alone never re-rendered the label.)
+    const editsKey = placedShown * 100000 + brokenThisSession;
+    if (editsKey !== lastEdits) {
+      lastEdits = editsKey;
       chipBlocks.innerHTML = `<b>${placedShown}</b> placed · <b>${brokenThisSession}</b> broken`;
     }
     const hkey = history.groupCount * 1000 + (history.canUndo ? 1 : 0) * 100 + (history.canRedo ? 1 : 0);
@@ -734,8 +747,8 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
     // Show the reason the *pressed* button is refusing; when nothing is pressed
     // show the placement reason, because that is the one that surprises people.
     let r: Refusal = Refusal.NONE;
-    if (wantBreak) r = t.breakRefusal;
-    else if (wantPlace || t.hit) r = t.placeRefusal;
+    if (wantBreak || touchBreakHeld) r = t.breakRefusal;
+    else if (wantPlace || touchPlaceHeld || t.hit) r = t.placeRefusal;
     if (r === Refusal.NO_TARGET) r = Refusal.NONE;
     if (r === lastHint) return;
     lastHint = r;
@@ -778,7 +791,9 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
       const canvas = host.canvas;
       scope.addListener(canvas, 'pointerdown', onPointerDown as EventListener);
       scope.addListener(window, 'pointerup', onPointerUp as EventListener);
-      scope.addListener(canvas, 'wheel', onWheel as EventListener, { passive: false });
+      // No wheel listener: the wheel reaches Builder as NextWeapon/PrevWeapon
+      // pulses on the TAKEN actions (see `consumeTakenTap` in update), which
+      // is also how the pad's WEP tap arrives. One path for both.
       scope.addListener(window, 'keydown', onKeyDown as EventListener);
       scope.addListener(window, 'keyup', onKeyUp as EventListener);
       scope.addListener(window, 'blur', onBlur as EventListener);
@@ -789,7 +804,10 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
       refreshWorldChip();
       refreshChips();
       host.setStatus('');
-      game.hud.pushFeed('Builder — LMB break, RMB place, B palette, Z undo, F no-clip camera', 's');
+      const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+      game.hud.pushFeed(coarse
+        ? 'Builder — tap places, hold FIRE digs, BLD palette, WEP next block'
+        : 'Builder — LMB break, RMB place, B palette, Z undo, F no-clip camera', 's');
     },
 
     update(dt: number, now: number): void {
@@ -815,8 +833,33 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
 
       placement.retarget();
 
+      /* --- touch and pad, read through the taken-action mask ---------- *
+       * Hold FIRE digs; a screen tap places (the pocket-builder convention:
+       * long-press to break, tap to build); BLD opens the palette; WEP and
+       * the wheel cycle the hotbar. Taps are consumed unconditionally so a
+       * latch can never go stale behind a menu.                            */
+      const input = game.input;
+      touchBreakHeld = input.takenHeld(InputAction.Fire);
+      touchPlaceHeld = input.takenHeld(InputAction.AltFire);
+      const tapPlace = input.consumeTakenTap(InputAction.Fire);
+      const paletteTap = input.consumeTakenTap(InputAction.BuildMode);
+      const nextTap = input.consumeTakenTap(InputAction.NextWeapon);
+      const prevTap = input.consumeTakenTap(InputAction.PrevWeapon);
+
+      if (game.playing) {
+        if (paletteTap) { if (picker.isOpen) picker.close(); else openPalette(); }
+        if (!picker.isOpen) {
+          if (nextTap) inventory.cycle(1);
+          if (prevTap) inventory.cycle(-1);
+        }
+      }
+
       const active = game.playing && !picker.isOpen && !net.local.dead;
-      placement.update(dtMs, active && wantBreak, active && wantPlace);
+      const breaking = active && (wantBreak || touchBreakHeld);
+      // A tap while the dig button is held is a mis-click, same as the
+      // both-buttons rule inside PlacementController.
+      const placing = active && (wantPlace || touchPlaceHeld || (tapPlace && !breaking));
+      placement.update(dtMs, breaking, placing);
 
       highlight.sync(
         placement.target,
