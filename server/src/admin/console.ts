@@ -364,6 +364,69 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         </div>
       </section>
 
+      <section id="tab-packs">
+        <div class="page-title">Inventory</div>
+        <div class="note">
+          What is INSTALLED on this host, per pack, per version. Installing bytes is a deploy or a
+          volume write — this console decides which installed version is <em>live</em>, never uploads
+          one. A version with a refused member cannot pass the gate, and its row says why here first.
+        </div>
+        <div class="card">
+          <div class="card-head">build packs — compiled into this binary</div>
+          <div class="card-body tscroll" id="inv-build"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">levels — data, versioned on disk</div>
+          <div class="card-body tscroll" id="inv-levels"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">campaign — data, versioned on disk</div>
+          <div class="card-body tscroll" id="inv-campaign"></div>
+        </div>
+      </section>
+
+      <section id="tab-review">
+        <div class="page-title">Review</div>
+        <div class="note mono" id="rel-head"></div>
+        <div class="warn" id="rel-warning"></div>
+        <div class="card">
+          <div class="card-head">the machine</div>
+          <div class="card-body">
+            <div class="rowline" id="rel-actions"></div>
+            <div class="rowline" id="rel-note-row" hidden>
+              <label for="rel-note" class="muted">release note</label>
+              <input id="rel-note" autocomplete="off" spellcheck="false"
+                placeholder="one sentence saying why — required to approve">
+            </div>
+            <div class="muted" id="rel-actions-note"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">draft under review</div>
+          <div class="card-body tscroll" id="rel-draft"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">gate verdict — failures first, details verbatim</div>
+          <div class="card-body tscroll" id="rel-gate"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">what this draft changes</div>
+          <div class="card-body tscroll" id="rel-diff"></div>
+        </div>
+      </section>
+
+      <section id="tab-rhistory">
+        <div class="page-title">History</div>
+        <div class="note">
+          The release document, newest first. Rollback appears only on the row the server would
+          accept it for; everywhere else the button is replaced by the reason it is not one.
+        </div>
+        <div class="card">
+          <div class="card-head">releases</div>
+          <div class="card-body tscroll" id="rel-history"></div>
+        </div>
+      </section>
+
       <section id="tab-refusals">
         <div class="page-title">Refusals</div>
         <div class="note">
@@ -481,7 +544,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   var MIN_REASON = ${MIN_REASON_CHARS};
   var MIN_ACTOR = ${MIN_ACTOR_CHARS};
   var TOKEN_KEY = 'dc.admin.token';
-  var TABS = ['fleet', 'flags', 'refusals', 'player', 'metrics', 'audit'];
+  var TABS = ['fleet', 'packs', 'review', 'rhistory', 'flags', 'refusals', 'player', 'metrics', 'audit'];
 
   /* ---- tiny DOM helpers. Everything below builds nodes; nothing sets
      innerHTML from data, so no value on this page needs escaping. ---- */
@@ -880,6 +943,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
 
   function fire() {
     if (!armed) return;
+    if (armed.release) { fireRelease(); return; }
     var body = {};
     for (var k in armed.patch) if (Object.prototype.hasOwnProperty.call(armed.patch, k)) body[k] = armed.patch[k];
     body.actor = el('c-actor').value.trim();
@@ -900,6 +964,273 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
       state.textContent = 'refused: HTTP ' + r.status + ' — ' + (r.body && r.body.error ? r.body.error : r.text.slice(0, 200));
       state.className = 'err';
       if (r.status === 409) loadFlags();
+    });
+  }
+
+  /* ---- releases: Inventory, Review, History (docs/PACKS.md §6) ---- */
+  var relState = null;
+
+  function fp(v) { return '0x' + ((v >>> 0).toString(16)); }
+
+  function loadRelease() {
+    return api('/api/admin/release').then(function (r) {
+      var head = el('rel-head');
+      if (r.status !== 200) { fail(el('rel-draft'), r); fail(el('inv-levels'), r); fail(el('rel-history'), r); return; }
+      relState = r.body;
+      paintInventory(relState);
+      paintReview(relState);
+      paintRelHistory(relState);
+    });
+  }
+
+  function paintInventory(st) {
+    var build = el('inv-build');
+    clear(build);
+    var rows = [];
+    var packs = (st.installed && st.installed.packs) || [];
+    for (var i = 0; i < packs.length; i++) {
+      if (packs[i].digest) continue;
+      rows.push([packs[i].label, fp(packs[i].fingerprint),
+        'rollback requires redeploying build ' + packs[i].label]);
+    }
+    build.appendChild(table(['pack', 'fingerprint', 'delivery'], rows));
+    build.appendChild(make('div', 'muted',
+      'Build packs are compiled into the bundle. They get versions, fingerprints and diffs; they do '
+      + 'not get a push button, and a release naming them only records what this binary already is.'));
+
+    var lv = el('inv-levels');
+    clear(lv);
+    var detail = (st.installed && st.installed.detail) || { levels: [], campaign: [] };
+    for (var v = 0; v < detail.levels.length; v++) {
+      var d = detail.levels[v];
+      var line = make('div');
+      line.appendChild(make('b', null, 'levels@' + d.version));
+      line.appendChild(make('span', 'muted',
+        ' — ' + d.total + ' levels, ' + d.playable + ' playable · ' + fp(d.fingerprint)
+        + ' · sha256 ' + (d.digest ? d.digest.slice(0, 12) + '…' : '—')));
+      lv.appendChild(line);
+      for (var q = 0; q < d.refused.length; q++) {
+        lv.appendChild(make('div', 'err', '  ' + d.refused[q].id + ' REFUSED: ' + d.refused[q].detail));
+      }
+    }
+    if (detail.levels.length === 0) lv.appendChild(make('div', 'empty', 'no levels installed'));
+
+    var cp = el('inv-campaign');
+    clear(cp);
+    for (var c = 0; c < detail.campaign.length; c++) {
+      var e = detail.campaign[c];
+      cp.appendChild(make('div', null,
+        'campaign@' + e.version + ' — ' + e.episodes + ' episode(s) · ' + fp(e.fingerprint)
+        + ' · sha256 ' + (e.digest ? e.digest.slice(0, 12) + '…' : '—')));
+    }
+    if (detail.campaign.length === 0) cp.appendChild(make('div', 'empty', 'no campaign manifest installed'));
+  }
+
+  function relFind(st, pred) {
+    var h = (st.document && st.document.history) || [];
+    for (var i = h.length - 1; i >= 0; i--) if (pred(h[i])) return h[i];
+    return null;
+  }
+
+  function paintReview(st) {
+    var doc = st.document;
+    var live = st.live || {};
+    el('rel-head').textContent =
+      'document revision ' + doc.revision
+      + ' · live ' + (live.revision === 0 ? 'builtin' : 'revision ' + live.revision)
+      + ' (ordinal ' + live.ordinal + ')'
+      + ' · pending ' + (doc.pendingRevision || 'none')
+      + (doc.frozen ? ' · FROZEN' : '');
+
+    var warn = el('rel-warning');
+    clear(warn);
+    if (doc.frozen) {
+      warn.appendChild(make('div', null,
+        'RELEASES ARE FROZEN. Every staged release — including one at 100% — resolves to the live one. '
+        + 'Freeze here beats a full stage on purpose; the terminal, freeze-proof state is live, and live '
+        + 'needs a separate promote click.'));
+    }
+    if ((live.unsatisfied || []).length > 0) {
+      warn.appendChild(make('div', null,
+        'THIS HOST CANNOT SATISFY THE LIVE RELEASE: ' + live.unsatisfied.join(', ')
+        + ' — it is serving the previous release instead and saying so (Rule E). Fix the volume, not the process.'));
+    }
+
+    var draft = relFind(st, function (x) { return x.state === 'draft' || x.state === 'review'; });
+    var staged = relFind(st, function (x) { return x.state === 'staged'; });
+
+    var acts = el('rel-actions');
+    clear(acts);
+    function actBtn(label, cls, verb, subject, sub, extra, disabledReason) {
+      var b = make('button', cls, label);
+      if (disabledReason) { b.disabled = true; b.title = disabledReason; }
+      else b.addEventListener('click', function () { armRelease(verb, subject, sub, extra || {}); });
+      acts.appendChild(b);
+      return b;
+    }
+    actBtn('assemble draft', null, 'release.draft', 'draft', '', {},
+      staged !== null ? 'a staged release is pending — promote or roll it back first' : '');
+    el('rel-note-row').hidden = draft === null;
+    if (draft !== null) {
+      actBtn('run gate', null, 'release.gate', 'revision ' + draft.revision, '/gate', {});
+      actBtn('approve', 'go', 'release.approve', 'revision ' + draft.revision, '/approve', { noteFrom: true },
+        draft.state !== 'review' || !draft.gate || !draft.gate.ok
+          ? 'the SERVER refuses approval until the gate has run green — this button firing anyway would just show you that refusal'
+          : '');
+    }
+    if (staged !== null) {
+      actBtn('stage 0%', null, 'release.stage', 'revision ' + staged.revision, '/stage', { bp: 0 });
+      for (var li = 1; li < LADDER.length - 1; li++) {
+        actBtn(bp(LADDER[li]), null, '', '', '', {},
+          'decorative on one host: one long-lived room per key means a partial stage reaches zero rooms for hours');
+      }
+      actBtn('stage 100%', null, 'release.stage', 'revision ' + staged.revision, '/stage', { bp: 10000 });
+      actBtn('PROMOTE', 'danger', 'release.promote', 'revision ' + staged.revision, '/promote', {},
+        staged.rolloutBp !== 10000 ? 'promote requires a stage at 100% — live is the terminal, freeze-proof state' : '');
+    }
+    actBtn(doc.frozen ? 'unfreeze releases' : 'freeze releases', doc.frozen ? 'go' : 'danger',
+      doc.frozen ? 'release.unfreeze' : 'release.freeze', 'document ' + doc.revision, '/freeze', { frozen: !doc.frozen });
+    el('rel-actions-note').textContent = staged !== null
+      ? 'staged: revision ' + staged.revision + ' at ' + bp(staged.rolloutBp) + ' of NEW rooms — the denominator is rooms created since staging, never players'
+      : (draft !== null ? 'draft revision ' + draft.revision + ' (' + draft.state + ')' : 'no draft — assemble one from what is installed');
+
+    var body = el('rel-draft');
+    clear(body);
+    var subject = draft || staged;
+    if (subject === null) {
+      body.appendChild(make('div', 'empty', 'nothing in flight'));
+    } else {
+      if (subject.gate && subject.gate.schemaTouching) {
+        body.appendChild(make('div', 'warn bad',
+          'THIS RELEASE TOUCHES THE PROFILE SCHEMA. It can NEVER be rolled back — a v(n-1) host has no '
+          + '_unknown bag, and every balance it rewrites is gone for good. Promote it knowing that.'));
+      }
+      var rows = [];
+      for (var i = 0; i < subject.packs.length; i++) {
+        var pk = subject.packs[i];
+        rows.push([pk.label, pk.digest ? 'data' : 'build', fp(pk.fingerprint),
+          pk.digest ? pk.digest.slice(0, 12) + '…' : '—',
+          pk.digest ? 'lands on the next NEW room' : 'rollback requires redeploying build ' + pk.label]);
+      }
+      body.appendChild(table(['pack', 'class', 'fingerprint', 'sha256', 'arrival / rollback'], rows));
+      if (subject.note) body.appendChild(make('div', 'muted', 'note: ' + subject.note));
+    }
+
+    var gateHost = el('rel-gate');
+    clear(gateHost);
+    var g = subject && subject.gate;
+    if (!g) {
+      gateHost.appendChild(make('div', 'empty', 'the gate has not run'));
+    } else {
+      var grows = [];
+      for (var ci = 0; ci < g.checks.length; ci++) {
+        var ck = g.checks[ci];
+        grows.push([make('span', ck.ok ? 'ok' : 'err', ck.ok ? 'ok' : 'FAIL'), ck.id, ck.detail || '']);
+      }
+      gateHost.appendChild(table(['', 'check', 'detail'], grows));
+      gateHost.appendChild(make('div', g.ok ? 'ok' : 'err',
+        (g.ok ? 'PASS' : 'REFUSED') + ' — ' + g.checks.length + ' checks in ' + g.ranMs + ' ms'));
+    }
+
+    var diffHost = el('rel-diff');
+    clear(diffHost);
+    var dl = (g && g.diff) || [];
+    if (dl.length === 0) {
+      diffHost.appendChild(make('div', 'empty', g
+        ? 'this release changes nothing against what is live — same packs, same versions, same bytes'
+        : 'no diff — run the gate to compute one'));
+    }
+    for (var di = 0; di < dl.length; di++) {
+      var dd = dl[di];
+      diffHost.appendChild(make('div', null, dd.key + ': ' + (dd.from || '(new)') + ' -> ' + dd.to));
+      for (var li2 = 0; li2 < dd.changes.length; li2++) {
+        diffHost.appendChild(make('div', dd.changes[li2].charAt(0) === '+' ? 'mono ok' : 'mono err', '  ' + dd.changes[li2]));
+      }
+    }
+  }
+
+  function paintRelHistory(st) {
+    var host = el('rel-history');
+    clear(host);
+    var doc = st.document;
+    var h = (doc.history || []).slice().reverse();
+    if (h.length === 0) { host.appendChild(make('div', 'empty', 'no release has ever been assembled on this host')); return; }
+    var rows = [];
+    for (var i = 0; i < h.length; i++) {
+      var r = h[i];
+      var action;
+      if (r.state === 'live') {
+        if (r.gate && r.gate.schemaTouching) {
+          action = make('span', 'muted', 'schema-touching: can never be rolled back');
+        } else {
+          action = make('button', 'danger', 'roll back');
+          (function (rev) {
+            action.addEventListener('click', function () {
+              armRelease('release.rollback', 'revision ' + rev, '/rollback', {});
+            });
+          })(r.revision);
+        }
+      } else {
+        action = make('span', 'muted',
+          r.state === 'staged' ? 'pending' : r.state === 'rolled_back' ? 'was live, is not any more' : '—');
+      }
+      rows.push([
+        r.revision, r.ordinal, r.state, bp(r.rolloutBp),
+        r.packs.map(function (pk) { return pk.label; }).join(' '),
+        r.note || '—', action,
+      ]);
+    }
+    host.appendChild(table(['revision', 'ordinal', 'state', 'rollout', 'packs', 'note', ''], rows, [0, 1]));
+  }
+
+  function armRelease(verb, subject, sub, extra) {
+    if (!relState) return;
+    armed = { verb: verb, subject: subject, release: { sub: sub, extra: extra } };
+    var diff = el('c-diff');
+    var warns = el('c-warnings');
+    clear(diff); clear(warns);
+    el('c-title').textContent = verb + ' — ' + subject;
+    diff.appendChild(make('div', 'muted',
+      'POST /api/admin/release' + sub + ' with ifRevision ' + relState.document.revision
+      + ' — a stale revision is a 409 and changes nothing.'));
+    el('c-subject').value = '';
+    el('c-subject-want').textContent = 'exactly: ' + subject;
+    el('c-reason').value = '';
+    el('c-state').textContent = '';
+    el('c-state').className = 'muted';
+    countdown = 0;
+    if (ticker) clearInterval(ticker);
+    ticker = setInterval(tick, 250);
+    tick();
+    el('confirm').showModal();
+  }
+
+  function fireRelease() {
+    var body = {};
+    var extra = armed.release.extra || {};
+    for (var k in extra) if (Object.prototype.hasOwnProperty.call(extra, k) && k !== 'noteFrom') body[k] = extra[k];
+    if (extra.noteFrom) {
+      var noteEl = el('rel-note');
+      body.note = noteEl ? noteEl.value.trim() : '';
+    }
+    body.ifRevision = relState.document.revision;
+    body.actor = el('c-actor').value.trim();
+    body.reason = el('c-reason').value.trim();
+    var state = el('c-state');
+    state.textContent = 'writing…';
+    state.className = 'muted';
+    api('/api/admin/release' + armed.release.sub, 'POST', body).then(function (r) {
+      if (r.status === 200) {
+        state.textContent = 'applied — document revision ' + r.body.document.revision;
+        state.className = 'ok';
+        loadRelease();
+        loadAudit();
+        setTimeout(function () { el('confirm').close(); }, 900);
+        return;
+      }
+      state.textContent = 'refused: HTTP ' + r.status + ' — ' + (r.body && r.body.error ? r.body.error : r.text.slice(0, 200));
+      state.className = 'err';
+      loadRelease();
     });
   }
 
@@ -1001,6 +1332,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
       el('btn-' + TABS[i]).className = TABS[i] === name ? 'nav-item on' : 'nav-item';
     }
     if (name === 'flags') loadFlags();
+    else if (name === 'packs' || name === 'review' || name === 'rhistory') loadRelease();
     else if (name === 'refusals') loadRefusals();
     else if (name === 'audit') loadAudit();
     else loadFleet();
@@ -1025,13 +1357,16 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
      active-state loop are built from; GROUPS only decides order and labels. */
   var GROUPS = [
     { label: 'Live', tabs: ['fleet', 'player'] },
-    { label: 'Releases', tabs: ['flags'] },
+    { label: 'Releases', tabs: ['packs', 'review', 'rhistory', 'flags'] },
     { label: 'Audit', tabs: ['refusals', 'audit'] },
     { label: 'Analytics', tabs: ['metrics'] },
   ];
   var TAB_META = {
     fleet: { title: 'Fleet', d: 'M4 4h16v7H4zM4 13h16v7H4zM7 7.5h.01M7 16.5h.01' },
     player: { title: 'Players', d: 'M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM5 20c.6-3.4 3.4-5 7-5s6.4 1.6 7 5' },
+    packs: { title: 'Inventory', d: 'M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12L4 7.5M12 12v9' },
+    review: { title: 'Review', d: 'M9 11l2.5 2.5L16 9M12 3l7 2.5V11c0 4.5-3 7.9-7 9-4-1.1-7-4.5-7-9V5.5z' },
+    rhistory: { title: 'History', d: 'M12 8v5l3 2M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4' },
     flags: { title: 'Flags', d: 'M6 21V4m0 1h11.5l-2.3 3.5 2.3 3.5H6' },
     refusals: { title: 'Refusals', d: 'M12 3l7 2.5V11c0 4.5-3 7.9-7 9-4-1.1-7-4.5-7-9V5.5zM9.5 9.5l5 5M14.5 9.5l-5 5' },
     audit: { title: 'Actions', d: 'M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5' },

@@ -789,6 +789,18 @@ Then `tools/release-verify.mjs`, wired to `npm run release:verify`, running `pac
 
 ### Phase 3 ⚑ — the console. **1.5 weeks. This is ask (1), delivered.**
 
+> **STATUS: DONE** (screens; the CI file landed back in phase 1). Three screens in the
+> EXISTING operator console — this document predates it, so nothing was rebuilt: Inventory
+> (per-pack, per-version, refused members with `formatValidation` verbatim), Review (the
+> state machine's buttons with the decorative rungs rendered disabled and the reason on
+> them; the draft's pack table with per-class arrival/rollback strings; the gate checklist
+> failures-first; the diff), History (rollback only on the row the server would accept it
+> for). Approve is enforced by the SERVER — the panel's disable is a courtesy. Mutations go
+> through the console's existing type-the-subject-back confirm with actor + reason.
+> Verified by driving the real machine over HTTP on a booted host and screenshotting all
+> three screens with the staged release on them. Not done from §6: the flags screen's
+> client-consumer-count column (needs a generated grep artifact; filed under LATER).
+
 `/admin` served same-origin, three screens (Inventory, Review, History) plus Drain and Flags. In-memory token. And one `.github/workflows/ci.yml` running `npx tsc -b` + `npx vitest run` + `npm run release:verify` — one file, and the repo has none.
 
 **Honest end state:** an operator opens a page, sees what is installed, sees the field-level diff of what a draft would change, sees a gate verdict they cannot override, writes one sentence, and clicks Approve → Promote. Levels and campaign push for real on that host. Weapons, characters and core show their diff and their version, and their Rollback is the string `rollback requires redeploying build <id>`. Fleet and Rollout are not there, and the page says why.

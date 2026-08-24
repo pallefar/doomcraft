@@ -1846,6 +1846,7 @@ async function handleApi(
         levels: inventory.levelsVersions(),
         campaign: inventory.campaignVersions(),
         packs: inventory.installedPacks().map((p) => ({ label: p.label, fingerprint: p.fingerprint, digest: p.digest })),
+        detail: inventory.summary(),
       },
       live: releaseView().release,
     }, cors);

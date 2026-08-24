@@ -50,7 +50,7 @@ import {
   type ReleaseState,
 } from '@doomcraft/shared/packs';
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
-import type { Level } from '@doomcraft/shared/level';
+import { formatValidation, type Level } from '@doomcraft/shared/level';
 
 import {
   DEFAULT_EPISODES_FILE,
@@ -242,6 +242,47 @@ export class PackInventory {
       if (c !== null) out.push(c.pack);
     }
     return out;
+  }
+
+  /**
+   * What the Inventory screen renders: every installed version of every data
+   * pack, with each refused member and the reason, straight from the
+   * library's own diagnostics. A version with any refused member cannot pass
+   * the gate, and the row says so before the operator tries.
+   */
+  summary(): {
+    levels: { version: number; total: number; playable: number; fingerprint: number; digest: string; refused: { id: string; detail: string }[] }[];
+    campaign: { version: number; episodes: number; fingerprint: number; digest: string }[];
+  } {
+    const levels = this.levelsVersions().map((version) => {
+      const record = this.recordFor(version);
+      const lib = record?.library ?? null;
+      const refused: { id: string; detail: string }[] = [];
+      if (lib !== null) {
+        for (const l of lib.all()) {
+          if (!l.validation.ok) refused.push({ id: l.id, detail: formatValidation(l.id, l.validation) });
+        }
+        for (const pr of lib.problems) refused.push({ id: pr.id || pr.file, detail: pr.message });
+      }
+      return {
+        version,
+        total: lib?.size ?? 0,
+        playable: lib?.playableCount ?? 0,
+        fingerprint: record?.pack?.fingerprint ?? 0,
+        digest: record?.pack?.digest ?? '',
+        refused,
+      };
+    });
+    const campaign = this.campaignVersions().map((version) => {
+      const c = this.campaignAt(version);
+      return {
+        version,
+        episodes: c?.manifest.episodes.length ?? 0,
+        fingerprint: c?.pack.fingerprint ?? 0,
+        digest: c?.pack.digest ?? '',
+      };
+    });
+    return { levels, campaign };
   }
 
   /**
