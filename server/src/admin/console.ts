@@ -11,10 +11,10 @@
  * unconfigured deployment does not advertise an admin surface at all.
  *
  * The page is a shell. It ships no data and holds no secret: the token is typed
- * in, kept in `sessionStorage` (which dies with the tab, unlike localStorage),
- * never in the URL and never in a query string. Every `/api/admin/*` call it
- * makes is gated by `AdminGate`; this route is not, because there is nothing
- * here to gate.
+ * in, kept in `sessionStorage` (which dies with the tab, unlike the other Web
+ * Storage area), never in the URL and never in a query string. Every
+ * `/api/admin/*` call it makes is gated by `AdminGate`; this route is not,
+ * because there is nothing here to gate.
  *
  * ## The rule this file lives under
  *
@@ -35,11 +35,26 @@
  * 1. **No `innerHTML` is ever given data.** Every value that reaches the page
  *    goes through `textContent`. Room keys, flag blast radii, audit reasons and
  *    operator-typed strings are all rendered as text by construction, so there
- *    is no escaping to get right and no injection path to miss.
+ *    is no escaping to get right and no injection path to miss. The nav icons
+ *    are built with `createElementNS`, under the same rule.
  * 2. **`fetch`, never a `<form>`.** The Node CSP is `form-action 'none'`
  *    (`server/src/index.ts`), so a form would not submit; more to the point, a
  *    form is a navigation and this page must never navigate away from a
  *    half-armed confirm.
+ *
+ * ## The chrome
+ *
+ * A fixed left sidebar groups the six panels the way an operator reaches for
+ * them — Live (fleet, players), Releases (flags), Audit (refusals, actions),
+ * Analytics (metrics) — and a top bar carries the host/build facts, who is
+ * signed in, and the refresh control. On a phone the sidebar slides in from a
+ * hamburger. The Doomcraft vocabulary (ground `#131010`, panel `#1E1917`, bone
+ * `#DED4C4`, hell `#E0431C`) is applied with **local-first font stacks only**:
+ * the CSP is `style-src 'self' 'nonce-…'; font-src 'self'`, so the Google
+ * Fonts stylesheet cannot load here and this page does not try — the families
+ * ("Big Shoulders Display", Barlow, "IBM Plex Mono") are named first in each
+ * stack and a system face carries the design when they are not installed.
+ * Nothing on this page loads off-origin, and the console test enforces that.
  *
  * ## What is deliberately NOT here
  *
@@ -74,167 +89,368 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
 <link rel="icon" href="data:,">
 <title>doomcraft — operator console</title>
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: dark;
+    --ground: #131010;
+    --panel: #1E1917;
+    --sunk: #0C0A09;
+    --rule: #463731;
+    --rule-soft: #2E2622;
+    --bone: #DED4C4;
+    --hell: #E0431C;
+    --amber: #E5A02E;
+    --tox: #86C232;
+    --faded: #A29584;
+    --dim: #7C7061;
+    --font-display: "Big Shoulders Display", "Arial Narrow", "Avenir Next Condensed", "Helvetica Neue", system-ui, sans-serif;
+    --font-body: "Barlow", "Helvetica Neue", Arial, system-ui, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
   * { box-sizing: border-box; }
-  body {
-    margin: 0; background: #0b0d10; color: #d7dde5;
-    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  body { margin: 0; background: var(--ground); color: var(--bone); font: 14px/1.5 var(--font-body); }
+  a { color: var(--amber); }
+  h1 { margin: 0; }
+  :focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+
+  /* ---- frame: sidebar + content column ---- */
+  .shell { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 230px; flex: none; background: var(--sunk);
+    border-right: 1px solid var(--rule);
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    display: flex; flex-direction: column;
   }
-  a { color: #7fb6ff; }
-  header {
-    position: sticky; top: 0; z-index: 5; background: #11151b;
-    border-bottom: 1px solid #232a33; padding: 10px 14px;
+  .brand { padding: 16px 16px 12px; border-bottom: 1px solid var(--rule-soft); }
+  .wordmark {
+    font-family: var(--font-display); font-weight: 700; font-size: 26px; line-height: 1;
+    letter-spacing: .05em; text-transform: uppercase; color: var(--hell);
   }
-  h1 { font-size: 14px; margin: 0 0 6px; letter-spacing: .12em; text-transform: uppercase; color: #9fb0c4; }
-  .facts { display: flex; flex-wrap: wrap; gap: 4px 18px; }
-  .fact b { color: #8ea3ba; font-weight: 400; }
-  .fact span { color: #eef3f8; }
-  nav { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 14px; border-bottom: 1px solid #232a33; }
-  nav button { min-width: 96px; }
-  button {
-    font: inherit; background: #1b2129; color: #d7dde5; border: 1px solid #2e3844;
-    padding: 5px 10px; cursor: pointer; border-radius: 3px;
+  .brand-sub {
+    font-family: var(--font-display); font-size: 11px; letter-spacing: .32em;
+    text-transform: uppercase; color: var(--dim); margin-top: 4px;
   }
-  button:hover:enabled { background: #232c37; }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  button.on { background: #2a3d55; border-color: #3f5f85; color: #eaf2ff; }
-  button.danger { border-color: #6b3535; color: #ffbcbc; }
-  button.go { border-color: #3a6b45; color: #b9f0c6; }
-  main { padding: 14px; }
+  nav { flex: 1; padding: 8px 10px 16px; }
+  .nav-label {
+    font-family: var(--font-display); font-size: 11px; letter-spacing: .26em;
+    text-transform: uppercase; color: var(--dim); padding: 14px 10px 4px;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    background: none; border: 0; border-left: 2px solid transparent; border-radius: 0 3px 3px 0;
+    color: var(--faded); font: 500 14px/1 var(--font-body);
+    padding: 9px 10px; cursor: pointer;
+  }
+  .nav-item:hover { background: var(--panel); color: var(--bone); }
+  .nav-item.on { background: var(--panel); border-left-color: var(--hell); color: var(--bone); }
+  .ico { width: 16px; height: 16px; flex: none; color: var(--dim); }
+  .nav-item.on .ico { color: var(--hell); }
+  .side-sec { border-top: 1px solid var(--rule-soft); padding: 4px 16px 16px; }
+  .bearer { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+  .bearer input { width: 100%; }
+
+  .content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: var(--panel); border-bottom: 1px solid var(--rule);
+    padding: 8px 16px; min-height: 48px;
+  }
+  .tb-brand {
+    display: none; font-family: var(--font-display); font-weight: 700; font-size: 18px;
+    letter-spacing: .05em; text-transform: uppercase; color: var(--hell);
+  }
+  .facts { display: flex; gap: 6px; overflow-x: auto; flex: 1 1 200px; min-width: 0; }
+  .fact {
+    flex: none; display: flex; gap: 6px; align-items: baseline;
+    background: var(--sunk); border: 1px solid var(--rule-soft); border-radius: 3px;
+    padding: 2px 8px; font-family: var(--font-mono); font-size: 11px; white-space: nowrap;
+  }
+  .fact b { color: var(--dim); font-weight: 400; }
+  .fact span { color: var(--bone); }
+  .tb-right { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #who { max-width: 44ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #freshness { font-family: var(--font-mono); font-size: 11px; }
+
+  main { padding: 18px 20px 40px; max-width: 1240px; width: 100%; }
   section { display: none; }
   section.live { display: block; }
-  h2 { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: #8ea3ba; margin: 18px 0 6px; }
+  .page-title {
+    font-family: var(--font-display); font-weight: 700; font-size: 26px; line-height: 1.1;
+    letter-spacing: .06em; text-transform: uppercase; color: var(--bone);
+    margin: 2px 0 14px;
+  }
+
+  /* ---- cards ---- */
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 5px; margin: 0 0 14px; }
+  .card-head {
+    font-family: var(--font-display); font-weight: 700; font-size: 13px; letter-spacing: .2em;
+    text-transform: uppercase; color: var(--amber);
+    padding: 9px 14px; border-bottom: 1px solid var(--rule-soft);
+  }
+  .card-body { padding: 12px 14px; }
+  #player-body { padding: 12px 14px; }
+  #player-body:empty { display: none; }
+  h2 {
+    font-family: var(--font-display); font-weight: 700; font-size: 13px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--amber); margin: 16px 0 6px;
+  }
   h2:first-child { margin-top: 0; }
-  table { border-collapse: collapse; width: 100%; margin-bottom: 8px; }
-  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #1d242c; vertical-align: top; }
-  th { color: #7f92a6; font-weight: 400; white-space: nowrap; }
+  .tscroll { overflow-x: auto; }
+
+  /* ---- tables: ruled + zebra, monospace figures ---- */
+  table { border-collapse: collapse; width: 100%; margin: 0 0 8px; font-family: var(--font-mono); font-size: 12px; }
+  th {
+    text-align: left; font-family: var(--font-body); font-weight: 600; font-size: 11px;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--dim);
+    padding: 6px 10px; border-bottom: 1px solid var(--rule); white-space: nowrap;
+  }
+  td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  tbody tr:nth-child(even) { background: rgba(222, 212, 196, .03); }
+  tbody tr:hover { background: rgba(224, 67, 28, .07); }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .note { color: #8ea3ba; margin: 6px 0 10px; max-width: 78ch; }
+  td button { padding: 3px 9px; font-size: 12px; }
+
+  /* ---- controls ---- */
+  button {
+    font: 500 13px/1.3 var(--font-body); background: #2A2320; color: var(--bone);
+    border: 1px solid var(--rule); padding: 6px 12px; cursor: pointer; border-radius: 3px;
+  }
+  button:hover:enabled { border-color: var(--amber); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.on { background: #3A1D14; border-color: var(--hell); color: #F2BFA9; }
+  button.danger { border-color: #8A3B27; color: #F0A088; }
+  button.go { border-color: #4E7030; color: #B3DE8B; }
+  .iconbtn { display: none; align-items: center; justify-content: center; padding: 6px 8px; background: none; }
+  .iconbtn .ico { width: 18px; height: 18px; color: var(--bone); }
+  input, textarea {
+    font: 13px/1.4 var(--font-mono); background: var(--sunk); color: var(--bone);
+    border: 1px solid var(--rule); padding: 6px 8px; border-radius: 3px;
+  }
+  input { width: 24ch; max-width: 100%; }
+  textarea { width: 100%; max-width: 80ch; height: 4.6em; }
+  label { color: var(--faded); }
+
+  /* ---- prose, states, chips ---- */
+  .note { color: var(--faded); margin: 6px 0 12px; max-width: 84ch; }
+  .note.mono { font-family: var(--font-mono); font-size: 12px; }
+  .note:empty, .warn:empty { display: none; }
   .warn {
-    border-left: 3px solid #7a5a20; background: #1a1710; color: #e8d5a8;
-    padding: 8px 10px; margin: 8px 0; max-width: 100ch;
+    border-left: 3px solid var(--amber); background: #201810; color: #E7CB93;
+    padding: 10px 12px; margin: 10px 0; max-width: 100ch; border-radius: 0 3px 3px 0;
   }
-  .bad { border-left-color: #7a2a2a; background: #1a1010; color: #f0bcbc; }
-  .blast { color: #e8d5a8; }
-  .muted { color: #6d7d8f; }
-  .pill { display: inline-block; padding: 0 6px; border: 1px solid #2e3844; border-radius: 10px; color: #9fb0c4; }
-  .pill.yes { border-color: #3a6b45; color: #b9f0c6; }
-  .pill.no { border-color: #6b3535; color: #ffbcbc; }
-  input, textarea { font: inherit; background: #0f141a; color: #eef3f8; border: 1px solid #2e3844; padding: 5px 7px; border-radius: 3px; }
-  input { width: 22ch; }
-  textarea { width: 100%; max-width: 80ch; height: 4.4em; }
-  code, pre { background: #0f141a; border: 1px solid #1d242c; border-radius: 3px; }
+  .warn.bad { border-left-color: var(--hell); background: #221110; color: #F0B2A2; }
+  .warn > div + div { margin-top: 6px; }
+  .blast { color: #E7CB93; }
+  .muted { color: var(--dim); }
+  .empty {
+    border: 1px dashed var(--rule); border-radius: 4px; color: var(--dim);
+    padding: 16px; text-align: center; margin: 4px 0 8px;
+  }
+  .pill { display: inline-block; padding: 0 8px; border: 1px solid var(--rule); border-radius: 10px; color: var(--faded); font-size: 12px; }
+  .pill.yes { border-color: #4E7030; color: #B3DE8B; }
+  .pill.no { border-color: #8A3B27; color: #F0A088; }
+  .err { color: #F0A088; }
+  .ok { color: #B3DE8B; }
+  code, pre { font-family: var(--font-mono); background: var(--sunk); border: 1px solid var(--rule-soft); border-radius: 3px; }
   code { padding: 1px 5px; }
-  pre { padding: 8px 10px; overflow-x: auto; max-width: 100ch; }
+  pre { padding: 10px 12px; overflow-x: auto; max-width: 100ch; font-size: 12px; }
   .rowline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+  .stack { display: block; margin: 6px 0; }
+
+  /* ---- the confirm dialog ---- */
   dialog {
-    background: #11151b; color: #d7dde5; border: 1px solid #3a4756; border-radius: 4px;
-    max-width: 90ch; width: calc(100vw - 40px);
+    background: var(--panel); color: var(--bone); border: 1px solid var(--rule);
+    border-radius: 6px; max-width: 90ch; width: calc(100vw - 40px); padding: 16px;
   }
-  dialog::backdrop { background: rgba(0,0,0,.72); }
-  .err { color: #ffbcbc; }
-  .ok { color: #b9f0c6; }
+  dialog::backdrop { background: rgba(5, 3, 2, .78); }
+  dialog h2 { color: var(--hell); }
+
+  /* ---- phone: the sidebar becomes a drawer behind the hamburger ---- */
+  #scrim { display: none; }
+  @media (max-width: 900px) {
+    .sidebar {
+      position: fixed; z-index: 40; top: 0; bottom: 0; left: 0; height: 100%;
+      transform: translateX(-104%); transition: transform .16s ease-out;
+      box-shadow: 4px 0 24px rgba(0, 0, 0, .5);
+    }
+    body.nav-open .sidebar { transform: none; }
+    #scrim { position: fixed; inset: 0; background: rgba(5, 3, 2, .6); z-index: 30; }
+    body.nav-open #scrim { display: block; }
+    .iconbtn { display: inline-flex; }
+    .tb-brand { display: block; }
+    main { padding: 12px 12px 32px; }
+    #who { max-width: 22ch; }
+    .rowline input { flex: 1 1 12ch; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>doomcraft — operator console</h1>
-  <div class="facts" id="facts"></div>
-  <div class="rowline">
-    <label for="token" class="muted">bearer</label>
-    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="DOOMCRAFT_ADMIN_TOKEN">
-    <button id="save-token">use</button>
-    <button id="forget-token">forget</button>
-    <button id="refresh">refresh</button>
-    <span id="auth-state" class="muted">no token in this tab</span>
+<div id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1 class="wordmark">Doomcraft</h1>
+      <div class="brand-sub">operator console</div>
+    </div>
+    <nav id="tabs"></nav>
+    <div class="side-sec">
+      <div class="nav-label">environment bearer</div>
+      <div class="bearer">
+        <input id="token" type="password" autocomplete="off" spellcheck="false" aria-label="bearer token" placeholder="DOOMCRAFT_ADMIN_TOKEN">
+        <div class="rowline">
+          <button id="save-token">use</button>
+          <button id="forget-token">forget</button>
+        </div>
+        <div id="auth-state" class="muted">no token in this tab</div>
+      </div>
+    </div>
+  </aside>
+  <div class="content">
+    <header class="topbar">
+      <button id="menu-toggle" class="iconbtn" aria-label="toggle navigation">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <span class="tb-brand">Doomcraft</span>
+      <div class="facts" id="facts"></div>
+      <div class="tb-right">
+        <span id="freshness" class="muted">not synced yet</span>
+        <button id="refresh">refresh</button>
+        <span id="who" class="muted">not signed in</span>
+        <button id="signout">sign out</button>
+      </div>
+    </header>
+    <main>
+      <section id="tab-fleet">
+        <div class="page-title">Fleet</div>
+        <div class="card">
+          <div class="card-head">who owns this host</div>
+          <div class="card-body">
+            <div class="warn" id="owner-note"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">this host</div>
+          <div class="card-body">
+            <div class="tscroll" id="fleet-deploy"></div>
+            <div class="warn" id="drain-warning"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">rooms</div>
+          <div class="card-body tscroll" id="fleet-rooms"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">directory &amp; signalling</div>
+          <div class="card-body tscroll" id="fleet-signal"></div>
+        </div>
+      </section>
+
+      <section id="tab-flags">
+        <div class="page-title">Flags</div>
+        <div class="note mono" id="flags-head"></div>
+        <div class="warn" id="flags-warning"></div>
+        <div class="card">
+          <div class="card-head">rollout freeze</div>
+          <div class="card-body">
+            <div class="rowline">
+              <button id="freeze-toggle"></button>
+              <span class="muted" id="freeze-note"></span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">registry</div>
+          <div class="card-body tscroll" id="flags-table"></div>
+        </div>
+      </section>
+
+      <section id="tab-refusals">
+        <div class="page-title">Refusals</div>
+        <div class="note">
+          Only refusals and strips are recorded, so an empty ring beside a non-zero
+          <code>accepted</code> is what a healthy process looks like. A ring full of one code is
+          somebody probing. Device ids are reduced to eight characters before they leave the process.
+        </div>
+        <div class="card">
+          <div class="card-head">gate</div>
+          <div class="card-body tscroll" id="guard-status"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">recent refusals</div>
+          <div class="card-body tscroll" id="guard-ring"></div>
+        </div>
+      </section>
+
+      <section id="tab-player">
+        <div class="page-title">Players</div>
+        <div class="card">
+          <div class="card-head">look up a player</div>
+          <div class="card-body">
+            <div class="rowline">
+              <label for="player-key" class="muted">device id</label>
+              <input id="player-key" autocomplete="off" spellcheck="false" placeholder="device-…">
+              <button id="player-go">look up</button>
+              <span id="player-state" class="muted"></span>
+            </div>
+            <div class="note">
+              Lookup is by exact device id — the profile store cannot enumerate, so there is no list and no
+              search. The id you type never comes back out: everything below is keyed by an eight-character
+              handle.
+            </div>
+          </div>
+        </div>
+        <div class="card tscroll" id="player-body"></div>
+        <div class="card">
+          <div class="card-head">what this console cannot do</div>
+          <div class="card-body">
+            <div class="note">
+              These are not disabled buttons. There is no storage behind them yet, and a console that renders
+              them anyway is one that lies about its own powers.
+            </div>
+            <div class="tscroll" id="player-missing"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-metrics">
+        <div class="page-title">Metrics</div>
+        <div class="note" id="metrics-note"></div>
+        <div class="card">
+          <div class="card-head">fleet</div>
+          <div class="card-body tscroll" id="metrics-fleet"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">connections — per-connection counters, rolled up</div>
+          <div class="card-body tscroll" id="metrics-conn"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">signalling</div>
+          <div class="card-body tscroll" id="metrics-signal"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">journal &amp; audit</div>
+          <div class="card-body tscroll" id="metrics-stores"></div>
+        </div>
+      </section>
+
+      <section id="tab-audit">
+        <div class="page-title">Actions</div>
+        <div class="note">
+          Every mutation writes one row with its before and after state. Rows whose verb starts with
+          <code>player.</code> are moderation records and are retained past the ordinary window.
+        </div>
+        <div class="card">
+          <div class="card-head">audit log</div>
+          <div class="card-body tscroll" id="audit-body"></div>
+        </div>
+      </section>
+    </main>
   </div>
-  <div class="rowline">
-    <span id="who" class="muted">not signed in</span>
-    <button id="signout">sign out</button>
-  </div>
-</header>
-<nav id="tabs"></nav>
-<main>
-  <section id="tab-fleet">
-    <h2>who owns this host</h2>
-    <div class="warn" id="owner-note"></div>
-    <h2>this host</h2>
-    <div id="fleet-deploy"></div>
-    <div class="warn" id="drain-warning"></div>
-    <h2>rooms</h2>
-    <div id="fleet-rooms"></div>
-    <h2>directory &amp; signalling</h2>
-    <div id="fleet-signal"></div>
-  </section>
-
-  <section id="tab-flags">
-    <div class="note" id="flags-head"></div>
-    <div class="warn" id="flags-warning"></div>
-    <div class="rowline">
-      <button id="freeze-toggle"></button>
-      <span class="muted" id="freeze-note"></span>
-    </div>
-    <h2>registry</h2>
-    <div id="flags-table"></div>
-  </section>
-
-  <section id="tab-refusals">
-    <div class="note">
-      Only refusals and strips are recorded, so an empty ring beside a non-zero
-      <code>accepted</code> is what a healthy process looks like. A ring full of one code is
-      somebody probing. Device ids are reduced to eight characters before they leave the process.
-    </div>
-    <h2>gate</h2>
-    <div id="guard-status"></div>
-    <h2>recent refusals</h2>
-    <div id="guard-ring"></div>
-  </section>
-
-  <section id="tab-player">
-    <div class="rowline">
-      <label for="player-key" class="muted">device id</label>
-      <input id="player-key" autocomplete="off" spellcheck="false" placeholder="device-…">
-      <button id="player-go">look up</button>
-      <span id="player-state" class="muted"></span>
-    </div>
-    <div class="note">
-      Lookup is by exact device id — the profile store cannot enumerate, so there is no list and no
-      search. The id you type never comes back out: everything below is keyed by an eight-character
-      handle.
-    </div>
-    <div id="player-body"></div>
-    <h2>what this console cannot do</h2>
-    <div class="note">
-      These are not disabled buttons. There is no storage behind them yet, and a console that renders
-      them anyway is one that lies about its own powers.
-    </div>
-    <div id="player-missing"></div>
-  </section>
-
-  <section id="tab-metrics">
-    <div class="note" id="metrics-note"></div>
-    <h2>fleet</h2>
-    <div id="metrics-fleet"></div>
-    <h2>connections — per-connection counters, rolled up</h2>
-    <div id="metrics-conn"></div>
-    <h2>signalling</h2>
-    <div id="metrics-signal"></div>
-    <h2>journal &amp; audit</h2>
-    <div id="metrics-stores"></div>
-  </section>
-
-  <section id="tab-audit">
-    <div class="note">
-      Every mutation writes one row with its before and after state. Rows whose verb starts with
-      <code>player.</code> are moderation records and are retained past the ordinary window.
-    </div>
-    <div id="audit-body"></div>
-  </section>
-</main>
+</div>
 
 <dialog id="confirm">
   <h2 id="c-title">confirm</h2>
-  <div id="c-diff"></div>
+  <div class="tscroll" id="c-diff"></div>
   <div id="c-warnings"></div>
   <div class="rowline">
     <label for="c-actor" class="muted">actor</label>
@@ -246,7 +462,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     <input id="c-subject" autocomplete="off" spellcheck="false">
     <span class="muted" id="c-subject-want"></span>
   </div>
-  <div class="rowline" style="display:block">
+  <div class="stack">
     <label for="c-reason" class="muted">reason (min ${MIN_REASON_CHARS} characters, no default, never prefilled)</label>
     <textarea id="c-reason" spellcheck="false"></textarea>
   </div>
@@ -317,6 +533,25 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     return s + 's';
   }
   function bp(v) { return (typeof v === 'number' ? (v / 100).toFixed(v % 100 === 0 ? 0 : 2) : '?') + '%'; }
+
+  /* ---- the nav icons: inline SVG, built with createElementNS — never
+     innerHTML — so the no-markup-from-data rule covers the chrome too. ---- */
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  function icon(d) {
+    var s = document.createElementNS(SVG_NS, 'svg');
+    s.setAttribute('viewBox', '0 0 24 24');
+    s.setAttribute('class', 'ico');
+    s.setAttribute('aria-hidden', 'true');
+    var p = document.createElementNS(SVG_NS, 'path');
+    p.setAttribute('d', d);
+    p.setAttribute('fill', 'none');
+    p.setAttribute('stroke', 'currentColor');
+    p.setAttribute('stroke-width', '1.7');
+    p.setAttribute('stroke-linecap', 'round');
+    p.setAttribute('stroke-linejoin', 'round');
+    s.appendChild(p);
+    return s;
+  }
 
   /* ---- token + transport ---- */
   function tok() { try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } }
@@ -450,7 +685,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
           m.monsters, m.wave, m.round, ms(m.timeLeftMs), m.chunks, String(m.worldReady),
         ]);
       }
-      if (rows.length === 0) rooms.appendChild(make('div', 'muted', 'no rooms on this host'));
+      if (rows.length === 0) rooms.appendChild(make('div', 'empty', 'no rooms on this host'));
       else rooms.appendChild(table(
         ['key', 'mode', 'state', 'humans/players', 'monsters', 'wave', 'round', 'time left', 'chunks', 'world'],
         rows, [4, 5, 6, 8]));
@@ -683,7 +918,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         var e = r.body.recent[i];
         rows.push([new Date(e.ms).toISOString(), e.device, e.code, e.reason, e.trust, (e.stripped || []).join(' ')]);
       }
-      if (rows.length === 0) ring.appendChild(make('div', 'muted', 'nothing refused since this process started'));
+      if (rows.length === 0) ring.appendChild(make('div', 'empty', 'no refusals since this process started — a healthy ring is empty'));
       else ring.appendChild(table(['when', 'player', 'code', 'reason', 'trust', 'stripped'], rows, [2]));
     });
   }
@@ -725,7 +960,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         var e = p.rows[i];
         rows.push([new Date(e.ms).toISOString(), e.kind, e.currency, e.delta, e.balanceAfter, e.sourceId, e.reason]);
       }
-      if (rows.length === 0) body.appendChild(make('div', 'muted', 'no ledger rows in the retained window'));
+      if (rows.length === 0) body.appendChild(make('div', 'empty', 'no ledger rows in the retained window'));
       else body.appendChild(table(['when', 'kind', 'currency', 'delta', 'balance after', 'source', 'reason'], rows, [3, 4]));
       paintMissing(p.missing);
     });
@@ -753,7 +988,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         var a = r.body.rows[i];
         rows.push([new Date(a.ms).toISOString(), a.actor, a.verb, a.subject, a.outcome, a.reason, a.before, a.after]);
       }
-      if (rows.length === 0) host.appendChild(make('div', 'muted', 'no admin action has been recorded on this host'));
+      if (rows.length === 0) host.appendChild(make('div', 'empty', 'no admin action has been recorded on this host'));
       else host.appendChild(table(['when', 'actor', 'verb', 'subject', 'outcome', 'reason', 'before', 'after'], rows));
       host.appendChild(pairs(r.body.status));
     });
@@ -763,7 +998,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   function show(name) {
     for (var i = 0; i < TABS.length; i++) {
       el('tab-' + TABS[i]).className = TABS[i] === name ? 'live' : '';
-      el('btn-' + TABS[i]).className = TABS[i] === name ? 'on' : '';
+      el('btn-' + TABS[i]).className = TABS[i] === name ? 'nav-item on' : 'nav-item';
     }
     if (name === 'flags') loadFlags();
     else if (name === 'refusals') loadRefusals();
@@ -771,8 +1006,11 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     else loadFleet();
   }
 
+  function closeNav() { document.body.classList.remove('nav-open'); }
+
   function refresh() {
     api('/api/admin/whoami').then(function (r) {
+      el('freshness').textContent = (r.status === 200 ? 'synced ' : 'sync failed ') + new Date().toLocaleTimeString();
       if (r.status !== 200) { paintFacts(null); paintWho(null); paintOwner(null); fail(el('fleet-deploy'), r); return; }
       paintFacts(r.body);
       paintWho(r.body.identity);
@@ -782,16 +1020,41 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     });
   }
 
+  /* The sidebar: the same six panels TABS declares, grouped the way an
+     operator reaches for them. TABS stays the one list the panels and the
+     active-state loop are built from; GROUPS only decides order and labels. */
+  var GROUPS = [
+    { label: 'Live', tabs: ['fleet', 'player'] },
+    { label: 'Releases', tabs: ['flags'] },
+    { label: 'Audit', tabs: ['refusals', 'audit'] },
+    { label: 'Analytics', tabs: ['metrics'] },
+  ];
+  var TAB_META = {
+    fleet: { title: 'Fleet', d: 'M4 4h16v7H4zM4 13h16v7H4zM7 7.5h.01M7 16.5h.01' },
+    player: { title: 'Players', d: 'M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM5 20c.6-3.4 3.4-5 7-5s6.4 1.6 7 5' },
+    flags: { title: 'Flags', d: 'M6 21V4m0 1h11.5l-2.3 3.5 2.3 3.5H6' },
+    refusals: { title: 'Refusals', d: 'M12 3l7 2.5V11c0 4.5-3 7.9-7 9-4-1.1-7-4.5-7-9V5.5zM9.5 9.5l5 5M14.5 9.5l-5 5' },
+    audit: { title: 'Actions', d: 'M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5' },
+    metrics: { title: 'Metrics', d: 'M4 20h16M7 16v-5M12 16V6M17 16v-8' },
+  };
+
   var nav = el('tabs');
-  for (var i = 0; i < TABS.length; i++) {
-    (function (name) {
-      var b = make('button', null, name);
-      b.id = 'btn-' + name;
-      b.addEventListener('click', function () { show(name); });
-      nav.appendChild(b);
-    })(TABS[i]);
+  for (var gi = 0; gi < GROUPS.length; gi++) {
+    nav.appendChild(make('div', 'nav-label', GROUPS[gi].label));
+    for (var ti = 0; ti < GROUPS[gi].tabs.length; ti++) {
+      (function (name) {
+        var b = make('button', 'nav-item');
+        b.id = 'btn-' + name;
+        b.appendChild(icon(TAB_META[name].d));
+        b.appendChild(make('span', null, TAB_META[name].title));
+        b.addEventListener('click', function () { show(name); closeNav(); });
+        nav.appendChild(b);
+      })(GROUPS[gi].tabs[ti]);
+    }
   }
 
+  el('menu-toggle').addEventListener('click', function () { document.body.classList.toggle('nav-open'); });
+  el('scrim').addEventListener('click', closeNav);
   el('save-token').addEventListener('click', function () { setTok(el('token').value.trim()); el('token').value = ''; refresh(); });
   el('forget-token').addEventListener('click', function () { setTok(''); location.reload(); });
   el('refresh').addEventListener('click', refresh);
@@ -875,40 +1138,82 @@ export function adminSignInHtml(view: SignInView): string {
 <link rel="icon" href="data:,">
 <title>doomcraft — operator sign-in</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: #0b0d10; color: #d7dde5;
-    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  :root {
+    color-scheme: dark;
+    --ground: #131010;
+    --panel: #1E1917;
+    --sunk: #0C0A09;
+    --rule: #463731;
+    --rule-soft: #2E2622;
+    --bone: #DED4C4;
+    --hell: #E0431C;
+    --amber: #E5A02E;
+    --faded: #A29584;
+    --dim: #7C7061;
+    --font-display: "Big Shoulders Display", "Arial Narrow", "Avenir Next Condensed", "Helvetica Neue", system-ui, sans-serif;
+    --font-body: "Barlow", "Helvetica Neue", Arial, system-ui, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
-  main { max-width: 72ch; margin: 0 auto; padding: 40px 16px; }
-  h1 { font-size: 14px; margin: 0 0 6px; letter-spacing: .12em; text-transform: uppercase; color: #9fb0c4; }
-  h2 { font-size: 13px; margin: 22px 0 6px; color: #eef3f8; }
-  p { color: #8ea3ba; max-width: 66ch; }
-  label { display: block; margin: 12px 0 4px; color: #8ea3ba; }
-  input { font: inherit; background: #0f141a; color: #eef3f8; border: 1px solid #2e3844; padding: 6px 8px; border-radius: 3px; width: 32ch; max-width: 100%; }
-  button { font: inherit; background: #1b2129; color: #d7dde5; border: 1px solid #2e3844; padding: 6px 12px; cursor: pointer; border-radius: 3px; margin-top: 14px; }
-  button:hover:enabled { background: #232c37; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--bone); font: 14px/1.5 var(--font-body); }
+  :focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+  main { max-width: 62ch; margin: 0 auto; padding: 48px 16px 40px; }
+  h1 {
+    margin: 0; font-family: var(--font-display); font-weight: 700; font-size: 34px; line-height: 1;
+    letter-spacing: .05em; text-transform: uppercase; color: var(--hell);
+  }
+  .brand-sub {
+    font-family: var(--font-display); font-size: 12px; letter-spacing: .32em;
+    text-transform: uppercase; color: var(--dim); margin: 4px 0 22px;
+  }
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 5px; margin: 0 0 18px; }
+  .card-head {
+    font-family: var(--font-display); font-weight: 700; font-size: 13px; letter-spacing: .2em;
+    text-transform: uppercase; color: var(--amber);
+    padding: 10px 16px; border-bottom: 1px solid var(--rule-soft);
+  }
+  .card-body { padding: 14px 16px 16px; }
+  .lead { color: var(--faded); margin: 0 0 8px; }
+  label { display: block; margin: 12px 0 4px; color: var(--faded); }
+  input {
+    font: 14px/1.4 var(--font-mono); background: var(--sunk); color: var(--bone);
+    border: 1px solid var(--rule); padding: 8px 10px; border-radius: 3px; width: 100%;
+  }
+  button {
+    font: 600 14px/1.3 var(--font-body); background: var(--hell); color: #1A0E0A;
+    border: 1px solid var(--hell); padding: 8px 16px; cursor: pointer; border-radius: 3px; margin-top: 16px;
+    letter-spacing: .02em;
+  }
+  button:hover:enabled { background: #F05A30; }
   button:disabled { opacity: .45; cursor: not-allowed; }
-  code, pre { background: #0f141a; border: 1px solid #1d242c; border-radius: 3px; }
+  code, pre { font-family: var(--font-mono); background: var(--sunk); border: 1px solid var(--rule-soft); border-radius: 3px; }
   code { padding: 1px 5px; }
-  pre { padding: 8px 10px; overflow-x: auto; }
-  .muted { color: #6d7d8f; }
-  .err { color: #ffbcbc; }
-  .warn { border-left: 3px solid #7a5a20; background: #1a1710; color: #e8d5a8; padding: 8px 10px; margin: 16px 0; }
+  pre { padding: 10px 12px; overflow-x: auto; font-size: 12px; }
+  p { max-width: 66ch; }
+  .muted { color: var(--dim); }
+  .err { color: #F0A088; }
+  .warn {
+    border-left: 3px solid var(--amber); background: #201810; color: #E7CB93;
+    padding: 10px 12px; margin: 16px 0; border-radius: 0 3px 3px 0;
+  }
 </style>
 </head>
 <body>
 <main>
-  <h1>doomcraft — operator console</h1>
-  <h2>${headline}</h2>
-  <p>${lead}</p>
-  <label for="su-name">name</label>
-  <input id="su-name" autocomplete="username" spellcheck="false" placeholder="${NAME_MIN}-${NAME_MAX} of a-z 0-9 _ -">
-  <label for="su-pass">passphrase</label>
-  <input id="su-pass" type="password" autocomplete="current-password" spellcheck="false" placeholder="${passHint}">
-  <div><button id="su-go">${action}</button></div>
-  <p id="su-state" class="muted">nothing sent yet</p>
+  <h1>Doomcraft</h1>
+  <div class="brand-sub">operator console</div>
+  <div class="card">
+    <div class="card-head">${headline}</div>
+    <div class="card-body">
+      <p class="lead">${lead}</p>
+      <label for="su-name">name</label>
+      <input id="su-name" autocomplete="username" spellcheck="false" placeholder="${NAME_MIN}-${NAME_MAX} of a-z 0-9 _ -">
+      <label for="su-pass">passphrase</label>
+      <input id="su-pass" type="password" autocomplete="current-password" spellcheck="false" placeholder="${passHint}">
+      <div><button id="su-go">${action}</button></div>
+      <p id="su-state" class="muted">nothing sent yet</p>
+    </div>
+  </div>
   <div class="warn">
     <div>Sessions do not survive a restart. They live in this one process, so a deploy signs everybody
     out and this page comes back. There is no database and no session file: a session on disk is a
