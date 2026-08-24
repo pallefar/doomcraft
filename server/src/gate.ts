@@ -520,11 +520,15 @@ function fnvOf(bytes: Uint8Array): number {
 }
 
 /** sha256 over one line per level, `id:sha256(bytes)`, sorted by id. */
-function levelsDigest(served: readonly { id: string; bytes: Uint8Array }[]): string {
+export function levelsDigest(served: readonly { id: string; bytes: Uint8Array }[]): string {
   const lines = [...served]
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((f) => `${f.id}:${sha256(f.bytes)}`);
   return sha256(Buffer.from(lines.join('\n'), 'utf8'));
+}
+
+export function campaignDigest(m: EpisodesManifest): string {
+  return sha256(Buffer.from(canonicalManifest(m), 'utf8'));
 }
 
 function canonicalManifest(m: EpisodesManifest): string {

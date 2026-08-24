@@ -106,7 +106,7 @@ import {
   redactGuardAudit,
 } from './admin/model.js';
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
-import { BUILTIN_PACKS, levelsPack, packSetHash } from '@doomcraft/shared/packs';
+import { PackInventory, ReleaseService, releaseContentHash } from './packs.js';
 import {
   ROLLOUT_LADDER,
   anonymousFlagBits,
@@ -630,6 +630,48 @@ const levels = (() => {
  * first socket that asks for one and reaped once empty.
  * ------------------------------------------------------------------------ */
 
+/**
+ * What `/api/version` says about the release tier: the live pack set per
+ * pack, what is pending, and what this host cannot satisfy — `unsatisfied`
+ * non-empty is Rule E visible from the outside (the host is refusing a
+ * release and serving the previous one, docs/PACKS.md 8.6).
+ */
+function releaseView(): Record<string, unknown> {
+  const doc = releases.document();
+  const live = releases.live();
+  const pendingRelease = doc.history.find((r) => r.revision === doc.pendingRevision) ?? null;
+  return {
+    release: {
+      revision: live.revision,
+      ordinal: live.ordinal,
+      frozen: doc.frozen,
+      packs: live.packs.map((p) => ({
+        label: p.label, cls: p.digest.length > 0 ? 'data' : 'build',
+        fingerprint: p.fingerprint, digest: p.digest,
+      })),
+      unsatisfied: live.revision === 0 ? [] : inventory.unsatisfied(live),
+      pending: pendingRelease === null ? null : {
+        revision: pendingRelease.revision,
+        ordinal: pendingRelease.ordinal,
+        rolloutBp: pendingRelease.rolloutBp,
+        unsatisfied: inventory.unsatisfied(pendingRelease),
+      },
+    },
+  };
+}
+
+/** The compact before/after an audit row carries; full state lives in releases.json. */
+function releaseSummary(): string {
+  const doc = releases.document();
+  return JSON.stringify({
+    revision: doc.revision,
+    live: doc.liveRevision,
+    pending: doc.pendingRevision,
+    frozen: doc.frozen,
+    states: doc.history.map((r) => `${r.revision}:${r.state}@${r.ordinal}`),
+  });
+}
+
 let draining = false;
 
 /* ------------------------------------------------------------------------ *
@@ -662,19 +704,19 @@ flags.loadJson(process.env.DOOMCRAFT_FLAGS);
  * for — see `RoomOptions.contentVersion`.
  */
 /**
- * The pack set this PROCESS is serving: the three build packs this binary
- * declares plus the levels pack folded from every installed level's own
- * FNV-1a content hash. Two hosts on the same CONTENT_VERSION with different
- * level files on disk is a real operational mistake, and comparing
- * `/api/version` between hosts is the only thing that catches it — the levels
- * pack's fingerprint is what carries that difference now (docs/PACKS.md
- * phase 1; it used to be a bare level-hash fold in `contentHashFor`).
+ * THE PACK TIER (docs/PACKS.md phase 2). The inventory is what is INSTALLED
+ * on this host — versioned pack directories under `DOOMCRAFT_PACKS`, falling
+ * back to `content/` as version 1 so an unconfigured deploy behaves exactly
+ * as before. The release service is which installed versions are LIVE:
+ * durable under `DOOMCRAFT_DATA`, CAS on every mutation, one audit line per
+ * transition in `release.jsonl`. Two hosts on the same CONTENT_VERSION with
+ * different files on disk still differ in `/api/version` — the data packs'
+ * fingerprints carry that difference, per pack and reviewable.
  */
-const installedPacks = [
-  ...BUILTIN_PACKS,
-  levelsPack(levels === null ? [] : levels.all().map((l) => ({ id: l.id, hash: l.contentHash }))),
-];
-const contentHash = packSetHash(installedPacks, CONTENT_VERSION);
+const inventory = new PackInventory({ packsRoot: process.env.DOOMCRAFT_PACKS ?? null });
+const releases = new ReleaseService(dataRoot, inventory, { clock: () => Date.now() });
+/** The fleet-agreement number: the LIVE release's identity, pending excluded. */
+const contentHash = (): number => releaseContentHash(releases.live());
 
 /* `lifecycle` and `router` refer to each other — the gate is inside the room
  * factory, and the drain reads the room table — so both need an explicit type
@@ -715,6 +757,16 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
      * however it was requested), so this pair is the intent, not the verdict.
      */
     const isInvite = key.includes(PRIVATE_KEY_MARK);
+    /*
+     * WHICH RELEASE THIS ROOM RUNS, decided once, here, and pinned. The
+     * instance id is minted with randomBytes — never the room key (~36 fixed
+     * strings under MAX_ROOMS, so a partial rollout would select the same
+     * zero rooms forever) and never options.seed (client-suppliable) — see
+     * docs/PACKS.md 8.1. The resolver is total: a bad document falls back to
+     * the builtin release rather than 503ing every upgrade (8.3).
+     */
+    const roomInstanceId = randomBytes(8).toString('hex');
+    const release = releases.resolveFor(roomInstanceId);
     const room = new Room({
       ...options,
       store,
@@ -728,7 +780,11 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
       // authored Quest level, whose terrain is replaced anyway.
       eagerWorld: options.eagerWorld,
       clock: () => Date.now(),
-      levels,
+      /* The release's OWN levels, version-bound and frozen (8.9): a reload or
+       * a later release must never change what an in-flight Quest room
+       * resolves for its next campaign level. Falls back to the shared
+       * library when the release names no installed levels version. */
+      levels: inventory.viewFor(release) ?? levels,
       name: key,
       plan,
       // Many rooms in one process: a `SELECT` naming a different place must not
@@ -739,8 +795,8 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
        * every new room at once and no in-flight match has its time-to-kill
        * changed underneath it. Flags are resolved server-side, per player, and
        * transmitted in `S2C.SESSION_CONFIG` — the client never decides. */
-      contentVersion: CONTENT_VERSION,
-      contentHash,
+      contentVersion: release.ordinal,
+      contentHash: releaseContentHash(release),
       /*
        * BOTH drains stop new players, and the deploy one has to or it never
        * converges.
@@ -1251,7 +1307,7 @@ async function handleApi(
       deploy: lifecycle.report(),
       uptimeMs: Date.now() - bootMs,
       protocol: 1,
-      version: versionDocument(contentHash),
+      version: versionDocument(contentHash(), releaseView()),
       fleet: fleetStatus(),
     }, cors);
     return true;
@@ -1264,7 +1320,7 @@ async function handleApi(
    * is the failure nobody thinks to look for. See docs/PATCHING.md.
    * --------------------------------------------------------------------- */
   if (path === '/api/version') {
-    sendJson(res, 200, versionDocument(contentHash, { deploy: lifecycle.report() }), cors);
+    sendJson(res, 200, versionDocument(contentHash(), { ...releaseView(), deploy: lifecycle.report() }), cors);
     return true;
   }
 
@@ -1588,7 +1644,7 @@ async function handleApi(
     const gate = admitAdmin(req, path);
     if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
     sendJson(res, 200, {
-      version: versionDocument(contentHash, { deploy: lifecycle.report() }),
+      version: versionDocument(contentHash(), { ...releaseView(), deploy: lifecycle.report() }),
       uptimeMs: Date.now() - bootMs,
       draining: notAdmitting(),
       shutdown: draining,
@@ -1765,6 +1821,103 @@ async function handleApi(
       action: action.id,
       registry: flagRegistryView(flags.registry(), doc),
     }, cors);
+    return true;
+  }
+
+  /* --- THE RELEASE TIER (docs/PACKS.md phase 2) ------------------------- *
+   *
+   * Eight routes, one state machine, and every rule enforced HERE, not in
+   * the panel: one pending release at a time; approve needs a green gate AND
+   * a sentence; every mutation carries ifRevision and a mismatch is a 409
+   * with the current document in the body; rollback is refused with the
+   * exact reason when it would destroy something (schema-touching, a build
+   * pack this binary does not carry, a data pack no longer installed).
+   * Every accepted transition writes one line to release.jsonl (inside the
+   * service) AND one admin audit row (here) — the second copy is what makes
+   * "what changed between Tuesday and the bug report" answerable from the
+   * console's own history screen.
+   * --------------------------------------------------------------------- */
+  if (path === '/api/admin/release' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    sendJson(res, 200, {
+      document: releases.document(),
+      installed: {
+        levels: inventory.levelsVersions(),
+        campaign: inventory.campaignVersions(),
+        packs: inventory.installedPacks().map((p) => ({ label: p.label, fingerprint: p.fingerprint, digest: p.digest })),
+      },
+      live: releaseView().release,
+    }, cors);
+    return true;
+  }
+
+  if (path.startsWith('/api/admin/release') && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = await readBody(req);
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+    const b = (body ?? {}) as Record<string, unknown>;
+    const ifRevision = typeof b.ifRevision === 'number' ? b.ifRevision : -1;
+
+    const sub = path.slice('/api/admin/release'.length);
+    const before = releaseSummary();
+    let result: import('./packs.js').ReleaseResult;
+    let verb: string;
+    switch (sub) {
+      case '':
+        verb = 'release.draft';
+        result = await releases.createDraft(ifRevision);
+        break;
+      case '/gate':
+        verb = 'release.gate';
+        result = await releases.gateDraft(ifRevision);
+        break;
+      case '/approve':
+        verb = 'release.approve';
+        result = await releases.approve(ifRevision, typeof b.note === 'string' ? b.note : '');
+        break;
+      case '/stage':
+        verb = 'release.stage';
+        result = await releases.stage(ifRevision, typeof b.bp === 'number' ? b.bp : Number.NaN, b.allowCustomRollout === true);
+        break;
+      case '/promote':
+        verb = 'release.promote';
+        result = await releases.promote(ifRevision);
+        break;
+      case '/rollback':
+        verb = 'release.rollback';
+        result = await releases.rollback(ifRevision);
+        break;
+      case '/freeze':
+        verb = b.frozen === true ? 'release.freeze' : 'release.unfreeze';
+        result = await releases.setFrozen(ifRevision, b.frozen === true);
+        break;
+      default:
+        sendJson(res, 404, { error: 'no such release action', action: sub }, cors);
+        return true;
+    }
+
+    /* A refused mutation IS an admin action and gets a row — a 409 that
+     * leaves no trace is how two tabs discover afterwards that they were
+     * both editing (same rule as the flags route). */
+    await auditLog.record({
+      ms: Date.now(), actor: who.actor, verb,
+      subject: result.ok
+        ? `revision ${result.release?.revision ?? result.doc.liveRevision}`
+        : `refused at document ${result.doc.revision}`,
+      reason: who.reason,
+      before, after: releaseSummary(),
+      outcome: result.ok ? 'applied' : 'refused', requestId: newRequestId(),
+    });
+
+    if (!result.ok) {
+      sendJson(res, result.status, { error: result.error, document: result.doc }, cors);
+      return true;
+    }
+    sendJson(res, 200, { document: result.doc, release: result.release ?? null }, cors);
     return true;
   }
 

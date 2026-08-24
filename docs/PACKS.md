@@ -759,6 +759,24 @@ Then `tools/release-verify.mjs`, wired to `npm run release:verify`, running `pac
 
 ### Phase 2 ⚑ — the server reads a release. **1.5 weeks.**
 
+> **STATUS: DONE**, second session commit. `server/src/packs.ts`: `PackInventory` (versioned
+> dirs under `DOOMCRAFT_PACKS/<key>/<version>/`, `content/` fallback as version 1, at most two
+> loaded levels versions, frozen version-bound views per 8.9) and `ReleaseService` (durable
+> tmp+rename document, CAS with 409-carrying-document, `release.jsonl` line per transition,
+> the full §5 state machine with every server-enforced rule). The factory mints
+> `randomBytes(8)` instance ids and resolves per room; `/api/version` reports the live pack
+> set, the pending release, and `unsatisfied` (Rule E visible from outside). Eight admin
+> routes under `/api/admin/release*`, each audited, proven over HTTP against the real
+> binary. Deviations, honest: `runGate` recomputes the levels digest from a FRESH disk scan
+> (a cached record would hold the pre-edit truth 8.12 exists to catch); the §4 `packs.unique`
+> / `levels.*` checks run against the release's own version directory; the D6 history cap
+> trims the rollback CHAIN from its deepest ancestor and re-bases the horizon onto revision
+> 0 — the first implementation kept every previous live forever, dead-ended at 32 and
+> evicted the just-created draft (caught by the 36-promote test); `stage` refuses the
+> decorative intermediate rungs without `allowCustomRollout`, same rule as the flags route.
+> `MAX_PACK_INPUTS`/`MAX_PACK_INPUT_BYTES`/`MAX_ORDINAL` are now enforced in the gate and
+> the service (`ordinal.monotonic` included) — the phase-1 audit's pre-commitment, closed.
+
 `server/src/packs.ts`: `PackInventory` (scans `DOOMCRAFT_PACKS/<key>/<version>/`, falling back to `content/` as version 1 so an unconfigured deploy behaves exactly as today; holds **two** installed versions — live and previous, which is the rollback requirement and half the code of four); `ReleaseService` (durable via `JsonFileStore`, CAS on `revision`, `release.jsonl` audit); `runGate`. Version-keyed `LevelLibrary` with `viewFor(release)` (8.9). Per-room resolution in the factory (`server/src/index.ts:551`) with the `randomBytes` instance id. Per-pack `/api/version` including `unsatisfied`. The seven admin routes. `adminAuthorised` hardened.
 
 **Honest end state:** a host resolves a release per room, pins it, reports it, refuses one it cannot satisfy, and survives a restart. There is no UI; every mutation is `curl`. **No player sees anything different.**
