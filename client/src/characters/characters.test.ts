@@ -483,3 +483,25 @@ describe('archetype silhouettes', () => {
     }
   });
 });
+
+/* ------------------------------------------------------------------------ *
+ * The characters pack ratchet — docs/PACKS.md phase 1
+ * ------------------------------------------------------------------------ */
+
+describe('the characters pack ratchet', () => {
+  it('fails when a look changes without the characters pack moving', async () => {
+    const { charactersFingerprintInputs, LOOKS } = await import('@doomcraft/shared/characters');
+    const { CHARACTERS_FINGERPRINT } = await import('@doomcraft/shared/packs');
+    const { fingerprint } = await import('@doomcraft/shared/version');
+    // If this fails you changed how the cast looks. Bump
+    // CHARACTERS_PACK_VERSION in shared/src/packs.ts and paste the new
+    // fingerprint there, in the same commit.
+    expect(fingerprint(charactersFingerprintInputs().join('|'))).toBe(CHARACTERS_FINGERPRINT);
+
+    // And the independence half: one edited tint moves THIS fingerprint...
+    const edited = LOOKS.map((l, i) => (i === 0 ? { ...l, tint: [9, 9, 9] as const } : l));
+    expect(fingerprint(charactersFingerprintInputs(edited).join('|'))).not.toBe(CHARACTERS_FINGERPRINT);
+    // ...and no other: weapons and core are untouched by construction, which
+    // version.test.ts asserts from the other side.
+  });
+});

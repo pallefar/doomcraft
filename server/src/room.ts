@@ -57,7 +57,8 @@ import {
   stampedLevelHash as levelStampHash,
   type Level,
 } from '@doomcraft/shared/level';
-import { CONTENT_VERSION, contentHashFor } from '@doomcraft/shared/version';
+import { CONTENT_VERSION } from '@doomcraft/shared/version';
+import { BUILTIN_CONTENT_HASH } from '@doomcraft/shared/packs';
 import { defaultFlagBits, flagOn } from '@doomcraft/shared/flags';
 import { BotDriver, MonsterManager, botSkillFor } from './bots.js';
 import { HordeDirector } from './horde.js';
@@ -386,7 +387,7 @@ export class Room implements NetHost {
     this.levelsResolver = options.levels ?? null;
     this.modeLocked = options.lockMode === true;
     this.contentVersion = options.contentVersion ?? CONTENT_VERSION;
-    this.contentHash = options.contentHash ?? contentHashFor();
+    this.contentHash = options.contentHash ?? BUILTIN_CONTENT_HASH;
     this.admittingFn = options.admitting ?? ((): boolean => true);
     this.flagResolver = options.resolveFlags ?? null;
     this.plan = options.plan ?? defaultPlan({ seed: this.seed });

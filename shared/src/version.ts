@@ -61,6 +61,7 @@ import {
   RF_ALL,
 } from './protocol.ts';
 import { GRAVITY, MATCH_DURATION_MS, SCORE_LIMIT, SPEED_RUN, SPEED_SPRINT, TICK_MS } from './constants.ts';
+import { TERRAIN_VERSION } from './terrain.ts';
 import { WEAPONS } from './weapons.ts';
 
 export { PROTOCOL_VERSION, PROTOCOL_MIN_SUPPORTED };
@@ -89,17 +90,15 @@ export const CONTENT_VERSION = 1;
  */
 export const CONTENT_MIN_SUPPORTED = 1;
 
-/**
- * The content fingerprint that `CONTENT_VERSION` currently stands for.
- *
- * This is the enforcement half of "bump CONTENT_VERSION for any balance
- * change". A human forgets; a hash does not. Change a weapon's damage without
- * touching `CONTENT_VERSION` and `shared/src/version.test.ts` fails with both
- * numbers in the message. Levels are NOT in here — they are files discovered at
- * runtime and each carries its own hash (`shared/src/level.ts`), which is why
- * `contentHashFor()` folds the level set in per room rather than per build.
+/*
+ * The single CONTENT_FINGERPRINT constant is gone: content identity is
+ * per-pack now (docs/PACKS.md phase 1). The declared values live on
+ * `BUILTIN_PACKS` in `shared/src/packs.ts`; the input functions that recompute
+ * them are below, and `npm run release:verify` plus the ratchet tests compare
+ * the two. "Bump CONTENT_VERSION for any balance change" survives unchanged —
+ * what changed is that a weapons edit now moves ONLY the weapons fingerprint,
+ * which is what lets a levels release ship without implicating the gun tables.
  */
-export const CONTENT_FINGERPRINT = 0x3b96e89f;
 
 /* ------------------------------------------------------------------------ *
  * Axis 3 — build id
@@ -324,16 +323,34 @@ export function protocolFingerprint(): number {
 }
 
 /**
- * Every number a room and its players must agree on for a shot to mean the same
- * thing on both sides. Weapon tables first, because that is what a balance
- * patch touches, then the mode constants that decide when a match ends.
+ * What used to be one `contentFingerprint()` is two input lists, split along
+ * the pack boundary (docs/PACKS.md §1): the mode constants that decide when a
+ * match ends are CORE, the weapon tables a balance patch touches are WEAPONS.
+ * Every string is byte-identical to what the joint function produced, plus one
+ * addition: `terrain=` joins core, because the arena generator was in no
+ * fingerprint at all — a voxel-moving change was invisible to every ratchet
+ * (docs/PACKS.md §1.4: the whole maps-as-a-pack intervention is this line).
+ *
+ * The input STRINGS are exported, not just the hash, because they are what
+ * `PackVersion.inputs` stores and what the release console line-diffs: the
+ * reviewable artifact is the diff, never the number.
  */
-export function contentFingerprint(): number {
-  const parts: string[] = [
+export function coreFingerprintInputs(): string[] {
+  return [
     `tick=${TICK_MS}`, `match=${MATCH_DURATION_MS}`, `score=${SCORE_LIMIT}`,
     `g=${GRAVITY}`, `run=${SPEED_RUN}`, `sprint=${SPEED_SPRINT}`,
+    `terrain=${TERRAIN_VERSION}`,
   ];
-  for (const w of WEAPONS) {
+}
+
+/**
+ * The weapons table is a parameter so a test can prove the independence claim
+ * — one changed field moves this fingerprint and no other — without editing
+ * this module. Callers never pass it.
+ */
+export function weaponsFingerprintInputs(weapons: typeof WEAPONS = WEAPONS): string[] {
+  const parts: string[] = [];
+  for (const w of weapons) {
     parts.push(
       `${w.id}:${w.damage}/${w.pellets}/${w.headshotMultiplier}/${w.rpm}`
       + `/${w.magSize}/${w.reserveMax}/${w.reloadMs}`
@@ -341,22 +358,13 @@ export function contentFingerprint(): number {
       + `/${w.spread}/${w.spreadMax}/${w.spreadPerShot}`,
     );
   }
-  return fingerprint(parts.join('|'));
+  return parts;
 }
 
-/**
- * The hash a room stamps into its session config.
- *
- * `CONTENT_VERSION` says "which release of the content this is"; the hash says
- * "and these are the exact tables plus the exact levels this ROOM loaded". Two
- * hosts on the same `CONTENT_VERSION` with different level files on disk is a
- * real operational mistake, and the only thing that catches it is a hash that
- * includes what was actually loaded.
- */
-export function contentHashFor(levelHashes: readonly number[] = []): number {
-  let h = contentFingerprint() ^ Math.imul(CONTENT_VERSION, 0x9e3779b1);
-  for (const lh of levelHashes) {
-    h = Math.imul(h ^ (lh >>> 0), 0x01000193);
-  }
-  return h >>> 0;
+export function coreFingerprint(): number {
+  return fingerprint(coreFingerprintInputs().join('|'));
+}
+
+export function weaponsFingerprint(weapons: typeof WEAPONS = WEAPONS): number {
+  return fingerprint(weaponsFingerprintInputs(weapons).join('|'));
 }

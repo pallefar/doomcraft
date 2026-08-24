@@ -111,9 +111,9 @@ import {
   CONTENT_VERSION,
   UpdateReason,
   checkProtocol,
-  contentHashFor,
 } from '@doomcraft/shared/version';
 import { defaultFlagBits } from '@doomcraft/shared/flags';
+import { BUILTIN_CONTENT_HASH } from '@doomcraft/shared/packs';
 import type { PlayerEntity } from './sim.js';
 import { EditResult, Simulation } from './sim.js';
 import { ServerWorld } from './world.js';
@@ -656,7 +656,7 @@ export class NetHub {
     conn.flagBits = (this.host.resolveFlags?.(conn) ?? defaultFlagBits()) >>> 0;
     encodeSessionConfig(
       w, PROTOCOL_VERSION, PROTOCOL_MIN_SUPPORTED,
-      this.contentVersion(), this.host.contentHash ?? contentHashFor(),
+      this.contentVersion(), this.host.contentHash ?? BUILTIN_CONTENT_HASH,
       conn.flagBits, BUILD_ID,
     );
     conn.send(w.copy());

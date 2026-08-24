@@ -105,7 +105,8 @@ import {
   playerLookup,
   redactGuardAudit,
 } from './admin/model.js';
-import { CONTENT_VERSION, contentHashFor } from '@doomcraft/shared/version';
+import { CONTENT_VERSION } from '@doomcraft/shared/version';
+import { BUILTIN_PACKS, levelsPack, packSetHash } from '@doomcraft/shared/packs';
 import {
   ROLLOUT_LADDER,
   anonymousFlagBits,
@@ -660,19 +661,20 @@ flags.loadJson(process.env.DOOMCRAFT_FLAGS);
  * with, so a room that outlives a deploy keeps serving what its players joined
  * for — see `RoomOptions.contentVersion`.
  */
-const contentHash = contentHashFor(
-  // Every installed level's own FNV-1a content hash, in the library's stable
-  // order. Two hosts on the same CONTENT_VERSION with different level files on
-  // disk is a real operational mistake, and comparing `/api/version` between
-  // hosts is the only thing that catches it.
-  //
-  // That last sentence was false until this commit: this value rode
-  // `SESSION_CONFIG` to players and NEVER reached `/api/version`, which built
-  // its own bare `contentHashFor()`. Every host in the fleet published the same
-  // constant. It is now passed to `versionDocument` at both call sites, and the
-  // parameter is required so it cannot be dropped again silently.
-  levels === null ? [] : levels.all().map((l) => l.contentHash),
-);
+/**
+ * The pack set this PROCESS is serving: the three build packs this binary
+ * declares plus the levels pack folded from every installed level's own
+ * FNV-1a content hash. Two hosts on the same CONTENT_VERSION with different
+ * level files on disk is a real operational mistake, and comparing
+ * `/api/version` between hosts is the only thing that catches it — the levels
+ * pack's fingerprint is what carries that difference now (docs/PACKS.md
+ * phase 1; it used to be a bare level-hash fold in `contentHashFor`).
+ */
+const installedPacks = [
+  ...BUILTIN_PACKS,
+  levelsPack(levels === null ? [] : levels.all().map((l) => ({ id: l.id, hash: l.contentHash }))),
+];
+const contentHash = packSetHash(installedPacks, CONTENT_VERSION);
 
 /* `lifecycle` and `router` refer to each other — the gate is inside the room
  * factory, and the drain reads the room table — so both need an explicit type

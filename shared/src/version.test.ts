@@ -44,20 +44,28 @@ import {
   CLOSE_CODE_BY_REASON,
   CLOSE_PROTOCOL_TOO_NEW,
   CLOSE_PROTOCOL_TOO_OLD,
-  CONTENT_FINGERPRINT,
   CONTENT_MIN_SUPPORTED,
   CONTENT_VERSION,
   PROTOCOL_WINDOW_DAYS,
   UPDATE_REASON_TEXT,
   UpdateReason,
   checkProtocol,
-  contentFingerprint,
-  contentHashFor,
+  coreFingerprint,
+  coreFingerprintInputs,
   isProtocolSupported,
   protocolFingerprint,
   requiresClientReload,
   sanitiseBuildId,
+  weaponsFingerprint,
+  weaponsFingerprintInputs,
 } from './version.ts';
+import {
+  CORE_FINGERPRINT,
+  WEAPONS_FINGERPRINT,
+  levelsPack,
+  packSetHash,
+} from './packs.ts';
+import { WEAPONS } from './weapons.ts';
 
 const hex = (u: Uint8Array): string => [...u].map((b) => b.toString(16).padStart(2, '0')).join('');
 const bytes = (h: string): Uint8Array =>
@@ -146,14 +154,20 @@ describe('the other two axes', () => {
     expect(CONTENT_VERSION).toBeGreaterThanOrEqual(CONTENT_MIN_SUPPORTED);
   });
 
-  it('folds the room\'s own levels into the content hash', () => {
-    const bare = contentHashFor();
-    expect(contentHashFor([])).toBe(bare);
+  it('folds the room\'s own levels into the content hash, via the levels pack', () => {
     // Two hosts on the same CONTENT_VERSION with different level files on disk
     // is a real operational mistake, and only a hash over what was LOADED
-    // catches it.
-    expect(contentHashFor([0x1234])).not.toBe(bare);
-    expect(contentHashFor([0x1234, 0x5678])).not.toBe(contentHashFor([0x5678, 0x1234]));
+    // catches it. The fold used to live in contentHashFor(); it is the levels
+    // pack's fingerprint now, and one changed level hash must still move the
+    // room hash.
+    const a = levelsPack([{ id: 'e1m1', hash: 0x1234 }]);
+    const b = levelsPack([{ id: 'e1m1', hash: 0x1235 }]);
+    expect(a.fingerprint).not.toBe(b.fingerprint);
+    expect(packSetHash([a], CONTENT_VERSION)).not.toBe(packSetHash([b], CONTENT_VERSION));
+    // Directory scan order must NOT move it: the pack sorts by id inside.
+    const two = levelsPack([{ id: 'e1m1', hash: 0x1234 }, { id: 'e1m2', hash: 0x5678 }]);
+    const swapped = levelsPack([{ id: 'e1m2', hash: 0x5678 }, { id: 'e1m1', hash: 0x1234 }]);
+    expect(two.fingerprint).toBe(swapped.fingerprint);
   });
 
   it('has a build id that is safe to put in a header and a packet', () => {
@@ -200,12 +214,42 @@ describe('the protocol ratchet', () => {
   });
 });
 
-describe('the content ratchet', () => {
-  it('fails when a weapon or a mode constant changes without a version bump', () => {
-    // If this fails you changed balance. That is fine and expected — bump
-    // CONTENT_VERSION in shared/src/version.ts and paste the new number here,
-    // in the same commit. The point is that the two move together.
-    expect(contentFingerprint()).toBe(CONTENT_FINGERPRINT);
+describe('the content ratchet, per pack', () => {
+  it('fails when a mode constant or the terrain generator moves without the core pack moving', () => {
+    // If this fails you changed core content. Bump CORE_PACK_VERSION in
+    // shared/src/packs.ts and paste the new fingerprint there, in the same
+    // commit — `npm run release:verify` prints the input diff.
+    expect(coreFingerprint()).toBe(CORE_FINGERPRINT);
+  });
+
+  it('fails when a weapon field changes without the weapons pack moving', () => {
+    expect(weaponsFingerprint()).toBe(WEAPONS_FINGERPRINT);
+  });
+
+  it('moves ONLY the weapons fingerprint when a weapon field changes', () => {
+    // The literal ask behind docs/PACKS.md: "not all upgrades hit the entire
+    // game". A damage edit must move the weapons fingerprint and leave core
+    // and the levels pack exactly where they were — before this split, a
+    // weapons edit and a levels edit were indistinguishable in every ratchet.
+    const edited = WEAPONS.map((w, i) => (i === 0 ? { ...w, damage: w.damage + 1 } : w));
+    expect(weaponsFingerprint(edited)).not.toBe(WEAPONS_FINGERPRINT);
+    expect(coreFingerprint()).toBe(CORE_FINGERPRINT);
+    const lv = levelsPack([{ id: 'e1m1', hash: 0x1234 }]);
+    expect(lv.fingerprint).toBe(levelsPack([{ id: 'e1m1', hash: 0x1234 }]).fingerprint);
+  });
+
+  it('keeps every split input string byte-identical to the joint function it replaced', () => {
+    // The split was mechanical: core is the old head, weapons the old tail,
+    // and the ONE deliberate addition is `terrain=` at the end of core —
+    // the generator was previously in no fingerprint at all.
+    const core = coreFingerprintInputs();
+    expect(core.slice(0, 6)).toEqual([
+      'tick=50', 'match=480000', 'score=30', 'g=28', 'run=9.5', 'sprint=12.6',
+    ]);
+    expect(core[6]).toMatch(/^terrain=\d+$/);
+    for (const line of weaponsFingerprintInputs()) {
+      expect(line).toMatch(/^[a-z0-9_-]+:(-?[\d.]+\/){12}-?[\d.]+$/);
+    }
   });
 });
 

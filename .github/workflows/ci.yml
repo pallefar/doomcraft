@@ -1,0 +1,27 @@
+# DOOMCRAFT CI — the one file docs/PACKS.md 8.14 says did not exist.
+#
+# Three commands, in the order a human would run them, so every ratchet in
+# the repo fires on every push instead of only when someone remembers to
+# type `npx vitest run`. `release:verify` is the release gate: it refuses a
+# moved fingerprint, a broken level, a FLAG_ORDER insert or an undeclared
+# schema bump even when every unit test is green.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc -b --pretty false
+      - run: npx vitest run
+      - run: npm run release:verify
