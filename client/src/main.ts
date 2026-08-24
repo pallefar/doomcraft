@@ -270,6 +270,11 @@ const SHELL_CSS = `
 .dc-menu{padding:calc(106px + var(--safe-t,0px)) 20px calc(106px + var(--safe-b,0px));
   place-items:safe center}
 @media (min-width:901px){ .dc-menu{padding-right:calc(326px + var(--safe-r,0px))} }
+/* The right-only reservation puts the menu ~150px left of the viewport's
+   centerline, which reads as a bug, not a layout. Once the viewport can
+   afford the rail's width on BOTH sides, mirror it so the menu sits on the
+   true center; below that, maximum room still beats symmetry. */
+@media (min-width:1360px){ .dc-menu{padding-left:calc(326px + var(--safe-l,0px))} }
 @media (max-width:900px){
   .dc-menu{padding-top:calc(66px + var(--safe-t,0px));
     padding-bottom:calc(116px + var(--safe-b,0px))}

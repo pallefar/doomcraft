@@ -107,7 +107,7 @@ let styleUsers = 0;
 const CSS = `
 .dcm{--dcm-ink:#e8e6e3;--dcm-dim:#938e89;--dcm-line:rgba(255,255,255,.13);
   --dcm-panel:rgba(10,10,14,.86);--dcm-hell:#e03c1c;
-  display:flex;flex-direction:column;gap:14px;width:min(1040px,94vw);margin:0 auto;
+  display:flex;flex-direction:column;gap:14px;width:min(1040px,100%);margin:0 auto;
   font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:var(--dcm-ink);
   text-align:left}
 .dcm *{box-sizing:border-box}
