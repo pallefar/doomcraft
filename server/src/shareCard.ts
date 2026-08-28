@@ -88,7 +88,7 @@ export function textWidth(text: string, scale: number): number {
  * A tiny RGB canvas
  * ------------------------------------------------------------------------ */
 
-class Raster {
+export class Raster {
   readonly px: Uint8Array;
   constructor(readonly w: number, readonly h: number) {
     this.px = new Uint8Array(w * h * 3);

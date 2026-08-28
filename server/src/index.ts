@@ -87,6 +87,8 @@ import { parseItemRef, type ItemDef, type ItemKind } from '@doomcraft/shared/ite
 import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
+import { compileLevel, parseLevelJson } from '@doomcraft/shared/level';
+import { renderLevelPreview } from './studioPreview.js';
 import {
   FlagService,
   HOST_ID,
@@ -2550,6 +2552,34 @@ async function handleApi(
     if (refuseCrossSiteWrite(req, res, cors)) return true;
     const body = (await readBody(req) ?? {}) as Record<string, unknown>;
     sendJson(res, 200, studio.validateLevelSource(typeof body.source === 'string' ? body.source : ''), cors);
+    return true;
+  }
+
+  /* S2: the in-panel preview — a dry run exactly like /validate (it writes
+   * nothing, no audit row: rendering is reading), answering a top-down slice
+   * PNG of the pasted source so the author sees the layout before saving. */
+  if (path === '/api/admin/studio/level/preview' && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const src = parseLevelJson(typeof body.source === 'string' ? body.source : '');
+    if (src === null) { sendJson(res, 400, { error: 'not a parseable level source' }, cors); return true; }
+    let png: Buffer;
+    try {
+      png = renderLevelPreview(compileLevel(src));
+    } catch (e) {
+      sendJson(res, 400, { error: `compile failed: ${e instanceof Error ? e.message : String(e)}` }, cors);
+      return true;
+    }
+    const headers: Record<string, string> = {
+      'content-type': 'image/png',
+      'content-length': String(png.length),
+      'cache-control': 'private, no-store',
+    };
+    if (cors !== null) headers['access-control-allow-origin'] = cors;
+    res.writeHead(200, headers);
+    res.end(png);
     return true;
   }
 

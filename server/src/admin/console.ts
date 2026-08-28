@@ -361,9 +361,11 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
               <textarea id="studio-items" spellcheck="false" rows="12"></textarea>
             </div>
             <div class="rowline">
+              <button id="studio-items-swatch">render swatches</button>
               <button id="studio-items-save" class="go">save as next items version</button>
               <span class="muted" id="studio-items-state"></span>
             </div>
+            <div id="studio-items-swatches"></div>
           </div>
         </div>
         <div class="card">
@@ -375,10 +377,12 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
             </div>
             <div class="rowline">
               <button id="studio-level-check">validate</button>
+              <button id="studio-level-preview">preview</button>
               <button id="studio-level-save" class="go">save as next levels version</button>
               <span class="muted" id="studio-level-state"></span>
             </div>
             <div class="tscroll mono" id="studio-level-report"></div>
+            <div id="studio-level-map"></div>
           </div>
         </div>
         <div class="card">
@@ -388,9 +392,11 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
               <textarea id="studio-campaign" spellcheck="false" rows="8"></textarea>
             </div>
             <div class="rowline">
+              <button id="studio-campaign-order">order editor</button>
               <button id="studio-campaign-save" class="go">save as next campaign version</button>
               <span class="muted" id="studio-campaign-state"></span>
             </div>
+            <div id="studio-campaign-list"></div>
           </div>
         </div>
         <div class="card">
@@ -1669,6 +1675,119 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   }
   el('studio-draft-weapons').addEventListener('click', function () { draftSave('weapons'); });
   el('studio-draft-characters').addEventListener('click', function () { draftSave('characters'); });
+
+  /* ---- S2: the in-panel preview — a PNG the validator's own compiler drew ---- */
+  el('studio-level-preview').addEventListener('click', function () {
+    var mount = el('studio-level-map');
+    clear(mount);
+    mount.appendChild(make('div', 'muted', 'rendering…'));
+    var opts = { method: 'POST', headers: {}, cache: 'no-store', credentials: 'same-origin' };
+    if (tok()) opts.headers.authorization = 'Bearer ' + tok();
+    opts.headers['content-type'] = 'application/json';
+    opts.body = JSON.stringify({ source: el('studio-level').value });
+    fetch('/api/admin/studio/level/preview', opts).then(function (res) {
+      if (!res.ok) {
+        return res.json().then(function (j) {
+          clear(mount);
+          mount.appendChild(make('div', 'err', j.error || ('refused (' + res.status + ')')));
+        });
+      }
+      return res.blob().then(function (blob) {
+        clear(mount);
+        var img = document.createElement('img');
+        img.alt = 'top-down level preview';
+        img.style.maxWidth = '100%';
+        img.style.imageRendering = 'pixelated';
+        img.style.border = '1px solid #333';
+        img.style.marginTop = '8px';
+        img.src = URL.createObjectURL(blob);
+        mount.appendChild(img);
+      });
+    }).catch(function () {
+      clear(mount);
+      mount.appendChild(make('div', 'err', 'no server answered'));
+    });
+  });
+
+  /* ---- S2: item palette swatches — the tint you typed, as a colour ---- */
+  el('studio-items-swatch').addEventListener('click', function () {
+    var mount = el('studio-items-swatches');
+    clear(mount);
+    var parsed = null;
+    try { parsed = JSON.parse(el('studio-items').value); } catch (e) { parsed = null; }
+    var items = parsed && Array.isArray(parsed.items) ? parsed.items : null;
+    if (items === null) {
+      mount.appendChild(make('div', 'err', 'the editor must hold valid items JSON first'));
+      return;
+    }
+    function css(c) {
+      if (!Array.isArray(c) || c.length !== 3) return null;
+      function ch(v) { return Math.max(0, Math.min(255, Math.round(Number(v) * 255))); }
+      return 'rgb(' + ch(c[0]) + ',' + ch(c[1]) + ',' + ch(c[2]) + ')';
+    }
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i] || {};
+      var row = make('div', 'rowline');
+      var sw = make('span');
+      sw.style.display = 'inline-block';
+      sw.style.width = '16px';
+      sw.style.height = '16px';
+      sw.style.borderRadius = '2px';
+      sw.style.border = '1px solid #444';
+      var tint = css(it.tint);
+      sw.style.background = tint || '#222';
+      var em = css(it.emissive);
+      if (em) sw.style.boxShadow = '0 0 6px 1px ' + em;
+      row.appendChild(sw);
+      row.appendChild(make('span', 'mono', String(it.id || '?') + ' — ' + String(it.kind || '?') + '/' + String(it.rarity || '?') + (tint ? '' : ' (no tint)')));
+      mount.appendChild(row);
+    }
+  });
+
+  /* ---- S2: campaign ordering — up/down rows that write the JSON back ---- */
+  el('studio-campaign-order').addEventListener('click', function () { renderCampaignOrder(); });
+  function renderCampaignOrder() {
+    var mount = el('studio-campaign-list');
+    clear(mount);
+    var parsed = null;
+    try { parsed = JSON.parse(el('studio-campaign').value); } catch (e) { parsed = null; }
+    var eps = parsed && Array.isArray(parsed.episodes) ? parsed.episodes : null;
+    if (eps === null) {
+      mount.appendChild(make('div', 'err', 'the editor must hold valid campaign JSON first'));
+      return;
+    }
+    function writeBack() {
+      el('studio-campaign').value = JSON.stringify(parsed, null, 2);
+      renderCampaignOrder();
+    }
+    for (var e = 0; e < eps.length; e++) {
+      (function (ep) {
+        mount.appendChild(make('div', 'muted', String(ep.id || '?') + ' — ' + String(ep.name || '')));
+        var levels = Array.isArray(ep.levels) ? ep.levels : [];
+        for (var i = 0; i < levels.length; i++) {
+          (function (idx) {
+            var row = make('div', 'rowline');
+            var up = make('button', null, String.fromCharCode(0x2191));
+            var down = make('button', null, String.fromCharCode(0x2193));
+            up.disabled = idx === 0;
+            down.disabled = idx === levels.length - 1;
+            up.addEventListener('click', function () {
+              var t = levels[idx - 1]; levels[idx - 1] = levels[idx]; levels[idx] = t;
+              writeBack();
+            });
+            down.addEventListener('click', function () {
+              var t = levels[idx + 1]; levels[idx + 1] = levels[idx]; levels[idx] = t;
+              writeBack();
+            });
+            row.appendChild(up);
+            row.appendChild(down);
+            row.appendChild(make('span', 'mono', String(idx + 1) + '. ' + String(levels[idx])));
+            mount.appendChild(row);
+          })(i);
+        }
+      })(eps[e]);
+    }
+  }
 
   /* ---- refusals ---- */
   function loadRefusals() {
