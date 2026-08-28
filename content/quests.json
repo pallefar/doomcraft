@@ -1,0 +1,58 @@
+{
+  "$schema": "doomcraft-quests/1",
+  "manifestVersion": 1,
+
+  "//": [
+    "The quests pack: daily and weekly challenge definitions as DATA",
+    "(docs/STUDIO.md S4, docs/ECONOMY.md 'Daily / weekly challenges feeding",
+    "Scrap and drops'). A challenge is a pure stat predicate — never a mode.",
+    "",
+    "Progress banks in sessions whose trust row grants REWARD_CHALLENGE",
+    "(public server matches); payment lands in the first settling session",
+    "that also grants REWARD_SCRAP, once per UTC period per challenge.",
+    "Daily resets at UTC midnight; weekly is the ISO week, Monday start.",
+    "",
+    "The whole set must fit one result submission (8 max), per-def scrap is",
+    "capped at 500 and the manifest total at 2000 — the parser refuses",
+    "anything over, here and in the studio editor alike. `item` names a",
+    "LOCAL id in the items manifest; the release gate cross-checks it."
+  ],
+
+  "challenges": [
+    {
+      "id": "daily.kill-25", "period": "daily", "stat": "kills", "target": 25,
+      "scrap": 40, "name": "Exterminator",
+      "blurb": "Take down 25 enemies or players today."
+    },
+    {
+      "id": "daily.win-1", "period": "daily", "stat": "wins", "target": 1,
+      "scrap": 30, "name": "Take the Day",
+      "blurb": "Win a match today."
+    },
+    {
+      "id": "daily.blocks-40", "period": "daily", "stat": "blocksPlaced", "target": 40,
+      "scrap": 25, "name": "Field Engineer",
+      "blurb": "Place 40 blocks today."
+    },
+    {
+      "id": "daily.damage-2000", "period": "daily", "stat": "damageDealt", "target": 2000,
+      "scrap": 30, "name": "Heavy Ordnance",
+      "blurb": "Deal 2000 damage today."
+    },
+    {
+      "id": "weekly.kills-250", "period": "weekly", "stat": "kills", "target": 250,
+      "scrap": 150, "name": "War of Attrition",
+      "blurb": "Take down 250 enemies or players this week."
+    },
+    {
+      "id": "weekly.wins-10", "period": "weekly", "stat": "wins", "target": 10,
+      "scrap": 150, "name": "Campaign Season",
+      "blurb": "Win 10 matches this week."
+    },
+    {
+      "id": "weekly.streak-8", "period": "weekly", "stat": "bestStreak", "target": 8,
+      "scrap": 100, "item": "title-knee-deep", "name": "Knee-Deep",
+      "blurb": "Hit an 8-kill streak in a single match this week."
+    }
+  ]
+}

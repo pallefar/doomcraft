@@ -90,13 +90,16 @@ describe('the builtin release', () => {
     }
   });
 
-  it('reserves QUESTS with NO PackDef; ITEMS graduated when its producer arrived', () => {
+  it('QUESTS and ITEMS both graduated when their producers arrived', () => {
     // A green check on a pack kind with no content is exactly the green test
-    // that cannot fail (docs/PACKS.md §1.3). QUESTS still has no producer, so
-    // it stays a bare number; ITEMS gained one (shared/src/items.ts +
-    // content/items.json) and is a data pack now.
+    // that cannot fail (docs/PACKS.md §1.3) — which is why QUESTS stayed a
+    // bare number until the S4 challenge engine consumed it. ITEMS graduated
+    // with shared/src/items.ts + content/items.json; QUESTS with
+    // shared/src/challenges.ts + content/quests.json. Both keep their burned
+    // enum numbers — packSetHash folds on them.
     expect(PackKind.QUESTS).toBe(5);
-    expect(PACKS[PackKind.QUESTS]).toBeUndefined();
+    expect(PACKS[PackKind.QUESTS]?.cls).toBe('data');
+    expect((PACKS[PackKind.QUESTS]?.blastRadius ?? '')).toContain('profile');
     expect(PackKind.ITEMS).toBe(6);
     expect(PACKS[PackKind.ITEMS]?.cls).toBe('data');
     expect((PACKS[PackKind.ITEMS]?.blastRadius ?? '')).toContain('dormant');

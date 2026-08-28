@@ -31,7 +31,7 @@ export enum PackKind {
   LEVELS = 2,
   CAMPAIGN = 3,
   CHARACTERS = 4,
-  /** RESERVED. No producer, no PackDef, no gate check. Do not add one to make a test pass. */
+  /** Producer: shared/src/challenges.ts + content/quests.json — the S4 challenge engine. */
   QUESTS = 5,
   /** Producer: shared/src/items.ts + content/items.json. Ownership rule: docs/PACKS.md §7. */
   ITEMS = 6,
@@ -75,6 +75,12 @@ export const PACKS: Readonly<Partial<Record<PackKind, PackDef>>> = Object.freeze
     kind: PackKind.CHARACTERS, key: 'characters', cls: 'build',
     blastRadius: 'How enemies look. Cosmetic and client-side: the server sends an EntityType byte '
       + 'and never reads this pack.',
+  },
+  [PackKind.QUESTS]: {
+    kind: PackKind.QUESTS, key: 'quests', cls: 'data',
+    blastRadius: 'Which daily/weekly challenges exist and what they pay. Progress and paid '
+      + 'receipts live on the profile, so a re-cut mid-period deletes nobody\'s Scrap — a '
+      + 'removed def simply stops accruing and paying from the next settlement.',
   },
   [PackKind.ITEMS]: {
     kind: PackKind.ITEMS, key: 'items', cls: 'data',
@@ -450,6 +456,24 @@ export function itemsPack(inputs: readonly string[], version = 1): PackVersion {
     inputs: Object.freeze([...inputs]),
     digest: '',
     label: `items@${version}`,
+  });
+}
+
+/**
+ * The quests pack: challenge definitions, from a challenges manifest's
+ * canonical input lines (one per def, id-sorted — shared/src/challenges.ts).
+ * Digest is filled by the server inventory and the verify tool, same as
+ * levels and items.
+ */
+export function questsPack(inputs: readonly string[], version = 1): PackVersion {
+  return Object.freeze({
+    kind: PackKind.QUESTS,
+    key: 'quests',
+    version,
+    fingerprint: fingerprint(inputs.join('|')),
+    inputs: Object.freeze([...inputs]),
+    digest: '',
+    label: `quests@${version}`,
   });
 }
 
