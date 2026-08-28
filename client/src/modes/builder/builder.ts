@@ -370,6 +370,9 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
       showToast(`Slot ${slot + 1}: ${blockName(id)}`);
       saveLayout();
     },
+    onCraft: (recipe) => {
+      showToast(`Crafted ${recipe.outCount}× ${blockName(recipe.out)}`);
+    },
     onClose: () => {
       wantBreak = false;
       wantPlace = false;
@@ -847,7 +850,15 @@ export function createBuilderMode(ctx: ModeContext, options: BuilderOptions = {}
       const prevTap = input.consumeTakenTap(InputAction.PrevWeapon);
 
       if (game.playing) {
-        if (paletteTap) { if (picker.isOpen) picker.close(); else openPalette(); }
+        /* OPEN-ONLY, never toggle. A keyboard B reaches the palette twice:
+         * the direct keydown above opens it, and the same press's pulse
+         * latches `takenTap` (input.ts line ~721: taken ∧ pulse), which
+         * this branch read ONE FRAME LATER as a second tap — so the
+         * desktop palette closed itself 3 ms after it opened, proven by a
+         * MutationObserver on the panel's style. The pad's BLD tap still
+         * opens; closing is Esc, the × or the backdrop, all of which the
+         * panel already owns. */
+        if (paletteTap && !picker.isOpen) openPalette();
         if (!picker.isOpen) {
           if (nextTap) inventory.cycle(1);
           if (prevTap) inventory.cycle(-1);

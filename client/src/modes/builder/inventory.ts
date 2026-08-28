@@ -43,6 +43,7 @@ import {
   minimapColor,
 } from '@shared/blocks';
 import { BLOCK_BREAK_BASE_MS } from '@shared/constants';
+import { CRAFT_RECIPES, craftableCount, recipeLine, type CraftRecipe } from '@shared/crafting';
 
 /* ------------------------------------------------------------------------ *
  * Palette model
@@ -326,6 +327,25 @@ export class Inventory {
     this.stock[blockId] = next;
     this.version++;
     return next;
+  }
+
+  /**
+   * Run one recipe against the stock: all inputs taken, the output given,
+   * atomically — a recipe either fully applies or does nothing. False in
+   * creative (infinite everything makes crafting meaningless, and the bench
+   * does not render there) and false when any input is short. The STACK_MAX
+   * clamp on the output can eat overflow exactly as `give` documents; the
+   * craftable count the UI shows comes from the same `count()` this reads.
+   */
+  craft(recipe: CraftRecipe): boolean {
+    if (this.creative) return false;
+    for (const input of recipe.inputs) {
+      if (this.count(input.block) < input.count) return false;
+    }
+    for (const input of recipe.inputs) this.stock[input.block] -= input.count;
+    this.stock[recipe.out] = Math.min(STACK_MAX, this.stock[recipe.out] + recipe.outCount);
+    this.version++;
+    return true;
   }
 
   /** Survival-build opening hand: enough of the basics to start a structure. */
@@ -636,6 +656,8 @@ export interface BlockPickerOptions {
   inventory: Inventory;
   /** Called after a block is assigned to a slot. */
   onAssign?(slot: number, blockId: number): void;
+  /** Called after a recipe ran — the feed line and the save both hang here. */
+  onCraft?(recipe: CraftRecipe): void;
   onClose?(): void;
 }
 
@@ -656,6 +678,9 @@ export class BlockPicker {
   private category: BlockCategory = BlockCategory.ALL;
   private cursor = 0;
   private open = false;
+  /** True while the grid shows the survival crafting bench, not blocks. */
+  private craftMode = false;
+  private craftButton: HTMLButtonElement | null = null;
   private readonly onKey: (e: KeyboardEvent) => void;
 
   constructor(options: BlockPickerOptions) {
@@ -701,6 +726,16 @@ export class BlockPicker {
       cats.appendChild(b);
       this.catButtons.push(b);
     }
+    /* The crafting bench rides the palette's own chrome: one more chip that
+     * swaps the grid for the recipe table. Survival only — creative has
+     * infinite everything, so `refresh()` hides the chip there. */
+    const craftBtn = document.createElement('button');
+    craftBtn.className = 'dcb-cat dcb-craft';
+    craftBtn.type = 'button';
+    craftBtn.textContent = 'Craft';
+    craftBtn.addEventListener('click', () => { this.showCraft(); });
+    cats.appendChild(craftBtn);
+    this.craftButton = craftBtn;
 
     this.grid = document.createElement('div');
     this.grid.className = 'dcb-grid';
@@ -747,14 +782,31 @@ export class BlockPicker {
 
   setCategory(c: BlockCategory): void {
     this.category = c;
+    this.craftMode = false;
     this.cursor = 0;
     for (let i = 0; i < this.catButtons.length; i++) this.catButtons[i].classList.toggle('on', i === c);
+    this.craftButton?.classList.remove('on');
+    this.refresh();
+  }
+
+  /** Swap the grid for the survival crafting bench. */
+  showCraft(): void {
+    if (this.inv.creative) return;
+    this.craftMode = true;
+    this.cursor = 0;
+    for (const b of this.catButtons) b.classList.remove('on');
+    this.craftButton?.classList.add('on');
     this.refresh();
   }
 
   /** Rebuild the grid. Cold path: only on open, search, category or assignment. */
   refresh(): void {
     if (!this.open) return;
+    if (this.craftButton !== null) {
+      this.craftButton.style.display = this.inv.creative ? 'none' : '';
+      if (this.inv.creative && this.craftMode) { this.craftMode = false; }
+    }
+    if (this.craftMode) { this.refreshCraft(); return; }
     searchPalette(this.search.value, this.category, this.filtered);
     this.grid.textContent = '';
     if (this.filtered.length === 0) {
@@ -796,6 +848,45 @@ export class BlockPicker {
     this.footer.append(slot, hint);
   }
 
+  /** The bench: one card per recipe, output icon, the line, and how many run. */
+  private refreshCraft(): void {
+    this.grid.textContent = '';
+    const stockOf = (b: number): number => this.inv.count(b);
+    for (let i = 0; i < CRAFT_RECIPES.length; i++) {
+      const recipe = CRAFT_RECIPES[i];
+      const runs = craftableCount(recipe, stockOf);
+      const cell = document.createElement('button');
+      cell.className = 'dcb-item';
+      cell.type = 'button';
+      cell.setAttribute('role', 'option');
+      cell.classList.toggle('on', i === this.cursor);
+      if (runs === 0) cell.classList.add('out');
+      cell.title = recipeLine(recipe, blockName);
+      cell.insertAdjacentHTML('beforeend', blockIconSvg(recipe.out, 40));
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = `${recipe.outCount}× ${blockName(recipe.out)}`;
+      const hd = document.createElement('span');
+      hd.className = 'hd';
+      hd.textContent = recipe.inputs.map((inp) => `${inp.count} ${blockName(inp.block)}`).join(' + ');
+      const ct = document.createElement('span');
+      ct.className = 'hd';
+      ct.textContent = runs === 0 ? 'missing materials' : `craft up to ${runs}`;
+      cell.append(nm, hd, ct);
+      cell.addEventListener('click', () => { this.cursor = i; this.craft(recipe); });
+      this.grid.appendChild(cell);
+    }
+    this.footer.innerHTML = '';
+    const hint = document.createElement('span');
+    hint.innerHTML = 'Mined blocks are your materials — <b>click</b> a recipe to craft it once · <b>Esc</b> close';
+    this.footer.append(hint);
+  }
+
+  private craft(recipe: CraftRecipe): void {
+    if (this.inv.craft(recipe)) this.opts.onCraft?.(recipe);
+    this.refresh();
+  }
+
   private assign(blockId: number): void {
     const slot = this.inv.selected;
     this.inv.assign(slot, blockId);
@@ -804,8 +895,8 @@ export class BlockPicker {
   }
 
   private moveCursor(delta: number): void {
-    if (this.filtered.length === 0) return;
-    const n = this.filtered.length;
+    const n = this.craftMode ? CRAFT_RECIPES.length : this.filtered.length;
+    if (n === 0) return;
     this.cursor = ((this.cursor + delta) % n + n) % n;
     const cells = this.grid.querySelectorAll('.dcb-item');
     for (let i = 0; i < cells.length; i++) cells[i].classList.toggle('on', i === this.cursor);
@@ -826,6 +917,11 @@ export class BlockPicker {
     if (e.key === 'Escape') { e.preventDefault(); this.close(); return; }
     if (e.key === 'Enter') {
       e.preventDefault();
+      if (this.craftMode) {
+        const recipe = CRAFT_RECIPES[this.cursor];
+        if (recipe !== undefined) this.craft(recipe);
+        return;
+      }
       const pick = this.filtered[this.cursor];
       if (pick !== undefined) this.assign(pick.id);
       return;
