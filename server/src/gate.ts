@@ -29,11 +29,17 @@ import {
   validateLevel,
   type Level,
 } from '@doomcraft/shared/level';
-import { parseItemsManifest, itemsFingerprintInputs } from '@doomcraft/shared/items';
+import { parseItemsManifest, itemsFingerprintInputs, type ItemsManifest } from '@doomcraft/shared/items';
+import {
+  challengesFingerprintInputs,
+  parseChallengesManifest,
+  type ChallengesManifest,
+} from '@doomcraft/shared/challenges';
 import { sanitiseContentId } from '@doomcraft/shared/modes';
 import {
   BUILTIN_FLAG_ORDER,
   itemsPack,
+  questsPack,
   BUILTIN_PACKS,
   BUILTIN_PROTOCOL_FINGERPRINT,
   PackKind,
@@ -59,6 +65,7 @@ const here = fileURLToPath(import.meta.url);
 const repoRoot = resolve(here, '..', '..', '..');
 export const DEFAULT_EPISODES_FILE = join(repoRoot, 'content', 'episodes.json');
 export const DEFAULT_ITEMS_FILE = join(repoRoot, 'content', 'items.json');
+export const DEFAULT_QUESTS_FILE = join(repoRoot, 'content', 'quests.json');
 
 /**
  * The schema versions this release was authored against. When either moves,
@@ -328,6 +335,39 @@ export function checkItemsValidate(text: string | null): GateCheck {
 }
 
 /**
+ * `quests.validate` — the challenges manifest parses and every refusal the
+ * parser can make is surfaced verbatim. Input that makes it fail: a def over
+ * the scrap cap, a duplicate id, a period the id contradicts.
+ */
+export function checkQuestsValidate(text: string | null): GateCheck {
+  if (text === null) return { id: 'quests.validate', ok: true, detail: 'no quests manifest installed — nothing to check' };
+  const parsed = parseChallengesManifest(text);
+  if (parsed.manifest !== null) return ok('quests.validate');
+  return fail('quests.validate', parsed.errors.join('; '));
+}
+
+/**
+ * `quests.refs` — every item a challenge pays exists in the items manifest
+ * it ships beside. The settlement formats the full `items@<v>:<id>` ref at
+ * grant time from the room's pinned items version, so a dangling local id
+ * would mint dormant-from-birth rewards; a PUBLISH refuses it. Input that
+ * makes it fail: rename an item and forget the quests manifest.
+ */
+export function checkQuestsRefs(
+  manifest: ChallengesManifest | null, items: ItemsManifest | null,
+): GateCheck {
+  if (manifest === null) return ok('quests.refs');
+  const itemIds = new Set((items?.items ?? []).map((i) => i.id));
+  const bad: string[] = [];
+  for (const c of manifest.challenges) {
+    if (c.item !== null && !itemIds.has(c.item)) {
+      bad.push(`${c.id} pays "${c.item}", which is not in the items manifest`);
+    }
+  }
+  return bad.length === 0 ? ok('quests.refs') : fail('quests.refs', bad.join('; '));
+}
+
+/**
  * `campaign.refs` — the manifest names only levels that exist, and no two
  * episodes share an id. The RUNTIME skips a dangling id so a work-in-progress
  * entry never breaks the campaign; a PUBLISH refuses it, same asymmetry as
@@ -419,6 +459,7 @@ export interface VerifyOptions {
   levelsDir?: string;
   episodesFile?: string;
   itemsFile?: string;
+  questsFile?: string;
   declaredPacks?: readonly PackVersion[];
   declaredProtocol?: number;
   declaredFlagOrder?: readonly string[];
@@ -455,6 +496,10 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
   const manifest = manifestText.length > 0 ? parseEpisodesManifest(manifestText) : null;
   const itemsFile = options.itemsFile ?? DEFAULT_ITEMS_FILE;
   const itemsText = existsSync(itemsFile) ? readFileSync(itemsFile, 'utf8') : null;
+  const parsedItems = itemsText === null ? null : parseItemsManifest(itemsText).manifest;
+  const questsFile = options.questsFile ?? DEFAULT_QUESTS_FILE;
+  const questsText = existsSync(questsFile) ? readFileSync(questsFile, 'utf8') : null;
+  const parsedQuests = questsText === null ? null : parseChallengesManifest(questsText).manifest;
 
   const checks: GateCheck[] = [
     ...checkPacksDeclared(declared),
@@ -464,6 +509,8 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
     checkLevelsCanonical(files),
     checkCampaignRefs(manifest, installedIds),
     checkItemsValidate(itemsText),
+    checkQuestsValidate(questsText),
+    checkQuestsRefs(parsedQuests, parsedItems),
     checkProtocolStable(options.declaredProtocol),
     checkFlagsOrder(FLAG_ORDER, options.declaredFlagOrder),
   ];
@@ -499,13 +546,15 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
     const cp = campaignPack(manifest);
     packs.push({ ...cp, digest: sha256(Buffer.from(canonicalManifest(manifest), 'utf8')) });
   }
-  if (itemsText !== null) {
-    const parsedItems = parseItemsManifest(itemsText);
-    if (parsedItems.manifest !== null) {
-      const inputs = itemsFingerprintInputs(parsedItems.manifest);
-      const ip = itemsPack(inputs);
-      packs.push({ ...ip, digest: sha256(Buffer.from(inputs.join('\n'), 'utf8')) });
-    }
+  if (parsedItems !== null) {
+    const inputs = itemsFingerprintInputs(parsedItems);
+    const ip = itemsPack(inputs);
+    packs.push({ ...ip, digest: sha256(Buffer.from(inputs.join('\n'), 'utf8')) });
+  }
+  if (parsedQuests !== null) {
+    const inputs = challengesFingerprintInputs(parsedQuests);
+    const qp = questsPack(inputs);
+    packs.push({ ...qp, digest: sha256(Buffer.from(inputs.join('\n'), 'utf8')) });
   }
 
   const diff = diffAgainstDeclared(packs, declared);

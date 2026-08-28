@@ -2889,6 +2889,8 @@ async function handleApi(
       installed: {
         levels: inventory.levelsVersions(),
         campaign: inventory.campaignVersions(),
+        items: inventory.itemsVersions(),
+        quests: inventory.questsVersions(),
         packs: inventory.installedPacks().map((p) => ({ label: p.label, fingerprint: p.fingerprint, digest: p.digest })),
         detail: inventory.summary(),
       },
@@ -2920,6 +2922,7 @@ async function handleApi(
           levels: typeof b.levels === 'number' ? b.levels : undefined,
           campaign: typeof b.campaign === 'number' ? b.campaign : undefined,
           items: typeof b.items === 'number' ? b.items : undefined,
+          quests: typeof b.quests === 'number' ? b.quests : undefined,
           note: typeof b.note === 'string' ? b.note : undefined,
         });
         break;

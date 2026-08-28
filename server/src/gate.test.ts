@@ -16,6 +16,8 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 import { compileLevel, parseLevelJson, validateLevel, type Level } from '@doomcraft/shared/level';
 import { BUILTIN_FLAG_ORDER, BUILTIN_PACKS, PackKind, type PackVersion } from '@doomcraft/shared/packs';
+import { parseChallengesManifest } from '@doomcraft/shared/challenges';
+import { parseItemsManifest } from '@doomcraft/shared/items';
 
 import {
   DECLARED_PERSIST_VERSION,
@@ -26,6 +28,8 @@ import {
   checkLevelsValidate,
   checkPacksDeclared,
   checkProtocolStable,
+  checkQuestsRefs,
+  checkQuestsValidate,
   checkSavesSchema,
   parseEpisodesManifest,
   runReleaseVerify,
@@ -237,6 +241,44 @@ describe('saves.schema', () => {
 });
 
 /* ------------------------------------------------------------------------ *
+ * The quests checks — refusals first, per the file header
+ * ------------------------------------------------------------------------ */
+
+describe('quests.validate and quests.refs can refuse', () => {
+  const questDef = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'daily.kill-5', period: 'daily', stat: 'kills', target: 5, scrap: 10,
+    name: 'Five', blurb: 'Take down five.', ...over,
+  });
+
+  it('quests.validate surfaces the parser refusal verbatim — the scrap cap is a money bound', () => {
+    const c = checkQuestsValidate(JSON.stringify({ challenges: [questDef({ scrap: 9999 })] }));
+    expect(c.ok).toBe(false);
+    expect(c.detail).toContain('MAX_CHALLENGE_SCRAP');
+    expect(checkQuestsValidate(null).ok).toBe(true); // no manifest — nothing to check
+    expect(checkQuestsValidate(JSON.stringify({ challenges: [questDef()] })).ok).toBe(true);
+  });
+
+  it('quests.refs refuses an item id the paired items manifest does not carry', () => {
+    const quests = parseChallengesManifest(JSON.stringify({
+      challenges: [questDef({ item: 'skin-ghost' })],
+    })).manifest;
+    const items = parseItemsManifest(JSON.stringify({
+      items: [{ id: 'skin-a', kind: 'skin', name: 'A', rarity: 'common' }],
+    })).manifest;
+    const bad = checkQuestsRefs(quests, items);
+    expect(bad.ok).toBe(false);
+    expect(bad.detail).toContain('skin-ghost');
+    // No items manifest at all: an item-paying def dangles just the same.
+    expect(checkQuestsRefs(quests, null).ok).toBe(false);
+    // And the honest pass: the id exists.
+    const good = parseChallengesManifest(JSON.stringify({
+      challenges: [questDef({ item: 'skin-a' })],
+    })).manifest;
+    expect(checkQuestsRefs(good, items).ok).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
  * The full run
  * ------------------------------------------------------------------------ */
 
@@ -249,13 +291,15 @@ describe('runReleaseVerify over the shipped tree', () => {
     for (const required of [
       'packs.declared.core', 'packs.declared.weapons', 'packs.declared.characters',
       'packs.installed', 'packs.unique', 'levels.validate', 'levels.canonical',
-      'campaign.refs', 'protocol.stable', 'flags.order', 'saves.schema', 'gate.nonempty',
+      'campaign.refs', 'quests.validate', 'quests.refs',
+      'protocol.stable', 'flags.order', 'saves.schema', 'gate.nonempty',
     ]) expect(ids).toContain(required);
-    // The pack set is the three build packs plus the two data packs, digests on.
+    // The pack set is the three build packs plus the four data packs, digests on.
     expect(packs.map((p) => p.key).sort())
-      .toEqual(['campaign', 'characters', 'core', 'items', 'levels', 'weapons']);
+      .toEqual(['campaign', 'characters', 'core', 'items', 'levels', 'quests', 'weapons']);
     expect(packs.find((p) => p.key === 'levels')?.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(packs.find((p) => p.key === 'campaign')?.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(packs.find((p) => p.key === 'quests')?.digest).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('one changed byte in one level file moves the levels pack fingerprint', () => {
@@ -316,9 +360,12 @@ describe('the gate hashes the SAME bytes the loader serves', () => {
 
 describe('packs.declared refuses what it cannot verify', () => {
   it('refuses a declared pack of a kind this binary has no inputs for', () => {
+    // A SYNTHETIC kind: every real PackKind has a producer now (QUESTS was
+    // the fixture here until S4 graduated it), so the premise 'a kind this
+    // binary cannot verify' needs a number the enum never minted.
     const bogus: PackVersion = {
-      kind: PackKind.QUESTS, key: 'quests', version: 1, fingerprint: 0xdead,
-      inputs: [], digest: '', label: 'quests@1',
+      kind: 99 as PackKind, key: 'mystery', version: 1, fingerprint: 0xdead,
+      inputs: [], digest: '', label: 'mystery@1',
     };
     const checks = checkPacksDeclared([...BUILTIN_PACKS, bogus]);
     const bad = checks.filter((c) => !c.ok);

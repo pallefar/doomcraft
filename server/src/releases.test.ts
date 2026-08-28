@@ -85,7 +85,7 @@ describe('PackInventory', () => {
     expect(inv.campaignVersions()).toEqual([1]);
     const packs = inv.installedPacks();
     expect(packs.map((p) => p.label).sort())
-      .toEqual(['campaign@1', 'characters@1', 'core@1', 'items@1', 'levels@1', 'weapons@1']);
+      .toEqual(['campaign@1', 'characters@1', 'core@1', 'items@1', 'levels@1', 'quests@1', 'weapons@1']);
     expect(packs.find((p) => p.label === 'levels@1')?.digest).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -130,6 +130,15 @@ describe('PackInventory', () => {
     expect(inv.unsatisfied(release([good]))).toEqual([]);
     expect(inv.unsatisfied(release([ghost]))).toEqual(['levels@9']);
     expect(inv.unsatisfied(release([tampered]))).toEqual(['levels@1']);
+    // The quests branch — the S4 lesson: a data kind with NO branch in
+    // unsatisfied() is silently unsatisfiable forever, so the branch is
+    // proven able to say both yes and no before anything serves it.
+    const quests = inv.questsAt(1)!.pack;
+    const questsGhost = { ...quests, version: 9, label: 'quests@9' };
+    const questsTampered = { ...quests, digest: 'f'.repeat(64) };
+    expect(inv.unsatisfied(release([quests]))).toEqual([]);
+    expect(inv.unsatisfied(release([questsGhost]))).toEqual(['quests@9']);
+    expect(inv.unsatisfied(release([questsTampered]))).toEqual(['quests@1']);
   });
 });
 

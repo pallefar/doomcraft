@@ -40,6 +40,7 @@ import {
   itemsPack,
   levelsPack,
   packSetHash,
+  questsPack,
   releaseAt,
   resolveRelease,
   type GateCheck,
@@ -60,10 +61,16 @@ import {
   parseItemsManifest,
   type ItemsManifest,
 } from '@doomcraft/shared/items';
+import {
+  challengesFingerprintInputs,
+  parseChallengesManifest,
+  type ChallengesManifest,
+} from '@doomcraft/shared/challenges';
 
 import {
   DEFAULT_EPISODES_FILE,
   DEFAULT_ITEMS_FILE,
+  DEFAULT_QUESTS_FILE,
   campaignDigest,
   checkCampaignRefs,
   checkFlagsOrder,
@@ -73,6 +80,8 @@ import {
   checkPacksInstalled,
   checkPacksUnique,
   checkProtocolStable,
+  checkQuestsRefs,
+  checkQuestsValidate,
   checkSavesSchema,
   levelsDigest,
   parseEpisodesManifest,
@@ -96,6 +105,8 @@ export interface PackInventoryOptions {
   episodesFallbackFile?: string;
   /** The version-1 fallback for items. Defaults to `content/items.json`. */
   itemsFallbackFile?: string;
+  /** The version-1 fallback for quests. Defaults to `content/quests.json`. */
+  questsFallbackFile?: string;
   log?: (line: string) => void;
 }
 
@@ -111,6 +122,7 @@ export class PackInventory {
   private readonly levelsFallbackDir: string;
   private readonly episodesFallbackFile: string;
   private readonly itemsFallbackFile: string;
+  private readonly questsFallbackFile: string;
   private readonly log: (line: string) => void;
 
   /**
@@ -126,6 +138,7 @@ export class PackInventory {
     this.levelsFallbackDir = resolve(options.levelsFallbackDir ?? DEFAULT_LEVEL_DIR);
     this.episodesFallbackFile = resolve(options.episodesFallbackFile ?? DEFAULT_EPISODES_FILE);
     this.itemsFallbackFile = resolve(options.itemsFallbackFile ?? DEFAULT_ITEMS_FILE);
+    this.questsFallbackFile = resolve(options.questsFallbackFile ?? DEFAULT_QUESTS_FILE);
     this.log = options.log ?? ((line) => { process.stderr.write(`${line}\n`); });
   }
 
@@ -174,6 +187,43 @@ export class PackInventory {
     if (parsed.manifest === null) return null;
     const inputs = itemsFingerprintInputs(parsed.manifest);
     const base = itemsPack(inputs, version);
+    const digest = createHash('sha256').update(inputs.join('\n'), 'utf8').digest('hex');
+    return { pack: { ...base, digest }, manifest: parsed.manifest };
+  }
+
+  questsFileFor(version: number): string | null {
+    if (this.packsRoot !== null) {
+      const file = join(this.packsRoot, 'quests', String(version), 'quests.json');
+      if (existsSync(file)) return file;
+    }
+    if (version === 1 && existsSync(this.questsFallbackFile)) return this.questsFallbackFile;
+    return null;
+  }
+
+  questsVersions(): number[] {
+    const out = new Set<number>();
+    if (existsSync(this.questsFallbackFile)) out.add(1);
+    if (this.packsRoot !== null) {
+      const root = join(this.packsRoot, 'quests');
+      if (existsSync(root)) {
+        for (const name of readdirSync(root)) {
+          const v = Number(name);
+          if (Number.isInteger(v) && v >= 1 && this.questsFileFor(v) !== null) out.add(v);
+        }
+      }
+    }
+    return [...out].sort((a, b) => a - b);
+  }
+
+  questsAt(version: number): { pack: PackVersion; manifest: ChallengesManifest } | null {
+    const file = this.questsFileFor(version);
+    if (file === null) return null;
+    const parsed = parseChallengesManifest(readFileSync(file, 'utf8'));
+    if (parsed.manifest === null) return null;
+    const inputs = challengesFingerprintInputs(parsed.manifest);
+    const base = questsPack(inputs, version);
+    // The digest is what makes /api/version render this as a DATA pack —
+    // cls is inferred from `digest.length > 0`, same as items.
     const digest = createHash('sha256').update(inputs.join('\n'), 'utf8').digest('hex');
     return { pack: { ...base, digest }, manifest: parsed.manifest };
   }
@@ -295,6 +345,11 @@ export class PackInventory {
       const i = this.itemsAt(iv[iv.length - 1]);
       if (i !== null) out.push(i.pack);
     }
+    const qv = this.questsVersions();
+    if (qv.length > 0) {
+      const q = this.questsAt(qv[qv.length - 1]);
+      if (q !== null) out.push(q.pack);
+    }
     return out;
   }
 
@@ -308,6 +363,7 @@ export class PackInventory {
     levels: { version: number; total: number; playable: number; fingerprint: number; digest: string; refused: { id: string; detail: string }[] }[];
     campaign: { version: number; episodes: number; fingerprint: number; digest: string }[];
     items: { version: number; count: number; fingerprint: number; digest: string }[];
+    quests: { version: number; count: number; fingerprint: number; digest: string }[];
   } {
     const levels = this.levelsVersions().map((version) => {
       const record = this.recordFor(version);
@@ -346,7 +402,16 @@ export class PackInventory {
         digest: i?.pack.digest ?? '',
       };
     });
-    return { levels, campaign, items };
+    const quests = this.questsVersions().map((version) => {
+      const q = this.questsAt(version);
+      return {
+        version,
+        count: q?.manifest.challenges.length ?? 0,
+        fingerprint: q?.pack.fingerprint ?? 0,
+        digest: q?.pack.digest ?? '',
+      };
+    });
+    return { levels, campaign, items, quests };
   }
 
   /**
@@ -399,6 +464,14 @@ export class PackInventory {
         if (installed === null || (p.digest.length > 0 && installed.pack.digest !== p.digest)) out.push(p.label);
         continue;
       }
+      if (p.kind === PackKind.QUESTS) {
+        const installed = this.questsAt(p.version);
+        if (installed === null || (p.digest.length > 0 && installed.pack.digest !== p.digest)) out.push(p.label);
+        continue;
+      }
+      // A data kind with no branch above is PERMANENTLY unsatisfiable —
+      // every release naming it silently Rule-E-falls-back forever. Adding a
+      // pack kind means adding its branch here FIRST (the S4 lesson).
       out.push(p.label);
     }
     return out;
@@ -430,6 +503,7 @@ export interface DraftPicks {
   levels?: number;
   campaign?: number;
   items?: number;
+  quests?: number;
   note?: string;
 }
 
@@ -609,6 +683,7 @@ export class ReleaseService {
         [PackKind.LEVELS, picks.levels, (v) => this.inventory.levelsPackAt(v)],
         [PackKind.CAMPAIGN, picks.campaign, (v) => this.inventory.campaignAt(v)?.pack ?? null],
         [PackKind.ITEMS, picks.items, (v) => this.inventory.itemsAt(v)?.pack ?? null],
+        [PackKind.QUESTS, picks.quests, (v) => this.inventory.questsAt(v)?.pack ?? null],
       ];
       for (const [kind, want, resolve] of pickOf) {
         if (want === undefined) continue;
@@ -872,6 +947,24 @@ export class ReleaseService {
             ? ''
             : `${gone.length} item id(s) from ${baseItems?.label} are absent from ${itemsDecl.label} — every owned copy goes dormant at the next read: ${gone.slice(0, 8).join(', ')}${gone.length > 8 ? '…' : ''}`,
         });
+      }
+    }
+
+    const questsDecl = draft.packs.find((p) => p.kind === PackKind.QUESTS);
+    if (questsDecl !== undefined) {
+      const installed = this.inventory.questsAt(questsDecl.version);
+      if (installed === null) {
+        checks.push({ id: 'packs.installed', ok: false, detail: `${questsDecl.label} is not installed on this host (or its manifest does not parse)` });
+      } else {
+        if (questsDecl.digest.length > 0 && installed.pack.digest !== questsDecl.digest) {
+          checks.push({ id: 'packs.installed', ok: false, detail: `${questsDecl.label}: digest mismatch` });
+        }
+        // Item refs are checked against the ITEMS version THIS DRAFT names,
+        // not the newest installed: the release is the pairing that ships.
+        // (No separate quests.validate here — questsAt returning non-null IS
+        // the parse; a re-parse of the same bytes is a check that cannot fail.)
+        const draftItems = itemsDecl === undefined ? null : this.inventory.itemsAt(itemsDecl.version);
+        checks.push(checkQuestsRefs(installed.manifest, draftItems?.manifest ?? null));
       }
     }
 
