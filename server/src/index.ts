@@ -32,7 +32,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { deflateRawSync } from 'node:zlib';
 
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -78,7 +78,7 @@ import {
   sessionCredential,
 } from './accounts.js';
 import { AccountGraph, JsonGraphBackend, countableProfile } from './accountGraph.js';
-import { mergeDeviceIntoAccount, planMerge } from './merge.js';
+import { mergeDeviceIntoAccount, planMerge, readMergeLog, undoMerge } from './merge.js';
 import { ReferralService } from './referrals.js';
 import { TradeService, type TradeResult } from './trades.js';
 import { CompetitionService } from './competitions.js';
@@ -134,7 +134,7 @@ import {
 } from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
-import { JsonFileStore, MAX_SCRAP_BALANCE, isValidDeviceId, migrateProfile, publicProfile } from './persistence.js';
+import { JsonFileStore, MAX_SCRAP_BALANCE, createProfile, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile } from './persistence.js';
 import type { PersistenceStore, StoredProfile } from './persistence.js';
 
 /* ------------------------------------------------------------------------ *
@@ -2981,6 +2981,46 @@ async function handleApi(
         after = `kicked ${kicked} connection(s)`;
         break;
       }
+      case 'reset-progress': {
+        /* C6.1. The archive is written FIRST and its failure refuses the
+         * reset — a destructive verb without its undo raw material is a
+         * verb support cannot walk back. The name stays (identity, not
+         * progress); settings, bindings, entitlements, moderation and the
+         * account link stay; the scrap zeroing goes through the journal
+         * like every other balance movement. */
+        const entryId = newLedgerId(now);
+        let hadScrap = 0;
+        let archived = false;
+        const updated = await store.update(profileKey, (p) => {
+          try {
+            const dir = join(dataRoot, 'reset');
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(join(dir, `${profileKey}-${entryId}.json`), JSON.stringify(serialiseProfile(p), null, 2), 'utf8');
+            archived = true;
+          } catch { /* refused below */ }
+          if (!archived) return;
+          hadScrap = p.economy.scrap;
+          const name = p.progress.name;
+          const fresh = createProfile(profileKey, now);
+          p.progress = fresh.progress;
+          p.progress.name = name;
+          p.progress.adsRemoved = p.entitlements.adsRemoved;
+          p.stats = fresh.stats;
+          p.economy = fresh.economy;
+          p.inventory = fresh.inventory;
+        });
+        if (!archived) { refused = 'could not archive the profile — nothing was reset'; break; }
+        if (hadScrap > 0) {
+          await journal.append([{
+            id: entryId, ms: now, kind: 'admin.adjust', sourceId: `reset:${entryId}`,
+            playerId: profileKey, currency: 'scrap',
+            delta: -hadScrap, balanceAfter: updated.economy.scrap,
+            actor: `admin:${who.actor}`, reason: who.reason,
+          }]);
+        }
+        after = `progress reset — ${hadScrap} scrap zeroed, archived as reset/${profileKey}-${entryId}.json`;
+        break;
+      }
       default:
         sendJson(res, 404, { error: 'no such player verb' }, cors);
         return true;
@@ -2994,6 +3034,51 @@ async function handleApi(
     });
     if (refused !== '') { sendJson(res, 400, { error: refused }, cors); return true; }
     sendJson(res, 200, { ok: true, result: after }, cors);
+    return true;
+  }
+
+  /* --- C6.1: the §3.6 merge undo ----------------------------------------- *
+   * Money moves and a profile is rewritten, so it confirms like the C6
+   * verbs. The engine (`merge.ts`) owns the idempotency and the crash
+   * order; this route owns the gate, the confirm and the audit row.        */
+  if (path === '/api/admin/merge/undo' && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = await readBody(req);
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+    const b = (body ?? {}) as Record<string, unknown>;
+    const eventId = typeof b.eventId === 'string' ? b.eventId.slice(0, 64) : '';
+    if (eventId === '') { sendJson(res, 400, { error: 'eventId required' }, cors); return true; }
+    const now = Date.now();
+    const pending = requireConfirm(`${who.actor}|merge-undo|${eventId}`, b.confirm, now);
+    if (pending !== null) { sendJson(res, pending.status, pending.body, cors); return true; }
+    const out = await undoMerge({ graph, store, journal, dataRoot }, eventId, `admin:${who.actor}`, who.reason);
+    await auditLog.record({
+      ms: now, actor: who.actor, verb: 'merge.undo',
+      subject: eventId, reason: who.reason,
+      before: '', after: out.ok ? `restored ${out.restoredScrap} scrap, shortfall ${out.shortfall}` : out.error,
+      outcome: out.ok ? 'applied' : 'refused', requestId: newRequestId(),
+    });
+    if (!out.ok) { sendJson(res, out.status, { error: out.error }, cors); return true; }
+    sendJson(res, 200, { ok: true, restoredScrap: out.restoredScrap, shortfall: out.shortfall }, cors);
+    return true;
+  }
+
+  /** The merge history an undo needs an event id FROM — newest first. */
+  if (path === '/api/admin/merges' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    const rows = readMergeLog(dataRoot);
+    const undone = new Set(rows.filter((r) => r.state === 'undone').map((r) => r.id));
+    sendJson(res, 200, {
+      merges: rows.filter((r) => r.state === 'applied').slice(-100).reverse().map((r) => ({
+        eventId: r.id, ms: r.ms,
+        into: r.intoAccountId, from: redactPlayerId(r.fromDeviceId),
+        scrapMoved: r.scrapMoved, undone: undone.has(r.id),
+      })),
+    }, cors);
     return true;
   }
 

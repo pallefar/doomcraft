@@ -179,7 +179,10 @@ export const MISSING_CAPABILITIES: readonly MissingCapability[] = Object.freeze(
   // C6 (2026-08-28) deleted its rows on the way in, as building them
   // requires: ban (profile + account + live kick + ticket refusal), kick,
   // currency adjust (admin.adjust journal rows), entitlement flip and item
-  // revoke are real now — /api/admin/player/*.
+  // revoke are real now — /api/admin/player/*. C6.1 (same day) deleted
+  // 'Undo a merge' (undoMerge over the merged/ archive + the journal pair,
+  // /api/admin/merge/undo) and 'Reset progress' (archive-first, journalled,
+  // /api/admin/player/reset-progress).
   Object.freeze({
     verb: 'Mute / shadowban',
     why: 'The ban is all-or-nothing today: there is no chat to mute and no reward-strip-but-admit '
@@ -188,22 +191,10 @@ export const MISSING_CAPABILITIES: readonly MissingCapability[] = Object.freeze(
     when: 'with the social features that make them meaningful',
   }),
   Object.freeze({
-    verb: 'Undo a merge',
-    why: 'The §3.6 raw material exists — the archived profile under merged/ and the journal pair — '
-      + 'but the reversal route and its support actor do not.',
-    when: 'C6.1 — on top of merge.jsonl and the archive that C5 writes',
-  }),
-  Object.freeze({
     verb: 'Refund a real purchase',
     why: 'The entitlement FLIP is auditable now, but a money-out refund needs the provider that '
       + 'took the money in. No Paddle, no clawback.',
     when: 'C8 — the vendors',
-  }),
-  Object.freeze({
-    verb: 'Reset progress',
-    why: 'Mechanically possible — nothing calls it, and doing it without an audit row and a scope '
-      + 'parameter is how a support action becomes an unexplained data loss.',
-    when: 'C6.1',
   }),
   Object.freeze({
     verb: 'Export a player\'s data (DSAR)',

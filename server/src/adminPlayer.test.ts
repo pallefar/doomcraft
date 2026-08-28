@@ -170,3 +170,33 @@ describe('C6 — the operator verbs', () => {
     expect(wrong.status).toBe(428);   // re-armed, never applied
   });
 });
+
+describe('C6.1 — reset-progress', () => {
+  it('archives first, zeroes progress/stats/economy through the journal, keeps identity', async () => {
+    const before = await fetch(`${origin}/api/admin/player?key=${DEVICE}`, {
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+    }).then(async (r) => (await r.json()) as { profile: { economy: { scrap: number } } });
+    const hadScrap = before.profile.economy.scrap;
+    expect(hadScrap).toBeGreaterThan(0);
+
+    const done = await confirmed('/api/admin/player/reset-progress', {
+      deviceId: DEVICE, actor: 'operator', reason: 'C6.1 verification reset',
+    });
+    expect(done.status).toBe(200);
+    expect(String(done.json.result)).toContain('archived');
+
+    const look = await fetch(`${origin}/api/admin/player?key=${DEVICE}`, {
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+    }).then(async (r) => (await r.json()) as {
+      profile: { progress: { xp: number }; economy: { scrap: number }; stats: { matches: number } };
+      rows: { kind: string; sourceId: string; delta: number }[];
+    });
+    expect(look.profile.progress.xp).toBe(0);
+    expect(look.profile.economy.scrap).toBe(0);
+    expect(look.profile.stats.matches).toBe(0);
+    // The zeroing is a journal row, not a silent field edit.
+    const row = look.rows.find((r) => r.sourceId.startsWith('reset:'));
+    expect(row?.kind).toBe('admin.adjust');
+    expect(row?.delta).toBe(-hadScrap);
+  });
+});

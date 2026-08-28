@@ -1086,10 +1086,12 @@ describe('no admin response carries a full identifier', () => {
     expect(body.reconcile.xp.stored).toBe(0);
     expect(body.reconcile.xp.journal).toBe(0);
     // And it says, with every lookup, what it STILL cannot do — C6 built
-    // ban/kick/currency out of the list, so the remaining honest gaps are
-    // the merge undo, real refunds, and the storage-shaped ones.
-    expect(body.missing.length).toBeGreaterThan(4);
-    expect(body.missing.map((m) => m.verb).join(' ')).toContain('Undo a merge');
+    // ban/kick/currency out of the list and C6.1 built the merge undo and
+    // reset-progress out, so the remaining honest gaps are real refunds
+    // and the storage-shaped ones.
+    expect(body.missing.length).toBeGreaterThan(3);
+    expect(body.missing.map((m) => m.verb).join(' ')).toContain('Refund a real purchase');
+    expect(body.missing.map((m) => m.verb).join(' ')).not.toContain('Undo a merge');
   });
 
   it('refuses a lookup key that is not a device id, in JSON', async () => {

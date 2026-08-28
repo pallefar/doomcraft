@@ -15,7 +15,7 @@ import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 
 import { AccountGraph, MemoryGraphBackend } from './accountGraph.js';
 import { JsonJournal } from './journal.js';
-import { applyMergeFields, budgetRefusal, mergeDeviceIntoAccount, planMerge } from './merge.js';
+import { applyMergeFields, budgetRefusal, mergeDeviceIntoAccount, planMerge, undoMerge } from './merge.js';
 import { MemoryStore, createProfile, utcDay, type StoredProfile } from './persistence.js';
 
 const tempDirs: string[] = [];
@@ -201,5 +201,88 @@ describe('mergeDeviceIntoAccount — over real stores and a real journal', () =>
     expect(plan.xpMoved).toBe(900);
     expect(plan.summary.some((s) => s.includes('journal entry'))).toBe(true);
     expect(plan.notMerged[0]).toContain('stay on the device');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The §3.6 undo — C6.1
+ * ------------------------------------------------------------------------ */
+
+describe('undoMerge', () => {
+  async function mergedRig(): Promise<{
+    root: string; graph: AccountGraph; store: MemoryStore; journal: JsonJournal;
+    accountId: ReturnType<typeof asAccountId>; eventId: string;
+    deps: { graph: AccountGraph; store: MemoryStore; journal: JsonJournal; dataRoot: string; clock: () => number };
+  }> {
+    const root = tempDir();
+    const graph = new AccountGraph(new MemoryGraphBackend(), { clock: () => NOW });
+    const store = new MemoryStore();
+    const journal = new JsonJournal(root, { clock: () => NOW });
+    const made = await graph.signIn({
+      provider: 'pass', secretHash: null, credentialAccount: null,
+      mintAccountId: asAccountId('pass:acct-a'),
+      deviceId: asDeviceId('dev-aaaaaaaa'), deviceHasProfile: true, deviceCountable: true,
+      answer: 'keep',
+    });
+    if (made.kind !== 'account') throw new Error(made.kind);
+    await store.update('dev-aaaaaaaa', (p) => { Object.assign(p, profileA()); });
+    await store.update('dev-bbbbbbbb', (p) => { Object.assign(p, profileB()); });
+    const deps = { graph, store, journal, dataRoot: root, clock: () => NOW };
+    const merged = await mergeDeviceIntoAccount(deps, asAccountId('pass:acct-a'), asDeviceId('dev-bbbbbbbb'), 'player', 'test');
+    if (!merged.ok) throw new Error(merged.error);
+    return { root, graph, store, journal, accountId: asAccountId('pass:acct-a'), eventId: merged.eventId, deps };
+  }
+
+  it('restores B from the archive, claws the money back through the journal, detaches the device', async () => {
+    const { graph, store, eventId, deps } = await mergedRig();
+    const out = await undoMerge(deps, eventId, 'admin:test', 'wrong account');
+    expect(out).toMatchObject({ ok: true, restoredScrap: 40, shortfall: 0 });
+
+    const a = await store.load('dev-aaaaaaaa');
+    const b = await store.load('dev-bbbbbbbb');
+    // A is back to its §3.7 numbers — money, xp, counts, level.
+    expect(a?.economy.scrap).toBe(380);
+    expect(a?.progress.xp).toBe(4200);
+    expect(a?.progress.level).toBe(levelForXp(4200));
+    expect(a?.stats.matches).toBe(62);
+    // B is whole again, and the tombstone marker is gone.
+    expect(b?.economy.scrap).toBe(40);
+    expect(b?.progress.xp).toBe(900);
+    expect(b?._unknown?.mergedInto).toBeUndefined();
+    // The device banks to its own file again.
+    expect(await graph.resolveProfileKey(asDeviceId('dev-bbbbbbbb'))).toBe('dev-bbbbbbbb');
+    // The log carries the undone row; the double undo is refused.
+    const again = await undoMerge(deps, eventId, 'admin:test', 'twice');
+    expect(again).toMatchObject({ ok: false, status: 409 });
+  });
+
+  it('THE CRASH REPLAY: a re-run undo with the journal already written moves nothing twice', async () => {
+    const { root, store, eventId, deps } = await mergedRig();
+    const staleLog = readFileSync(join(root, 'merge.jsonl'), 'utf8');
+    expect((await undoMerge(deps, eventId, 'admin:test', 'undo')).ok).toBe(true);
+    // The crash: the 'undone' row never reached the log, but the journal did.
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(join(root, 'merge.jsonl'), staleLog, 'utf8');
+    expect((await undoMerge(deps, eventId, 'admin:test', 'undo replay')).ok).toBe(true);
+    expect((await store.load('dev-aaaaaaaa'))?.economy.scrap).toBe(380);   // not 340
+    expect((await store.load('dev-bbbbbbbb'))?.economy.scrap).toBe(40);    // not 80
+    expect((await store.load('dev-aaaaaaaa'))?.progress.xp).toBe(4200);    // not 3300
+  });
+
+  it('a spent balance documents the shortfall and still makes B whole', async () => {
+    const { store, eventId, deps } = await mergedRig();
+    await store.update('dev-aaaaaaaa', (p) => { p.economy.scrap = 10; });   // A spent it
+    const out = await undoMerge(deps, eventId, 'admin:test', 'undo');
+    expect(out).toMatchObject({ ok: true, restoredScrap: 40, shortfall: 30 });
+    expect((await store.load('dev-aaaaaaaa'))?.economy.scrap).toBe(0);
+    expect((await store.load('dev-bbbbbbbb'))?.economy.scrap).toBe(40);
+  });
+
+  it('refuses an unknown event id and a gone archive', async () => {
+    const { root, eventId, deps } = await mergedRig();
+    expect((await undoMerge(deps, 'NOSUCHEVENT', 'admin:test', 'x')).ok).toBe(false);
+    rmSync(join(root, 'merged', `dev-bbbbbbbb-${eventId}.json`));
+    const gone = await undoMerge(deps, eventId, 'admin:test', 'x');
+    expect(gone).toMatchObject({ ok: false, status: 410 });
   });
 });

@@ -439,6 +439,24 @@ export class AccountGraph {
     await this.backend.saveAccount(record);
   }
 
+  /**
+   * C6.1: the merge undo's graph half — the absorbed device leaves the
+   * account and banks to its own file again. Same contract as
+   * `absorbDeviceHoldingLock`: called by `merge.ts` INSIDE `withGraphLock`
+   * only, never takes the lock itself. The PRIMARY device can never detach
+   * — it IS the account's storage key.
+   */
+  async detachDeviceHoldingLock(id: AccountId, deviceId: DeviceId): Promise<boolean> {
+    const record = this.accounts.get(id);
+    if (record === undefined) return false;
+    if (String(record.primaryDeviceId) === String(deviceId)) return false;
+    const at = record.devices.indexOf(deviceId);
+    if (at >= 0) record.devices.splice(at, 1);
+    if (this.homeByDevice.get(deviceId) === id) this.homeByDevice.delete(deviceId);
+    await this.backend.saveAccount(record);
+    return true;
+  }
+
   moderate(id: AccountId, state: ModerationState, reason: string, untilMs: number): Promise<void> {
     return this.withGraphLock(async () => {
       const record = this.accounts.get(id);

@@ -567,7 +567,22 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
               <label class="muted">live</label>
               <button id="act-kick">kick this player's connections…</button>
             </div>
+            <div class="rowline">
+              <label class="muted">progress</label>
+              <button id="act-reset" class="danger">reset progress…</button>
+            </div>
             <div class="muted" id="act-state"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">merges — the §3.6 undo</div>
+          <div class="card-body">
+            <div class="note">
+              Applied merges, newest first. Undo restores the absorbed profile from its archive, claws
+              the Scrap back through the journal (a shortfall is documented, never hidden), and the
+              device banks to its own file again.
+            </div>
+            <div class="tscroll" id="player-merges"></div>
           </div>
         </div>
         <div class="card">
@@ -579,6 +594,23 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
             </div>
             <div class="tscroll" id="player-missing"></div>
           </div>
+        </div>
+      </section>
+
+      <section id="tab-referrals">
+        <div class="page-title">Referrals</div>
+        <div class="note">
+          Conversions the fraud heuristics parked — over the day cap, or claimed from the code's own
+          /24. Approve is the release valve: it PAYS both sides through the journal, so it walks the
+          same two-phase confirm as the player verbs. A queue left alone pays nobody.
+        </div>
+        <div class="card">
+          <div class="card-head">status</div>
+          <div class="card-body tscroll" id="ref-status"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">review queue</div>
+          <div class="card-body tscroll" id="ref-queue"></div>
         </div>
       </section>
 
@@ -651,7 +683,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   var MIN_REASON = ${MIN_REASON_CHARS};
   var MIN_ACTOR = ${MIN_ACTOR_CHARS};
   var TOKEN_KEY = 'dc.admin.token';
-  var TABS = ['fleet', 'packs', 'review', 'rhistory', 'studio', 'flags', 'refusals', 'player', 'metrics', 'audit'];
+  var TABS = ['fleet', 'packs', 'review', 'rhistory', 'studio', 'flags', 'refusals', 'player', 'referrals', 'metrics', 'audit'];
 
   /* ---- tiny DOM helpers. Everything below builds nodes; nothing sets
      innerHTML from data, so no value on this page needs escaping. ---- */
@@ -1104,9 +1136,64 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     send();
   }
 
+  /* Any confirm-gated admin ROUTE (referral approve, merge undo): the same
+     dialog and the same server 428 walk as the player verbs, generalised to
+     a path + body. andThen reloads whatever screen armed it. */
+  function armRoute(route, title, subject, patch, lines, andThen) {
+    armed = { route: route, patch: patch, subject: subject, plan: { delayMs: 3000 }, andThen: andThen };
+    var diff = el('c-diff'); var warns = el('c-warnings');
+    clear(diff); clear(warns);
+    el('c-title').textContent = title + ' — ' + subject;
+    for (var i = 0; i < lines.length; i++) diff.appendChild(make('div', 'muted', lines[i]));
+    el('c-subject').value = '';
+    el('c-subject-want').textContent = 'exactly: ' + subject;
+    el('c-reason').value = '';
+    el('c-state').textContent = '';
+    el('c-state').className = 'muted';
+    countdown = 3;
+    if (ticker) clearInterval(ticker);
+    ticker = setInterval(tick, 250);
+    tick();
+    el('confirm').showModal();
+  }
+
+  function fireRoute() {
+    var body = {};
+    for (var k in armed.patch) if (Object.prototype.hasOwnProperty.call(armed.patch, k)) body[k] = armed.patch[k];
+    body.actor = el('c-actor').value.trim();
+    body.reason = el('c-reason').value.trim();
+    var route = armed.route;
+    var andThen = armed.andThen;
+    var state = el('c-state');
+    var send = function () {
+      return api(route, 'POST', body).then(function (r) {
+        if (r.status === 428 && r.body && r.body.confirmToken) {
+          body.confirm = r.body.confirmToken;
+          var wait = Math.max(0, (r.body.notBeforeMs || 0) - Date.now()) + 200;
+          state.textContent = 'server armed — confirming in ' + Math.ceil(wait / 1000) + 's…';
+          return new Promise(function (res2) { setTimeout(res2, wait); }).then(send);
+        }
+        if (r.status === 200) {
+          state.textContent = 'applied';
+          state.className = 'ok';
+          if (andThen) andThen();
+          loadAudit();
+          setTimeout(function () { el('confirm').close(); }, 1200);
+          return;
+        }
+        state.textContent = 'refused: HTTP ' + r.status + ' — ' + (r.body && r.body.error ? r.body.error : r.text.slice(0, 200));
+        state.className = 'err';
+      });
+    };
+    state.textContent = 'writing…';
+    state.className = 'muted';
+    send();
+  }
+
   function fire() {
     if (!armed) return;
     if (armed.player) { firePlayer(); return; }
+    if (armed.route) { fireRoute(); return; }
     if (armed.release) { fireRelease(); return; }
     var body = {};
     for (var k in armed.patch) if (Object.prototype.hasOwnProperty.call(armed.patch, k)) body[k] = armed.patch[k];
@@ -1498,6 +1585,71 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     });
   }
 
+  /* ---- referrals (C6.1: the review queue as a screen) ---- */
+  function loadReferrals() {
+    return api('/api/admin/referrals').then(function (r) {
+      var s = el('ref-status');
+      var q = el('ref-queue');
+      if (r.status !== 200) { fail(s, r); return; }
+      clear(s);
+      s.appendChild(pairs(r.body.status));
+      clear(q);
+      var queue = r.body.queue || [];
+      if (queue.length === 0) {
+        q.appendChild(make('div', 'empty', 'nothing parked — every conversion paid or none converted'));
+        return;
+      }
+      var rows = [];
+      for (var i = 0; i < queue.length; i++) {
+        (function (row) {
+          var b = make('button', 'danger', 'approve — PAYS both sides…');
+          b.addEventListener('click', function () {
+            armRoute('/api/admin/referrals/approve', 'approve referral', row.referred,
+              { referredKey: row.referredKey }, [
+                'Pays the recruiter and the referred player through the journal, idempotent forever.',
+                'Parked because: ' + row.review,
+              ], loadReferrals);
+          });
+          rows.push([new Date(row.claimedMs).toISOString(), row.referred, row.referrer, row.review, b]);
+        })(queue[i]);
+      }
+      q.appendChild(table(['claimed', 'referred', 'recruiter', 'why it parked', ''], rows));
+    });
+  }
+
+  /* ---- merges (C6.1: the §3.6 undo) ---- */
+  function loadMerges() {
+    return api('/api/admin/merges').then(function (r) {
+      var host = el('player-merges');
+      if (r.status !== 200) { fail(host, r); return; }
+      clear(host);
+      var merges = r.body.merges || [];
+      if (merges.length === 0) {
+        host.appendChild(make('div', 'empty', 'no applied merges on this host'));
+        return;
+      }
+      var rows = [];
+      for (var i = 0; i < merges.length; i++) {
+        (function (m) {
+          var act;
+          if (m.undone) act = make('span', 'muted', 'undone');
+          else {
+            act = make('button', 'danger', 'undo…');
+            act.addEventListener('click', function () {
+              armRoute('/api/admin/merge/undo', 'undo merge', m.eventId, { eventId: m.eventId }, [
+                'Restores the absorbed profile from its archive and claws ' + m.scrapMoved
+                  + ' Scrap back through the journal — a shortfall is documented, never hidden.',
+                'The device detaches and banks to its own file again.',
+              ], loadMerges);
+            });
+          }
+          rows.push([new Date(m.ms).toISOString(), m.eventId, m.into, m.from, String(m.scrapMoved), act]);
+        })(merges[i]);
+      }
+      host.appendChild(table(['when', 'event', 'into account', 'from', 'scrap', ''], rows, [4]));
+    });
+  }
+
   /* ---- player ---- */
   function loadPlayer() {
     var key = el('player-key').value.trim();
@@ -1579,8 +1731,10 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     else if (name === 'packs' || name === 'review' || name === 'rhistory') loadRelease();
     else if (name === 'studio') loadStudio();
     else if (name === 'refusals') loadRefusals();
+    else if (name === 'referrals') loadReferrals();
     else if (name === 'audit') loadAudit();
     else loadFleet();
+    if (name === 'player') loadMerges();
   }
 
   function closeNav() { document.body.classList.remove('nav-open'); }
@@ -1601,7 +1755,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
      operator reaches for them. TABS stays the one list the panels and the
      active-state loop are built from; GROUPS only decides order and labels. */
   var GROUPS = [
-    { label: 'Live', tabs: ['fleet', 'player'] },
+    { label: 'Live', tabs: ['fleet', 'player', 'referrals'] },
     { label: 'Releases', tabs: ['packs', 'review', 'rhistory', 'studio', 'flags'] },
     { label: 'Audit', tabs: ['refusals', 'audit'] },
     { label: 'Analytics', tabs: ['metrics'] },
@@ -1615,6 +1769,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     studio: { title: 'Studio', d: 'M4 20l4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10zM13.5 7.5l3 3M4 20l1-4.5' },
     flags: { title: 'Flags', d: 'M6 21V4m0 1h11.5l-2.3 3.5 2.3 3.5H6' },
     refusals: { title: 'Refusals', d: 'M12 3l7 2.5V11c0 4.5-3 7.9-7 9-4-1.1-7-4.5-7-9V5.5zM9.5 9.5l5 5M14.5 9.5l-5 5' },
+    referrals: { title: 'Referrals', d: 'M9 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM3 16c.4-2.6 2.6-4 6-4M17 10a3 3 0 1 0 0-6M15 21l3-3-3-3M21 18h-6' },
     audit: { title: 'Actions', d: 'M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5' },
     metrics: { title: 'Metrics', d: 'M4 20h16M7 16v-5M12 16V6M17 16v-8' },
   };
@@ -1677,6 +1832,12 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   });
   el('act-kick').addEventListener('click', function () {
     armPlayer('kick', 'kick live connections', {}, ['Closes every live socket banking to this player, on this host. They can reconnect unless banned.']);
+  });
+  el('act-reset').addEventListener('click', function () {
+    armPlayer('reset-progress', 'reset progress', {}, [
+      'Progress, stats, economy and inventory go to zero. The name, settings, entitlements and the account link stay.',
+      'The profile is ARCHIVED first — a reset that cannot archive refuses — and the Scrap zeroing is a journal row.',
+    ]);
   });
   el('c-cancel').addEventListener('click', function () { armed = null; el('confirm').close(); });
   el('c-go').addEventListener('click', fire);

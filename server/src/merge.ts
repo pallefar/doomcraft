@@ -30,7 +30,7 @@
  * screens (C6), where the support actor it needs actually exists.
  */
 
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { levelForXp } from '@doomcraft/shared/constants';
@@ -40,7 +40,7 @@ import type { AccountGraph } from './accountGraph.js';
 import { MERGES_PER_LIFETIME, MERGES_PER_WINDOW, MERGE_WINDOW_MS, countableProfile } from './accountGraph.js';
 import { newLedgerId, type Journal, type LedgerEntry } from './journal.js';
 import {
-  MAX_SCRAP_BALANCE, rollDayBucket, utcDay,
+  MAX_SCRAP_BALANCE, migrateProfile, rollDayBucket, utcDay,
   type PersistenceStore, type StoredProfile,
 } from './persistence.js';
 
@@ -173,7 +173,7 @@ export interface MergeEventRow {
   fromDeviceId: DeviceId;
   actor: string;
   reason: string;
-  state: 'pending' | 'applied' | 'refused';
+  state: 'pending' | 'applied' | 'refused' | 'undone';
   ledgerEntryIds: readonly string[];
   scrapMoved: number;
   note: string;
@@ -272,6 +272,145 @@ export async function mergeDeviceIntoAccount(
 
     appendMergeLog(deps.dataRoot, { ...event, state: 'applied' });
     return { ok: true as const, eventId: event.id, plan };
+  });
+}
+
+/* ------------------------------------------------------------------------ *
+ * The §3.6 undo — C6.1, on top of the archive and the journal pair
+ * ------------------------------------------------------------------------ */
+
+export type UndoResult =
+  | { ok: true; restoredScrap: number; shortfall: number }
+  | { ok: false; status: number; error: string };
+
+/** Every row ever appended, oldest first. A bad line is skipped, not fatal. */
+export function readMergeLog(dataRoot: string): MergeEventRow[] {
+  try {
+    const text = readFileSync(join(dataRoot, MERGE_LOG_FILE), 'utf8');
+    const out: MergeEventRow[] = [];
+    for (const line of text.split('\n')) {
+      if (line.trim().length === 0) continue;
+      try {
+        const row = JSON.parse(line) as MergeEventRow;
+        if (typeof row.id === 'string' && typeof row.state === 'string') out.push(row);
+      } catch { /* a torn line must not hide the rest */ }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function readArchive(dataRoot: string, device: string, eventId: string): StoredProfile | null {
+  try {
+    const raw = JSON.parse(readFileSync(join(dataRoot, 'merged', `${device}-${eventId}.json`), 'utf8'));
+    return migrateProfile(raw, device);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Mutates `a` in place: the archived profile's SUMMED contributions come
+ * back out, clamped at zero — A may have played since, and a count can
+ * never go negative. MAX-class fields (records, entitlements) deliberately
+ * stay: a record was genuinely achieved and an entitlement is support's
+ * duplicate-refund case, not the undo's. MONEY IS NOT TOUCHED HERE — the
+ * caller moves it with the journal, exactly as the merge did.
+ */
+export function unApplyMergeFields(a: StoredProfile, b: StoredProfile): void {
+  const pa = a.progress, pb = b.progress;
+  const sa = a.stats, sb = b.stats;
+  for (const k of ['kills', 'deaths', 'wins', 'gamesPlayed', 'blocksPlaced', 'blocksBroken', 'secondsPlayed'] as const) {
+    pa[k] = Math.max(0, pa[k] - pb[k]);
+  }
+  for (const k of ['matches', 'wins', 'kills', 'deaths', 'damageDealt', 'blocksPlaced', 'blocksBroken', 'secondsPlayed'] as const) {
+    sa[k] = Math.max(0, sa[k] - sb[k]);
+  }
+  for (let i = 0; i < sa.weaponKills.length; i++) {
+    sa.weaponKills[i] = Math.max(0, sa.weaponKills[i] - (sb.weaponKills[i] ?? 0));
+  }
+  pa.xp = Math.max(0, pa.xp - pb.xp);
+  pa.level = levelForXp(pa.xp);
+}
+
+/**
+ * Undo one APPLIED merge: the archive restores B, the journal moves the
+ * money back (clamped at what A still holds — the shortfall is in the
+ * result and the caller's audit row), the device detaches and banks to its
+ * own file again. Idempotent and crash-ordered: both profile updates are
+ * guarded by the journal's (kind, `undo:<eventId>`, player) key, and the
+ * 'undone' log row is appended LAST — a crash mid-undo retries clean.
+ */
+export async function undoMerge(
+  deps: MergeDeps, eventId: string, actor: string, reason: string,
+): Promise<UndoResult> {
+  const now = deps.clock?.() ?? Date.now();
+  return deps.graph.withGraphLock(async () => {
+    const rows = readMergeLog(deps.dataRoot);
+    const applied = rows.find((r) => r.id === eventId && r.state === 'applied');
+    if (applied === undefined) return { ok: false as const, status: 404, error: 'no applied merge with that event id' };
+    if (rows.some((r) => r.id === eventId && r.state === 'undone')) {
+      return { ok: false as const, status: 409, error: 'that merge is already undone' };
+    }
+    const archived = readArchive(deps.dataRoot, applied.fromDeviceId, eventId);
+    if (archived === null) return { ok: false as const, status: 410, error: 'the archived profile for that merge is gone' };
+    const account = await deps.graph.get(applied.intoAccountId);
+    if (account === null) return { ok: false as const, status: 404, error: 'the account no longer exists' };
+
+    const undoSource = `undo:${eventId}`;
+    const moved = Math.max(0, applied.scrapMoved);
+
+    // A gives back what it still can; the un-sum rides the same guard so a
+    // replayed undo can neither double-debit nor double-subtract.
+    let clawed = 0;
+    await deps.store.update(account.primaryDeviceId, async (p) => {
+      if (deps.journal !== null && await deps.journal.has('merge.debit', undoSource, account.primaryDeviceId)) return;
+      clawed = Math.min(moved, p.economy.scrap);
+      p.economy.scrap -= clawed;
+      unApplyMergeFields(p, archived);
+      if (deps.journal !== null) {
+        await deps.journal.append([{
+          id: newLedgerId(now), ms: now, kind: 'merge.debit', sourceId: undoSource,
+          playerId: account.primaryDeviceId, currency: 'scrap',
+          delta: -clawed, balanceAfter: p.economy.scrap, actor, reason,
+        }]);
+      }
+    });
+
+    // B comes back as archived, balance restored THROUGH the journal.
+    await deps.store.update(applied.fromDeviceId, async (p) => {
+      if (deps.journal !== null && await deps.journal.has('merge.credit', undoSource, applied.fromDeviceId)) return;
+      p.progress = structuredClone(archived.progress);
+      p.settings = structuredClone(archived.settings);
+      p.bindings = structuredClone(archived.bindings);
+      p.loadout = structuredClone(archived.loadout);
+      p.entitlements = structuredClone(archived.entitlements);
+      p.stats = structuredClone(archived.stats);
+      p.inventory = structuredClone(archived.inventory);
+      p.economy = structuredClone(archived.economy);
+      p.economy.scrap = Math.min(archived.economy.scrap, MAX_SCRAP_BALANCE);
+      if (p._unknown !== undefined) {
+        delete p._unknown.mergedInto;
+        delete p._unknown.mergedEventId;
+        delete p._unknown.mergedMs;
+      }
+      if (deps.journal !== null) {
+        await deps.journal.append([{
+          id: newLedgerId(now + 1), ms: now, kind: 'merge.credit', sourceId: undoSource,
+          playerId: applied.fromDeviceId, currency: 'scrap',
+          delta: p.economy.scrap, balanceAfter: p.economy.scrap, actor, reason,
+        }]);
+      }
+    });
+
+    await deps.graph.detachDeviceHoldingLock(applied.intoAccountId, applied.fromDeviceId);
+
+    appendMergeLog(deps.dataRoot, {
+      ...applied, state: 'undone', actor, reason, ms: now,
+      note: clawed < moved ? `shortfall ${moved - clawed} — the account had spent it` : '',
+    });
+    return { ok: true as const, restoredScrap: moved, shortfall: moved - clawed };
   });
 }
 
