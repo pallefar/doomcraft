@@ -2605,8 +2605,26 @@ async function handleApi(
           const f = v === undefined ? null : inventory.episodesFileFor(v);
           return f === null ? '' : readFileSync(f, 'utf8');
         })(),
+        quests: ((): string => {
+          const v = inventory.questsVersions().at(-1);
+          const f = v === undefined ? null : inventory.questsFileFor(v);
+          return f === null ? '' : readFileSync(f, 'utf8');
+        })(),
       },
     }, cors);
+    return true;
+  }
+
+  /* The challenge board's dry-run — same contract as the level lab's:
+   * the save's own two gates (parser caps + item refs), no write, no
+   * audit row. */
+  if (path === '/api/admin/studio/quests/validate' && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const verdict = studio.validateQuestsSource(typeof body.manifest === 'string' ? body.manifest : '');
+    sendJson(res, 200, verdict, cors);
     return true;
   }
 
@@ -2674,6 +2692,10 @@ async function handleApi(
       case 'campaign':
         verb = 'studio.campaign';
         result = studio.saveCampaign(typeof b.manifest === 'string' ? b.manifest : '');
+        break;
+      case 'quests':
+        verb = 'studio.quests';
+        result = studio.saveQuests(typeof b.manifest === 'string' ? b.manifest : '');
         break;
       case 'draft':
         verb = 'studio.draft';

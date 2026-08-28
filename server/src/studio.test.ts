@@ -145,3 +145,50 @@ describe('the campaign assembler and the designers', () => {
     expect(inv.installedPacks().some((p) => p.key === 'weapons' && p.digest !== '')).toBe(false);
   });
 });
+
+describe('the challenge board editor (S4)', () => {
+  const board = (defs: Record<string, unknown>[]): string => JSON.stringify({ challenges: defs });
+  const def = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'daily.kill-5', period: 'daily', stat: 'kills', target: 5, scrap: 10,
+    name: 'Five', blurb: 'Take down five.', ...over,
+  });
+
+  it('refuses without a writable packs root, with the reason', () => {
+    const { studio } = studioWith(null);
+    const r = studio.saveQuests(board([def()]));
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error).toContain('DOOMCRAFT_PACKS');
+  });
+
+  it('refuses what the parser refuses, verbatim — the money caps included', () => {
+    const { studio } = studioWith(seededRoot());
+    const over = studio.saveQuests(board([def({ scrap: 9999 })]));
+    expect(over.ok).toBe(false);
+    expect(!over.ok && over.error).toContain('MAX_CHALLENGE_SCRAP');
+    // And the dry run says the same thing without writing anything.
+    const dry = studio.validateQuestsSource(board([def({ scrap: 9999 })]));
+    expect(dry.ok).toBe(false);
+    expect(dry.detail).toContain('MAX_CHALLENGE_SCRAP');
+  });
+
+  it('refuses an item reward the items manifest does not carry', () => {
+    const { studio } = studioWith(seededRoot());
+    const r = studio.saveQuests(board([def({ item: 'skin-ghost' })]));
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error).toContain('quests.refs');
+    expect(!r.ok && r.error).toContain('skin-ghost');
+  });
+
+  it('mints the next quests version; immutability mints again, never rewrites', () => {
+    const { studio, inv } = studioWith(seededRoot());
+    const r = studio.saveQuests(board([def({ item: 'title-knee-deep' })]));
+    expect(r.ok).toBe(true);
+    // The seeded root has no quests dir, so the content/ fallback is v1 and
+    // the first save mints 2.
+    expect(r.ok && r.label).toBe('quests@2');
+    expect(r.ok && r.detail).toContain('1 challenge(s)');
+    expect(inv.questsVersions()).toEqual([1, 2]);
+    const again = studio.saveQuests(board([def()]));
+    expect(again.ok && again.label).toBe('quests@3');
+  });
+});

@@ -24,13 +24,14 @@ import {
   validateLevel,
 } from '@doomcraft/shared/level';
 import { parseItemsManifest } from '@doomcraft/shared/items';
+import { parseChallengesManifest } from '@doomcraft/shared/challenges';
 import { sanitiseContentId } from '@doomcraft/shared/modes';
 import {
   charactersFingerprintInputs,
 } from '@doomcraft/shared/characters';
 import { weaponsFingerprintInputs } from '@doomcraft/shared/version';
 
-import { checkCampaignRefs, parseEpisodesManifest, scanLevelDir } from './gate.js';
+import { checkCampaignRefs, checkQuestsRefs, parseEpisodesManifest, scanLevelDir } from './gate.js';
 import type { PackInventory } from './packs.js';
 
 export interface StudioOptions {
@@ -224,6 +225,46 @@ export class StudioService {
       return { ok: false, status: 500, error: e instanceof Error ? e.message : String(e) };
     }
     return { ok: true, label: `campaign@${next}`, version: next, detail: `${manifest.episodes.length} episode(s)` };
+  }
+
+  /* --- quests: the challenge board (docs/STUDIO.md S4) ------------------- */
+
+  /**
+   * The dry run the console's CHECK button calls — the same two gates a
+   * save walks, no write, no audit row. The parser is the mint bound
+   * (per-def and manifest Scrap caps), so a refusal here is the money
+   * saying no, verbatim.
+   */
+  validateQuestsSource(text: string): { ok: boolean; detail: string } {
+    const parsed = parseChallengesManifest(text);
+    if (parsed.manifest === null) return { ok: false, detail: parsed.errors.join('; ') };
+    const iv = this.inventory.itemsVersions();
+    const items = iv.length > 0 ? this.inventory.itemsAt(iv[iv.length - 1]) : null;
+    const refs = checkQuestsRefs(parsed.manifest, items?.manifest ?? null);
+    if (!refs.ok) {
+      return { ok: false, detail: `would fail quests.refs (against items@${iv.at(-1) ?? '?'}): ${refs.detail}` };
+    }
+    const total = parsed.manifest.challenges.reduce((sum, c) => sum + c.scrap, 0);
+    return {
+      ok: true,
+      detail: `${parsed.manifest.challenges.length} challenge(s), paying ${total} Scrap a full board`,
+    };
+  }
+
+  saveQuests(manifestText: string): StudioResult {
+    const root = this.root();
+    if (typeof root !== 'string') return root;
+    const verdict = this.validateQuestsSource(manifestText);
+    if (!verdict.ok) {
+      return { ok: false, status: 400, error: `the manifest would fail quests.validate: ${verdict.detail}` };
+    }
+    const next = (this.inventory.questsVersions().at(-1) ?? 0) + 1;
+    try {
+      this.writeVersioned('quests', next, { 'quests.json': manifestText });
+    } catch (e) {
+      return { ok: false, status: 500, error: e instanceof Error ? e.message : String(e) };
+    }
+    return { ok: true, label: `quests@${next}`, version: next, detail: verdict.detail };
   }
 
   /* --- the build-class designers: drafts, never packs -------------------- */

@@ -400,6 +400,27 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
           </div>
         </div>
         <div class="card">
+          <div class="card-head">challenges — the daily/weekly board (quests pack)</div>
+          <div class="card-body">
+            <div class="note">
+              What the Challenges section pays, as data. The parser is the money bound:
+              at most 8 challenges, 500 Scrap per challenge, 2000 for the whole board;
+              an item reward names an id in the items manifest and the save refuses a
+              dangling one. Progress and paid receipts live on player profiles, so a
+              re-cut deletes nobody's Scrap.
+            </div>
+            <div class="stack">
+              <textarea id="studio-quests" spellcheck="false" rows="8"></textarea>
+            </div>
+            <div class="rowline">
+              <button id="studio-quests-check">check against the gate</button>
+              <button id="studio-quests-save" class="go">save as next quests version</button>
+              <span class="muted" id="studio-quests-state"></span>
+            </div>
+            <div id="studio-quests-report"></div>
+          </div>
+        </div>
+        <div class="card">
           <div class="card-head">expansion — one click to a release draft</div>
           <div class="card-body">
             <div class="note">
@@ -411,6 +432,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
               <select id="studio-exp-levels"></select>
               <select id="studio-exp-campaign"></select>
               <select id="studio-exp-items"></select>
+              <select id="studio-exp-quests"></select>
               <input id="studio-exp-name" placeholder="expansion name (the draft's note)" maxlength="120">
               <button id="studio-exp-draft" class="go">assemble draft</button>
               <span class="muted" id="studio-exp-state"></span>
@@ -772,6 +794,20 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
               <li>Undo with the confirm walk. The absorbed profile is restored from its archive; the Scrap moves back as a journal pair.</li>
             </ol>
             <div class="warn">The response's <code>shortfall</code> is Scrap the absorbing account already spent and cannot return &mdash; the restored player is still made whole from the house side. Archives are kept 90 days, not forever.</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">8 &middot; run challenges</div>
+          <div class="card-body">
+            <ol>
+              <li>The daily/weekly board is the QUESTS pack &mdash; challenge definitions as data. The bundle ships one (4 dailies, 3 weeklies); players see it in the profile's Competitions tab.</li>
+              <li>To change the board: Studio &rarr; the challenges card. Edit the JSON, CHECK (the save's own gates, dry), then save as the next quests version.</li>
+              <li>A save is only INSTALLED. To ship it: assemble an expansion draft picking your quests version, then walk gate &rarr; approve &rarr; stage &rarr; promote on Review. Until a release names a quests version, rooms serve the newest installed one.</li>
+              <li>Rewards: progress banks in public online matches (solo and private pay nothing by the trust table); payment lands with a match payout, once per UTC day or ISO week per challenge, as journal rows &mdash; kind <code>prize</code>, actor <code>system:challenge</code>, source <code>challenge:&lt;id&gt;:&lt;period&gt;</code>.</li>
+              <li>Verify a change: <code>curl /api/challenges?device=&lt;id&gt;</code> shows the board a player sees, progress included.</li>
+            </ol>
+            <div class="warn">The parser is the money bound: 8 challenges, 500 Scrap each, 2000 a board &mdash; a save over any cap is refused, here and over curl alike. Public Builder banks challenge progress but never mints the Scrap; that is the trust table working, not a bug.</div>
+            <div class="warn bad">Re-cutting the pack mid-period deletes nobody's progress or Scrap &mdash; but a REMOVED challenge stops accruing and paying at the next settlement, and a player mid-way gets nothing. Prefer re-cuts at the UTC day boundary.</div>
           </div>
         </div>
       </section>
@@ -1629,6 +1665,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
       if (!studioSeeded) {
         el('studio-items').value = r.body.seeds.items || '';
         el('studio-campaign').value = r.body.seeds.campaign || '';
+        el('studio-quests').value = r.body.seeds.quests || '';
         studioSeeded = true;
       }
       var list = el('studio-drafts-list');
@@ -1665,6 +1702,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
       fillSelect('studio-exp-levels', 'levels', inst.levels, function (p) { return p.playable + '/' + p.total + ' playable'; });
       fillSelect('studio-exp-campaign', 'campaign', inst.campaign, function (p) { return p.episodes + ' episodes'; });
       fillSelect('studio-exp-items', 'items', inst.items, function (p) { return p.count + ' items'; });
+      fillSelect('studio-exp-quests', 'quests', inst.quests, function (p) { return p.count + ' challenges'; });
     });
   }
 
@@ -1690,9 +1728,11 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
       var lv = el('studio-exp-levels').value;
       var cv = el('studio-exp-campaign').value;
       var iv = el('studio-exp-items').value;
+      var qv = el('studio-exp-quests').value;
       if (lv !== '') body.levels = Number(lv);
       if (cv !== '') body.campaign = Number(cv);
       if (iv !== '') body.items = Number(iv);
+      if (qv !== '') body.quests = Number(qv);
       api('/api/admin/release', 'POST', body).then(function (r) {
         if (r.status === 200) {
           state.textContent = 'draft assembled — walk it on the Review screen (gate, approve, stage, promote)';
@@ -1743,6 +1783,18 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   });
   el('studio-campaign-save').addEventListener('click', function () {
     studioPost('campaign', { manifest: el('studio-campaign').value }, el('studio-campaign-state'));
+  });
+  el('studio-quests-check').addEventListener('click', function () {
+    var qreport = el('studio-quests-report');
+    clear(qreport);
+    api('/api/admin/studio/quests/validate', 'POST', { manifest: el('studio-quests').value }).then(function (r) {
+      if (r.status !== 200) { fail(qreport, r); return; }
+      var v = r.body;
+      qreport.appendChild(make('div', v.ok ? 'ok' : 'err', (v.ok ? 'WOULD PASS the gate — ' : 'WOULD BE REFUSED — ') + (v.detail || '')));
+    });
+  });
+  el('studio-quests-save').addEventListener('click', function () {
+    studioPost('quests', { manifest: el('studio-quests').value }, el('studio-quests-state'));
   });
   function draftSave(kind) {
     var raw = el('studio-draft').value;
