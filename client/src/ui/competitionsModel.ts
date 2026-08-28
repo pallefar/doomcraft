@@ -192,6 +192,93 @@ export function buildCompetitionsView(inputs: CompetitionsInputs): CompetitionsV
   };
 }
 
+/* ------------------------------------------------------------------------ *
+ * Daily/weekly challenges (Studio S4) — the section rendered ABOVE the
+ * competitions list, same tab, same flag. Decisions here, DOM in the tab.
+ *
+ * The honesty rules:
+ * - `done` renders as done, never as a bar stuck at 100% — a finished
+ *   challenge is a fact, not a progress state.
+ * - The note says WHERE progress banks (online matches) and WHEN it resets
+ *   (UTC midnight / Monday), because solo play silently banking nothing is
+ *   the confusion the trust table guarantees.
+ * - A null wire answer (older server, network) hides the section entirely —
+ *   an empty board must never read as "you finished everything".
+ * ------------------------------------------------------------------------ */
+
+export interface WireChallenge {
+  readonly id: string;
+  readonly name: string;
+  readonly blurb: string;
+  readonly period: 'daily' | 'weekly';
+  readonly target: number;
+  readonly scrap: number;
+  readonly item: string | null;
+  readonly itemName: string;
+  readonly progress: number;
+  readonly done: boolean;
+}
+
+export interface ChallengeRowView {
+  readonly id: string;
+  readonly name: string;
+  readonly blurb: string;
+  readonly periodLabel: 'Daily' | 'Weekly';
+  /** '3 / 5' while running, 'done' when paid. Never empty. */
+  readonly progress: string;
+  /** 0..1 for the bar width. done renders 1. */
+  readonly frac: number;
+  /** '40 Scrap' | '100 Scrap + Knee-Deep'. Never empty. */
+  readonly reward: string;
+  readonly done: boolean;
+}
+
+export interface ChallengesSectionView {
+  /** '' = render nothing (no wire answer, or no defs shipped). */
+  readonly heading: string;
+  readonly rows: readonly ChallengeRowView[];
+  /** The how-it-works teaching line. */
+  readonly note: string;
+}
+
+export function buildChallengesSection(
+  challenges: readonly WireChallenge[] | null,
+): ChallengesSectionView {
+  if (challenges === null || challenges.length === 0) {
+    return { heading: '', rows: [], note: '' };
+  }
+  const rows: ChallengeRowView[] = challenges.map((c) => {
+    const target = Math.max(1, safeInt(c.target));
+    const progress = Math.max(0, Math.min(safeInt(c.progress), target));
+    const scrap = Math.max(0, safeInt(c.scrap));
+    const itemHalf = c.item === null ? ''
+      : ` + ${typeof c.itemName === 'string' && c.itemName.length > 0 ? c.itemName : 'an item'}`;
+    return {
+      id: c.id,
+      name: c.name.length > 0 ? c.name : c.id,
+      blurb: c.blurb,
+      periodLabel: c.period === 'weekly' ? 'Weekly' : 'Daily',
+      progress: c.done ? 'done' : `${groupInt(progress)} / ${groupInt(target)}`,
+      frac: c.done ? 1 : progress / target,
+      reward: `${groupInt(scrap)} Scrap${itemHalf}`,
+      done: c.done === true,
+    };
+  });
+  return {
+    heading: 'Challenges',
+    rows,
+    note: 'Daily challenges reset at midnight UTC, weeklies on Monday. Progress counts in '
+      + 'online matches only — solo play does not bank. Rewards land with a match payout.',
+  };
+}
+
+/** Every string the challenges section renders — the no-NaN test walks this. */
+export function renderedChallengeStrings(v: ChallengesSectionView): string[] {
+  const out: string[] = [v.heading, v.note];
+  for (const r of v.rows) out.push(r.name, r.blurb, r.periodLabel, r.progress, r.reward);
+  return out;
+}
+
 /** Every string the view renders — the no-NaN test walks this. */
 export function renderedCompetitionStrings(v: CompetitionsView): string[] {
   const out: string[] = [v.line, v.error, v.emptyTable];

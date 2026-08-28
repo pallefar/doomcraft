@@ -10,8 +10,10 @@
  */
 
 import {
+  buildChallengesSection,
   buildCompetitionsView,
   type CompetitionsInputs,
+  type WireChallenge,
   type WireCompetition,
   type WireStanding,
 } from '@/ui/competitionsModel';
@@ -50,6 +52,22 @@ const CSS = `
 .dcc-st.is-you{color:#ffe6d8}
 .dcc-st.is-you b,.dcc-st.is-you em{color:#ffd9a0}
 .dcc-empty{padding:8px 0 2px;font-size:12px;color:#7d7873}
+.dcc-chhead{font:700 14px/1.2 system-ui;color:#f4f1ee;margin:0 0 8px}
+.dcc-ch{display:flex;gap:10px;align-items:center;padding:7px 0;border-top:1px solid rgba(255,255,255,.06)}
+.dcc-ch:first-of-type{border-top:0}
+.dcc-ch-main{flex:1;min-width:0}
+.dcc-ch-name{font:600 12.5px/1.3 system-ui;color:#e8e6e3}
+.dcc-ch-name em{font-style:normal;font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:#8d8781;margin-left:7px}
+.dcc-ch-blurb{font-size:11.5px;color:#9d968f;margin-top:1px}
+.dcc-ch-bar{height:3px;border-radius:2px;background:rgba(255,255,255,.1);margin-top:5px;overflow:hidden}
+.dcc-ch-bar i{display:block;height:100%;background:#e03c1c}
+.dcc-ch.is-done .dcc-ch-bar i{background:#5da05a}
+.dcc-ch-right{flex:0 0 auto;text-align:right}
+.dcc-ch-prog{font-variant-numeric:tabular-nums;font-size:12px;color:#c9c3bd}
+.dcc-ch.is-done .dcc-ch-prog{color:#8fc48c}
+.dcc-ch-reward{font-size:11px;color:#ffd9a0;margin-top:1px}
+.dcc-ch-note{margin:9px 0 0;font-size:11.5px;color:#7d7873}
 #ui .dcc button{font:700 11px/1 system-ui;letter-spacing:.08em;min-height:32px;
   padding:8px 14px;border:1px solid rgba(255,255,255,.22);border-radius:2px;
   background:rgba(255,255,255,.06);color:#e8e6e3;cursor:pointer;text-transform:uppercase}
@@ -89,6 +107,8 @@ export class CompetitionsTab {
   private error = '';
   private phase: CompetitionsInputs['phase'] = 'loading';
   private competitions: WireCompetition[] = [];
+  /** null until the wire answers — a hidden section, never an empty board. */
+  private challenges: WireChallenge[] | null = null;
   private standings: Record<string, WireStanding[]> = {};
   private open = '';
 
@@ -111,8 +131,13 @@ export class CompetitionsTab {
     this.error = '';
     this.phase = 'loading';
     this.render();
-    const res = await this.get(`/api/competitions?device=${encodeURIComponent(this.opts.deviceId())}`) as
-      { status: number; competitions?: WireCompetition[] };
+    const device = encodeURIComponent(this.opts.deviceId());
+    const [res, chal] = await Promise.all([
+      this.get(`/api/competitions?device=${device}`) as
+        Promise<{ status: number; competitions?: WireCompetition[] }>,
+      this.get(`/api/challenges?device=${device}`) as
+        Promise<{ status: number; challenges?: WireChallenge[] }>,
+    ]);
     if (this.destroyed) return;
     if (res.status === 200 && Array.isArray(res.competitions)) {
       this.competitions = res.competitions;
@@ -121,6 +146,9 @@ export class CompetitionsTab {
       this.competitions = [];
       this.phase = 'offline';
     }
+    this.challenges = chal.status === 200 && Array.isArray(chal.challenges)
+      ? chal.challenges
+      : null;
     // A stale expansion survives a refetch only if its competition still runs.
     if (this.open !== '' && !this.competitions.some((c) => c.id === this.open)) this.open = '';
     this.render();
@@ -194,6 +222,32 @@ export class CompetitionsTab {
     this.element.replaceChildren();
     this.element.appendChild(el('p', 'dcc-line', v.line));
     if (v.error !== '') this.element.appendChild(el('p', 'dcc-err', v.error));
+
+    const ch = buildChallengesSection(this.challenges);
+    if (ch.heading !== '') {
+      const box = el('div', 'dcc-box');
+      box.appendChild(el('p', 'dcc-chhead', ch.heading));
+      for (const row of ch.rows) {
+        const line = el('div', row.done ? 'dcc-ch is-done' : 'dcc-ch');
+        const main = el('div', 'dcc-ch-main');
+        const name = el('div', 'dcc-ch-name', row.name);
+        name.appendChild(el('em', undefined, row.periodLabel));
+        main.appendChild(name);
+        main.appendChild(el('div', 'dcc-ch-blurb', row.blurb));
+        const bar = el('div', 'dcc-ch-bar');
+        const fill = el('i');
+        fill.style.width = `${Math.round(row.frac * 100)}%`;
+        bar.appendChild(fill);
+        main.appendChild(bar);
+        const right = el('div', 'dcc-ch-right');
+        right.appendChild(el('div', 'dcc-ch-prog', row.progress));
+        right.appendChild(el('div', 'dcc-ch-reward', row.reward));
+        line.append(main, right);
+        box.appendChild(line);
+      }
+      box.appendChild(el('p', 'dcc-ch-note', ch.note));
+      this.element.appendChild(box);
+    }
 
     for (const row of v.rows) {
       const box = el('div', 'dcc-box');

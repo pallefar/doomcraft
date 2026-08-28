@@ -127,6 +127,7 @@ import { CreativeStore, IMAGE_MAX_BYTES } from './creatives.js';
 import { PHASE_ONE_SURFACES, type AdEventType, type SurfaceId } from '@doomcraft/shared/sponsor';
 import { PackKind } from '@doomcraft/shared/packs';
 import { flagOn } from '@doomcraft/shared/flags';
+import { utcDayKey, utcWeekKey } from '@doomcraft/shared/challenges';
 import {
   ROLLOUT_LADDER,
   anonymousFlagBits,
@@ -2120,6 +2121,58 @@ async function handleApi(
       (url.searchParams.get('id') ?? '').slice(0, 64), key, { store, journal });
     if (table === null) { sendJson(res, 404, { error: 'no such competition' }, cors); return true; }
     sendJson(res, 200, { standings: table }, cors);
+    return true;
+  }
+
+  /* --- challenges: the daily/weekly board (docs/ECONOMY.md, Studio S4) --- *
+   * Same gate as competitions — the flag registry claims daily/weekly
+   * challenges for `economy_competitions`. Progress renders through a VIEW
+   * roll: the period keys are computed at REQUEST time and a stored bucket
+   * from an older period answers zeroed counts and an empty done — a read
+   * never writes the profile, and yesterday's finished board never renders
+   * as today's. */
+  if (path === '/api/challenges' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const raw = cookieValue(req.headers.cookie, DEVICE_COOKIE) ?? url.searchParams.get('device') ?? '';
+    if (!isValidDeviceId(raw)) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(raw));
+    if (!flagOn(flags.bitsFor(key), 'economy_competitions')) {
+      sendJson(res, 404, { error: 'challenges are not enabled' }, cors);
+      return true;
+    }
+    const live = releases.live();
+    const qdecl = live.packs.find((pk) => pk.kind === PackKind.QUESTS);
+    const qi = qdecl !== undefined
+      ? inventory.questsAt(qdecl.version)
+      : inventory.questsAt(inventory.questsVersions().at(-1) ?? 1);
+    const defs = qi?.manifest.challenges ?? [];
+    const idecl = live.packs.find((pk) => pk.kind === PackKind.ITEMS);
+    const items = inventory.itemsAt(idecl?.version ?? (inventory.itemsVersions().at(-1) ?? 1));
+    const profile = await store.load(key);
+    const now = Date.now();
+    const day = utcDayKey(now);
+    const week = utcWeekKey(now);
+    const ch = profile?.challenges ?? null;
+    sendJson(res, 200, {
+      day,
+      week,
+      challenges: defs.map((d) => {
+        const fresh = ch !== null && (d.period === 'daily' ? ch.day === day : ch.week === week);
+        return {
+          id: d.id,
+          name: d.name,
+          blurb: d.blurb,
+          period: d.period,
+          stat: d.stat,
+          target: d.target,
+          scrap: d.scrap,
+          item: d.item,
+          itemName: d.item === null ? ''
+            : items?.manifest.items.find((i) => i.id === d.item)?.name ?? '',
+          progress: fresh ? Math.min(ch.counts[d.id] ?? 0, d.target) : 0,
+          done: fresh ? ch.done.includes(d.id) : false,
+        };
+      }),
+    }, cors);
     return true;
   }
 

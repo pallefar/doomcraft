@@ -18,6 +18,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { utcDayKey, utcWeekKey } from '@doomcraft/shared/challenges';
+
 import { TRADE_ITEM_COOLDOWN_MS, TRADE_MIN_ACCOUNT_AGE_MS, TRADE_MIN_MATCHES } from './trades.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +27,10 @@ const serverEntry = join(here, 'index.ts');
 
 const ALFA = 'adadadadadadadadadadadad';
 const BRAVO = 'bdbdbdbdbdbdbdbdbdbdbdbd';
+/** Challenge progress from a PAST period — the view roll must zero it. */
+const STALE = 'cdcdcdcdcdcdcdcdcdcdcdcd';
+/** Challenge progress from the CURRENT period — the view must show it. */
+const FRESH = 'dddddddddddddddddddddde1';
 const RUST = 'items@1:skin-rust-marine';
 const EMBER = 'items@1:skin-ember-core';
 const ADMIN_TOKEN = 'trade-routes-test-token';
@@ -53,6 +59,17 @@ function seedTrader(dataRoot: string, device: string, refs: string[]): void {
       last: { ms: Date.now(), kills: 18, deaths: 4, won: true, seconds: 372, bestStreak: 7, xp: 320, scrap: 41 },
     },
     inventory: { items: refs.map((ref) => ({ ref, ms: old, source: 'drop', sourceId: 'seed' })), equippedSkin: '', title: '' },
+  }), 'utf8');
+}
+
+function seedChallenger(
+  dataRoot: string, device: string, challenges: Record<string, unknown>,
+): void {
+  const shard = join(dataRoot, 'profiles', device.slice(0, 2));
+  mkdirSync(shard, { recursive: true });
+  writeFileSync(join(shard, `${device}.json`), JSON.stringify({
+    version: 6, deviceId: device, createdMs: Date.now() - 86_400_000,
+    challenges,
   }), 'utf8');
 }
 
@@ -104,6 +121,15 @@ beforeAll(async () => {
       (dataRoot) => {
         seedTrader(dataRoot, ALFA, [RUST, RUST]);
         seedTrader(dataRoot, BRAVO, [EMBER]);
+        seedChallenger(dataRoot, STALE, {
+          day: '2020-01-01', week: '2020-W01',
+          counts: { 'daily.kill-25': 25, 'weekly.wins-10': 10 },
+          done: ['daily.kill-25', 'weekly.wins-10'],
+        });
+        seedChallenger(dataRoot, FRESH, {
+          day: utcDayKey(Date.now()), week: utcWeekKey(Date.now()),
+          counts: { 'daily.kill-25': 10 }, done: ['daily.win-1'],
+        });
       },
     ),
     boot({}, (dataRoot) => { seedTrader(dataRoot, ALFA, [RUST]); }),
@@ -187,6 +213,39 @@ describe('competitions over the wire', () => {
 
     const hidden = await call(off.origin, `/api/competitions?device=${ALFA}`);
     expect(hidden.status).toBe(404);
+  });
+});
+
+describe('challenges over the wire (Studio S4)', () => {
+  it('serves the shipped board with per-caller progress; the flagless host hides it', async () => {
+    const view = await call(on.origin, `/api/challenges?device=${FRESH}`);
+    expect(view.status).toBe(200);
+    expect(view.json?.day).toBe(utcDayKey(Date.now()));
+    expect(view.json?.week).toBe(utcWeekKey(Date.now()));
+    const list = (view.json?.challenges ?? []) as Array<Record<string, unknown>>;
+    expect(list.length).toBeGreaterThan(0);
+    // The current-period seed renders: 10/25 on the kill daily, win-1 done.
+    expect(list.find((c) => c.id === 'daily.kill-25')?.progress).toBe(10);
+    expect(list.find((c) => c.id === 'daily.win-1')?.done).toBe(true);
+    // The item half resolves its display name from the live items manifest.
+    const streak = list.find((c) => c.id === 'weekly.streak-8');
+    expect(streak?.item).toBe('title-knee-deep');
+    expect(streak?.itemName).toBe('Knee-Deep');
+
+    const hidden = await call(off.origin, `/api/challenges?device=${FRESH}`);
+    expect(hidden.status).toBe(404);
+  });
+
+  it('zeroes a stale period at READ time — yesterday\'s finished board never renders as today\'s', async () => {
+    const view = await call(on.origin, `/api/challenges?device=${STALE}`);
+    expect(view.status).toBe(200);
+    const list = (view.json?.challenges ?? []) as Array<Record<string, unknown>>;
+    const daily = list.find((c) => c.id === 'daily.kill-25');
+    const weekly = list.find((c) => c.id === 'weekly.wins-10');
+    expect(daily?.progress).toBe(0);
+    expect(daily?.done).toBe(false);
+    expect(weekly?.progress).toBe(0);
+    expect(weekly?.done).toBe(false);
   });
 });
 

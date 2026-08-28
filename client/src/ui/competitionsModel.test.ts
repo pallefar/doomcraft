@@ -9,11 +9,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildChallengesSection,
   buildCompetitionsView,
   clockText,
   prizeText,
+  renderedChallengeStrings,
   renderedCompetitionStrings,
   type CompetitionsInputs,
+  type WireChallenge,
   type WireCompetition,
 } from '@/ui/competitionsModel';
 
@@ -114,6 +117,58 @@ describe('laundering', () => {
     });
     for (const v of [buildCompetitionsView(hostile), buildCompetitionsView(inputsOf())]) {
       for (const s of renderedCompetitionStrings(v)) expect(s).not.toMatch(/NaN|Infinity|undefined/);
+    }
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The challenges section (Studio S4)
+ * ------------------------------------------------------------------------ */
+
+function chal(patch: Partial<WireChallenge> = {}): WireChallenge {
+  return {
+    id: 'daily.kill-25', name: 'Exterminator', blurb: 'Take down 25 today.',
+    period: 'daily', target: 25, scrap: 40, item: null, itemName: '',
+    progress: 10, done: false,
+    ...patch,
+  };
+}
+
+describe('the challenges section', () => {
+  it('hides entirely on a null wire answer — an empty board must never read as finished', () => {
+    expect(buildChallengesSection(null).heading).toBe('');
+    expect(buildChallengesSection([]).heading).toBe('');
+  });
+
+  it('renders progress as a fraction and done as done, never a stuck bar', () => {
+    const v = buildChallengesSection([chal(), chal({ id: 'daily.win-1', done: true, progress: 1, target: 1 })]);
+    expect(v.heading).toBe('Challenges');
+    expect(v.rows[0]?.progress).toBe('10 / 25');
+    expect(v.rows[0]?.frac).toBeCloseTo(0.4);
+    expect(v.rows[1]?.progress).toBe('done');
+    expect(v.rows[1]?.frac).toBe(1);
+  });
+
+  it('names the item half of a reward, with a fallback when the server sent no name', () => {
+    const named = buildChallengesSection([chal({ item: 'title-knee-deep', itemName: 'Knee-Deep', scrap: 100 })]);
+    expect(named.rows[0]?.reward).toBe('100 Scrap + Knee-Deep');
+    const unnamed = buildChallengesSection([chal({ item: 'title-knee-deep', itemName: '' })]);
+    expect(unnamed.rows[0]?.reward).toContain('+ an item');
+  });
+
+  it('teaches where progress banks and when it resets', () => {
+    const v = buildChallengesSection([chal()]);
+    expect(v.note).toContain('midnight UTC');
+    expect(v.note).toContain('Monday');
+    expect(v.note).toContain('online matches only');
+  });
+
+  it('no rendered string ever says NaN, Infinity or undefined', () => {
+    const hostile = buildChallengesSection([chal({
+      target: Number.NaN, progress: Number.POSITIVE_INFINITY, scrap: Number.NaN,
+    })]);
+    for (const s of renderedChallengeStrings(hostile)) {
+      expect(s).not.toMatch(/NaN|Infinity|undefined/);
     }
   });
 });
