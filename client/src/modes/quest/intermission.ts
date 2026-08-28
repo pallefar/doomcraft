@@ -22,6 +22,8 @@
 
 import { formatTime, percentOf, type IntermissionStats } from '@shared/modes';
 
+import { createMatchShareButton, type MatchShareButton } from '@/ui/shareCard';
+
 /* ------------------------------------------------------------------------ *
  * Styles
  * ------------------------------------------------------------------------ */
@@ -225,6 +227,7 @@ export class QuestIntermission {
   private readonly shown: number[] = [];
   private disposed = false;
   private disposeSponsor: (() => void) | null = null;
+  private shareBtn: MatchShareButton | null = null;
 
   private readonly onKey: (e: KeyboardEvent) => void;
 
@@ -273,6 +276,11 @@ export class QuestIntermission {
     const quit = button('Main menu', 'dcqi-btn');
     quit.addEventListener('click', () => { if (!this.disposed) opts.onQuit(); });
     actions.append(this.btnGo, restart, quit);
+    /* The share card (S36): self-gating on the server's share_cards flag via
+     * the page's one flags probe — quest runs in the local Worker, whose
+     * session bits can never carry it. Null when this build has no server. */
+    this.shareBtn = createMatchShareButton('dcqi-btn');
+    if (this.shareBtn !== null) actions.appendChild(this.shareBtn.element);
     panel.appendChild(actions);
 
     const hint = div('dcqi-hint');
@@ -440,6 +448,8 @@ export class QuestIntermission {
     this.disposed = true;
     try { this.disposeSponsor?.(); } catch { /* a card must never break teardown */ }
     this.disposeSponsor = null;
+    try { this.shareBtn?.dispose(); } catch { /* same rule */ }
+    this.shareBtn = null;
     window.removeEventListener('keydown', this.onKey);
     this.element.remove();
     releaseStyle();

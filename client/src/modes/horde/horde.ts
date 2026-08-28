@@ -116,6 +116,7 @@ import {
   type ModeContext,
   type ModeInstance,
 } from '@/modes/registry';
+import { createMatchShareButton } from '@/ui/shareCard';
 
 import {
   HordeItem,
@@ -1696,6 +1697,10 @@ export class HordeMode implements ModeInstance {
     leave.textContent = 'LEAVE';
     btns.appendChild(again);
     btns.appendChild(leave);
+    /* The share card (S36): self-gating on the server's share_cards flag —
+     * horde runs in the local Worker, whose bits can never carry it. */
+    const share = createMatchShareButton('dch-btn');
+    if (share !== null) btns.appendChild(share.element); // torn down with the card
     this.cardNote = div('dch-note', this.card);
     scope.addListener(again, 'click', () => { this.restart(); });
     scope.addListener(leave, 'click', () => { this.ctx.host.requestExit('horde-run-over'); });

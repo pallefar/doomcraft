@@ -45,7 +45,8 @@ import { Feature, hasOverride, isEnabled } from '@shared/features';
 
 import { AVATAR_PALETTE, avatarLabel, unpackAvatar } from '@/characters/avatar';
 import { createAccountPanel, type AccountPanel, type AccountPanelOptions } from '@/ui/accountPanel';
-import { createLoadoutTab, economyTabs, type LoadoutTab } from '@/ui/loadoutTab';
+import { createLoadoutTab, economyTabs, probeServerFlags, type LoadoutTab } from '@/ui/loadoutTab';
+import { createMatchShareButton } from '@/ui/shareCard';
 import { createCompetitionsTab, type CompetitionsTab } from '@/ui/competitionsTab';
 import { createTradeTab, type TradeTab } from '@/ui/tradeTab';
 import { MatchTypeNotice } from '@/ui/matchType';
@@ -205,6 +206,11 @@ export const PROFILE_CSS = `
 #ui .dcp-done{font:800 14px/1 "Arial Black",Impact,sans-serif;letter-spacing:.16em;
   padding:12px 30px;text-transform:uppercase}
 #ui .dcp-tab{font:700 12px/1 system-ui;letter-spacing:.14em}
+#ui .dcp-share{font:700 12px/1 system-ui;letter-spacing:.08em;min-height:36px;margin-top:9px;
+  padding:9px 18px;border:1px solid rgba(255,255,255,.22);border-radius:2px;
+  background:rgba(255,255,255,.06);color:#e8e6e3;cursor:pointer;text-transform:uppercase}
+#ui .dcp-share:hover{border-color:rgba(255,255,255,.4)}
+#ui .dcp-share:disabled{opacity:.5;cursor:progress}
 `;
 
 function ensureStyle(): void {
@@ -350,6 +356,25 @@ export class ProfileScreen {
     /* ---- the account panel (C4) — interactive, so not a model panel ---- */
     this.accountPanel = opts.account === undefined ? null : createAccountPanel(opts.account);
     if (this.accountPanel !== null) this.overviewWrap.appendChild(this.accountPanel.element);
+
+    /* ---- share (S36) — hidden until the probe grants share_cards ---- */
+    if (opts.account !== undefined) {
+      const shareBox = el('div', 'dcp-panel');
+      shareBox.style.display = 'none';
+      shareBox.appendChild(el('h3', undefined, 'Share'));
+      shareBox.appendChild(el('p', 'dcp-caveat',
+        'Your last paying round as a card, rendered by the server with your referral code on it.'));
+      const share = createMatchShareButton('dcp-share');
+      if (share !== null) {
+        shareBox.appendChild(share.element);
+        share.element.style.display = '';
+        const acc = opts.account;
+        void probeServerFlags(acc.serverBase, acc.deviceId()).then((flags) => {
+          if (!this.destroyed && flags?.share_cards === true) shareBox.style.display = '';
+        });
+      }
+      this.overviewWrap.appendChild(shareBox);
+    }
 
     /* ---- panels ---- */
     this.gridEl = el('div', 'dcp-grid');
