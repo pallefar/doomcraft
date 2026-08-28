@@ -1,0 +1,285 @@
+{
+ "$schema": "doomcraft-level/1",
+ "sourceVersion": 1,
+ "meta": {
+  "id": "tut-01-basic-training",
+  "name": "Basic Training I: Move",
+  "episodeId": "tut",
+  "episodeName": "Basic Training",
+  "episodeIndex": 0,
+  "levelIndex": 1,
+  "author": "Doomcraft",
+  "description": "Boot camp, no ammunition required. Learn to walk, sprint, jump and use before anything down here learns you exist. Walk into each glowing lesson marker; the exit switch ends the drill.",
+  "parTimeSec": 90,
+  "musicCue": "e1m1",
+  "outsideBlock": "bedrock",
+  "defaultSkill": 1,
+  "palette": {
+   "skyTop": "#0e1420",
+   "skyHorizon": "#2a3a50",
+   "fog": "#1a2432",
+   "fogNear": 28,
+   "fogFar": 78,
+   "ambient": 0.45,
+   "sun": 0.85
+  }
+ },
+ "bounds": {
+  "minCX": 0,
+  "minCZ": 0,
+  "maxCX": 2,
+  "maxCZ": 2
+ },
+ "brushes": [
+  {
+   "kind": "box",
+   "block": "stone",
+   "x": 0,
+   "y": 2,
+   "z": 0,
+   "w": 96,
+   "h": 29,
+   "d": 96
+  },
+  {
+   "kind": "box",
+   "block": "bedrock",
+   "x": 0,
+   "y": 0,
+   "z": 0,
+   "w": 96,
+   "h": 2,
+   "d": 96
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 38,
+   "y": 8,
+   "z": 6,
+   "w": 20,
+   "h": 8,
+   "d": 20
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 38,
+   "y": 7,
+   "z": 6,
+   "w": 20,
+   "h": 1,
+   "d": 20
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 45,
+   "y": 8,
+   "z": 26,
+   "w": 6,
+   "h": 8,
+   "d": 14
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 45,
+   "y": 7,
+   "z": 26,
+   "w": 6,
+   "h": 1,
+   "d": 14
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 34,
+   "y": 8,
+   "z": 40,
+   "w": 28,
+   "h": 8,
+   "d": 18
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 34,
+   "y": 7,
+   "z": 40,
+   "w": 28,
+   "h": 1,
+   "d": 18
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 45,
+   "y": 8,
+   "z": 58,
+   "w": 6,
+   "h": 8,
+   "d": 6
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 45,
+   "y": 7,
+   "z": 58,
+   "w": 6,
+   "h": 1,
+   "d": 6
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 36,
+   "y": 8,
+   "z": 64,
+   "w": 24,
+   "h": 8,
+   "d": 24
+  },
+  {
+   "kind": "box",
+   "block": "metal",
+   "x": 36,
+   "y": 7,
+   "z": 64,
+   "w": 24,
+   "h": 1,
+   "d": 24
+  },
+  {
+   "kind": "box",
+   "block": "brick",
+   "x": 40,
+   "y": 8,
+   "z": 50,
+   "w": 16,
+   "h": 1,
+   "d": 2
+  }
+ ],
+ "spawns": [
+  {
+   "kind": "player",
+   "x": 48.5,
+   "y": 8,
+   "z": 10.5,
+   "yaw": 3.141592653589793,
+   "index": 0
+  }
+ ],
+ "enemies": [],
+ "pickups": [
+  {
+   "id": "p-shard-0",
+   "kind": "health",
+   "variant": "bonus",
+   "x": 42.5,
+   "y": 9,
+   "z": 50.5
+  },
+  {
+   "id": "p-shard-1",
+   "kind": "health",
+   "variant": "bonus",
+   "x": 47.5,
+   "y": 9,
+   "z": 50.5
+  },
+  {
+   "id": "p-shard-2",
+   "kind": "health",
+   "variant": "bonus",
+   "x": 52.5,
+   "y": 9,
+   "z": 50.5
+  }
+ ],
+ "doors": [
+  {
+   "id": "d-plain",
+   "x": 45,
+   "y": 8,
+   "z": 60,
+   "w": 6,
+   "h": 4,
+   "d": 1,
+   "key": "none",
+   "block": "metal",
+   "frameBlock": "tech_panel",
+   "openMs": 700,
+   "lockedMessage": ""
+  }
+ ],
+ "switches": [
+  {
+   "id": "sw-exit",
+   "x": 48,
+   "y": 9,
+   "z": 88,
+   "face": -1,
+   "block": "rusted_metal",
+   "activeBlock": "neon",
+   "targets": [
+    "exit"
+   ],
+   "message": "The exit pad hums to life."
+  }
+ ],
+ "secrets": [
+  {
+   "id": "l-move",
+   "x": 38,
+   "y": 8,
+   "z": 12,
+   "w": 20,
+   "h": 4,
+   "d": 4,
+   "message": "Move with W A S D or the arrow keys. The mouse looks. Head south, into the corridor."
+  },
+  {
+   "id": "l-sprint",
+   "x": 45,
+   "y": 8,
+   "z": 28,
+   "w": 6,
+   "h": 4,
+   "d": 6,
+   "message": "Hold SHIFT to sprint. SPACE jumps. You will want both."
+  },
+  {
+   "id": "l-jump",
+   "x": 34,
+   "y": 8,
+   "z": 44,
+   "w": 28,
+   "h": 4,
+   "d": 4,
+   "message": "The low wall ahead: jump onto it. The armour shards up there are yours."
+  },
+  {
+   "id": "l-use",
+   "x": 36,
+   "y": 8,
+   "z": 66,
+   "w": 24,
+   "h": 4,
+   "d": 4,
+   "message": "Doors and switches answer to E. Throw the glowing switch, then stand on the exit pad."
+  }
+ ],
+ "exit": {
+  "x": 44,
+  "y": 8,
+  "z": 82,
+  "w": 8,
+  "h": 3,
+  "d": 4,
+  "requiresSwitch": "sw-exit",
+  "nextLevelId": "tut-02-live-fire"
+ }
+}

@@ -1,0 +1,321 @@
+{
+ "$schema": "doomcraft-level/1",
+ "sourceVersion": 1,
+ "meta": {
+  "id": "tut-02-live-fire",
+  "name": "Basic Training II: Fight",
+  "episodeId": "tut",
+  "episodeName": "Basic Training",
+  "episodeIndex": 0,
+  "levelIndex": 2,
+  "author": "Doomcraft",
+  "description": "Live fire. Take the shotgun from the rack, drop the practice shamblers, and patch yourself up on the way out. Weapons live on keys 1 to 4; the mouse button does the rest.",
+  "parTimeSec": 120,
+  "musicCue": "e1m1",
+  "outsideBlock": "bedrock",
+  "defaultSkill": 1,
+  "palette": {
+   "skyTop": "#0e1420",
+   "skyHorizon": "#2a3a50",
+   "fog": "#1a2432",
+   "fogNear": 28,
+   "fogFar": 78,
+   "ambient": 0.45,
+   "sun": 0.85
+  }
+ },
+ "bounds": {
+  "minCX": 0,
+  "minCZ": 0,
+  "maxCX": 2,
+  "maxCZ": 2
+ },
+ "brushes": [
+  {
+   "kind": "box",
+   "block": "stone",
+   "x": 0,
+   "y": 2,
+   "z": 0,
+   "w": 96,
+   "h": 29,
+   "d": 96
+  },
+  {
+   "kind": "box",
+   "block": "bedrock",
+   "x": 0,
+   "y": 0,
+   "z": 0,
+   "w": 96,
+   "h": 2,
+   "d": 96
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 38,
+   "y": 8,
+   "z": 6,
+   "w": 20,
+   "h": 8,
+   "d": 18
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 38,
+   "y": 7,
+   "z": 6,
+   "w": 20,
+   "h": 1,
+   "d": 18
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 45,
+   "y": 8,
+   "z": 24,
+   "w": 6,
+   "h": 8,
+   "d": 12
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 45,
+   "y": 7,
+   "z": 24,
+   "w": 6,
+   "h": 1,
+   "d": 12
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 30,
+   "y": 8,
+   "z": 36,
+   "w": 36,
+   "h": 8,
+   "d": 24
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 30,
+   "y": 7,
+   "z": 36,
+   "w": 36,
+   "h": 1,
+   "d": 24
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 45,
+   "y": 8,
+   "z": 60,
+   "w": 6,
+   "h": 8,
+   "d": 8
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 45,
+   "y": 7,
+   "z": 60,
+   "w": 6,
+   "h": 1,
+   "d": 8
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 36,
+   "y": 8,
+   "z": 68,
+   "w": 24,
+   "h": 8,
+   "d": 20
+  },
+  {
+   "kind": "box",
+   "block": "metal",
+   "x": 36,
+   "y": 7,
+   "z": 68,
+   "w": 24,
+   "h": 1,
+   "d": 20
+  }
+ ],
+ "spawns": [
+  {
+   "kind": "player",
+   "x": 48.5,
+   "y": 8,
+   "z": 10.5,
+   "yaw": 3.141592653589793,
+   "index": 0
+  }
+ ],
+ "enemies": [
+  {
+   "id": "z-drill-1",
+   "type": "zombie",
+   "x": 42.5,
+   "y": 8,
+   "z": 46.5,
+   "yaw": 0.0,
+   "trigger": "sight",
+   "minSkill": 0,
+   "patrol": [
+    42.5,
+    8,
+    46.5,
+    52.5,
+    8,
+    46.5
+   ]
+  },
+  {
+   "id": "z-drill-2",
+   "type": "zombie",
+   "x": 52.5,
+   "y": 8,
+   "z": 52.5,
+   "yaw": 0.0,
+   "trigger": "sight",
+   "minSkill": 0,
+   "patrol": [
+    52.5,
+    8,
+    52.5,
+    42.5,
+    8,
+    52.5
+   ]
+  },
+  {
+   "id": "imp-warden",
+   "type": "imp",
+   "x": 48.5,
+   "y": 8,
+   "z": 80.5,
+   "yaw": 0.0,
+   "trigger": "sight",
+   "minSkill": 0
+  }
+ ],
+ "pickups": [
+  {
+   "id": "p-shotgun",
+   "kind": "weapon",
+   "variant": "shotgun",
+   "x": 48.5,
+   "y": 8,
+   "z": 18.5
+  },
+  {
+   "id": "p-shells",
+   "kind": "ammo",
+   "variant": "shells",
+   "x": 46.5,
+   "y": 8,
+   "z": 19.5
+  },
+  {
+   "id": "p-shells-2",
+   "kind": "ammo",
+   "variant": "shells",
+   "x": 50.5,
+   "y": 8,
+   "z": 19.5
+  },
+  {
+   "id": "p-stim",
+   "kind": "health",
+   "variant": "stimpack",
+   "x": 42.5,
+   "y": 8,
+   "z": 72.5
+  },
+  {
+   "id": "p-medikit",
+   "kind": "health",
+   "variant": "medikit",
+   "x": 48.5,
+   "y": 8,
+   "z": 72.5
+  },
+  {
+   "id": "p-armor",
+   "kind": "armor",
+   "variant": "green",
+   "x": 54.5,
+   "y": 8,
+   "z": 72.5
+  }
+ ],
+ "doors": [],
+ "switches": [
+  {
+   "id": "sw-exit",
+   "x": 48,
+   "y": 9,
+   "z": 88,
+   "face": -1,
+   "block": "rusted_metal",
+   "activeBlock": "neon",
+   "targets": [
+    "exit"
+   ],
+   "message": "Drill complete. The exit pad is live."
+  }
+ ],
+ "secrets": [
+  {
+   "id": "l-arm",
+   "x": 38,
+   "y": 8,
+   "z": 12,
+   "w": 20,
+   "h": 4,
+   "d": 4,
+   "message": "Take the shotgun from the rack ahead. Left mouse fires. Keys 1 to 4 change weapons."
+  },
+  {
+   "id": "l-contact",
+   "x": 45,
+   "y": 8,
+   "z": 26,
+   "w": 6,
+   "h": 4,
+   "d": 5,
+   "message": "Contact ahead. Two shamblers, slow and stupid. Put them down before they touch you."
+  },
+  {
+   "id": "l-heal",
+   "x": 45,
+   "y": 8,
+   "z": 62,
+   "w": 6,
+   "h": 4,
+   "d": 4,
+   "message": "Hurt? Walk over stimpacks and medikits. Armour shards soak the next hit."
+  }
+ ],
+ "exit": {
+  "x": 44,
+  "y": 8,
+  "z": 82,
+  "w": 8,
+  "h": 3,
+  "d": 4,
+  "requiresSwitch": "sw-exit",
+  "nextLevelId": "tut-03-locks-and-keys"
+ }
+}

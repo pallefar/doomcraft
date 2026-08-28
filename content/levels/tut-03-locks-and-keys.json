@@ -1,0 +1,374 @@
+{
+ "$schema": "doomcraft-level/1",
+ "sourceVersion": 1,
+ "meta": {
+  "id": "tut-03-locks-and-keys",
+  "name": "Basic Training III: Locks",
+  "episodeId": "tut",
+  "episodeName": "Basic Training",
+  "episodeIndex": 0,
+  "levelIndex": 3,
+  "author": "Doomcraft",
+  "description": "The last lesson: locked doors want keycards, some walls are lying to you, and the exit is always earned. Find the blue card, find the panel that looks wrong, and graduate.",
+  "parTimeSec": 150,
+  "musicCue": "e1m1",
+  "outsideBlock": "bedrock",
+  "defaultSkill": 1,
+  "palette": {
+   "skyTop": "#0e1420",
+   "skyHorizon": "#2a3a50",
+   "fog": "#1a2432",
+   "fogNear": 28,
+   "fogFar": 78,
+   "ambient": 0.45,
+   "sun": 0.85
+  }
+ },
+ "bounds": {
+  "minCX": 0,
+  "minCZ": 0,
+  "maxCX": 2,
+  "maxCZ": 2
+ },
+ "brushes": [
+  {
+   "kind": "box",
+   "block": "stone",
+   "x": 0,
+   "y": 2,
+   "z": 0,
+   "w": 96,
+   "h": 29,
+   "d": 96
+  },
+  {
+   "kind": "box",
+   "block": "bedrock",
+   "x": 0,
+   "y": 0,
+   "z": 0,
+   "w": 96,
+   "h": 2,
+   "d": 96
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 38,
+   "y": 8,
+   "z": 6,
+   "w": 20,
+   "h": 8,
+   "d": 18
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 38,
+   "y": 7,
+   "z": 6,
+   "w": 20,
+   "h": 1,
+   "d": 18
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 45,
+   "y": 8,
+   "z": 24,
+   "w": 6,
+   "h": 8,
+   "d": 16
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 45,
+   "y": 7,
+   "z": 24,
+   "w": 6,
+   "h": 1,
+   "d": 16
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 24,
+   "y": 8,
+   "z": 26,
+   "w": 14,
+   "h": 8,
+   "d": 12
+  },
+  {
+   "kind": "box",
+   "block": "brick",
+   "x": 24,
+   "y": 7,
+   "z": 26,
+   "w": 14,
+   "h": 1,
+   "d": 12
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 38,
+   "y": 8,
+   "z": 30,
+   "w": 7,
+   "h": 8,
+   "d": 6
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 38,
+   "y": 7,
+   "z": 30,
+   "w": 7,
+   "h": 1,
+   "d": 6
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 40,
+   "y": 8,
+   "z": 40,
+   "w": 20,
+   "h": 8,
+   "d": 22
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 40,
+   "y": 7,
+   "z": 40,
+   "w": 20,
+   "h": 1,
+   "d": 22
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 45,
+   "y": 8,
+   "z": 62,
+   "w": 6,
+   "h": 8,
+   "d": 8
+  },
+  {
+   "kind": "box",
+   "block": "cobblestone",
+   "x": 45,
+   "y": 7,
+   "z": 62,
+   "w": 6,
+   "h": 1,
+   "d": 8
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 36,
+   "y": 8,
+   "z": 70,
+   "w": 24,
+   "h": 8,
+   "d": 18
+  },
+  {
+   "kind": "box",
+   "block": "metal",
+   "x": 36,
+   "y": 7,
+   "z": 70,
+   "w": 24,
+   "h": 1,
+   "d": 18
+  },
+  {
+   "kind": "clear",
+   "block": "stone",
+   "x": 61,
+   "y": 8,
+   "z": 48,
+   "w": 8,
+   "h": 8,
+   "d": 8
+  },
+  {
+   "kind": "box",
+   "block": "obsidian",
+   "x": 61,
+   "y": 7,
+   "z": 48,
+   "w": 8,
+   "h": 1,
+   "d": 8
+  }
+ ],
+ "spawns": [
+  {
+   "kind": "player",
+   "x": 48.5,
+   "y": 8,
+   "z": 10.5,
+   "yaw": 3.141592653589793,
+   "index": 0
+  }
+ ],
+ "enemies": [],
+ "pickups": [
+  {
+   "id": "p-bluekey",
+   "kind": "key",
+   "variant": "blue",
+   "x": 28.5,
+   "y": 8,
+   "z": 33.5
+  },
+  {
+   "id": "p-blue-armor",
+   "kind": "armor",
+   "variant": "blue",
+   "x": 65.5,
+   "y": 8,
+   "z": 52.5
+  },
+  {
+   "id": "p-rockets",
+   "kind": "ammo",
+   "variant": "rockets",
+   "x": 63.5,
+   "y": 8,
+   "z": 52.5
+  }
+ ],
+ "doors": [
+  {
+   "id": "d-blue",
+   "x": 45,
+   "y": 8,
+   "z": 38,
+   "w": 6,
+   "h": 4,
+   "d": 1,
+   "key": "blue",
+   "block": "metal",
+   "frameBlock": "tech_panel",
+   "openMs": 700,
+   "lockedMessage": "You need the blue keycard. Check the side room to the west."
+  },
+  {
+   "id": "d-secret",
+   "x": 60,
+   "y": 8,
+   "z": 50,
+   "w": 1,
+   "h": 4,
+   "d": 4,
+   "key": "none",
+   "block": "stone",
+   "frameBlock": "tech_panel",
+   "openMs": 900,
+   "lockedMessage": ""
+  }
+ ],
+ "switches": [
+  {
+   "id": "sw-secret",
+   "x": 60,
+   "y": 9,
+   "z": 52,
+   "face": -1,
+   "hidden": true,
+   "block": "neon",
+   "activeBlock": "tech_panel",
+   "targets": [
+    "d-secret"
+   ],
+   "message": "A hidden panel grinds open."
+  },
+  {
+   "id": "sw-exit",
+   "x": 48,
+   "y": 9,
+   "z": 88,
+   "face": -1,
+   "block": "rusted_metal",
+   "activeBlock": "neon",
+   "targets": [
+    "exit"
+   ],
+   "message": "Graduation. The exit pad is live."
+  }
+ ],
+ "secrets": [
+  {
+   "id": "l-locked",
+   "x": 38,
+   "y": 8,
+   "z": 12,
+   "w": 20,
+   "h": 4,
+   "d": 4,
+   "message": "A blue door blocks the corridor south. Blue doors want blue keycards. The side room west has yours."
+  },
+  {
+   "id": "l-key",
+   "x": 24,
+   "y": 8,
+   "z": 30,
+   "w": 8,
+   "h": 4,
+   "d": 6,
+   "message": "The blue keycard. Colours match: blue opens blue, yellow opens yellow, red opens red."
+  },
+  {
+   "id": "l-secret",
+   "x": 40,
+   "y": 8,
+   "z": 44,
+   "w": 20,
+   "h": 4,
+   "d": 4,
+   "message": "One panel in this vault glows wrong. Press E on it. Secret rooms pay for the curiosity."
+  },
+  {
+   "id": "s-vault",
+   "x": 62,
+   "y": 8,
+   "z": 49,
+   "w": 6,
+   "h": 4,
+   "d": 6,
+   "message": "A secret is revealed!"
+  },
+  {
+   "id": "l-grad",
+   "x": 36,
+   "y": 8,
+   "z": 72,
+   "w": 24,
+   "h": 4,
+   "d": 4,
+   "message": "Training complete. Throw the switch, take the pad, and start the real thing: Knee-Deep in the Blocks."
+  }
+ ],
+ "exit": {
+  "x": 44,
+  "y": 8,
+  "z": 82,
+  "w": 8,
+  "h": 3,
+  "d": 4,
+  "requiresSwitch": "sw-exit",
+  "nextLevelId": "",
+  "endsEpisode": true
+ }
+}

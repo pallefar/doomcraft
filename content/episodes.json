@@ -1,40 +1,50 @@
 {
-  "$schema": "doomcraft-episodes/1",
-  "manifestVersion": 1,
-
-  "//": [
-    "The episode manifest. This file is the ORDER; content/levels/*.json is the",
-    "CONTENT. Neither is code, and neither requires a code change to extend.",
-    "",
-    "To add a level:   drop <id>.json in content/levels/ and add its id to the",
-    "                  `levels` array of the episode it belongs to.",
-    "To add an episode: append an object here and drop its level files in.",
-    "",
-    "The server's LevelLibrary discovers levels on its own by scanning the",
-    "directory, so a level missing from this file is still playable and still",
-    "appears in /api/levels — it just has no fixed place in the run order and",
-    "falls back to its own exit.nextLevelId. An id listed here that has no file",
-    "is skipped, so a work-in-progress entry never breaks the campaign."
-  ],
-
-  "defaultEpisode": "e1",
-
-  "episodes": [
-    {
-      "id": "e1",
-      "name": "Knee-Deep in the Blocks",
-      "index": 1,
-      "tagline": "Six levels under a UAC landing bay, and every one of them is worse than the last.",
-      "accent": "#e03c1c",
-      "musicCue": "e1",
-      "levels": [
-        "e1m1-hangar",
-        "e1m2-coolant",
-        "e1m3-warrens",
-        "e1m4-blackout",
-        "e1m5-furnace",
-        "e1m6-throne"
-      ]
-    }
-  ]
+    "$schema": "doomcraft-episodes/1",
+    "manifestVersion": 1,
+    "//": [
+        "The episode manifest. This file is the ORDER; content/levels/*.json is the",
+        "CONTENT. Neither is code, and neither requires a code change to extend.",
+        "",
+        "To add a level:   drop <id>.json in content/levels/ and add its id to the",
+        "                  `levels` array of the episode it belongs to.",
+        "To add an episode: append an object here and drop its level files in.",
+        "",
+        "The server's LevelLibrary discovers levels on its own by scanning the",
+        "directory, so a level missing from this file is still playable and still",
+        "appears in /api/levels \u2014 it just has no fixed place in the run order and",
+        "falls back to its own exit.nextLevelId. An id listed here that has no file",
+        "is skipped, so a work-in-progress entry never breaks the campaign."
+    ],
+    "defaultEpisode": "e1",
+    "episodes": [
+        {
+            "id": "tut",
+            "name": "Basic Training",
+            "index": 0,
+            "tagline": "Three drills \u2014 move, fight, use. Ten minutes and you speak the whole language.",
+            "accent": "#4aa3ff",
+            "musicCue": "e1",
+            "levels": [
+                "tut-01-basic-training",
+                "tut-02-live-fire",
+                "tut-03-locks-and-keys"
+            ]
+        },
+        {
+            "id": "e1",
+            "name": "Knee-Deep in the Blocks",
+            "index": 1,
+            "tagline": "Six levels under a UAC landing bay, and every one of them is worse than the last.",
+            "accent": "#e03c1c",
+            "musicCue": "e1",
+            "levels": [
+                "e1m1-hangar",
+                "e1m2-coolant",
+                "e1m3-warrens",
+                "e1m4-blackout",
+                "e1m5-furnace",
+                "e1m6-throne"
+            ]
+        }
+    ]
 }

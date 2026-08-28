@@ -115,6 +115,19 @@ function reparse(s: Shipped): LevelSource {
   return parseLevelJson(s.text) as LevelSource;
 }
 
+/**
+ * The Doom-design invariants (monster escalation, ammo pacing, a second
+ * weapon, a bulk cache) are CAMPAIGN rules. The Basic Training drills are
+ * deliberately outside them — the first drill MUST have zero enemies, and a
+ * movement lesson with a mandated backpack is not a lesson. Everything else
+ * (validation at all five skills, reachable exits, keycard solvability, the
+ * binary round trip, unique ids, a secret, the darkness bar) still applies to
+ * the tutorial unchanged. `shared/src/tutorial.test.ts` holds the drills to
+ * their own, stricter contract — zero enemies in drill one, walkable lesson
+ * checkpoints, chained exits — so this exemption cannot rot into a skip.
+ */
+const CAMPAIGN: Shipped[] = SHIPPED.filter((s) => s.level.meta.episodeId !== 'tut');
+
 interface EpisodeDoc {
   defaultEpisode?: unknown;
   episodes?: unknown;
@@ -213,7 +226,7 @@ describe('the shipped campaign', () => {
         expect(s.level.meta.ambient).toBeLessThanOrEqual(0.45);
       });
 
-      it('escalates its monster count with skill', () => {
+      it.skipIf(s.level.meta.episodeId === 'tut')('escalates its monster count with skill', () => {
         const easy = levelTotals(s.level, Skill.TOO_YOUNG_TO_DIE).enemies;
         const hard = levelTotals(s.level, Skill.NIGHTMARE).enemies;
         expect(easy).toBeGreaterThan(0);
@@ -740,7 +753,7 @@ describe('the ammo economy', () => {
     }
   });
 
-  for (const s of SHIPPED) {
+  for (const s of CAMPAIGN) {
     describe(s.id, () => {
       it('ships enough ammo to clear its roster, and not much more', () => {
         for (const skill of [Skill.ULTRA_VIOLENCE, Skill.NIGHTMARE]) {
