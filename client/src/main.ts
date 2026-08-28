@@ -493,6 +493,16 @@ const adPipeline = createAdPipeline({
   enabled: () => flagOn(game.net.flagBits, 'sponsor_slots'),
   adsRemoved: () => progress.adsRemoved || settings.showAds === false,
   platform: matchMedia('(pointer: coarse)').matches ? 'mobile' : 'desktop',
+  /* S3 — the badge renders through the mode picker so it owns the DOM; the
+   * pipeline meters exactly what came back and nothing when it refuses.
+   * `modeSelect` is declared further down but only ever read on menu entry,
+   * long after it exists. */
+  onModeTile: (fill) => modeSelect.setSponsorBadge(fill.modeId, fill.label, fill.text),
+  clearModeTile: () => { modeSelect.clearSponsorBadge(); },
+  /* S4 — the boot line is sellable only while the boot screen is really up.
+   * A hoisted function, because SESSION_CONFIG can fire before this module's
+   * later `let`s are initialised. */
+  bootTip: bootTipEl,
 });
 
 /**
@@ -581,6 +591,18 @@ function hideBoot(): void {
   boot.classList.add('is-done');
   window.setTimeout(() => { boot.hidden = true; }, 320);
 }
+
+/** The S4 surface: the boot tip line, only while the boot screen is up. */
+function bootTipEl(): HTMLElement | null {
+  return bootShown ? boot?.querySelector<HTMLElement>('.boot-tip') ?? null : null;
+}
+
+/* The S4 boot line decides NOW, not at SESSION_CONFIG: the pipeline answers
+ * the kill switch from `/api/flags` on its own, and waiting for the socket to
+ * settle loses the whole boot window on the slow connections where the line
+ * is actually worth something. Idempotent; SESSION_CONFIG calls it again for
+ * the menu-retry half. */
+adPipeline.onBootReady();
 
 /* ------------------------------------------------------------------------ *
  * Menu
@@ -1362,6 +1384,10 @@ registry.register(
  */
 game.net.events.onSessionConfig = (config) => {
   applyServerFlags(featureFlagsFromBits(config.flags));
+  /* The earliest moment the sponsor kill switch is answerable — the S4 boot
+   * line either decides now, while the boot screen is still up on a slow
+   * connection, or never (docs/SPONSORS.md §1a S4). Idempotent. */
+  adPipeline.onBootReady();
 };
 game.net.events.onModeState = (state) => { registry.dispatchState(state); };
 game.net.events.onModeEvent = (event) => { registry.dispatchEvent(event); };

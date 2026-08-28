@@ -24,6 +24,7 @@
 
 import { Feature, isEnabled, COMING_SOON_BADGE } from '@shared/features';
 import {
+  MODE_KEYS,
   MODE_MENU_ORDER,
   ModeId,
   SKILL_NAMES,
@@ -150,6 +151,11 @@ const CSS = `
   background:linear-gradient(180deg,#e8451f,#a11d06);color:#fff;text-align:center;
   font:700 8px/16px system-ui,sans-serif;letter-spacing:.06em;white-space:nowrap;
   box-shadow:0 2px 8px rgba(0,0,0,.5);pointer-events:none;z-index:2}
+.dcm-ribbon-sponsor{top:30px;left:-38px;width:164px;padding:0 22px;box-sizing:border-box;
+  background:linear-gradient(180deg,#f0a020,#a86206);color:#241704;
+  font-size:7.5px;letter-spacing:.04em;text-transform:uppercase;
+  overflow:hidden;text-overflow:ellipsis}
+.dcm-ribbon-sponsor b{font-weight:800;letter-spacing:.08em;margin-right:4px}
 
 /* ---- picker panel ---- */
 .dcm-panel{background:var(--dcm-panel);border:1px solid var(--dcm-line);border-radius:4px;
@@ -455,6 +461,7 @@ export class ModeSelect {
   private botCount = 6;
   private busy = false;
   private destroyed = false;
+  private sponsorBadge: HTMLElement | null = null;
   private readonly keyHandler: (e: KeyboardEvent) => void;
 
   constructor(opts: ModeSelectOptions) {
@@ -674,6 +681,39 @@ export class ModeSelect {
     this.refreshTileSaves();
     this.refreshHordeFacts();
     this.syncPlayButton();
+  }
+
+  /**
+   * S3 — the sponsored mode-tile badge (docs/SPONSORS.md §1a). Rendered in the
+   * `.dcm-ribbon` position — voxiom's "Most Popular" ribbon is the stated
+   * visual precedent — as a gold variant the red editorial ribbon can never be
+   * confused with. One absolutely-positioned node in a grid that already
+   * builds four tiles; no re-layout. Refused (null) when the tile is unknown
+   * or already carries an editorial ribbon — paid never displaces editorial,
+   * and an unrendered badge must count nothing, so the caller only meters
+   * what this returns. The shell clears it on menu exit; the next entry
+   * re-decides.
+   */
+  setSponsorBadge(modeId: number, label: string, text: string): HTMLElement | null {
+    this.clearSponsorBadge();
+    if (this.destroyed || text.length === 0) return null;
+    const key = MODE_KEYS[modeId];
+    if (key === undefined) return null;
+    const tile = this.tiles.find((t) => t.dataset.mode === key);
+    if (tile === undefined || tile.querySelector('.dcm-ribbon') !== null) return null;
+    const ribbon = el('div', 'dcm-ribbon dcm-ribbon-sponsor');
+    const b = el('b', undefined, label.length > 0 ? label : 'Sponsored');
+    ribbon.appendChild(b);
+    ribbon.appendChild(document.createTextNode(text));
+    ribbon.title = `${label.length > 0 ? label : 'Sponsored'} · ${text}`;
+    tile.appendChild(ribbon);
+    this.sponsorBadge = ribbon;
+    return ribbon;
+  }
+
+  clearSponsorBadge(): void {
+    this.sponsorBadge?.remove();
+    this.sponsorBadge = null;
   }
 
   /** Grey the CTA while the shell is spinning a room up. */

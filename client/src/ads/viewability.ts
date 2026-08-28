@@ -26,7 +26,9 @@ export interface GateState {
   visible: boolean;        // document.visibilityState === 'visible'
   focused: boolean;        // document.hasFocus()
   prerendering: boolean;   // IIG 3.1.5.1: pre-render must not count
-  menuMode: boolean;       // #ads[data-mode] === 'menu'
+  menuMode: boolean;       // the surface's own screen is up — `#ads[data-mode] === 'menu'` for
+                           // the reserved slots; a first-party surface supplies its own answer
+                           // (see ObserveSlotOptions.active)
   overlayOpen: boolean;    // #ad-overlay open covers the slots
   creativeLoaded: boolean;
   msSinceInput: number;    // ours, stricter than MRC (IIG §3.1.5.3)
@@ -109,11 +111,26 @@ export interface ObservedSlot {
   disconnect(): void;
 }
 
+export interface ObserveSlotOptions {
+  now?: () => number;
+  /**
+   * Overrides the "the surface's own screen is up" gate. The default is the
+   * §3.2 menu-slot gate — `#ads[data-mode] === 'menu'` — which is meaningless
+   * for a first-party surface living in `#ui` or `#boot` (the S3 tile badge is
+   * an exception: it IS on the menu screen and keeps the default). S4 passes
+   * "the boot screen is still up", S12 "the intermission is open". Like every
+   * gate it can only subtract: false stops the clock, nothing restarts it but
+   * the surface actually being there.
+   */
+  active?: () => boolean;
+}
+
 export function observeSlot(
   el: HTMLElement,
   emit: (e: MeterEvent) => void,
-  now: () => number = () => performance.now(),
+  opts: ObserveSlotOptions = {},
 ): ObservedSlot {
+  const now = opts.now ?? ((): number => performance.now());
   const meter = new SlotMeter(emit);
   let ratio = 0;
   let ioOccluded = false;
@@ -123,7 +140,9 @@ export function observeSlot(
     visible: document.visibilityState === 'visible',
     focused: document.hasFocus(),
     prerendering: (document as { prerendering?: boolean }).prerendering === true,
-    menuMode: document.getElementById('ads')?.dataset.mode === 'menu',
+    menuMode: opts.active !== undefined
+      ? opts.active()
+      : document.getElementById('ads')?.dataset.mode === 'menu',
     overlayOpen: document.getElementById('ad-overlay')?.dataset.open === '1',
     creativeLoaded: el.childElementCount > 0,
     msSinceInput: now() - lastInputMs,
