@@ -354,6 +354,36 @@ describe('items in the release machine', () => {
   });
 });
 
+describe('the expansion one-click (S3): a draft from PICKED versions', () => {
+  it('drafts the picked older version, carries the name, and refuses the uninstalled', async () => {
+    const root = packsRoot(true); // levels@1 and levels@2 both installed
+    const { svc } = service(root);
+    let doc = svc.document();
+
+    // The default is still the newest…
+    expect((await svc.createDraft(doc.revision)).ok).toBe(true);
+    doc = svc.document();
+    const newest = doc.history.find((r) => r.state === 'draft') as Release;
+    expect(newest.packs.find((p) => p.kind === PackKind.LEVELS)?.version).toBe(2);
+
+    // …but a pick names levels@1 exactly, and the note names the expansion.
+    const picked = await svc.createDraft(doc.revision, { levels: 1, note: 'Expansion One: Basic Training' });
+    expect(picked.ok).toBe(true);
+    doc = svc.document();
+    const draft = doc.history.find((r) => r.state === 'draft') as Release;
+    expect(draft.packs.find((p) => p.kind === PackKind.LEVELS)?.version).toBe(1);
+    expect(draft.note).toBe('Expansion One: Basic Training');
+    // The other data packs still ride at their newest installed versions.
+    expect(draft.packs.find((p) => p.kind === PackKind.ITEMS)?.version).toBe(1);
+
+    // A pick of something not on this host is a refusal, never a fallback.
+    doc = svc.document();
+    const missing = await svc.createDraft(doc.revision, { items: 9 });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error).toContain('items@9');
+  });
+});
+
 describe('the release routes on the real binary', () => {
   it('runs draft → gate → approve → stage → promote → rollback over HTTP, and /api/version follows', async () => {
     const port = await freePort();

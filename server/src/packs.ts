@@ -421,6 +421,18 @@ export type ReleaseResult =
 const DOC_FILE = 'releases.json';
 const AUDIT_FILE = 'release.jsonl';
 
+/**
+ * S3: the expansion one-click's selection — a specific installed version per
+ * data pack, and the name the draft will carry into review. Absent fields
+ * mean "newest installed", which is what createDraft always did.
+ */
+export interface DraftPicks {
+  levels?: number;
+  campaign?: number;
+  items?: number;
+  note?: string;
+}
+
 export class ReleaseService {
   private readonly root: string;
   private readonly inventory: PackInventory;
@@ -574,8 +586,13 @@ export class ReleaseService {
    * superseded — it was assembled from the same inventory and holds nothing
    * a re-assembly cannot reproduce; the one-at-a-time rule is what keeps
    * "what would ship" a question with one answer.
+   *
+   * S3, the expansion one-click: `picks` may name a SPECIFIC installed
+   * version per data pack (a refused pick refuses the draft — never a silent
+   * fallback to newest), and `note` names the expansion on the draft itself,
+   * so the Review screen shows what the bundle IS before anyone approves it.
    */
-  createDraft(ifRevision: number): Promise<ReleaseResult> {
+  createDraft(ifRevision: number, picks: DraftPicks = {}): Promise<ReleaseResult> {
     return this.mutate(() => {
       const conflict = this.cas(ifRevision);
       if (conflict !== null) return conflict;
@@ -587,18 +604,32 @@ export class ReleaseService {
       if (ordinal > MAX_ORDINAL) {
         return { ok: false, status: 400, doc: this.doc, error: `ordinal ${ordinal} exceeds the wire's u16` };
       }
+      let packs = this.inventory.installedPacks();
+      const pickOf: Array<[PackKind, number | undefined, (v: number) => PackVersion | null]> = [
+        [PackKind.LEVELS, picks.levels, (v) => this.inventory.levelsPackAt(v)],
+        [PackKind.CAMPAIGN, picks.campaign, (v) => this.inventory.campaignAt(v)?.pack ?? null],
+        [PackKind.ITEMS, picks.items, (v) => this.inventory.itemsAt(v)?.pack ?? null],
+      ];
+      for (const [kind, want, resolve] of pickOf) {
+        if (want === undefined) continue;
+        const resolved = resolve(want);
+        if (resolved === null) {
+          return { ok: false, status: 400, doc: this.doc, error: `${PACKS[kind]?.key ?? 'pack'}@${want} is not installed on this host` };
+        }
+        packs = [...packs.filter((p) => p.kind !== kind), resolved];
+      }
       const revision = this.doc.revision + 1;
       const draft: Release = {
         revision,
         state: 'draft',
         ordinal,
-        packs: this.inventory.installedPacks(),
+        packs,
         rolloutBp: 0,
         baseRevision: this.doc.liveRevision,
         gate: null,
         createdMs: this.clock(),
         publishedMs: 0,
-        note: '',
+        note: (picks.note ?? '').slice(0, 120),
       };
       const history = this.doc.history
         .map((r) => (r.state === 'draft' || r.state === 'review' ? { ...r, state: 'superseded' as ReleaseState } : r));

@@ -400,6 +400,24 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
           </div>
         </div>
         <div class="card">
+          <div class="card-head">expansion — one click to a release draft</div>
+          <div class="card-body">
+            <div class="note">
+              Pick the exact versions this expansion ships and name it. The click makes a
+              DRAFT — nothing goes live until it walks gate &rarr; approve &rarr; stage &rarr;
+              promote on the Review screen, same as every release.
+            </div>
+            <div class="rowline">
+              <select id="studio-exp-levels"></select>
+              <select id="studio-exp-campaign"></select>
+              <select id="studio-exp-items"></select>
+              <input id="studio-exp-name" placeholder="expansion name (the draft's note)" maxlength="120">
+              <button id="studio-exp-draft" class="go">assemble draft</button>
+              <span class="muted" id="studio-exp-state"></span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
           <div class="card-head">designers — weapons &amp; characters (drafts for the platform lane)</div>
           <div class="card-body">
             <div class="note">
@@ -1621,8 +1639,72 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
       }
       if (rows.length === 0) list.appendChild(make('div', 'empty', 'no drafts yet'));
       else list.appendChild(table(['kind', 'file', 'saved'], rows));
+
+      /* S2/S3: the expansion selects — one option per INSTALLED version,
+         newest selected; 'bundled' when only the content/ fallback exists. */
+      var inst = r.body.installed || {};
+      function fillSelect(id, label, entries, describe) {
+        var sel = el(id);
+        clear(sel);
+        var list2 = entries || [];
+        if (list2.length === 0) {
+          var o0 = document.createElement('option');
+          o0.value = '';
+          o0.textContent = label + ': bundled v1';
+          sel.appendChild(o0);
+          return;
+        }
+        for (var j = 0; j < list2.length; j++) {
+          var o = document.createElement('option');
+          o.value = String(list2[j].version);
+          o.textContent = label + '@' + list2[j].version + ' — ' + describe(list2[j]);
+          sel.appendChild(o);
+        }
+        sel.selectedIndex = list2.length - 1;
+      }
+      fillSelect('studio-exp-levels', 'levels', inst.levels, function (p) { return p.playable + '/' + p.total + ' playable'; });
+      fillSelect('studio-exp-campaign', 'campaign', inst.campaign, function (p) { return p.episodes + ' episodes'; });
+      fillSelect('studio-exp-items', 'items', inst.items, function (p) { return p.count + ' items'; });
     });
   }
+
+  /* ---- S3: the expansion one-click ---- */
+  el('studio-exp-draft').addEventListener('click', function () {
+    var state = el('studio-exp-state');
+    var name = el('studio-exp-name').value.trim();
+    if (name.length < 3) {
+      state.textContent = 'name the expansion first (3+ characters)';
+      state.className = 'err';
+      return;
+    }
+    state.textContent = 'assembling…';
+    state.className = 'muted';
+    api('/api/admin/release').then(function (doc) {
+      if (doc.status !== 200 || !doc.body.document) { state.textContent = 'could not read the release document'; state.className = 'err'; return; }
+      var body = {
+        ifRevision: doc.body.document.revision,
+        actor: el('c-actor').value.trim() || 'operator',
+        reason: 'expansion assembled in the studio: ' + name,
+        note: name,
+      };
+      var lv = el('studio-exp-levels').value;
+      var cv = el('studio-exp-campaign').value;
+      var iv = el('studio-exp-items').value;
+      if (lv !== '') body.levels = Number(lv);
+      if (cv !== '') body.campaign = Number(cv);
+      if (iv !== '') body.items = Number(iv);
+      api('/api/admin/release', 'POST', body).then(function (r) {
+        if (r.status === 200) {
+          state.textContent = 'draft assembled — walk it on the Review screen (gate, approve, stage, promote)';
+          state.className = 'ok';
+          loadAudit();
+          return;
+        }
+        state.textContent = 'refused: ' + (r.body && r.body.error ? r.body.error : 'HTTP ' + r.status);
+        state.className = 'err';
+      });
+    });
+  });
 
   function studioPost(sub, body, state) {
     state.textContent = 'saving…';

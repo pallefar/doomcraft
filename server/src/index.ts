@@ -2914,7 +2914,14 @@ async function handleApi(
     switch (sub) {
       case '':
         verb = 'release.draft';
-        result = await releases.createDraft(ifRevision);
+        /* S3: the studio's one-click passes picks; absent fields mean
+         * "newest installed", which is what the Review button always sent. */
+        result = await releases.createDraft(ifRevision, {
+          levels: typeof b.levels === 'number' ? b.levels : undefined,
+          campaign: typeof b.campaign === 'number' ? b.campaign : undefined,
+          items: typeof b.items === 'number' ? b.items : undefined,
+          note: typeof b.note === 'string' ? b.note : undefined,
+        });
         break;
       case '/gate':
         verb = 'release.gate';
