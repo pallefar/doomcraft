@@ -315,6 +315,15 @@ export class TradeService {
     if (dirty) this.persist();
   }
 
+  /**
+   * What `key` has on the table in ANY live trade — the public seam other
+   * spenders of copies (crafting) consult, so a copy on the table can never
+   * also be consumed. Same source of truth the escrow itself uses.
+   */
+  reservedRefs(key: string): ReadonlyMap<string, number> {
+    return this.reservedFor(key, '');
+  }
+
   /** What `key` has on the table in live trades other than `exceptId`. */
   private reservedFor(key: string, exceptId: string): Map<string, number> {
     const out = new Map<string, number>();

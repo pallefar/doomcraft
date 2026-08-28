@@ -21,6 +21,7 @@ import {
   ITEM_KIND_NAMES,
   ITEM_RARITY_NAMES,
   ItemKind,
+  ItemRarity,
   itemStateFor,
   parseItemRef,
   type ItemDef,
@@ -76,6 +77,14 @@ export interface LoadoutInputs {
 
 export type LoadoutSlot = 'skin' | 'title';
 
+export interface CraftTarget {
+  readonly localId: string;
+  readonly name: string;
+  readonly rarityLabel: string;
+  readonly swatch: string;
+  readonly fee: number;
+}
+
 export interface LoadoutRow {
   readonly ref: string;
   readonly name: string;
@@ -94,6 +103,13 @@ export interface LoadoutRow {
   readonly swatch: string;
   /** 'not in the current items pack' | 'revoked' | title text | ''. */
   readonly note: string;
+  /**
+   * The trade-up: non-empty ONLY when this row can craft (ACTIVE, three or
+   * more copies, a craftable kind, and the live pack defines at least one
+   * same-kind item exactly one rarity up). The player picks the target —
+   * crafting is deterministic, never a roll.
+   */
+  readonly craftTargets: readonly CraftTarget[];
 }
 
 export interface LoadoutSection {
@@ -190,6 +206,41 @@ const SLOT_FOR_KIND: Readonly<Record<number, LoadoutSlot | null>> = Object.freez
   [ItemKind.TROPHY]: null,
 });
 
+/**
+ * Restated from `server/src/craft.ts` because the client cannot import server
+ * code; `loadoutModel.test.ts` reads that file and fails on drift, exactly as
+ * `profileModel.test.ts` guards its `RemoteStats` restatement.
+ */
+export const CRAFT_COPIES = 3;
+export const CRAFT_FEES_BY_RARITY: Readonly<Record<number, number>> = Object.freeze({
+  [ItemRarity.UNCOMMON]: 50,
+  [ItemRarity.RARE]: 150,
+  [ItemRarity.EPIC]: 400,
+  [ItemRarity.RELIC]: 1000,
+});
+const CRAFTABLE_KINDS: ReadonlySet<ItemKind> = new Set([ItemKind.SKIN, ItemKind.EMBLEM, ItemKind.TRAIL]);
+
+function craftTargetsFor(
+  def: ItemDef | undefined,
+  state: ItemState,
+  copies: number,
+  pack: WireItemsPack | null,
+): CraftTarget[] {
+  if (def === undefined || state !== 'active' || copies < CRAFT_COPIES) return [];
+  if (!CRAFTABLE_KINDS.has(def.kind) || def.rarity >= ItemRarity.RELIC) return [];
+  const fee = CRAFT_FEES_BY_RARITY[def.rarity + 1] ?? 0;
+  if (fee <= 0) return [];
+  return (pack?.items ?? [])
+    .filter((t) => t.kind === def.kind && t.rarity === def.rarity + 1)
+    .map((t) => ({
+      localId: t.id,
+      name: t.name,
+      rarityLabel: ITEM_RARITY_NAMES[t.rarity] ?? '',
+      swatch: swatchCss(t.tint),
+      fee,
+    }));
+}
+
 export function buildLoadoutView(inputs: LoadoutInputs): LoadoutView {
   const balance = {
     shown: inputs.scrapVisible && inputs.phase === 'ready',
@@ -249,6 +300,7 @@ export function buildLoadoutView(inputs: LoadoutInputs): LoadoutView {
       busy: inputs.busyRef === ref,
       swatch: swatchCss(def?.tint ?? null),
       note,
+      craftTargets: inputs.busyRef !== '' ? [] : craftTargetsFor(def, state, copies, inputs.pack),
     };
     const bucket = rowsByKind.get(kind) ?? [];
     bucket.push(row);
@@ -282,6 +334,7 @@ export function renderedLoadoutStrings(v: LoadoutView): string[] {
     out.push(s.title);
     for (const r of s.rows) {
       out.push(r.name, r.kindLabel, r.rarityLabel, r.state, String(r.copies), r.note, r.swatch);
+      for (const t of r.craftTargets) out.push(t.name, t.rarityLabel, String(t.fee), t.swatch);
     }
   }
   return out;

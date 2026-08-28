@@ -65,11 +65,13 @@ writeFileSync(join(shard, `${SEED_DEVICE}.json`), JSON.stringify({
   progress: { name: 'Marine', xp: 4200, kills: 300, deaths: 120, wins: 22, gamesPlayed: 60 },
   economy: { scrap: 860, lifetimeScrap: 1200, day: '', dayXp: 0, dayScrap: 0, dayMatches: 0 },
   inventory: {
-    items: [RUST, RUST, EMBER, TITLE, RETIRED, HAZARD]
+    // Four rust copies: enough to craft (3) with one left over, so the
+    // crafting arc below is provable from this seed alone.
+    items: [RUST, RUST, RUST, RUST, EMBER, TITLE, RETIRED, HAZARD]
       .map((ref) => ({ ref, ms: 1_700_000_000_000, source: 'drop', sourceId: 'seed' })),
     equippedSkin: '', title: '',
   },
-  moderation: { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [{ ref: HAZARD, ms: 2, reason: 'seeded take-back' }] },
+  moderation: { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [{ ref: EMBER, ms: 2, reason: 'seeded take-back' }] },
 }), 'utf8');
 
 // 3. The real server, flags forced the way production will be after the flip.
@@ -117,7 +119,7 @@ try {
   await page.click('.dcp-tab:text("Loadout")');
   await page.waitForSelector('.dcl-sec', { timeout: 10_000 });
   const text = await page.evaluate(() => document.querySelector('.dcl').textContent);
-  for (const needle of ['×2', 'Rust Marine', 'Hangar Rat', 'revoked', 'not in the current items pack', '860']) {
+  for (const needle of ['×4', 'Rust Marine', 'Hangar Rat', 'revoked', 'not in the current items pack', '860']) {
     if (!text.includes(needle)) throw new Error(`loadout tab is missing "${needle}" — rendered: ${text.slice(0, 400)}`);
   }
   mkdirSync('shots', { recursive: true });
@@ -125,7 +127,7 @@ try {
 
   // 6. Equip through the UI…
   const rustRow = page.locator('.dcl-row', { hasText: 'Rust Marine' });
-  await rustRow.locator('button:text("Equip")').click();
+  await rustRow.locator('button:text-is("Equip")').click();
   await page.waitForSelector('.dcl-on', { timeout: 10_000 });
   await page.screenshot({ path: 'shots/loadout-equipped.png' });
 
@@ -138,8 +140,29 @@ try {
   }
   console.log('SERVER CLAIMS', JSON.stringify(claims));
 
+  // 8. The trade-up: open the picker on the rust row, pay 50 Scrap for the
+  //    chosen uncommon, and prove the swap server-side.
+  await page.locator('.dcl-row', { hasText: 'Rust Marine' }).locator('button:text-is("Craft up")').click();
+  await page.waitForSelector('.dcl-craft', { timeout: 10_000 });
+  const pitch = await page.evaluate(() => document.querySelector('.dcl-craft').textContent);
+  if (!pitch.includes('no rolls, no boxes')) throw new Error(`craft panel pitch missing: ${pitch.slice(0, 200)}`);
+  await page.screenshot({ path: 'shots/loadout-craft.png' });
+  await page.locator('.dcl-craft .dcl-row', { hasText: 'Void Hazard' }).locator('button').click();
+  await page.waitForSelector('.dcl-flash', { timeout: 15_000 });
+  await page.screenshot({ path: 'shots/loadout-crafted.png' });
+
+  const after = await (await fetch(`${ORIGIN}/api/profile?device=${SEED_DEVICE}`)).json();
+  const refs = after.profile.inventory.items.map((i) => i.ref);
+  const rustLeft = refs.filter((r) => r === RUST).length;
+  const hazards = refs.filter((r) => r === HAZARD).length;
+  const scrap = after.profile.economy.scrap;
+  if (rustLeft !== 1 || hazards !== 2 || scrap !== 810) {
+    throw new Error(`craft did not settle: rust=${rustLeft} hazard=${hazards} scrap=${scrap}`);
+  }
+  console.log('CRAFTED', JSON.stringify({ rustLeft, hazards, scrap }));
+
   await browser.close();
-  console.log('OK shots/loadout-tab.png shots/loadout-equipped.png');
+  console.log('OK shots/loadout-tab.png shots/loadout-equipped.png shots/loadout-craft.png shots/loadout-crafted.png');
 } finally {
   server.kill('SIGKILL');
 }

@@ -10,6 +10,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CRAFT_COPIES,
+  CRAFT_FEES_BY_RARITY,
   buildLoadoutView,
   economyTabsFor,
   fallbackName,
@@ -177,6 +179,50 @@ describe('the tab strip decision', () => {
     expect(economyTabsFor({ economy_items: true, economy_trading: true, economy_competitions: true }))
       .toEqual(['loadout', 'trade', 'competitions']);
     expect(economyTabsFor({ economy_items: 'yes' as unknown as boolean })).toEqual([]);
+  });
+});
+
+describe('the trade-up affordance', () => {
+  const THREE_RUST = {
+    items: [
+      { ref: RUST, ms: 10, source: 'drop' },
+      { ref: RUST, ms: 11, source: 'drop' },
+      { ref: RUST, ms: 12, source: 'drop' },
+    ],
+    equippedSkin: '', title: '',
+  };
+
+  it('offers targets only at 3+ copies, ACTIVE, craftable kind, one rarity up', () => {
+    const three = inputsOf({ inventory: THREE_RUST });
+    const targets = rowFor(three, RUST)?.craftTargets ?? [];
+    // Rust Marine is a common skin; the pack's uncommon skin is Void Hazard.
+    expect(targets.map((t) => t.localId)).toEqual(['skin-void-hazard']);
+    expect(targets[0].fee).toBe(50);
+    // Two copies: no affordance.
+    const two = inputsOf({ inventory: { ...THREE_RUST, items: THREE_RUST.items.slice(0, 2) } });
+    expect(rowFor(two, RUST)?.craftTargets).toEqual([]);
+    // A title never crafts, whatever the copy count.
+    const titles = inputsOf({
+      inventory: { items: [1, 2, 3].map((i) => ({ ref: TITLE, ms: i, source: 'prize' })), equippedSkin: '', title: '' },
+    });
+    expect(rowFor(titles, TITLE)?.craftTargets).toEqual([]);
+    // Dormant source: no affordance even with copies.
+    const dormant = inputsOf({ inventory: THREE_RUST, pack: { version: 2, items: [] } });
+    expect(rowFor(dormant, RUST)?.craftTargets).toEqual([]);
+  });
+
+  it('mirrors the server constants — read from server/src/craft.ts, not assumed', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const path = await import('node:path');
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(path.resolve(here, '..', '..', '..', 'server', 'src', 'craft.ts'), 'utf8');
+    expect(src).toContain(`export const CRAFT_COPIES = ${CRAFT_COPIES};`);
+    for (const [rarity, fee] of Object.entries(CRAFT_FEES_BY_RARITY)) {
+      // Each fee number must appear against the same rarity index in the
+      // server table (the literal is keyed by ItemRarity enum member).
+      expect(src, `fee ${fee} for rarity ${rarity}`).toMatch(new RegExp(`:\\s*${fee},`));
+    }
   });
 });
 

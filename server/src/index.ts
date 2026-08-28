@@ -134,7 +134,8 @@ import {
 } from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
-import { JsonFileStore, MAX_SCRAP_BALANCE, applyEquip, createProfile, equipVerdict, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile } from './persistence.js';
+import { JsonFileStore, MAX_SCRAP_BALANCE, applyEquip, createProfile, equipVerdict, grantDrops, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile } from './persistence.js';
+import { CRAFT_COPIES, applyCraft, craftVerdict } from './craft.js';
 import type { EquipSlot, PersistenceStore, StoredProfile } from './persistence.js';
 
 /* ------------------------------------------------------------------------ *
@@ -2783,6 +2784,68 @@ async function handleApi(
     });
     if (refusal !== null) { sendJson(res, 400, { error: refusal }, cors); return true; }
     sendJson(res, 200, {
+      inventory: { equippedSkin: updated.inventory.equippedSkin, title: updated.inventory.title },
+    }, cors);
+    return true;
+  }
+
+  /* --- crafting: the deterministic trade-up (docs/ECONOMY.md) ------------ *
+   * Three duplicates + a Scrap fee -> the CHOSEN item one rarity up, same
+   * kind. The engine (`craft.ts`) owns every rule; this route owns identity,
+   * the escrow reservation set, and the journal's first 'spend' rows —
+   * idempotent on the client nonce, so a crash-replayed craft consumes and
+   * grants nothing twice.                                                   */
+  if (path === '/api/craft' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const device = deviceFromRequest(req, body);
+    if (device === null) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(device));
+    if (!flagOn(flags.bitsFor(key), 'economy_items')) {
+      sendJson(res, 404, { error: 'crafting is not enabled' }, cors);
+      return true;
+    }
+    const source = typeof body.source === 'string' ? body.source.slice(0, 96) : '';
+    const target = typeof body.target === 'string' ? body.target.slice(0, 64) : '';
+    const nonce = typeof body.nonce === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(body.nonce) ? body.nonce : '';
+    if (nonce === '') { sendJson(res, 400, { error: 'a craft needs a client nonce (8-64 url-safe chars)' }, cors); return true; }
+    const decl = releases.live().packs.find((pk) => pk.kind === PackKind.ITEMS);
+    if (decl === undefined) { sendJson(res, 400, { error: 'the live release carries no items pack' }, cors); return true; }
+    const defs = liveItemDefs();
+    const reserved = trades.reservedRefs(key);
+    const sourceId = `craft:${nonce}`;
+    const now = Date.now();
+
+    let refusal: { status: number; error: string } | null = null;
+    let crafted = '';
+    let replay = false;
+    const updated = await store.update(key, async (p) => {
+      // Idempotency FIRST and inside the same update, exactly as every
+      // payment in this repo: the nonce's grant is the durable receipt.
+      const prior = p.inventory.items.find((i) => i.sourceId === sourceId);
+      if (prior !== undefined || await journal.has('spend', sourceId, key)) {
+        crafted = prior?.ref ?? '';
+        replay = true;
+        return;
+      }
+      const v = craftVerdict(p, source, target, defs, decl.version, reserved);
+      if (!v.ok) { refusal = { status: v.status, error: v.error }; return; }
+      const outcome = applyCraft(p, v.plan);
+      const landed = grantDrops(p, [v.plan.targetRef], 'craft', sourceId, now);
+      crafted = landed[0]?.ref ?? v.plan.targetRef;
+      await journal.append([{
+        id: newLedgerId(now), ms: now, kind: 'spend', sourceId,
+        playerId: key, currency: 'scrap',
+        delta: outcome.debited, balanceAfter: outcome.balanceAfter,
+        actor: 'system:craft',
+        reason: `crafted ${v.plan.targetLocalId} from ${CRAFT_COPIES}x ${v.plan.sourceRef}`,
+      }]);
+    });
+    if (refusal !== null) { sendJson(res, (refusal as { status: number }).status, { error: (refusal as { error: string }).error }, cors); return true; }
+    sendJson(res, 200, {
+      crafted,
+      replay,
+      balance: updated.economy.scrap,
       inventory: { equippedSkin: updated.inventory.equippedSkin, title: updated.inventory.title },
     }, cors);
     return true;

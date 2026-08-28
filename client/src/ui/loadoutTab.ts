@@ -96,6 +96,12 @@ const CSS = `
 .dcl-meta.is-bad{color:#e8695a}
 .dcl-on{flex:0 0 auto;font-size:10px;letter-spacing:.14em;text-transform:uppercase;
   color:#8fd18a;border:1px solid rgba(143,209,138,.4);border-radius:2px;padding:3px 7px}
+.dcl-craft{margin:2px 0 8px 24px;padding:9px 12px;border:1px solid rgba(240,160,32,.35);
+  border-radius:3px;background:rgba(240,160,32,.05)}
+.dcl-craft p{margin:0 0 7px;font-size:11.5px;color:#cfc9c3}
+.dcl-craft .dcl-row{border-top:1px solid rgba(255,255,255,.05)}
+.dcl-flash{margin:0 0 10px;padding:8px 12px;border:1px solid rgba(143,209,138,.4);
+  border-radius:3px;background:rgba(143,209,138,.06);color:#b9e3b5;font-size:12.5px}
 #ui .dcl button{font:700 11px/1 system-ui;letter-spacing:.08em;min-height:30px;
   padding:7px 12px;border:1px solid rgba(255,255,255,.22);border-radius:2px;
   background:rgba(255,255,255,.06);color:#e8e6e3;cursor:pointer;text-transform:uppercase;
@@ -145,6 +151,10 @@ export class LoadoutTab {
   private destroyed = false;
   private busyRef = '';
   private error = '';
+  /** The row whose trade-up picker is expanded, or ''. */
+  private craftOpenRef = '';
+  /** 'Crafted <name>' after a success; cleared on the next refresh. */
+  private flash = '';
   private inputs: LoadoutInputs;
   private pack: WireItemsPack | null = null;
   private profile: ProfileAnswer | null = null;
@@ -167,6 +177,8 @@ export class LoadoutTab {
   /** Fetch everything fresh and repaint. Called on every switch to this tab. */
   async refresh(): Promise<void> {
     this.error = '';
+    this.flash = '';
+    this.craftOpenRef = '';
     this.inputs = this.buildInputs('loading');
     this.paint();
     const device = this.opts.deviceId();
@@ -277,6 +289,46 @@ export class LoadoutTab {
     this.paint();
   }
 
+  /**
+   * The trade-up: deterministic, the player picked the target, idempotent on
+   * a fresh nonce per CLICK (a retry of a failed send would need the same
+   * nonce — but a failed send changes nothing server-side, so a new click is
+   * a new craft and a new nonce is correct).
+   */
+  private async craft(sourceRef: string, targetLocalId: string): Promise<void> {
+    if (this.busyRef !== '') return;
+    this.busyRef = sourceRef;
+    this.error = '';
+    this.inputs = this.buildInputs('ready');
+    this.paint();
+    const nonce = crypto.randomUUID().replace(/-/g, '');
+    let status = 0;
+    let answer: { crafted?: string; error?: string } = {};
+    try {
+      const res = await fetch(`${this.opts.serverBase}/api/craft`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: this.opts.deviceId(), source: sourceRef, target: targetLocalId, nonce,
+        }),
+      });
+      status = res.status;
+      answer = await res.json().catch(() => ({})) as typeof answer;
+    } catch { /* status stays 0 */ }
+    if (this.destroyed) return;
+    this.busyRef = '';
+    if (status === 200) {
+      await this.refresh(); // the server's inventory is the truth
+      if (this.destroyed) return;
+      this.flash = 'Crafted. Three copies became one better one — it is in the list below.';
+      this.paint();
+      return;
+    }
+    this.error = status === 0 ? 'No server answered.' : answer.error ?? `Refused (${status}).`;
+    this.inputs = this.buildInputs('ready');
+    this.paint();
+  }
+
   /* -------------------------------------------------------------------- *
    * Painting — no decisions, only placement
    * -------------------------------------------------------------------- */
@@ -310,14 +362,45 @@ export class LoadoutTab {
     }
 
     this.element.appendChild(el('p', 'dcl-line', v.line));
+    if (this.flash !== '') this.element.appendChild(el('p', 'dcl-flash', this.flash));
     if (this.error !== '') this.element.appendChild(el('p', 'dcl-err', this.error));
 
     for (const s of v.sections) {
       const sec = el('div', 'dcl-sec');
       sec.appendChild(el('h3', undefined, s.title));
-      for (const r of s.rows) sec.appendChild(this.rowEl(r));
+      for (const r of s.rows) {
+        sec.appendChild(this.rowEl(r));
+        if (this.craftOpenRef === r.ref && r.craftTargets.length > 0) {
+          sec.appendChild(this.craftEl(r.ref, r.craftTargets));
+        }
+      }
       this.element.appendChild(sec);
     }
+  }
+
+  private craftEl(sourceRef: string, targets: LoadoutRow['craftTargets']): HTMLElement {
+    const box = el('div', 'dcl-craft');
+    box.appendChild(el('p', undefined,
+      `Trade up: three copies + the Scrap fee become the ONE you pick — no rolls, no boxes.`));
+    for (const t of targets) {
+      const row = el('div', 'dcl-row');
+      const sw = el('i');
+      if (t.swatch === '') sw.className = 'dcl-none';
+      else sw.style.background = t.swatch;
+      row.appendChild(sw);
+      const name = el('span', 'dcl-name', t.name);
+      name.appendChild(el('small', undefined, t.rarityLabel));
+      row.appendChild(name);
+      const btn = el('button', undefined, `Craft — ${t.fee} Scrap`);
+      btn.type = 'button';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        void this.craft(sourceRef, t.localId);
+      });
+      row.appendChild(btn);
+      box.appendChild(row);
+    }
+    return box;
   }
 
   private rowEl(r: LoadoutRow): HTMLElement {
@@ -338,6 +421,17 @@ export class LoadoutTab {
     row.appendChild(meta);
 
     if (r.equipped) row.appendChild(el('span', 'dcl-on', 'Equipped'));
+
+    if (r.craftTargets.length > 0) {
+      const craft = el('button', undefined, this.craftOpenRef === r.ref ? 'Close' : 'Craft up');
+      craft.type = 'button';
+      craft.addEventListener('click', (e) => {
+        e.preventDefault();
+        this.craftOpenRef = this.craftOpenRef === r.ref ? '' : r.ref;
+        this.render();
+      });
+      row.appendChild(craft);
+    }
 
     if (r.action !== null && r.slot !== null) {
       const slot = r.slot;
