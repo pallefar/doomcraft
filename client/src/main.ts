@@ -937,7 +937,15 @@ async function openProfile(): Promise<void> {
   avatarEditor?.close();
   if (profileScreen === null) {
     profileLoading ??= import('@/ui/profile')
-      .then((m) => m.createProfileScreen({ root: uiRoot!, inputs: profileInputs }));
+      .then((m) => m.createProfileScreen({
+        root: uiRoot!,
+        inputs: profileInputs,
+        /* C4: the interactive account panel. Mounted only when a server can
+         * answer — the pure-static build keeps the truthful model sentence. */
+        account: serverUrl !== '' || location.origin !== 'null'
+          ? { serverBase: serverUrl, deviceId: () => deviceId() }
+          : undefined,
+      }));
     try {
       profileScreen = await profileLoading;
     } catch {

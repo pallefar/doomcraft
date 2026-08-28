@@ -42,6 +42,7 @@
  */
 
 import { AVATAR_PALETTE, avatarLabel, unpackAvatar } from '@/characters/avatar';
+import { createAccountPanel, type AccountPanel, type AccountPanelOptions } from '@/ui/accountPanel';
 import { MatchTypeNotice } from '@/ui/matchType';
 import {
   buildProfileView,
@@ -61,6 +62,12 @@ export interface ProfileScreenOptions {
   inputs(): ProfileInputs;
   /** Fired on every close path: the button, Escape, and `setScreen`. */
   onClose?(): void;
+  /**
+   * C4: mount the interactive account panel (sign in / the row-3 question /
+   * sign out). Absent, the overlay is exactly what it was — the static
+   * build's model sentence stands alone and stays true.
+   */
+  account?: AccountPanelOptions;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -235,6 +242,7 @@ export class ProfileScreen {
   private readonly gridEl: HTMLElement;
   private readonly closeBtn: HTMLButtonElement;
 
+  private readonly accountPanel: AccountPanel | null;
   private opened = false;
   private destroyed = false;
   private last: ProfileView | null = null;
@@ -302,6 +310,10 @@ export class ProfileScreen {
     this.worthEl.appendChild(this.notice.element);
     shell.appendChild(this.worthEl);
 
+    /* ---- the account panel (C4) — interactive, so not a model panel ---- */
+    this.accountPanel = opts.account === undefined ? null : createAccountPanel(opts.account);
+    if (this.accountPanel !== null) shell.appendChild(this.accountPanel.element);
+
     /* ---- panels ---- */
     this.gridEl = el('div', 'dcp-grid');
     shell.appendChild(this.gridEl);
@@ -331,6 +343,7 @@ export class ProfileScreen {
     if (this.opened || this.destroyed) return;
     this.opened = true;
     this.paint(buildProfileView(this.opts.inputs()));
+    void this.accountPanel?.refresh();
     this.element.classList.add('is-open');
     this.element.scrollTop = 0;
     this.closeBtn.focus({ preventScroll: true });
@@ -357,6 +370,7 @@ export class ProfileScreen {
     this.opened = false;
     this.element.classList.remove('is-open');
     this.notice.destroy();
+    this.accountPanel?.destroy();
     this.element.remove();
     releaseStyle();
   }

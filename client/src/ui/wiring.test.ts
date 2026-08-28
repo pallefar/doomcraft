@@ -321,7 +321,7 @@ describe('the profile overlay is wired the whole way', () => {
   });
 
   it('mounts on #ui itself, not inside a screen', () => {
-    expect(main).toMatch(/createProfileScreen\(\{ root: uiRoot!, inputs: profileInputs \}\)/);
+    expect(main).toMatch(/createProfileScreen\(\{\s*root: uiRoot!,\s*inputs: profileInputs,/);
   });
 
   it('is opened from the launcher row and closed by the screen machine', () => {
