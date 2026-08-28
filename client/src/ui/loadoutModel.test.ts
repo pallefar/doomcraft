@@ -167,11 +167,13 @@ describe('the balance and the honest sentences', () => {
 });
 
 describe('the tab strip decision', () => {
-  it('grants the loadout tab on economy_items alone, and nothing without it', () => {
+  it('grants each tab on its own flag alone, and nothing without them', () => {
     expect(economyTabsFor(null)).toEqual([]);
     expect(economyTabsFor({})).toEqual([]);
     expect(economyTabsFor({ economy_scrap: true })).toEqual([]);
     expect(economyTabsFor({ economy_items: true })).toEqual(['loadout']);
+    expect(economyTabsFor({ economy_trading: true })).toEqual(['trade']);
+    expect(economyTabsFor({ economy_items: true, economy_trading: true })).toEqual(['loadout', 'trade']);
     expect(economyTabsFor({ economy_items: 'yes' as unknown as boolean })).toEqual([]);
   });
 });
