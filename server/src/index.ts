@@ -2086,10 +2086,14 @@ async function handleApi(
         ? body.code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12) : '';
       out = await trades.join(key, code, deps);
     } else if (verb === 'offer') {
-      const refs = Array.isArray(body.refs)
-        ? body.refs.filter((r): r is string => typeof r === 'string' && r.length <= 96).slice(0, 32)
-        : [];
-      out = await trades.offer(key, tradeId, refs, deps);
+      // Refused, not filtered: an offer with junk in it must not quietly
+      // become a smaller offer the caller never made.
+      const raw = Array.isArray(body.refs) ? body.refs : null;
+      if (raw === null || raw.length > 32 || raw.some((r) => typeof r !== 'string' || r.length > 96)) {
+        sendJson(res, 400, { error: 'refs must be an array of item refs' }, cors);
+        return true;
+      }
+      out = await trades.offer(key, tradeId, raw as string[], deps);
     } else if (verb === 'confirm') out = await trades.confirm(key, tradeId, deps);
     else if (verb === 'cancel') out = await trades.cancel(key, tradeId);
     if (out === null) { sendJson(res, 404, { error: 'unknown trade verb' }, cors); return true; }

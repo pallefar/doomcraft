@@ -54,6 +54,13 @@ export const TRADE_TTL_MS = 15 * 60_000;
 export const TRADE_KEEP_MS = 3600_000;
 export const MAX_TRADE_REFS = 6;
 export const MAX_OPEN_TRADES_PER_KEY = 3;
+/**
+ * Free inventory slots a receiver must have BEYOND the incoming items. The
+ * overflow check runs outside the device locks; this margin is what keeps a
+ * concurrent drop or prize grant from pushing the transfer into
+ * `grantDrops`' silent truncation at the hard cap.
+ */
+export const TRADE_CAPACITY_MARGIN = 16;
 
 export type TradeState = 'open' | 'active' | 'settling' | 'settled' | 'cancelled';
 
@@ -76,6 +83,13 @@ interface TradeRow {
   note: string;
   /** ref -> copies owned per side, written at 'settling' — the replay guard. */
   snapshot: { a: Record<string, number>; b: Record<string, number> } | null;
+  /**
+   * Persisted the moment each side's transfer returns, BEFORE 'settled', so
+   * a replay consults a durable positive record instead of inferring from
+   * counts. The count/tag guards in `settleSide` remain as the belt for the
+   * one crash window this cannot cover (between the update and this write).
+   */
+  done: { a: boolean; b: boolean };
 }
 
 interface TradesDoc {
@@ -112,6 +126,42 @@ export type TradeResult =
 
 function refuse(status: number, error: string): TradeResult {
   return { ok: false, status, error };
+}
+
+const TRADE_STATES: readonly TradeState[] = ['open', 'active', 'settling', 'settled', 'cancelled'];
+
+function sanitiseSide(v: unknown): TradeSide | null {
+  const s = (v ?? {}) as Record<string, unknown>;
+  if (typeof s.key !== 'string' || s.key.length === 0) return null;
+  const offer = Array.isArray(s.offer)
+    ? s.offer.filter((r): r is string => typeof r === 'string' && parseItemRef(r) !== null)
+    : [];
+  return { key: s.key, offer, confirmed: s.confirmed === true };
+}
+
+/** Null = drop the row. A doc off disk is input, not gospel. */
+function sanitiseTradeRow(id: string, v: unknown): TradeRow | null {
+  const r = (v ?? {}) as Record<string, unknown>;
+  const a = sanitiseSide(r.a);
+  if (a === null) return null;
+  const state = TRADE_STATES.includes(r.state as TradeState) ? r.state as TradeState : null;
+  if (state === null) return null;
+  const b = r.b === null || r.b === undefined ? null : sanitiseSide(r.b);
+  // A settling row without both parties and its snapshot cannot ever be
+  // recovered — refuse it rather than let it reserve items forever.
+  const snap = (r.snapshot ?? null) as TradeRow['snapshot'];
+  if (state === 'settling' && (b === null || snap === null || typeof snap !== 'object')) return null;
+  const done = (r.done ?? {}) as Record<string, unknown>;
+  return {
+    id,
+    code: typeof r.code === 'string' ? r.code : '',
+    ms: typeof r.ms === 'number' ? r.ms : 0,
+    updatedMs: typeof r.updatedMs === 'number' ? r.updatedMs : 0,
+    a, b, state,
+    note: typeof r.note === 'string' ? r.note : '',
+    snapshot: snap,
+    done: { a: done.a === true, b: done.b === true },
+  };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -173,9 +223,14 @@ export function offerRefusal(
     const def = defs.get(parsed.localId);
     if (def === undefined) return 'that item is not in the live release — it cannot move while dormant';
     if (!def.tradable) return `"${def.name}" is not tradable`;
-    const have = tradableCopies(p, ref, nowMs) - (reserved.get(ref) ?? 0);
+    const held = reserved.get(ref) ?? 0;
+    const have = tradableCopies(p, ref, nowMs) - held;
     if (have < wanted) {
-      if (ownedCount(p, ref) < wanted + (reserved.get(ref) ?? 0)) return `you do not own ${wanted} of "${def.name}"`;
+      if (ownedCount(p, ref) < wanted + held) {
+        return held > 0
+          ? `${held} of your "${def.name}" ${held === 1 ? 'copy is' : 'copies are'} already on the table in another trade`
+          : `you do not own ${wanted} of "${def.name}"`;
+      }
       return `"${def.name}" is still in its trade cooldown`;
     }
   }
@@ -198,7 +253,13 @@ export class TradeService {
     try {
       const raw = JSON.parse(readFileSync(join(this.root, TRADES_FILE), 'utf8')) as TradesDoc;
       if (raw.version === 1 && raw.trades !== null && typeof raw.trades === 'object') {
-        this.doc = { version: 1, trades: raw.trades };
+        // Sanitised, row by row: a malformed row (hand-edited, truncated,
+        // or from a newer build) must not sit in the doc forever reserving
+        // items and trade slots it cannot release.
+        for (const [id, row] of Object.entries(raw.trades)) {
+          const t = sanitiseTradeRow(id, row);
+          if (t !== null) this.doc.trades[id] = t;
+        }
       }
     } catch { /* first boot */ }
   }
@@ -210,13 +271,22 @@ export class TradeService {
     return next;
   }
 
-  private persist(): void {
+  /**
+   * True when the doc reached disk. Most callers may shrug a failure off —
+   * an unwritable doc must not break play — but `settle()` MUST NOT: moving
+   * items without the durable 'settling' record on disk is a settlement no
+   * crash can ever recover, so there the return value is load-bearing.
+   */
+  private persist(): boolean {
     try {
       mkdirSync(this.root, { recursive: true });
       const tmp = join(this.root, `${TRADES_FILE}.tmp`);
       writeFileSync(tmp, JSON.stringify(this.doc, null, 2), 'utf8');
       renameSync(tmp, join(this.root, TRADES_FILE));
-    } catch { /* an unwritable doc must not break play */ }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private audit(row: Record<string, unknown>): void {
@@ -309,7 +379,7 @@ export class TradeService {
       const t: TradeRow = {
         id: newLedgerId(now), code, ms: now, updatedMs: now,
         a: { key, offer: [], confirmed: false }, b: null,
-        state: 'open', note: '', snapshot: null,
+        state: 'open', note: '', snapshot: null, done: { a: false, b: false },
       };
       this.doc.trades[t.id] = t;
       this.persist();
@@ -474,14 +544,39 @@ export class TradeService {
       if (who !== null) return `a trader can no longer trade: ${who}`;
       const bad = offerRefusal(p as StoredProfile, side.offer, defs, now, this.reservedFor(side.key, t.id));
       if (bad !== null) return `an offer no longer stands: ${bad}`;
+      /* The MARGIN, not the cap. This check runs outside the device locks
+       * and the transfer lands several awaits later — a match drop or a
+       * prize grant can add items in between, and `grantDrops` at the hard
+       * cap silently destroys what does not fit. The margin buys room for
+       * any realistic concurrent burst; `settleSide` still audits loudly
+       * if the impossible happens and a grant lands short. */
       const after = (p as StoredProfile).inventory.items.length - side.offer.length + other.offer.length;
-      if (after > MAX_OWNED_ITEMS) return 'a trader\'s inventory would overflow';
+      if (after > MAX_OWNED_ITEMS - TRADE_CAPACITY_MARGIN) return 'a trader\'s inventory would overflow';
     }
     return null;
   }
 
-  /** Runs inside the service lock, with both offers already revalidated. */
-  private async settle(t: TradeRow, deps: TradeDeps, now: number): Promise<void> {
+  /**
+   * Runs inside the service lock, with both offers already revalidated.
+   *
+   * The DURABILITY ORDER is the whole design and every line of it is
+   * load-bearing:
+   *
+   *   1. The 'settling' record + snapshot MUST reach disk before any item
+   *      moves — persist() failing here aborts the settlement outright,
+   *      because a transfer with no durable record is one no crash can
+   *      ever recover.
+   *   2. Each side's done-flag persists the moment its transfer returns.
+   *   3. `store.flush()` runs BEFORE the doc says 'settled'. The production
+   *      store debounces profile writes (~800 ms); marking 'settled'
+   *      durably while the inventories are still buffered is a crash
+   *      window where the trade is skipped by `recover()` and the swap is
+   *      silently voided or half-applied. The flush is the barrier.
+   *
+   * Returns false when the settlement could not start; the trade is put
+   * back to 'active' with both confirms cleared.
+   */
+  private async settle(t: TradeRow, deps: TradeDeps, now: number): Promise<boolean> {
     const b = t.b as TradeSide;
     const snap = (p: StoredProfile | null, side: TradeSide): Record<string, number> => {
       const out: Record<string, number> = {};
@@ -494,41 +589,67 @@ export class TradeService {
       b: snap(await deps.store.load(b.key), b),
     };
     t.state = 'settling';
+    t.done = { a: false, b: false };
     t.updatedMs = now;
-    this.persist();
+    if (!this.persist()) {
+      t.state = 'active';
+      t.snapshot = null;
+      t.a.confirmed = false;
+      b.confirmed = false;
+      t.note = 'the settlement could not be recorded — nothing moved, confirm again';
+      this.audit({ ms: now, tradeId: t.id, event: 'settle-refused', note: 'unwritable doc' });
+      return false;
+    }
     this.audit({
       ms: now, tradeId: t.id, event: 'settling',
       a: { key: t.a.key, gives: t.a.offer.slice() },
       b: { key: b.key, gives: b.offer.slice() },
     });
 
-    await this.settleSide(t, t.a, b, t.snapshot.a, deps, now);
-    await this.settleSide(t, b, t.a, t.snapshot.b, deps, now);
+    await this.settleSide(t, 'a', deps, now);
+    await this.settleSide(t, 'b', deps, now);
+
+    // The barrier: both inventories durable BEFORE the doc stops saying
+    // 'settling', or a crash right here replays into the per-side guards.
+    await deps.store.flush();
 
     t.state = 'settled';
     t.updatedMs = this.clock();
     this.persist();
     this.audit({ ms: t.updatedMs, tradeId: t.id, event: 'settled' });
+    return true;
   }
 
   /**
    * One side's whole transfer in one `store.update`, idempotent under
-   * replay: a side that RECEIVES is done iff the tagged grant is present; a
-   * side that only GIVES is done iff the snapshot says its copies already
-   * left. Removal takes the OLDEST cooled-down copies, so the copies that
-   * stay are the ones still in cooldown — never the other way around.
+   * replay, guards strongest first: the durable done-flag, then the
+   * sourceId tag on any received copy, then the snapshot count comparison
+   * (the belt for a crash between the update and the done-flag persist).
+   * Removal takes the OLDEST cooled-down copies, so the copies that stay
+   * are the ones still in cooldown — never the other way around.
    */
-  private async settleSide(
-    t: TradeRow, side: TradeSide, other: TradeSide,
-    snapshot: Record<string, number>, deps: TradeDeps, now: number,
-  ): Promise<void> {
+  private async settleSide(t: TradeRow, which: 'a' | 'b', deps: TradeDeps, now: number): Promise<void> {
+    const side = which === 'a' ? t.a : (t.b as TradeSide);
+    const other = which === 'a' ? (t.b as TradeSide) : t.a;
+    const snapshot = t.snapshot?.[which] ?? {};
+    if (t.done[which]) return;
     const tag = `trade:${t.id}`;
     await deps.store.update(side.key, (p) => {
       if (other.offer.length > 0 && p.inventory.items.some((it) => it.sourceId === tag)) return;
       if (other.offer.length === 0 && this.alreadyRemoved(p, side, snapshot)) return;
       this.removeCopies(p, side.offer, now);
-      grantDrops(p, other.offer, 'trade', tag, now);
+      const landed = grantDrops(p, other.offer, 'trade', tag, now);
+      if (landed.length < other.offer.length) {
+        // The margin makes this unreachable in practice; if it ever fires,
+        // it must fire LOUDLY — a silent cap is how items vanish.
+        this.audit({
+          ms: now, tradeId: t.id, event: 'grant-truncated',
+          side: which, wanted: other.offer.length, landed: landed.length,
+        });
+      }
     });
+    t.done[which] = true;
+    this.persist();
   }
 
   private alreadyRemoved(p: StoredProfile, side: TradeSide, snapshot: Record<string, number>): boolean {
@@ -558,6 +679,11 @@ export class TradeService {
    * Boot-time crash recovery: any trade the last process left in 'settling'
    * had both confirms and a snapshot on disk — finish it. The per-side
    * guards make a half-done side a no-op and a not-done side a redo.
+   *
+   * NEVER throws, and one failing trade never strands the others: the boot
+   * call is fire-and-forget, so a rejection here would be an unhandled
+   * rejection in the process, and an early `throw` would leave every later
+   * 'settling' trade frozen forever.
    */
   recover(deps: TradeDeps): Promise<number> {
     return this.locked(async () => {
@@ -565,13 +691,20 @@ export class TradeService {
       for (const t of Object.values(this.doc.trades)) {
         if (t.state !== 'settling' || t.b === null || t.snapshot === null) continue;
         const now = this.clock();
-        await this.settleSide(t, t.a, t.b, t.snapshot.a, deps, now);
-        await this.settleSide(t, t.b, t.a, t.snapshot.b, deps, now);
-        t.state = 'settled';
-        t.note = 'settled after a restart';
-        t.updatedMs = now;
-        this.audit({ ms: now, tradeId: t.id, event: 'settled', note: 'recovered' });
-        finished++;
+        try {
+          await this.settleSide(t, 'a', deps, now);
+          await this.settleSide(t, 'b', deps, now);
+          await deps.store.flush();
+          t.state = 'settled';
+          t.note = 'settled after a restart';
+          t.updatedMs = now;
+          this.audit({ ms: now, tradeId: t.id, event: 'settled', note: 'recovered' });
+          finished++;
+        } catch (err) {
+          // Left in 'settling': the next boot tries again, and the guards
+          // keep however far this attempt got from ever applying twice.
+          this.audit({ ms: now, tradeId: t.id, event: 'recover-failed', note: String(err).slice(0, 200) });
+        }
       }
       if (finished > 0) this.persist();
       return finished;
