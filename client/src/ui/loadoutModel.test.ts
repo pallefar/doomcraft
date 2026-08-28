@@ -173,7 +173,9 @@ describe('the tab strip decision', () => {
     expect(economyTabsFor({ economy_scrap: true })).toEqual([]);
     expect(economyTabsFor({ economy_items: true })).toEqual(['loadout']);
     expect(economyTabsFor({ economy_trading: true })).toEqual(['trade']);
-    expect(economyTabsFor({ economy_items: true, economy_trading: true })).toEqual(['loadout', 'trade']);
+    expect(economyTabsFor({ economy_competitions: true })).toEqual(['competitions']);
+    expect(economyTabsFor({ economy_items: true, economy_trading: true, economy_competitions: true }))
+      .toEqual(['loadout', 'trade', 'competitions']);
     expect(economyTabsFor({ economy_items: 'yes' as unknown as boolean })).toEqual([]);
   });
 });

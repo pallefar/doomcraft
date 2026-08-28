@@ -149,7 +149,7 @@ export function swatchCss(tint: readonly [number, number, number] | null | undef
  * Which economy tabs exist at all — decided from the /api/flags probe
  * ------------------------------------------------------------------------ */
 
-export type EconomyTabId = 'loadout' | 'trade';
+export type EconomyTabId = 'loadout' | 'trade' | 'competitions';
 
 /**
  * The menu-time truth: on the menu `game.net.flagBits` comes from the local
@@ -162,6 +162,7 @@ export function economyTabsFor(flags: Readonly<Record<string, unknown>> | null):
   const out: EconomyTabId[] = [];
   if (flags.economy_items === true) out.push('loadout');
   if (flags.economy_trading === true) out.push('trade');
+  if (flags.economy_competitions === true) out.push('competitions');
   return out;
 }
 
