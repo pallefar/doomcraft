@@ -182,25 +182,10 @@ describe('the socket ticket (§2.3)', () => {
     const redeemed = await g.redeemTicket(ticket);
     expect(redeemed?.profileKey).toBe(x.account.primaryDeviceId);
     expect(redeemed?.profileKey).not.toBe(y.account.primaryDeviceId);
-  });
-});
-
-describe('player sessions', () => {
-  it('opens, resolves, refreshes with rotation, and revokes', async () => {
-    const g = graph();
-    const out = await g.signIn({ ...CLAIM, deviceId: D('device-s1'), deviceHasProfile: false, deviceCountable: false });
-    if (out.kind !== 'account') throw new Error(out.kind);
-    const opened = await g.openSession(out.account.accountId, D('device-s1'));
-    expect((await g.resolveSession(opened.token))?.accountId).toBe(out.account.accountId);
-
-    const rotated = await g.refreshSession(opened.refresh);
-    expect(rotated).not.toBeNull();
-    // The old pair is dead either way.
-    expect(await g.resolveSession(opened.token)).toBeNull();
-    expect(await g.refreshSession(opened.refresh)).toBeNull();
-
-    await g.revokeAll(out.account.accountId);
-    expect(await g.resolveSession(rotated!.token)).toBeNull();
+    // The account-keyed mint answers the same, and a missing account mints nothing.
+    const byAccount = await g.mintAccountTicket(x.account.accountId);
+    expect((await g.redeemTicket(byAccount!))?.profileKey).toBe(x.account.primaryDeviceId);
+    expect(await g.mintAccountTicket(asAccountId('pass:missing'))).toBeNull();
   });
 });
 

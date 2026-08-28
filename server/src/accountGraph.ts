@@ -45,8 +45,6 @@ import { randomCrockford, sha256Hex } from './credentials.js';
 export const ACCOUNT_GRAPH_VERSION = 1;
 export const MAX_LINKED_DEVICES = 8;
 
-export const PLAYER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-export const REFRESH_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 /** §2.3: a SINGLE-USE, 120-second ticket for the WebSocket upgrade. */
 export const TICKET_TTL_MS = 120_000;
 
@@ -74,16 +72,6 @@ export interface AccountRecord {
   createdMs: number;
   lastSeenMs: number;
   _unknown?: Record<string, unknown>;
-}
-
-/** A 30-day API session. The clear token is returned once and forgotten. */
-export interface PlayerSession {
-  readonly tokenHash: string;
-  readonly refreshHash: string;
-  readonly accountId: AccountId;
-  readonly deviceId: DeviceId;
-  readonly issuedMs: number;
-  readonly expiresMs: number;
 }
 
 export interface SocketTicket {
@@ -227,8 +215,6 @@ export class AccountGraph {
   /** secretHash -> account, for house sign-ins. */
   private readonly bySecret = new Map<string, AccountId>();
 
-  private readonly sessions = new Map<string, PlayerSession>();
-  private readonly byRefresh = new Map<string, string>();     // refreshHash -> tokenHash
   private readonly tickets = new Map<string, SocketTicket>();
 
   private chain: Promise<unknown> = Promise.resolve();
@@ -298,8 +284,8 @@ export class AccountGraph {
    * of an existing unclaimed profile — same write, the profile file simply
    * already has state.
    */
-  private async mintForDeviceUnlocked(provider: string, secretHash: string | null, deviceId: DeviceId): Promise<AccountRecord> {
-    const record = this.blankRecord(provider, secretHash, deviceId as string as ProfileKey);
+  private async mintForDeviceUnlocked(provider: string, secretHash: string | null, deviceId: DeviceId, explicitId?: AccountId): Promise<AccountRecord> {
+    const record = this.blankRecord(provider, secretHash, deviceId as string as ProfileKey, explicitId);
     record.devices = [deviceId];
     this.index(record);
     this.homeByDevice.set(deviceId, record.accountId);
@@ -312,9 +298,9 @@ export class AccountGraph {
    * profile key. The device's home is deliberately NOT touched — the
    * brother can still claim it (§3.2).
    */
-  private async mintDetachedUnlocked(provider: string, secretHash: string | null): Promise<AccountRecord> {
+  private async mintDetachedUnlocked(provider: string, secretHash: string | null, explicitId?: AccountId): Promise<AccountRecord> {
     const syntheticKey = `p-${randomCrockford(24).toLowerCase()}` as ProfileKey;
-    const record = this.blankRecord(provider, secretHash, syntheticKey);
+    const record = this.blankRecord(provider, secretHash, syntheticKey, explicitId);
     this.index(record);
     await this.backend.saveAccount(record);
     return record;
@@ -347,6 +333,12 @@ export class AccountGraph {
     secretHash: string | null;
     /** The credential's account, or null when the credential is new. */
     credentialAccount: AccountId | null;
+    /**
+     * When the credential system already names the account (the passphrase
+     * store's id, prefixed `pass:`), a minting row adopts it, so the graph
+     * and the credential store share ONE name for one player.
+     */
+    mintAccountId?: AccountId;
     deviceId: DeviceId;
     deviceHasProfile: boolean;
     deviceCountable: boolean;
@@ -368,23 +360,23 @@ export class AccountGraph {
       switch (decision.kind) {
         case 'mint':
         case 'claim_silently': {
-          const account = await this.mintForDeviceUnlocked(args.provider, args.secretHash, args.deviceId);
+          const account = await this.mintForDeviceUnlocked(args.provider, args.secretHash, args.deviceId, args.mintAccountId);
           return { kind: 'account', decision, account };
         }
         case 'ask': {
           if (args.answer === 'keep') {
-            const account = await this.mintForDeviceUnlocked(args.provider, args.secretHash, args.deviceId);
+            const account = await this.mintForDeviceUnlocked(args.provider, args.secretHash, args.deviceId, args.mintAccountId);
             return { kind: 'account', decision, account };
           }
           if (args.answer === 'fresh') {
-            const account = await this.mintDetachedUnlocked(args.provider, args.secretHash);
+            const account = await this.mintDetachedUnlocked(args.provider, args.secretHash, args.mintAccountId);
             return { kind: 'account', decision, account };
           }
           return { kind: 'ask', decision };
         }
         case 'shared_machine': {
           // Row 4: D.home UNCHANGED, forever. Only the session is P3's.
-          const account = await this.mintDetachedUnlocked(args.provider, args.secretHash);
+          const account = await this.mintDetachedUnlocked(args.provider, args.secretHash, args.mintAccountId);
           return { kind: 'account', decision, account };
         }
         case 'new_device':
@@ -428,11 +420,11 @@ export class AccountGraph {
     });
   }
 
-  private blankRecord(provider: string, secretHash: string | null, primary: ProfileKey): AccountRecord {
+  private blankRecord(provider: string, secretHash: string | null, primary: ProfileKey, explicitId?: AccountId): AccountRecord {
     const now = this.clock();
     return {
       version: ACCOUNT_GRAPH_VERSION,
-      accountId: `${provider}:${randomCrockford(24).toLowerCase()}` as AccountId,
+      accountId: explicitId ?? `${provider}:${randomCrockford(24).toLowerCase()}` as AccountId,
       provider, secretHash,
       primaryDeviceId: primary,
       devices: [],
@@ -442,62 +434,16 @@ export class AccountGraph {
     };
   }
 
-  /* --- sessions ---------------------------------------------------------- */
+  /* --- socket tickets ----------------------------------------------------- *
+   * API sessions themselves live in accounts.ts's SessionTable (dc_sess) —
+   * that table predates this file and there is no reason for two. What the
+   * session system cannot do is ride the WebSocket upgrade, which is what
+   * these are for.                                                          */
 
-  async openSession(id: AccountId, deviceId: DeviceId): Promise<{ token: string; refresh: string; expiresMs: number }> {
-    const now = this.clock();
-    const token = randomCrockford(40);
-    const refresh = randomCrockford(40);
-    const session: PlayerSession = {
-      tokenHash: await sha256Hex(token),
-      refreshHash: await sha256Hex(refresh),
-      accountId: id, deviceId,
-      issuedMs: now, expiresMs: now + PLAYER_SESSION_TTL_MS,
-    };
-    this.sessions.set(session.tokenHash, session);
-    this.byRefresh.set(session.refreshHash, session.tokenHash);
-    return { token, refresh, expiresMs: session.expiresMs };
-  }
-
-  async resolveSession(token: string): Promise<PlayerSession | null> {
-    const hash = await sha256Hex(token);
-    const session = this.sessions.get(hash);
-    if (session === undefined) return null;
-    if (this.clock() > session.expiresMs) {
-      this.sessions.delete(hash);
-      this.byRefresh.delete(session.refreshHash);
-      return null;
-    }
-    return session;
-  }
-
-  /** dc_rt: the refresh rotates BOTH tokens; the old pair dies either way. */
-  async refreshSession(refresh: string): Promise<{ token: string; refresh: string; expiresMs: number } | null> {
-    const refreshHash = await sha256Hex(refresh);
-    const tokenHash = this.byRefresh.get(refreshHash);
-    if (tokenHash === undefined) return null;
-    const session = this.sessions.get(tokenHash);
-    this.byRefresh.delete(refreshHash);
-    this.sessions.delete(tokenHash);
-    if (session === undefined || this.clock() > session.issuedMs + REFRESH_TTL_MS) return null;
-    return this.openSession(session.accountId, session.deviceId);
-  }
-
-  async revokeAll(id: AccountId): Promise<void> {
-    for (const [hash, session] of this.sessions) {
-      if (session.accountId === id) {
-        this.sessions.delete(hash);
-        this.byRefresh.delete(session.refreshHash);
-      }
-    }
-  }
-
-  /* --- socket tickets ----------------------------------------------------- */
-
-  /** For a signed-in session: the profile key is the ACCOUNT's, always. */
-  async mintSessionTicket(session: PlayerSession): Promise<string> {
-    const account = await this.get(session.accountId);
-    if (account === null) throw new Error('session names a missing account');
+  /** For a signed-in caller: the profile key is the ACCOUNT's, always. */
+  async mintAccountTicket(id: AccountId): Promise<string | null> {
+    const account = await this.get(id);
+    if (account === null) return null;
     return this.mintTicket(account.primaryDeviceId, account.accountId, account.ageBand, account.moderation);
   }
 

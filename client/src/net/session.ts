@@ -42,9 +42,9 @@
 
 import { ModeId, legacyGameMode } from '@shared/modes';
 import type { ClientTransport } from './transport.js';
-import { webSocketTransport } from './transport.js';
 import { createLocalServer, type LocalServer, type LocalServerOptions } from './localServer.js';
-import { gameSocketUrl, resolveServerUrl, type RemoteJoin } from './serverConfig.js';
+import { apiUrl, gameSocketUrl, resolveServerUrl, type RemoteJoin } from './serverConfig.js';
+import { ticketedWebSocketTransport } from './transport.js';
 import { probeServer, type ServerHealth } from './matchmaker.js';
 
 /* ------------------------------------------------------------------------ *
@@ -177,8 +177,33 @@ export class GameSession {
     this.onState = options.onState ?? ((): void => { /* nobody listening */ });
     this.probe = options.probe ?? ((base) => probeServer(base));
     this.makeLocal = options.makeLocal ?? createLocalServer;
-    this.makeRemote = options.makeRemote ?? webSocketTransport;
+    /* C4: the default remote transport fetches a single-use socket ticket
+     * at connect time (docs/PLATFORM.md §2.3). Tests that inject their own
+     * makeRemote are untouched — a fake transport needs no credential. */
+    this.makeRemote = options.makeRemote
+      ?? ((url): ClientTransport => ticketedWebSocketTransport(url, () => this.mintTicket()));
     this.now = options.now ?? (() => Date.now());
+  }
+
+  /**
+   * One ticket per connection attempt — they are single-use and 120 s by
+   * design, so caching one would be a bug. '' means "connect anonymously":
+   * the mint failing must never keep a player out of a match, it only stops
+   * that match banking anything.
+   */
+  private async mintTicket(): Promise<string> {
+    try {
+      const res = await fetch(apiUrl(this.serverUrl, '/api/session/ticket'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceId: this.deviceId }),
+      });
+      if (!res.ok) return '';
+      const body = await res.json() as { ticket?: string };
+      return typeof body.ticket === 'string' ? body.ticket : '';
+    } catch {
+      return '';
+    }
   }
 
   /**
@@ -266,7 +291,6 @@ export class GameSession {
       worldId: target.worldId,
       skill: target.skill,
       code: target.code,
-      deviceId: this.deviceId,
     };
     this.remoteUrl = gameSocketUrl(this.serverUrl, join);
     return this.publish({

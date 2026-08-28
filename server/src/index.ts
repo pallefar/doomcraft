@@ -69,11 +69,16 @@ import {
   NAME_MIN,
   PASSPHRASE_MIN,
   SessionTable,
+  cookieValue,
   expiredSessionCookie,
+  nameKeyOf,
+  passphraseOk,
   publicAccount,
   sessionCookie,
   sessionCredential,
 } from './accounts.js';
+import { AccountGraph, JsonGraphBackend, countableProfile } from './accountGraph.js';
+import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
 import {
@@ -123,7 +128,7 @@ import {
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
 import { JsonFileStore, isValidDeviceId, migrateProfile, publicProfile } from './persistence.js';
-import type { PersistenceStore } from './persistence.js';
+import type { PersistenceStore, StoredProfile } from './persistence.js';
 
 /* ------------------------------------------------------------------------ *
  * Paths and configuration
@@ -545,6 +550,49 @@ void accounts.ready();
  * on disk is a credential at rest with no expiry anybody can see.
  */
 const sessions = new SessionTable();
+
+/* --- C4: the player identity graph (docs/PLATFORM.md §2.3) --------------- *
+ * The passphrase account (above) is the CREDENTIAL; this graph is the
+ * device->profile authority: which profile file a device's play banks to,
+ * and the single-use tickets the WebSocket upgrade admits with. The legacy
+ * linkAccount/accountIndex substrate stops being written from here on —
+ * the graph is the one resolver.                                            */
+const graph = new AccountGraph(new JsonGraphBackend(dataRoot));
+
+/** The graph's name for a passphrase account. One player, one id. */
+function graphIdFor(accountId: string): ReturnType<typeof asAccountId> {
+  return asAccountId(`pass:${accountId}`);
+}
+
+/* The dc_dev device cookie — the Safari ITP fix (docs/INFRASTRUCTURE.md):
+ * script-written localStorage is evicted after 7 idle days, so a returning
+ * player on day 8 silently lost everything. A server-set httpOnly cookie
+ * with a 400-day max-age survives; the client mirrors it via POST
+ * /api/device, which answers with the id the cookie remembers. */
+const DEVICE_COOKIE = 'dc_dev';
+const DEVICE_COOKIE_MAX_AGE_S = 400 * 24 * 60 * 60;
+function deviceCookie(id: string): string {
+  return `${DEVICE_COOKIE}=${id}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${DEVICE_COOKIE_MAX_AGE_S}`;
+}
+/** The cookie's word beats the body's — the cookie is the one the caller cannot typo. */
+function deviceFromRequest(req: IncomingMessage, body: Record<string, unknown> | null): string | null {
+  const fromCookie = cookieValue(req.headers.cookie, DEVICE_COOKIE);
+  if (fromCookie !== null && isValidDeviceId(fromCookie)) return fromCookie;
+  const fromBody = typeof body?.deviceId === 'string' ? body.deviceId : '';
+  return isValidDeviceId(fromBody) ? fromBody : null;
+}
+
+/** The §3.2.1 question's numbers — what is at stake on this device. */
+function askSummary(profile: StoredProfile): Record<string, number | string> {
+  return {
+    level: profile.progress.level,
+    xp: profile.progress.xp,
+    scrap: profile.economy.scrap,
+    matches: profile.stats.matches,
+    firstPlayedMs: profile.createdMs,
+    name: profile.progress.name,
+  };
+}
 
 /**
  * The failure budget for `/api/auth/signup` and `/api/auth/signin`, with the
@@ -1506,6 +1554,28 @@ async function handleApi(
       return true;
     }
     const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+
+    /*
+     * THE §3.2 PRE-FLIGHT (row 3, the family PC). A signup from a device
+     * whose ANONYMOUS profile has countable state gets the one question —
+     * "Keep this device's progress?" — BEFORE the account exists, so the
+     * answer can arrive on a clean retry instead of colliding with
+     * name-taken. Claiming wrongly loses 40 hours; asking costs one click.
+     * The inputs are validated first so an unusable signup is never asked.
+     */
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
+    if (isValidDeviceId(deviceId) && body.keepProgress === undefined
+      && nameKeyOf(body.name) !== null && passphraseOk(body.passphrase)) {
+      const home = await graph.accountForDevice(asDeviceId(deviceId));
+      if (home === null) {
+        const profile = await store.load(deviceId);
+        if (profile !== null && countableProfile(profile)) {
+          sendJson(res, 200, { ask: askSummary(profile) }, cors);
+          return true;
+        }
+      }
+    }
+
     const result = await accounts.signup(body.name, body.passphrase, now);
     if (!result.ok) {
       authThrottle.fail(client, now);
@@ -1515,20 +1585,35 @@ async function handleApi(
     }
     authThrottle.clear(client);
     /*
-     * THE LINK. `store.linkAccount` writes `accountId` + a fresh recovery
-     * secret into the device's profile and updates the account index, so the
-     * progress this browser already earned follows the account. The secret it
-     * returns is DELIBERATELY DROPPED here: it is a durable credential, this
-     * response is not the place for one, and the passphrase is now the stronger
-     * way in. Merging two devices' progress is `docs/PLATFORM.md` §3 (C5) and is
-     * NOT this: a second device simply links.
+     * THE LINK, through the §3.2 decision table. The graph is the one
+     * resolver of "which profile does this device's play bank to"; the
+     * legacy store.linkAccount/accountIndex substrate is not written any
+     * more. `keepProgress` carries the pre-flight's answer: true binds this
+     * device (its progress follows the account), false starts the account
+     * fresh and leaves the device's anonymous profile claimable by whoever
+     * actually earned it. A device already claimed by ANOTHER account is
+     * the shared machine (row 4): the new account plays under its own
+     * fresh profile and the device's home never moves.
      */
-    const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
     let linkedDevice = false;
+    let decisionRow = 0;
     if (isValidDeviceId(deviceId)) {
-      await store.linkAccount(deviceId, result.account.id);
-      await accounts.linkDevice(result.account.id, deviceId);
-      linkedDevice = true;
+      const profile = await store.load(deviceId);
+      const out = await graph.signIn({
+        provider: 'pass', secretHash: null,
+        credentialAccount: null,
+        mintAccountId: graphIdFor(result.account.id),
+        deviceId: asDeviceId(deviceId),
+        deviceHasProfile: profile !== null,
+        deviceCountable: countableProfile(profile),
+        answer: body.keepProgress === true ? 'keep' : body.keepProgress === false ? 'fresh' : undefined,
+      });
+      decisionRow = out.decision.row;
+      if (out.kind === 'account') {
+        await accounts.linkDevice(result.account.id, deviceId);
+        linkedDevice = out.decision.row !== 4 && out.decision.row !== 3
+          ? true : out.account.primaryDeviceId === deviceId;
+      }
     }
     const token = sessions.mint(result.account.id, now);
     res.setHeader('set-cookie', sessionCookie(token));
@@ -1540,6 +1625,7 @@ async function handleApi(
       /* True exactly once in a host's life: this signup took the owner role. */
       bootstrapped: result.bootstrapped,
       linkedDevice,
+      decisionRow,
     }, cors);
     return true;
   }
@@ -1562,9 +1648,49 @@ async function handleApi(
       return true;
     }
     authThrottle.clear(client);
+
+    /*
+     * Device binding through the §3.2 table. The SESSION always opens — it
+     * rides the credential, never the device (row 9's whole point) — and
+     * the decision only governs what this device banks to from now on:
+     * row 5 attaches a new device to the account, row 3/8 surface the one
+     * question (`ask` / `merge.offered`) for the client to answer on a
+     * retry with `keepProgress` / `declineMerge`, and a device claimed by
+     * someone else is left exactly where it was.
+     */
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
+    let decisionRow = 0;
+    let ask: Record<string, number | string> | null = null;
+    let mergeOffered = false;
+    if (isValidDeviceId(deviceId)) {
+      const gid = graphIdFor(result.account.id);
+      const existing = await graph.get(gid);
+      const profile = await store.load(deviceId);
+      const out = await graph.signIn({
+        provider: 'pass', secretHash: null,
+        credentialAccount: existing === null ? null : gid,
+        mintAccountId: gid,
+        deviceId: asDeviceId(deviceId),
+        deviceHasProfile: profile !== null,
+        deviceCountable: countableProfile(profile),
+        answer: body.keepProgress === true ? 'keep'
+          : body.keepProgress === false ? 'fresh'
+            : body.declineMerge === true ? 'decline' : undefined,
+      });
+      decisionRow = out.decision.row;
+      if (out.kind === 'account') await accounts.linkDevice(result.account.id, deviceId);
+      if (out.kind === 'ask' && profile !== null) ask = askSummary(profile);
+      if (out.kind === 'merge_offered') mergeOffered = true;
+    }
+
     const token = sessions.mint(result.account.id, now);
     res.setHeader('set-cookie', sessionCookie(token));
-    sendJson(res, 200, { account: publicAccount(result.account) }, cors);
+    sendJson(res, 200, {
+      account: publicAccount(result.account),
+      decisionRow,
+      ...(ask !== null ? { ask } : {}),
+      ...(mergeOffered ? { merge: { offered: true } } : {}),
+    }, cors);
     return true;
   }
 
@@ -1590,6 +1716,55 @@ async function handleApi(
        * should have to discover that from a 401 mid-rollout. */
       sessionsSurviveRestart: false,
     }, cors);
+    return true;
+  }
+
+  /* --- C4: the device cookie and the socket ticket ----------------------- */
+
+  /*
+   * The dc_dev mirror. The client posts the id it holds in localStorage; the
+   * cookie's word wins when both exist, because the cookie is the one Safari
+   * ITP cannot evict and the one a page cannot typo. Day 8 on Safari:
+   * localStorage is gone, the cookie is not, and this answer restores it.
+   */
+  if (path === '/api/device' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const fromCookie = cookieValue(req.headers.cookie, DEVICE_COOKIE);
+    if (fromCookie !== null && isValidDeviceId(fromCookie)) {
+      res.setHeader('set-cookie', deviceCookie(fromCookie));   // re-arm the 400 days
+      sendJson(res, 200, { deviceId: fromCookie, restored: true }, cors);
+      return true;
+    }
+    const claimed = typeof body.deviceId === 'string' && isValidDeviceId(body.deviceId)
+      ? body.deviceId
+      : randomBytes(12).toString('hex');
+    res.setHeader('set-cookie', deviceCookie(claimed));
+    sendJson(res, 200, { deviceId: claimed, restored: false }, cors);
+    return true;
+  }
+
+  /*
+   * The WS credential (§2.3): single-use, 120 seconds, minted here and
+   * redeemed exactly once at the upgrade. A signed-in caller's ticket
+   * carries the ACCOUNT's profile key whatever device asks — that is what
+   * makes a payout bank to the person; an anonymous caller's carries the
+   * device's RESOLVED key, so a claimed device banks to its account even
+   * when nobody typed a passphrase this session.
+   */
+  if (path === '/api/session/ticket' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const row = sessions.resolve(sessionCredential(req.headers), Date.now());
+    if (row !== null) {
+      const ticket = await graph.mintAccountTicket(graphIdFor(row.accountId));
+      if (ticket !== null) { sendJson(res, 200, { ticket }, cors); return true; }
+      // Signed in, but the account never bound a device: the device path
+      // below still answers.
+    }
+    const device = deviceFromRequest(req, body);
+    if (device === null) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    sendJson(res, 200, { ticket: await graph.mintDeviceTicket(asDeviceId(device)) }, cors);
     return true;
   }
 
@@ -2476,9 +2651,19 @@ async function handleApi(
    * 404 with no body detail, and `publicProfile` decides what a body may say.
    */
   if (path === '/api/profile' && req.method === 'GET') {
-    const deviceId = url.searchParams.get('device') ?? '';
-    if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
-    const profile = await store.load(deviceId);
+    /* C4: a session beats ?device= — the signed-in caller reads the
+     * ACCOUNT's profile of record, and the graph resolves an anonymous
+     * device to its home account's file when one exists. */
+    let profileKey = url.searchParams.get('device') ?? '';
+    const sessionRow = sessions.resolve(sessionCredential(req.headers), Date.now());
+    if (sessionRow !== null) {
+      const record = await graph.get(graphIdFor(sessionRow.accountId));
+      if (record !== null) profileKey = record.primaryDeviceId;
+    } else if (isValidDeviceId(profileKey)) {
+      profileKey = await graph.resolveProfileKey(asDeviceId(profileKey));
+    }
+    if (!isValidDeviceId(profileKey)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
+    const profile = await store.load(profileKey);
     if (profile === null) { sendJson(res, 404, { error: 'no such profile' }, cors); return true; }
     sendJson(res, 200, { profile: publicProfile(profile) }, cors);
     return true;
@@ -2712,7 +2897,7 @@ function refuseUpgrade(socket: { write(s: string): void; destroy(): void }, stat
   socket.destroy();
 }
 
-httpServer.on('upgrade', (req, socket, head) => {
+httpServer.on('upgrade', (req, socket, head) => { void (async () => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
   // A browser cannot forge `Origin`, so this is the one cheap control that
@@ -2771,10 +2956,35 @@ httpServer.on('upgrade', (req, socket, head) => {
   }
   const { key, room } = routed;
 
+  /*
+   * C4: identity rides a single-use ticket, never a bare id. `?device=` is
+   * REFUSED, not ignored — accepting it alongside the ticket would leave
+   * PLATFORM §2.1 defect #7 open (anyone naming a victim's id could burn
+   * their day caps). The ticket was minted seconds ago by /api/session/
+   * ticket and already carries the RESOLVED profile key, so `conn.deviceId`
+   * is the person's file from the first byte and every payout, journal row,
+   * entitlement participant and flag bucket downstream keys per person with
+   * no room.ts change. No ticket at all is still a valid spectator-shaped
+   * join: the connection plays, nothing banks.
+   */
+  if (url.searchParams.has('device')) {
+    refuseUpgrade(socket, 400, 'Ticket Required');
+    return;
+  }
+  const ticketParam = url.searchParams.get('t') ?? '';
+  const ticket = ticketParam === '' ? null : await graph.redeemTicket(ticketParam);
+  if (ticketParam !== '' && ticket === null) {
+    refuseUpgrade(socket, 401, 'Ticket Expired');
+    return;
+  }
+  if (ticket !== null && ticket.moderation === 'banned') {
+    refuseUpgrade(socket, 403, 'Forbidden');
+    return;
+  }
+
   wss.handleUpgrade(req, socket, head, (ws) => {
-    const deviceId = url.searchParams.get('device') ?? '';
     const conn = room.join(new WsTransport(ws));
-    if (isValidDeviceId(deviceId)) conn.deviceId = deviceId;
+    if (ticket !== null) conn.deviceId = ticket.profileKey;
     // Keep the reaper off a room somebody is walking into but has not yet
     // said HELLO in — `humanCount` is still 0 for those few hundred ms.
     router.touch(key);
@@ -2791,7 +3001,7 @@ httpServer.on('upgrade', (req, socket, head) => {
     ws.on('close', () => { room.leave(conn); });
     ws.on('error', () => { room.leave(conn); });
   });
-});
+})(); });
 
 /* ------------------------------------------------------------------------ *
  * Lifecycle

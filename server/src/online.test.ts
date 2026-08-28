@@ -611,7 +611,15 @@ describe('the entitlement guard is in the live payout path', () => {
     const srv = await boot();
     const device = 'device-live0001';
 
-    const player = new TestClient(`${srv.wsBase}/ws?mode=deathmatch&device=${device}`, 'LedgerMarine');
+    /* C4: identity rides the single-use ticket now — `?device=` is refused
+     * at the upgrade. This is the whole point proven end-to-end: the ticket
+     * minted for this device is what makes the payout below bank to it. */
+    const minted = await fetch(`${srv.origin}/api/session/ticket`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: device }),
+    }).then(async (r) => (await r.json()) as { ticket: string });
+
+    const player = new TestClient(`${srv.wsBase}/ws?mode=deathmatch&t=${minted.ticket}`, 'LedgerMarine');
     await until(() => player.gotWelcome, 20_000, 'welcome');
 
     // The room opened a ledger entry the moment the round began.

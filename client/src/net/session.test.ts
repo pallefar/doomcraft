@@ -125,9 +125,10 @@ describe('serverConfig: the default is nowhere', () => {
     expect(toWebSocketOrigin('wss://a.example')).toBe('wss://a.example');
   });
 
-  it('puts the mode in the socket URL, because that is what routes the room', () => {
-    const url = gameSocketUrl('https://a.example', { modeId: ModeId.DEATHMATCH, deviceId: 'abc12345' });
-    expect(url).toBe('wss://a.example/ws?mode=deathmatch&device=abc12345');
+  it('puts the mode in the socket URL, and NEVER a device id — identity rides the ticket (C4)', () => {
+    const url = gameSocketUrl('https://a.example', { modeId: ModeId.DEATHMATCH });
+    expect(url).toBe('wss://a.example/ws?mode=deathmatch');
+    expect(url).not.toContain('device');
   });
 
   it('sends a join code INSTEAD of a mode — a code already names one room', () => {
@@ -230,14 +231,14 @@ describe('going remote', () => {
     expect(state.reason).toBe('5 online');
     expect(built).toHaveLength(0);
     session.createTransport();
-    expect(dialled).toEqual(['wss://play.example/ws?mode=deathmatch&device=devicetest01']);
+    expect(dialled).toEqual(['wss://play.example/ws?mode=deathmatch']);   // no device — identity is the ticket (C4)
   });
 
   it('carries a join code through to the socket', async () => {
     const { session, dialled } = harness();
     await session.start({ modeId: ModeId.DEATHMATCH, code: '9km2qd' });
     session.createTransport();
-    expect(dialled[0]).toBe('wss://play.example/ws?code=9km2qd&device=devicetest01');
+    expect(dialled[0]).toBe('wss://play.example/ws?code=9km2qd');
   });
 
   it('refuses a draining host — probeServer answers null for one', async () => {

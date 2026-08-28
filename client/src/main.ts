@@ -502,6 +502,33 @@ let profileScreen: ProfileScreen | null = null;
  */
 const serverUrl = resolveServerUrl();
 
+/*
+ * C4: mirror the device id through the server-set dc_dev cookie
+ * (docs/PLATFORM.md — the Safari ITP fix). The cookie is httpOnly, so this
+ * round trip is the only way to read it back: the server answers with the
+ * id the cookie remembers, which beats whatever localStorage holds — on
+ * day 8 in Safari, localStorage is a fresh mint and the cookie is the
+ * player's real identity. The ticket route prefers the cookie server-side
+ * too, so a payout banks right even before this answer lands; adopting it
+ * into localStorage just keeps the visible profile consistent.
+ */
+void (async (): Promise<void> => {
+  if (serverUrl === '' && location.origin === 'null') return;
+  try {
+    const res = await fetch(`${serverUrl}/api/device`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: deviceId() }),
+    });
+    if (!res.ok) return;
+    const body = await res.json() as { deviceId?: string };
+    const remembered = typeof body.deviceId === 'string' ? body.deviceId : '';
+    if (/^[A-Za-z0-9_-]{8,64}$/.test(remembered) && remembered !== deviceId()) {
+      try { localStorage.setItem(`${STORAGE_KEYS.progress}:device`, remembered); } catch { /* private mode */ }
+    }
+  } catch { /* offline is first-class */ }
+})();
+
 /* The ad pipeline (docs/SPONSORS.md phase 1). Inert unless a server is
  * configured AND the server-resolved sponsor_slots switch is on AND ads are
  * not removed — in every other case the menu is byte-identical to before. */

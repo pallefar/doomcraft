@@ -339,6 +339,52 @@ export function webSocketTransport(url: string): ClientTransport {
   return t;
 }
 
+/**
+ * C4: the game socket authenticates with a single-use, 120-second ticket
+ * (docs/PLATFORM.md §2.3), fetched at connect time — never a bare device id
+ * in the URL. The transport starts CONNECTING while the ticket is in flight;
+ * a mint that fails closes the socket the way a refused upgrade would, so
+ * `NetClient`'s backoff (and the session's local fallback) treat both
+ * identically. `fetchTicket` resolving '' means "connect anonymously":
+ * anonymous play is first-class, it simply banks nothing.
+ */
+export function ticketedWebSocketTransport(
+  url: string,
+  fetchTicket: () => Promise<string>,
+): ClientTransport {
+  let ws: WebSocket | null = null;
+  let closedEarly = false;
+  const t: ClientTransport = {
+    kind: 'websocket',
+    get readyState(): number { return ws === null ? 0 : ws.readyState; },
+    send(data: Uint8Array): void {
+      if (ws !== null && ws.readyState === 1) ws.send(data);
+    },
+    close(code?: number, reason?: string): void {
+      closedEarly = true;
+      try { ws?.close(code, reason); } catch { /* already closed */ }
+    },
+    onopen: null,
+    onmessage: null,
+    onclose: null,
+    onerror: null,
+  };
+  fetchTicket().then((ticket) => {
+    if (closedEarly) return;
+    const dial = ticket === '' ? url : `${url}${url.includes('?') ? '&' : '?'}t=${encodeURIComponent(ticket)}`;
+    const sock = new WebSocket(dial);
+    sock.binaryType = 'arraybuffer';
+    ws = sock;
+    sock.onopen = (): void => { t.onopen?.(); };
+    sock.onmessage = (ev: MessageEvent): void => { t.onmessage?.(ev.data as ArrayBuffer); };
+    sock.onclose = (ev: CloseEvent): void => { t.onclose?.(ev.code, ev.reason); };
+    sock.onerror = (ev: Event): void => { t.onerror?.(ev); };
+  }).catch(() => {
+    if (!closedEarly) t.onclose?.(4401, 'ticket mint failed');
+  });
+  return t;
+}
+
 /** The URL the game server lives at, in dev and in production. */
 export function defaultServerUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';

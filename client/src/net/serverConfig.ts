@@ -160,8 +160,6 @@ export interface RemoteJoin {
   skill?: number;
   /** Private room join code. Overrides mode/level entirely, server side. */
   code?: string;
-  /** Stable per-device id, so the room can attribute XP to a profile. */
-  deviceId?: string;
 }
 
 /**
@@ -182,7 +180,9 @@ export function gameSocketUrl(base: string, join: RemoteJoin): string {
     if (join.worldId) p.set('world', join.worldId);
     if (join.modeId === ModeId.QUEST && join.skill !== undefined) p.set('skill', String(join.skill));
   }
-  if (join.deviceId) p.set('device', join.deviceId);
+  // C4: identity does NOT ride the URL. `?device=` is refused server-side
+  // (PLATFORM §2.1 defect #7); the transport appends a single-use `?t=`
+  // ticket it fetched seconds earlier — see ticketedWebSocketTransport.
   return `${toWebSocketOrigin(base)}/ws?${p.toString()}`;
 }
 
