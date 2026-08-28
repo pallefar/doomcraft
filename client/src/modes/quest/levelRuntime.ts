@@ -62,6 +62,7 @@ import {
 import { BLOCK_SOLID, BlockId } from '@shared/blocks';
 import { createVoxelHit, type VoxelHit, raycastVoxels } from '@shared/math';
 import {
+  KEY_COLORS,
   KeyColor,
   SKILL_PICKUP_SCALE,
   Skill,
@@ -721,6 +722,31 @@ export class QuestLevelRuntime {
     }
   }
 
+  /**
+   * Every untaken pickup at this skill, in WORLD coordinates (the same
+   * `pickupPos` the trigger test walks, so what you can see is exactly what
+   * you can take). This is what closes "ammo and keycards cannot be seen on
+   * the ground": before it, an authored pickup was an invisible trigger
+   * sphere. `quest.ts` maps these to `GroundMarker`s after placement and
+   * after every take — never per frame.
+   */
+  pickupMarkers(): QuestPickupMarker[] {
+    const out: QuestPickupMarker[] = [];
+    for (let i = 0; i < this.pickupIndex.length; i++) {
+      if (this.pickupTaken[i] === 1) continue;
+      const p = this.level.pickups[this.pickupIndex[i]];
+      const j = i * 3;
+      out.push({
+        x: this.pickupPos[j] + 0.5,
+        y: this.pickupPos[j + 1],
+        z: this.pickupPos[j + 2] + 0.5,
+        kind: p.kind,
+        variant: p.variant,
+      });
+    }
+    return out;
+  }
+
   private testPickups(px: number, py: number, pz: number): void {
     const n = this.pickupIndex.length;
     const pos = this.pickupPos;
@@ -1127,6 +1153,39 @@ const ARMOR_LINE: readonly string[] = [
   'Picked up the megaarmour!',
 ];
 const AMMO_LINE: readonly string[] = ['', 'bullets', 'shells', 'rockets', 'cells'];
+
+/** An untaken pickup as the renderer sees it — world position, kind, variant. */
+export interface QuestPickupMarker {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly kind: PickupKind;
+  readonly variant: number;
+}
+
+/** Ground-marker colours, matching the arena `PICKUP_COLOR` family. */
+const MARKER_COLOR: readonly number[] = [
+  0x22cc44,   // HEALTH — the arena health green
+  0x2f7fd0,   // ARMOR
+  0xd8b23a,   // AMMO
+  0xf0a020,   // WEAPON
+  0xffffff,   // KEY — replaced by the key's own colour below
+  0xb0722a,   // BACKPACK
+];
+
+/**
+ * What a pickup looks like on the ground: keycards render as a flat card in
+ * the door colour they open (`KEY_COLORS`, the same table the HUD pips and
+ * the locked-door message use), everything else as a supply cube. Pure, so
+ * the mapping is testable without a renderer.
+ */
+export function markerStyleFor(kind: PickupKind, variant: number): { color: number; card: boolean } {
+  if (kind === PickupKind.KEY) {
+    const c = variant > 0 && variant < KEY_COLORS.length ? KEY_COLORS[variant] : 0xf4f2ee;
+    return { color: c, card: true };
+  }
+  return { color: MARKER_COLOR[kind] ?? 0xf4f2ee, card: false };
+}
 
 /**
  * What one pickup is worth. `ammo` is indexed by `AmmoType` and is refilled in

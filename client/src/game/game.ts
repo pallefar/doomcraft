@@ -196,6 +196,22 @@ const PICKUP_COLOR: Record<number, number> = {
   [EntityType.PICKUP_WEAPON]: 0xf0a020,
 };
 
+/**
+ * A thing a MODE wants drawn on the ground — Quest's authored ammo boxes and
+ * keycards, which live client-side and have no sim entity to ride in on.
+ * Before this seam they were invisible 1.35 m trigger spheres, which is the
+ * bug it exists to close. Drawn inside the actor batch, so a level's worth
+ * of pickups costs zero extra draw calls.
+ */
+export interface GroundMarker {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly color: number;
+  /** True renders a flat spinning card (keycards); false a supply cube. */
+  readonly card: boolean;
+}
+
 /* ------------------------------------------------------------------------ *
  * Options / events
  * ------------------------------------------------------------------------ */
@@ -1052,6 +1068,18 @@ export class Game {
    */
   worldAudioEnabled = true;
 
+  /** What the active mode wants drawn on the ground. See `GroundMarker`. */
+  private groundMarkers: readonly GroundMarker[] = [];
+
+  /**
+   * Replace the mode's ground markers. Pass `[]` on teardown — the array is
+   * read every frame until then. Quest calls this after placement and after
+   * every pickup, so the marker set is always exactly the untaken set.
+   */
+  setGroundMarkers(markers: readonly GroundMarker[]): void {
+    this.groundMarkers = markers;
+  }
+
   /** The audio mix and the accessibility rule. Owned by main.ts, read here. */
   setAudioSettings(a: AudioSettings): void { this.audioSettings = a; }
 
@@ -1879,7 +1907,7 @@ export class Game {
     // and ActorRenderer keeps drawing monsters as boxes, so a slow fetch
     // degrades to exactly the game that shipped before, not to an empty arena.
     const rigged = this.demons !== null && this.demons.ready;
-    this.actors.update(net, this.timeSeconds, !rigged);
+    this.actors.update(net, this.timeSeconds, !rigged, this.groundMarkers);
     this.demons?.update(net, gr.camera, dt, this.timeSeconds);
     this.characters.update(net, this.timeSeconds);
 
@@ -2344,7 +2372,7 @@ class ActorRenderer {
    *   `EnemyRenderer` has its rig, which is the normal case; true only while
    *   the 47 KB is in flight or if it failed to arrive.
    */
-  update(net: NetClient, time: number, boxMonsters: boolean): void {
+  update(net: NetClient, time: number, boxMonsters: boolean, markers: readonly GroundMarker[]): void {
     this.count = 0;
 
     for (let i = 0; i < net.players.length; i++) {
@@ -2370,6 +2398,11 @@ class ActorRenderer {
       const p = net.projectiles[i];
       if (!p.active) continue;
       this.drawProjectile(p.x, p.y, p.z, p.weapon, time);
+    }
+
+    for (let i = 0; i < markers.length; i++) {
+      const m = markers[i];
+      this.drawMarker(m.x, m.y, m.z, m.color, m.card, time);
     }
 
     this.mesh.count = this.count;
@@ -2457,6 +2490,24 @@ class ActorRenderer {
     const color = PICKUP_COLOR[type] ?? 0xffffff;
     const spin = time * 1.7;
     const bob = Math.sin(time * 2.2 + x) * 0.12;
+    this.box(x, y + 0.45 + bob, z, 0.42, 0.42, 0.42, spin, color);
+    this.box(x, y + 0.45 + bob, z, 0.5, 0.14, 0.14, spin, 0xf4f2ee);
+  }
+
+  /**
+   * A mode's ground marker — Quest's authored ammo boxes and keycards.
+   * Same body language as `drawPickup` (spin + bob says "collectable"), a
+   * different silhouette per family: supplies are a cube under a white bar,
+   * a keycard is a flat spinning card, unmistakable from across a room.
+   */
+  private drawMarker(x: number, y: number, z: number, color: number, card: boolean, time: number): void {
+    const spin = time * 1.7;
+    const bob = Math.sin(time * 2.2 + x) * 0.12;
+    if (card) {
+      this.box(x, y + 0.55 + bob, z, 0.46, 0.3, 0.06, spin, color);
+      this.box(x, y + 0.62 + bob, z, 0.2, 0.1, 0.075, spin, 0xf4f2ee);
+      return;
+    }
     this.box(x, y + 0.45 + bob, z, 0.42, 0.42, 0.42, spin, color);
     this.box(x, y + 0.45 + bob, z, 0.5, 0.14, 0.14, spin, 0xf4f2ee);
   }

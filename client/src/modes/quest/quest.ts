@@ -112,11 +112,13 @@ import {
   USE_NOTHING,
   createPickupGrant,
   fillPickupGrant,
+  markerStyleFor,
   type QuestPaletteSink,
   type QuestPickupGrant,
   type QuestSpawn,
   type QuestWorldSink,
 } from '@/modes/quest/levelRuntime';
+import type { GroundMarker } from '@/game/game';
 import {
   LevelAgreement,
   levelAgreement,
@@ -555,6 +557,8 @@ class QuestMode implements ModeInstance {
       });
     });
     ctx.scope.add(() => { this.runtime.dispose(); });
+    // The ground markers are this mode's — the next mode starts clean.
+    ctx.scope.add(() => { game.setGroundMarkers([]); });
 
     /* --- loadout restore ---------------------------------------------------- */
     // Quest is the only mode that takes weapons away, so it is the only mode
@@ -706,6 +710,7 @@ class QuestMode implements ModeInstance {
     this.runtime.place();
     this.placed = true;
     this.phase = PHASE_LIVE;
+    this.refreshMarkers();
 
     // "Opens on a readable silhouette" (docs/MODES.md §1) is not an accident in
     // E1M1 — you are pointed down the room at the corridor mouth. Every level
@@ -933,6 +938,21 @@ class QuestMode implements ModeInstance {
     this.hud.setTime(this.elapsed);
   }
 
+  /**
+   * Push the untaken-pickup set to the renderer — after placement and after
+   * every take, never per frame. Before this, an authored ammo box or
+   * keycard was an invisible trigger sphere; now what you can see on the
+   * ground is exactly what you can still take.
+   */
+  private refreshMarkers(): void {
+    const out: GroundMarker[] = [];
+    for (const m of this.runtime.pickupMarkers()) {
+      const style = markerStyleFor(m.kind, m.variant);
+      out.push({ x: m.x, y: m.y, z: m.z, color: style.color, card: style.card });
+    }
+    this.ctx.host.game.setGroundMarkers(out);
+  }
+
   /* -------------------------------------------------------------------- *
    * Runtime events
    * -------------------------------------------------------------------- */
@@ -948,9 +968,11 @@ class QuestMode implements ModeInstance {
       case QuestEvent.KEY_TAKEN:
         this.hud.toast(text);
         game.hud.pushFeed(text, 'j');
+        this.refreshMarkers();
         break;
       case QuestEvent.ITEM_TAKEN:
         this.applyPickup(index);
+        this.refreshMarkers();
         break;
       case QuestEvent.DOOR_LOCKED:
         this.hud.toast(text, true);
@@ -993,6 +1015,7 @@ class QuestMode implements ModeInstance {
     const game = this.ctx.host.game;
     this.phase = PHASE_INTERMISSION;
     game.leavePlay();
+    game.setGroundMarkers([]);
     this.hud.clearBanner();
     this.hud.setObjective('LEVEL COMPLETE');
 

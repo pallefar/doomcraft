@@ -40,6 +40,7 @@ import {
 } from '@shared/constants';
 import { BLOCK_SOLID, BlockId } from '@shared/blocks';
 import {
+  KEY_COLORS,
   KeyColor,
   SKILL_COUNT,
   SKILL_PICKUP_SCALE,
@@ -68,6 +69,7 @@ import {
   spawnsOfKind,
   validateLevel,
   type Level,
+  type LevelPickup,
   type LevelSource,
 } from '@shared/level';
 
@@ -84,6 +86,7 @@ import {
   createPickupGrant,
   fillPickupGrant,
   levelKeyMask,
+  markerStyleFor,
   type QuestWorldSink,
 } from '@/modes/quest/levelRuntime';
 
@@ -453,6 +456,38 @@ describe('QuestLevelRuntime', () => {
     const it2 = item as NonNullable<typeof item>;
     runtime.update(1 / 60, it2.x, it2.y - 0.1, it2.z);
     expect(runtime.items).toBe(1);
+  });
+
+  it('pickupMarkers is exactly the untaken set, in world space, and a keycard renders as a card in its door colour', () => {
+    const level = sample.level;
+    const key = level.pickups.find((p) => p.kind === PickupKind.KEY) as LevelPickup;
+    const { runtime } = runtimeFor(level);
+    // Placed OFF-ORIGIN, because the bug this guards against is a marker
+    // drawn where the level was authored instead of where it was placed.
+    runtime.alignSpawnTo(96, 20, 96);
+    runtime.place();
+
+    const before = runtime.pickupMarkers();
+    expect(before.length).toBeGreaterThan(0);
+    const marked = before.find((m) => m.kind === PickupKind.KEY && m.variant === key.variant);
+    expect(marked).toBeDefined();
+    const mk = marked as NonNullable<typeof marked>;
+    // World space = authored + origin, centred in the voxel.
+    expect(mk.x - 0.5 - key.x).toBe(runtime.originX);
+    expect(mk.z - 0.5 - key.z).toBe(runtime.originZ);
+
+    // Walking onto the trigger removes exactly that marker.
+    runtime.update(1 / 60, mk.x - 0.5, mk.y - 0.1, mk.z - 0.5);
+    const after = runtime.pickupMarkers();
+    expect(after.length).toBe(before.length - 1);
+    expect(after.some((m) => m.x === mk.x && m.y === mk.y && m.z === mk.z)).toBe(false);
+
+    // The style rows: a keycard is a CARD in the same colour the HUD pips
+    // and the locked door use; supplies are cubes in the arena's colours.
+    expect(markerStyleFor(PickupKind.KEY, key.variant))
+      .toEqual({ color: KEY_COLORS[key.variant], card: true });
+    expect(markerStyleFor(PickupKind.AMMO, 1).card).toBe(false);
+    expect(markerStyleFor(PickupKind.HEALTH, 1).color).toBe(0x22cc44);
   });
 
   it('fires the secret sting exactly once per sector', () => {
