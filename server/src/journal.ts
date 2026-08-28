@@ -57,7 +57,8 @@ export type LedgerCurrency = 'xp' | 'scrap';
 
 export type LedgerKind =
   | 'match.payout' | 'merge.debit' | 'merge.credit'
-  | 'admin.adjust' | 'purchase.grant' | 'purchase.refund' | 'spend';
+  | 'admin.adjust' | 'purchase.grant' | 'purchase.refund' | 'spend'
+  | 'referral';
 
 /** Written out so a `LedgerKind` typo in a call site is a compile error. */
 export const MATCH_PAYOUT: LedgerKind = 'match.payout';
@@ -65,6 +66,7 @@ export const MATCH_PAYOUT: LedgerKind = 'match.payout';
 export const LEDGER_KINDS: readonly LedgerKind[] = Object.freeze([
   'match.payout', 'merge.debit', 'merge.credit',
   'admin.adjust', 'purchase.grant', 'purchase.refund', 'spend',
+  'referral',
 ]);
 
 /**

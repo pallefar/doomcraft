@@ -129,6 +129,20 @@ export class AccountPanel {
       this.renderSignedOut('');
       this.opts.onChanged?.(null);
     }
+    void this.renderReferral();
+  }
+
+  /** Viral tier 1: the player's own code, minted server-side on first ask. */
+  private async renderReferral(): Promise<void> {
+    const mine = await this.call(`/api/referral/mine?device=${encodeURIComponent(this.opts.deviceId())}`) as
+      { status: number; code?: string; converted?: number };
+    if (this.destroyed || mine.status !== 200 || typeof mine.code !== 'string') return;
+    const line = el('p', 'dcpa-note');
+    line.append('Refer a friend: share ');
+    const link = el('b', undefined, `${location.origin}/?ref=${mine.code}`);
+    line.appendChild(link);
+    line.append(` — you both earn Scrap when they reach level 5 or 30 minutes of play.${(mine.converted ?? 0) > 0 ? ` Converted so far: ${mine.converted}.` : ''}`);
+    this.body.appendChild(line);
   }
 
   /* ---------------------------------------------------------------- */

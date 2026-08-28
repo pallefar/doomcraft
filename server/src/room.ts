@@ -146,6 +146,12 @@ export interface RoomOptions {
    */
   journal?: Journal | null;
   /**
+   * Viral tier 1: called after a round's profile write lands for a player,
+   * with the PROFILE KEY the payout banked to. The referral service checks
+   * engagement thresholds there; the room knows nothing about referrals.
+   */
+  onProfilePersisted?: (profileKey: string) => void;
+  /**
    * This PROCESS's id, from `server/src/deploy.ts`. It is the first component
    * of every payout's idempotency key; see `payoutSourceId`.
    */
@@ -246,6 +252,7 @@ export class Room implements NetHost {
   readonly store: PersistenceStore | null;
   readonly guard: EntitlementGuard | null;
   readonly journal: Journal | null;
+  private readonly onProfilePersisted?: (profileKey: string) => void;
   private readonly hostId: string;
   /**
    * This room OBJECT's id, minted here and never reused.
@@ -379,6 +386,7 @@ export class Room implements NetHost {
     this.store = options.store ?? null;
     this.guard = options.guard ?? null;
     this.journal = options.journal ?? null;
+    this.onProfilePersisted = options.onProfilePersisted;
     this.hostId = options.hostId ?? 'local';
     this.instanceId = randomToken().slice(0, 8);
     this.sessionOrigin = options.sessionOrigin ?? SessionOrigin.SERVER_MATCHMAKER;
@@ -1538,6 +1546,10 @@ export class Room implements NetHost {
         }));
       });
       if (paid) this.tellPlayerWhatLanded(conn, landed, updated, verdict.code);
+      /* Viral tier 1: a paying round is the moment an engagement threshold
+       * can newly be true. Fire-and-forget — a referral must never delay or
+       * break a payout. */
+      if (paid) this.onProfilePersisted?.(deviceId);
     } catch {
       // A failed save must never take the match down.
     }

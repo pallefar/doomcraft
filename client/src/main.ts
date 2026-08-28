@@ -529,6 +529,22 @@ void (async (): Promise<void> => {
   } catch { /* offline is first-class */ }
 })();
 
+/* Viral tier 1: an inbound ?ref= claims its attribution exactly once —
+ * first wins forever, and every rule (self-referral, veterans, caps) is
+ * decided server-side. Losing the race to an offline build costs nothing. */
+void (async (): Promise<void> => {
+  const refCode = new URLSearchParams(location.search).get('ref');
+  if (refCode === null || refCode.length === 0) return;
+  if (serverUrl === '' && location.origin === 'null') return;
+  try {
+    await fetch(`${serverUrl}/api/referral/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: deviceId(), code: refCode }),
+    });
+  } catch { /* the server decides; silence either way */ }
+})();
+
 /* The ad pipeline (docs/SPONSORS.md phase 1). Inert unless a server is
  * configured AND the server-resolved sponsor_slots switch is on AND ads are
  * not removed — in every other case the menu is byte-identical to before. */

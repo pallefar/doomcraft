@@ -79,6 +79,7 @@ import {
 } from './accounts.js';
 import { AccountGraph, JsonGraphBackend, countableProfile } from './accountGraph.js';
 import { mergeDeviceIntoAccount, planMerge } from './merge.js';
+import { ReferralService } from './referrals.js';
 import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
@@ -561,6 +562,10 @@ const sessions = new SessionTable();
  * the graph is the one resolver.                                            */
 const graph = new AccountGraph(new JsonGraphBackend(dataRoot));
 
+/* Viral tier 1 (docs/ECONOMY.md "Viral sharing"): codes, first-wins
+ * attribution, engagement conversion through the journal, caps + queue. */
+const referrals = new ReferralService(dataRoot);
+
 /** The graph's name for a passphrase account. One player, one id. The
  * account store already namespaces its ids (`house:<hex>`), so the graph
  * adopts them verbatim — `pass:house:<hex>` would be two namespaces deep
@@ -894,6 +899,9 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
       store,
       guard,
       journal,
+      /* Viral tier 1: a paying round may newly satisfy the referred
+       * player's engagement threshold. Fire-and-forget by contract. */
+      onProfilePersisted: (profileKey) => { void referrals.sweep(profileKey, { store, journal }); },
       hostId: HOST_ID,
       sessionOrigin: isInvite ? SessionOrigin.SERVER_INVITE : SessionOrigin.SERVER_MATCHMAKER,
       sessionIntent: isInvite ? MatchType.PRIVATE : MatchType.PUBLIC,
@@ -1824,6 +1832,78 @@ async function handleApi(
     );
     if (!result.ok) { sendJson(res, result.status, { error: result.error }, cors); return true; }
     sendJson(res, 200, { eventId: result.eventId, plan: result.plan }, cors);
+    return true;
+  }
+
+  /* --- viral tier 1: referral codes ------------------------------------- */
+
+  /** The player's own code (minted on first ask) and their conversion tally. */
+  if (path === '/api/referral/mine' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const raw = cookieValue(req.headers.cookie, DEVICE_COOKIE) ?? url.searchParams.get('device') ?? '';
+    if (!isValidDeviceId(raw)) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(raw));
+    const code = await referrals.codeFor(key, clientAddress(req));
+    sendJson(res, 200, { code, converted: referrals.conversionsFor(key) }, cors);
+    return true;
+  }
+
+  /**
+   * `?ref=` lands here, once, at first visit. First wins forever; a veteran
+   * is refused ('too-late'); self-referral is refused; a same-network claim
+   * is accepted but its conversion parks for review. The answer never
+   * distinguishes refusals to the CALLER beyond ok — a probe must not learn
+   * the attribution table — but the reason is logged for the operator.
+   */
+  if (path === '/api/referral/claim' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const device = deviceFromRequest(req, body);
+    const code = typeof body.code === 'string' ? body.code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12) : '';
+    if (device === null || code === '') { sendJson(res, 400, { error: 'bad request' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(device));
+    const result = await referrals.claim(key, code, clientAddress(req), { store, journal });
+    sendJson(res, 200, { ok: result.ok }, cors);
+    return true;
+  }
+
+  if (path === '/api/admin/referrals' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    sendJson(res, 200, {
+      status: referrals.status(),
+      queue: referrals.reviewQueue().map((q) => ({
+        referred: redactPlayerId(q.referredKey),
+        referredKey: q.referredKey,
+        referrer: redactPlayerId(q.attribution.referrerKey),
+        claimedMs: q.attribution.ms,
+        review: q.attribution.review,
+      })),
+    }, cors);
+    return true;
+  }
+
+  /** The queue's release valve — it PAYS, so it confirms like the C6 verbs. */
+  if (path === '/api/admin/referrals/approve' && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = await readBody(req);
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+    const b = (body ?? {}) as Record<string, unknown>;
+    const referredKey = typeof b.referredKey === 'string' ? b.referredKey : '';
+    if (!isValidDeviceId(referredKey)) { sendJson(res, 400, { error: 'bad referredKey' }, cors); return true; }
+    const now = Date.now();
+    const pending = requireConfirm(`${who.actor}|referral-approve|${referredKey}`, b.confirm, now);
+    if (pending !== null) { sendJson(res, pending.status, pending.body, cors); return true; }
+    const paid = await referrals.approve(referredKey, { store, journal });
+    await auditLog.record({
+      ms: now, actor: who.actor, verb: 'referral.approve',
+      subject: redactPlayerId(referredKey), reason: who.reason,
+      before: '', after: paid ? 'paid' : 'nothing pending',
+      outcome: paid ? 'applied' : 'refused', requestId: newRequestId(),
+    });
+    sendJson(res, paid ? 200 : 404, { ok: paid }, cors);
     return true;
   }
 
