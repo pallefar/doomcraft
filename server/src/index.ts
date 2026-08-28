@@ -108,6 +108,8 @@ import {
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
 import { PackInventory, ReleaseService, releaseContentHash, rollMatchDrops } from './packs.js';
 import { StudioService } from './studio.js';
+import { AdService } from './ads.js';
+import { PHASE_ONE_SURFACES, type AdEventType, type SurfaceId } from '@doomcraft/shared/sponsor';
 import { PackKind } from '@doomcraft/shared/packs';
 import { flagOn } from '@doomcraft/shared/flags';
 import {
@@ -731,6 +733,14 @@ const releases = new ReleaseService(dataRoot, inventory, { clock: () => Date.now
  * still walk the release machine to reach a player. Build-class designs
  * (weapons, characters) land as drafts for the platform lane.
  */
+/**
+ * THE AD PLATFORM, phase 1 (docs/SPONSORS.md): decide → fill → measure →
+ * event → redirect, server-authoritative, house-backed. Campaigns are
+ * operator-authored in $DOOMCRAFT_DATA/sponsors.json; every counted event
+ * lands in ads.jsonl because billing is a batch job over a log.
+ */
+const ads = new AdService(dataRoot, { clock: () => Date.now() });
+
 const studio = new StudioService(inventory, {
   packsRoot: process.env.DOOMCRAFT_PACKS ?? null,
   dataRoot,
@@ -1018,6 +1028,7 @@ function adminStatusDocument(): Record<string, unknown> {
     directory: directory.status(),
     rooms: router.status().map(redactRoomRow),
     entitlement: guard.status(),
+    ads: ads.status(),
     signal: signalHub.stats(),
     connections: connectionRollup(allConnectionStats()),
     journal: journal.status(),
@@ -1953,6 +1964,71 @@ async function handleApi(
     return true;
   }
 
+  /* --- THE AD PIPELINE (docs/SPONSORS.md phase 1) ----------------------- *
+   * decide and event are public same-origin surfaces like /api/profile; the
+   * redirector is the ONLY place a click becomes a fact. The client never
+   * chooses a fill and never asserts a countable event.                     */
+  if (path === '/api/ads/decide' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
+    const surfaces = (Array.isArray(body.surfaces) ? body.surfaces : [])
+      .filter((v): v is SurfaceId => typeof v === 'number' && (PHASE_ONE_SURFACES as readonly number[]).includes(v));
+    let adsRemoved = false;
+    let ageBand: 'unknown' | 'u13' | '13-17' | '18plus' = 'unknown';
+    if (isValidDeviceId(deviceId)) {
+      const profile = await store.load(deviceId);
+      if (profile !== null) {
+        adsRemoved = profile.progress.adsRemoved;
+        ageBand = profile.ageBand;
+      }
+    }
+    const fills = ads.decide({
+      deviceId,
+      sessionId: typeof body.sessionId === 'string' ? body.sessionId.slice(0, 64) : '',
+      surfaces,
+      mode: typeof body.mode === 'number' ? body.mode : 0,
+      platform: body.platform === 'mobile' ? 'mobile' : 'desktop',
+    }, {
+      adsRemoved,
+      ageBand,
+      /* No edge geo on this host yet: region is unknown, and a campaign that
+       * targets regions therefore never serves — fail closed, never guessed
+       * from a client-supplied field. */
+      region: '',
+    });
+    sendJson(res, 200, { fills }, cors);
+    return true;
+  }
+
+  if (path === '/api/ads/event' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const nonce = typeof body.nonce === 'string' ? body.nonce : '';
+    const type = typeof body.type === 'string' ? body.type as AdEventType : 'impression';
+    const verdict = ads.event(
+      nonce, type,
+      typeof body.ms === 'number' ? body.ms : Date.now(),
+      typeof body.exposureMs === 'number' ? body.exposureMs : 0,
+    );
+    /* A refused event answers 200 with ok:false — a 4xx would teach a probe
+     * which nonces are live, and the client retry path must not treat a
+     * refusal as transport failure. */
+    sendJson(res, 200, verdict, cors);
+    return true;
+  }
+
+  if (path.startsWith('/r/') && (req.method === 'GET' || req.method === 'HEAD')) {
+    const clickId = path.slice(3);
+    const hit = /^[A-Za-z0-9_-]{16,64}$/.test(clickId) ? ads.redirect(clickId) : null;
+    if (hit === null) { sendJson(res, 404, { error: 'unknown link' }, cors); return true; }
+    /* The human ALWAYS gets the 302 — what varied is whether it counted,
+     * and that decision is already in the log. */
+    res.writeHead(302, { location: hit.target, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+    res.end();
+    return true;
+  }
+
   /*
    * The LIVE release's item definitions — what an owned ref resolves to. The
    * client joins this against the profile's inventory; ownership never rides
@@ -2248,6 +2324,7 @@ async function handleApi(
       // A healthy fleet shows a rising `accepted` and an all-but-empty `codes`
       // map. `violations` climbing is the number worth an alert.
       entitlement: guard.status(),
+    ads: ads.status(),
     }, cors);
     return true;
   }

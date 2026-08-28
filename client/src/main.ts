@@ -58,6 +58,8 @@ import {
 
 import { Game } from '@/game/game';
 import { resolveServerUrl } from '@/net/serverConfig';
+import { createAdPipeline } from '@/ads/serve';
+import { flagOn } from '@doomcraft/shared/flags';
 import type { SessionState } from '@/net/session';
 import {
   createPrivateRoom,
@@ -481,6 +483,17 @@ let profileScreen: ProfileScreen | null = null;
  * `client/src/net/serverConfig.ts` and `client/src/net/session.ts`.
  */
 const serverUrl = resolveServerUrl();
+
+/* The ad pipeline (docs/SPONSORS.md phase 1). Inert unless a server is
+ * configured AND the server-resolved sponsor_slots switch is on AND ads are
+ * not removed — in every other case the menu is byte-identical to before. */
+const adPipeline = createAdPipeline({
+  serverBase: serverUrl,
+  deviceId: () => deviceId(),
+  enabled: () => flagOn(game.net.flagBits, 'sponsor_slots'),
+  adsRemoved: () => progress.adsRemoved || settings.showAds === false,
+  platform: matchMedia('(pointer: coarse)').matches ? 'mobile' : 'desktop',
+});
 
 /**
  * Declared before `new Game` on purpose.
@@ -1440,9 +1453,12 @@ function setScreen(s: Screen): void {
   if (s !== 'menu') { avatarEditor?.close(); profileScreen?.close(); }
   uiRoot!.dataset.screen = s;
   if (adsRoot !== null) {
-    adsRoot.dataset.mode = settings.showAds === false || progress.adsRemoved
+    const mode = settings.showAds === false || progress.adsRemoved
       ? 'off'
       : s === 'playing' ? 'game' : 'menu';
+    adsRoot.dataset.mode = mode;
+    if (mode === 'menu') adPipeline.onMenuEnter();
+    else adPipeline.onMenuExit();
   }
 }
 
