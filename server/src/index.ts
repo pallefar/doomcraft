@@ -80,6 +80,8 @@ import {
 import { AccountGraph, JsonGraphBackend, countableProfile } from './accountGraph.js';
 import { mergeDeviceIntoAccount, planMerge } from './merge.js';
 import { ReferralService } from './referrals.js';
+import { TradeService, type TradeResult } from './trades.js';
+import type { ItemDef } from '@doomcraft/shared/items';
 import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
@@ -566,6 +568,12 @@ const graph = new AccountGraph(new JsonGraphBackend(dataRoot));
  * attribution, engagement conversion through the journal, caps + queue. */
 const referrals = new ReferralService(dataRoot);
 
+/* Trading (docs/ECONOMY.md "Trading"): the two-sided escrow. The engine owns
+ * every rule; the routes below own identity and transport only. `recover()`
+ * runs at boot, just before listen, to finish any settling trade a crash
+ * left behind. */
+const trades = new TradeService(dataRoot);
+
 /** The graph's name for a passphrase account. One player, one id. The
  * account store already namespaces its ids (`house:<hex>`), so the graph
  * adopts them verbatim — `pass:house:<hex>` would be two namespaces deep
@@ -759,6 +767,13 @@ function liveItemIdSet(): ReadonlySet<string> {
   const decl = releases.live().packs.find((pk) => pk.kind === PackKind.ITEMS);
   const installed = decl === undefined ? null : inventory.itemsAt(decl.version);
   return new Set((installed?.manifest.items ?? []).map((i) => i.id));
+}
+
+/** The live items pack as localId -> def — what "tradable" and ACTIVE mean. */
+function liveItemDefs(): ReadonlyMap<string, ItemDef> {
+  const decl = releases.live().packs.find((pk) => pk.kind === PackKind.ITEMS);
+  const installed = decl === undefined ? null : inventory.itemsAt(decl.version);
+  return new Map((installed?.manifest.items ?? []).map((i) => [i.id, i]));
 }
 
 /** The compact before/after an audit row carries; full state lives in releases.json. */
@@ -1904,6 +1919,65 @@ async function handleApi(
       outcome: paid ? 'applied' : 'refused', requestId: newRequestId(),
     });
     sendJson(res, paid ? 200 : 404, { ok: paid }, cors);
+    return true;
+  }
+
+  /* --- trading: the two-sided escrow (docs/ECONOMY.md "Trading") --------- *
+   * Every verb resolves the caller to a PROFILE KEY — the same resolution a
+   * payout uses, so a claimed device trades as its person — and gates on the
+   * caller's own `economy_trading` bits, which is the kill switch. The
+   * engine (`trades.ts`) owns every rule: eligibility, the ACTIVE-state
+   * check at offer AND confirm, the confirm reset on any change, and the
+   * crash-recoverable settlement. These routes own identity and transport
+   * only.                                                                   */
+  if ((path === '/api/trade/mine' || path === '/api/trade/state')
+      && (req.method === 'GET' || req.method === 'HEAD')) {
+    const raw = cookieValue(req.headers.cookie, DEVICE_COOKIE) ?? url.searchParams.get('device') ?? '';
+    if (!isValidDeviceId(raw)) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(raw));
+    if (!flagOn(flags.bitsFor(key), 'economy_trading')) {
+      sendJson(res, 404, { error: 'trading is not enabled' }, cors);
+      return true;
+    }
+    if (path === '/api/trade/mine') {
+      sendJson(res, 200, { trades: await trades.mine(key) }, cors);
+      return true;
+    }
+    const view = await trades.stateFor(key, (url.searchParams.get('id') ?? '').slice(0, 64));
+    if (view === null) { sendJson(res, 404, { error: 'no such trade' }, cors); return true; }
+    sendJson(res, 200, { trade: view }, cors);
+    return true;
+  }
+
+  if (path.startsWith('/api/trade/') && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const device = deviceFromRequest(req, body);
+    if (device === null) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(device));
+    if (!flagOn(flags.bitsFor(key), 'economy_trading')) {
+      sendJson(res, 404, { error: 'trading is not enabled' }, cors);
+      return true;
+    }
+    const deps = { store, defs: liveItemDefs };
+    const tradeId = typeof body.tradeId === 'string' ? body.tradeId.slice(0, 64) : '';
+    const verb = path.slice('/api/trade/'.length);
+    let out: TradeResult | null = null;
+    if (verb === 'open') out = await trades.open(key, deps);
+    else if (verb === 'join') {
+      const code = typeof body.code === 'string'
+        ? body.code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12) : '';
+      out = await trades.join(key, code, deps);
+    } else if (verb === 'offer') {
+      const refs = Array.isArray(body.refs)
+        ? body.refs.filter((r): r is string => typeof r === 'string' && r.length <= 96).slice(0, 32)
+        : [];
+      out = await trades.offer(key, tradeId, refs, deps);
+    } else if (verb === 'confirm') out = await trades.confirm(key, tradeId, deps);
+    else if (verb === 'cancel') out = await trades.cancel(key, tradeId);
+    if (out === null) { sendJson(res, 404, { error: 'unknown trade verb' }, cors); return true; }
+    if (!out.ok) { sendJson(res, out.status, { error: out.error }, cors); return true; }
+    sendJson(res, 200, { trade: out.trade }, cors);
     return true;
   }
 
@@ -3290,6 +3364,10 @@ httpServer.on('upgrade', (req, socket, head) => { void (async () => {
 /* ------------------------------------------------------------------------ *
  * Lifecycle
  * ------------------------------------------------------------------------ */
+
+/* Finish any trade a crash left mid-settlement — the per-side guards make
+ * this a no-op when the last process got everything to disk. */
+void trades.recover({ store, defs: liveItemDefs });
 
 httpServer.listen(PORT, HOST, () => {
   const hasBundle = existsSync(join(staticRoot, 'index.html'));
