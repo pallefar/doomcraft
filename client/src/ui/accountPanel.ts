@@ -233,7 +233,7 @@ export class AccountPanel {
     }
     if ((answer.status === 200 || answer.status === 201) && answer.account !== undefined) {
       this.renderSignedIn(answer.account);
-      if (answer.merge?.offered === true) this.renderMergeNote();
+      if (answer.merge?.offered === true) void this.renderMergeOffer(answer.account);
       this.opts.onChanged?.(answer.account);
       return;
     }
@@ -281,10 +281,50 @@ export class AccountPanel {
     this.renderSignedOut(answer.error ?? 'That did not go through — try again.');
   }
 
-  private renderMergeNote(): void {
-    this.body.appendChild(el('p', 'dcpa-note',
-      'This device also has separate progress. Merging it into your account arrives with a later update; '
-      + 'until then the two are kept apart.'));
+  /**
+   * Row 8's offer (docs/PLATFORM.md §3.2/§3.8): the plan comes from the
+   * server and its summary renders VERBATIM — the confirm dialog never
+   * paraphrases what the merge will do with money.
+   */
+  private async renderMergeOffer(account: { name: string; role: string }): Promise<void> {
+    const preview = await this.call('/api/account/merge', { deviceId: this.opts.deviceId(), preview: true });
+    if (this.destroyed) return;
+    const plan = (preview as { plan?: { summary?: string[]; notMerged?: string[] } }).plan;
+    const card = el('div', 'dcpa-ask');
+    card.appendChild(el('b', undefined, 'This device has separate progress. Merge it into your account?'));
+    for (const line of plan?.summary ?? []) card.appendChild(el('p', undefined, line));
+    const row = el('div', 'dcpa-row');
+    const merge = el('button', 'go', 'Merge it in');
+    merge.type = 'button';
+    const keep = el('button', undefined, 'Keep separate');
+    keep.type = 'button';
+    merge.addEventListener('click', () => {
+      void (async (): Promise<void> => {
+        merge.disabled = true;
+        const done = await this.call('/api/account/merge', { deviceId: this.opts.deviceId() });
+        if (this.destroyed) return;
+        card.remove();
+        this.renderSignedIn(account);
+        this.body.appendChild(el('p', 'dcpa-note', done.status === 200
+          ? 'Merged. This device now banks to your account, and the Scrap moved as a journal entry.'
+          : `The merge was refused: ${done.error ?? done.status}.`));
+      })();
+    });
+    keep.addEventListener('click', () => {
+      // Decline -> row 5: the device joins the account without the progress.
+      void (async (): Promise<void> => {
+        keep.disabled = true;
+        await this.call('/api/account/merge', { deviceId: this.opts.deviceId(), decline: true });
+        if (this.destroyed) return;
+        card.remove();
+        this.body.appendChild(el('p', 'dcpa-note',
+          'Kept separate. This device plays under your account from here on; its old progress stays put.'));
+      })();
+    });
+    row.append(merge, keep);
+    card.appendChild(row);
+    for (const line of plan?.notMerged ?? []) card.appendChild(el('p', 'dcpa-note', line));
+    this.body.appendChild(card);
   }
 
   private async signOut(): Promise<void> {

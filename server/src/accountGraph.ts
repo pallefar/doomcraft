@@ -45,6 +45,11 @@ import { randomCrockford, sha256Hex } from './credentials.js';
 export const ACCOUNT_GRAPH_VERSION = 1;
 export const MAX_LINKED_DEVICES = 8;
 
+/** §3.5: the merge budget binds NON-TRIVIAL absorbs only. */
+export const MERGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+export const MERGES_PER_WINDOW = 2;
+export const MERGES_PER_LIFETIME = 5;
+
 /** §2.3: a SINGLE-USE, 120-second ticket for the WebSocket upgrade. */
 export const TICKET_TTL_MS = 120_000;
 
@@ -407,6 +412,31 @@ export class AccountGraph {
         }
       }
     });
+  }
+
+  /**
+   * C5: the merge's graph half — the absorbed device joins the account and
+   * the budget counters move. Called by `merge.ts` INSIDE `withGraphLock`,
+   * so this method must never take the lock itself (the chain mutex would
+   * deadlock on re-entry). Nothing else may call it.
+   */
+  async absorbDeviceHoldingLock(id: AccountId, deviceId: DeviceId, countable: boolean, nowMs: number): Promise<void> {
+    const record = this.accounts.get(id);
+    if (record === undefined) throw new Error(`no such account ${id}`);
+    if (!record.devices.includes(deviceId) && record.devices.length < MAX_LINKED_DEVICES) {
+      record.devices.push(deviceId);
+    }
+    this.homeByDevice.set(deviceId, id);
+    if (countable) {
+      if (nowMs - record.mergesWindowStartMs >= MERGE_WINDOW_MS) {
+        record.mergesWindowStartMs = nowMs;
+        record.mergesInWindow = 0;
+      }
+      record.mergesInWindow += 1;
+      record.mergesLifetime += 1;
+    }
+    record.lastSeenMs = nowMs;
+    await this.backend.saveAccount(record);
   }
 
   moderate(id: AccountId, state: ModerationState, reason: string, untilMs: number): Promise<void> {

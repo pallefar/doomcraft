@@ -78,6 +78,7 @@ import {
   sessionCredential,
 } from './accounts.js';
 import { AccountGraph, JsonGraphBackend, countableProfile } from './accountGraph.js';
+import { mergeDeviceIntoAccount, planMerge } from './merge.js';
 import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
@@ -559,9 +560,12 @@ const sessions = new SessionTable();
  * the graph is the one resolver.                                            */
 const graph = new AccountGraph(new JsonGraphBackend(dataRoot));
 
-/** The graph's name for a passphrase account. One player, one id. */
+/** The graph's name for a passphrase account. One player, one id. The
+ * account store already namespaces its ids (`house:<hex>`), so the graph
+ * adopts them verbatim — `pass:house:<hex>` would be two namespaces deep
+ * and a lie about the provider. */
 function graphIdFor(accountId: string): ReturnType<typeof asAccountId> {
-  return asAccountId(`pass:${accountId}`);
+  return asAccountId(accountId.includes(':') ? accountId : `pass:${accountId}`);
 }
 
 /* The dc_dev device cookie — the Safari ITP fix (docs/INFRASTRUCTURE.md):
@@ -1741,6 +1745,54 @@ async function handleApi(
       : randomBytes(12).toString('hex');
     res.setHeader('set-cookie', deviceCookie(claimed));
     sendJson(res, 200, { deviceId: claimed, restored: false }, cors);
+    return true;
+  }
+
+  /*
+   * C5 — the merge, accepted (docs/PLATFORM.md §3). The offer came from the
+   * §3.2 table at sign-in (row 8); this route is the player saying yes on
+   * THIS device. `preview: true` answers with the plan the confirm dialog
+   * renders verbatim and writes nothing.
+   */
+  if (path === '/api/account/merge' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const row = sessions.resolve(sessionCredential(req.headers), Date.now());
+    if (row === null) { sendJson(res, 401, { error: 'not signed in' }, cors); return true; }
+    const device = deviceFromRequest(req, body);
+    if (device === null) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const gid = graphIdFor(row.accountId);
+    if (body.preview === true) {
+      const record = await graph.get(gid);
+      const pa = record === null ? null : await store.load(record.primaryDeviceId);
+      const pb = await store.load(device);
+      if (pa === null || pb === null) { sendJson(res, 404, { error: 'nothing to merge' }, cors); return true; }
+      sendJson(res, 200, { plan: planMerge(pa, pb) }, cors);
+      return true;
+    }
+    if (body.decline === true) {
+      // Row 8 declined -> row 5 (§3.2): the device joins the account, the
+      // anonymous progress stays where it is, unmerged and unclaimed by
+      // nobody else from here on.
+      const profile = await store.load(device);
+      const out = await graph.signIn({
+        provider: 'pass', secretHash: null,
+        credentialAccount: (await graph.get(gid)) === null ? null : gid,
+        mintAccountId: gid,
+        deviceId: asDeviceId(device),
+        deviceHasProfile: profile !== null,
+        deviceCountable: countableProfile(profile),
+        answer: 'decline',
+      });
+      sendJson(res, 200, { declined: true, decisionRow: out.decision.row }, cors);
+      return true;
+    }
+    const result = await mergeDeviceIntoAccount(
+      { graph, store, journal, dataRoot },
+      gid, asDeviceId(device), 'player', 'account-panel merge',
+    );
+    if (!result.ok) { sendJson(res, result.status, { error: result.error }, cors); return true; }
+    sendJson(res, 200, { eventId: result.eventId, plan: result.plan }, cors);
     return true;
   }
 
