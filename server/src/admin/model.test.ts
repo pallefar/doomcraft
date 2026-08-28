@@ -152,10 +152,15 @@ describe('the connection rollup', () => {
  * ------------------------------------------------------------------------ */
 
 describe('what the console cannot do', () => {
-  it('names every verb docs/PLATFORM.md §5.6 found has no storage behind it', () => {
+  it('names every verb that STILL has no storage behind it — C6 built ban/kick/currency out of the list', () => {
     const verbs = MISSING_CAPABILITIES.map((m) => m.verb.toLowerCase()).join(' | ');
-    for (const needle of ['ban', 'kick', 'currency', 'refund', 'reset', 'export', 'erase', 'list']) {
+    for (const needle of ['mute', 'undo a merge', 'refund', 'reset', 'export', 'erase', 'list']) {
       expect(verbs, `${needle} is not named as impossible`).toContain(needle);
+    }
+    // And the built ones are GONE — a capability list that still claims ban
+    // is impossible after C6 is the same lie in the other direction.
+    for (const built of ['ban /', 'kick one', 'adjust a currency']) {
+      expect(verbs, `${built} is still listed as impossible`).not.toContain(built);
     }
   });
 

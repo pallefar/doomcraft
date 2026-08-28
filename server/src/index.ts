@@ -95,6 +95,7 @@ import {
   DEFAULT_FINANCIAL_DAYS,
   DEFAULT_JOURNAL_DAYS,
   JsonJournal,
+  newLedgerId,
   redactPlayerId,
 } from './journal.js';
 import {
@@ -128,7 +129,7 @@ import {
 } from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
-import { JsonFileStore, isValidDeviceId, migrateProfile, publicProfile } from './persistence.js';
+import { JsonFileStore, MAX_SCRAP_BALANCE, isValidDeviceId, migrateProfile, publicProfile } from './persistence.js';
 import type { PersistenceStore, StoredProfile } from './persistence.js';
 
 /* ------------------------------------------------------------------------ *
@@ -584,6 +585,36 @@ function deviceFromRequest(req: IncomingMessage, body: Record<string, unknown> |
   if (fromCookie !== null && isValidDeviceId(fromCookie)) return fromCookie;
   const fromBody = typeof body?.deviceId === 'string' ? body.deviceId : '';
   return isValidDeviceId(fromBody) ? fromBody : null;
+}
+
+/* C6: the two-phase confirm with delay. The first call banks an intent and
+ * answers 428 with the token and the earliest usable moment; a confirm
+ * inside the delay window is refused (425, token still live), so a
+ * double-click cannot ban anybody, and an unknown or expired token starts
+ * over rather than guessing. */
+const ADMIN_CONFIRM_DELAY_MS = Math.max(0, Number(process.env.DOOMCRAFT_CONFIRM_DELAY_MS ?? 3000));
+const ADMIN_CONFIRM_TTL_MS = 5 * 60_000;
+const adminIntents = new Map<string, { token: string; notBeforeMs: number; expiresMs: number }>();
+function requireConfirm(key: string, provided: unknown, now: number): { status: number; body: Record<string, unknown> } | null {
+  const held = adminIntents.get(key);
+  if (typeof provided === 'string' && held !== undefined && provided === held.token) {
+    if (now > held.expiresMs) {
+      adminIntents.delete(key);
+    } else if (now < held.notBeforeMs) {
+      return { status: 425, body: { error: 'confirm inside the delay window — wait, then resend', notBeforeMs: held.notBeforeMs } };
+    } else {
+      adminIntents.delete(key);
+      return null;
+    }
+  }
+  const token = randomBytes(12).toString('hex');
+  adminIntents.set(key, { token, notBeforeMs: now + ADMIN_CONFIRM_DELAY_MS, expiresMs: now + ADMIN_CONFIRM_TTL_MS });
+  return { status: 428, body: { error: 'confirm required', confirmToken: token, notBeforeMs: now + ADMIN_CONFIRM_DELAY_MS } };
+}
+
+/** The audit log's name for a profile key — the handle, never the id. */
+function hashDeviceForAudit(profileKey: string): string {
+  return redactPlayerId(profileKey);
 }
 
 /** The §3.2.1 question's numbers — what is at stake on this device. */
@@ -1816,6 +1847,16 @@ async function handleApi(
     }
     const device = deviceFromRequest(req, body);
     if (device === null) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    /* C6 enforcement: a banned PROFILE mints no credential. The graph-level
+     * account ban is checked again at redemption; this is the profile-level
+     * half, and it reads the resolved key so a ban follows the person. */
+    const bannedKey = await graph.resolveProfileKey(asDeviceId(device));
+    const banned = await store.load(bannedKey);
+    if (banned !== null && banned.moderation.banned
+      && (banned.moderation.bannedUntilMs === 0 || Date.now() < banned.moderation.bannedUntilMs)) {
+      sendJson(res, 403, { error: 'this player is banned', untilMs: banned.moderation.bannedUntilMs }, cors);
+      return true;
+    }
     sendJson(res, 200, { ticket: await graph.mintDeviceTicket(asDeviceId(device)) }, cors);
     return true;
   }
@@ -2520,6 +2561,117 @@ async function handleApi(
       sums: await journal.balances(key),
       liveItemIds: liveItemIdSet(),
     }), cors);
+    return true;
+  }
+
+  /* --- C6: the operator verbs the Players screen was refusing to lie about *
+   * Every one is admin-gated, audited, journal-backed where money moves, and
+   * the destructive ones sit behind a TWO-PHASE CONFIRM WITH DELAY: the
+   * first call answers 428 with a token and the earliest moment it may be
+   * used; a confirm inside the delay window is refused — a double-click
+   * cannot ban anybody.                                                     */
+  if (path.startsWith('/api/admin/player/') && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = await readBody(req);
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+    const b = (body ?? {}) as Record<string, unknown>;
+    const deviceId = typeof b.deviceId === 'string' ? b.deviceId : '';
+    if (!isValidDeviceId(deviceId)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
+    const verb = path.slice('/api/admin/player/'.length);
+    const now = Date.now();
+
+    // Kick is immediate — a reconnect undoes it; everything else confirms.
+    if (verb !== 'kick') {
+      const pending = requireConfirm(`${who.actor}|${verb}|${deviceId}`, b.confirm, now);
+      if (pending !== null) { sendJson(res, pending.status, pending.body, cors); return true; }
+    }
+
+    const profileKey = await graph.resolveProfileKey(asDeviceId(deviceId));
+    let after = '';
+    let refused = '';
+    switch (verb) {
+      case 'moderate': {
+        const banned = b.banned === true;
+        const untilMs = typeof b.untilMs === 'number' && Number.isFinite(b.untilMs) ? Math.max(0, b.untilMs) : 0;
+        const updated = await store.update(profileKey, (p) => {
+          p.moderation.banned = banned;
+          p.moderation.bannedUntilMs = banned ? untilMs : 0;
+          p.moderation.reason = banned ? who.reason : '';
+        });
+        const home = await graph.accountForDevice(asDeviceId(deviceId));
+        if (home !== null) {
+          await graph.moderate(home.accountId, banned ? 'banned' : 'clear', who.reason, untilMs);
+        }
+        // A ban takes effect NOW, not at the next connect.
+        let kicked = 0;
+        for (const key of router.keys()) kicked += router.get(key)?.kick(profileKey, 'banned') ?? 0;
+        after = `banned=${updated.moderation.banned} until=${untilMs} kicked=${kicked}`;
+        break;
+      }
+      case 'revoke-item': {
+        const ref = typeof b.ref === 'string' ? b.ref.slice(0, 80) : '';
+        if (ref === '') { refused = 'ref required'; break; }
+        await store.update(profileKey, (p) => {
+          if (!p.moderation.revokedItems.some((r) => r.ref === ref)) {
+            p.moderation.revokedItems.push({ ref, ms: now, reason: who.reason });
+          }
+        });
+        after = `revoked ${ref}`;
+        break;
+      }
+      case 'currency': {
+        const delta = typeof b.delta === 'number' && Number.isFinite(b.delta) ? Math.trunc(b.delta) : NaN;
+        if (!Number.isFinite(delta) || delta === 0 || Math.abs(delta) > 100_000) {
+          refused = 'delta must be a non-zero integer within ±100000';
+          break;
+        }
+        // The journal is the truth the balance follows — never the reverse.
+        const entryId = newLedgerId(now);
+        const updated = await store.update(profileKey, (p) => {
+          p.economy.scrap = Math.max(0, Math.min(p.economy.scrap + delta, MAX_SCRAP_BALANCE));
+          if (delta > 0) p.economy.lifetimeScrap = Math.min(p.economy.lifetimeScrap + delta, MAX_SCRAP_BALANCE);
+        });
+        await journal.append([{
+          id: entryId, ms: now, kind: 'admin.adjust', sourceId: `admin:${entryId}`,
+          playerId: profileKey, currency: 'scrap',
+          delta, balanceAfter: updated.economy.scrap,
+          actor: `admin:${who.actor}`, reason: who.reason,
+        }]);
+        after = `scrap ${delta > 0 ? '+' : ''}${delta} -> ${updated.economy.scrap}`;
+        break;
+      }
+      case 'entitlement': {
+        const adsRemoved = b.adsRemoved === true;
+        const updated = await store.update(profileKey, (p) => {
+          p.entitlements.adsRemoved = adsRemoved;
+          p.progress.adsRemoved = adsRemoved;
+          if (adsRemoved && p.entitlements.purchasedMs === 0) p.entitlements.purchasedMs = now;
+        });
+        after = `adsRemoved=${updated.entitlements.adsRemoved}`;
+        break;
+      }
+      case 'kick': {
+        let kicked = 0;
+        for (const key of router.keys()) kicked += router.get(key)?.kick(profileKey, who.reason || 'removed by operator') ?? 0;
+        after = `kicked ${kicked} connection(s)`;
+        break;
+      }
+      default:
+        sendJson(res, 404, { error: 'no such player verb' }, cors);
+        return true;
+    }
+
+    await auditLog.record({
+      ms: now, actor: who.actor, verb: `player.${verb}`,
+      subject: hashDeviceForAudit(profileKey), reason: who.reason,
+      before: '', after: refused === '' ? after : refused,
+      outcome: refused === '' ? 'applied' : 'refused', requestId: newRequestId(),
+    });
+    if (refused !== '') { sendJson(res, 400, { error: refused }, cors); return true; }
+    sendJson(res, 200, { ok: true, result: after }, cors);
     return true;
   }
 

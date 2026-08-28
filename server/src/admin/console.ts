@@ -534,6 +534,43 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         </div>
         <div class="card tscroll" id="player-body"></div>
         <div class="card">
+          <div class="card-head">actions</div>
+          <div class="card-body">
+            <div class="note">
+              Every action is audited with your actor and reason. The dangerous ones carry the server's own
+              two-phase confirm on top of this page's dialog — the first request arms it, and a confirm
+              inside the server's delay window is refused, so a double-click cannot ban anybody.
+              The subject is the device id in the lookup box; a claimed device resolves to its account.
+            </div>
+            <div class="rowline">
+              <label class="muted">ban</label>
+              <input id="act-ban-hours" autocomplete="off" placeholder="hours (blank = permanent)" size="20">
+              <button id="act-ban" class="danger">ban…</button>
+              <button id="act-unban">lift ban…</button>
+            </div>
+            <div class="rowline">
+              <label class="muted">scrap</label>
+              <input id="act-delta" autocomplete="off" placeholder="+100 or -100" size="12">
+              <button id="act-currency">adjust…</button>
+            </div>
+            <div class="rowline">
+              <label class="muted">item</label>
+              <input id="act-ref" autocomplete="off" placeholder="item ref, e.g. trail-coolant-leak" size="24">
+              <button id="act-revoke" class="danger">revoke…</button>
+            </div>
+            <div class="rowline">
+              <label class="muted">remove-ads</label>
+              <button id="act-ads-on">grant…</button>
+              <button id="act-ads-off" class="danger">take away…</button>
+            </div>
+            <div class="rowline">
+              <label class="muted">live</label>
+              <button id="act-kick">kick this player's connections…</button>
+            </div>
+            <div class="muted" id="act-state"></div>
+          </div>
+        </div>
+        <div class="card">
           <div class="card-head">what this console cannot do</div>
           <div class="card-body">
             <div class="note">
@@ -1011,8 +1048,65 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     go.disabled = !(subjOk && actorOk && reasonOk);
   }
 
+  /* ---- C6: player actions through the same confirm dialog ---- */
+  function armPlayer(verb, title, patch, lines) {
+    var key = el('player-key').value.trim();
+    if (key.length === 0) { el('act-state').textContent = 'look a player up first — the subject is the lookup box'; return; }
+    armed = { player: verb, patch: patch, subject: key, plan: { delayMs: 3000 } };
+    var diff = el('c-diff'); var warns = el('c-warnings');
+    clear(diff); clear(warns);
+    el('c-title').textContent = title + ' — ' + key;
+    for (var i = 0; i < lines.length; i++) diff.appendChild(make('div', 'muted', lines[i]));
+    el('c-subject').value = '';
+    el('c-subject-want').textContent = 'exactly: ' + key;
+    el('c-reason').value = '';
+    el('c-state').textContent = '';
+    el('c-state').className = 'muted';
+    countdown = 3;
+    if (ticker) clearInterval(ticker);
+    ticker = setInterval(tick, 250);
+    tick();
+    el('confirm').showModal();
+  }
+
+  function firePlayer() {
+    var verb = armed.player;
+    var body = {};
+    for (var k in armed.patch) if (Object.prototype.hasOwnProperty.call(armed.patch, k)) body[k] = armed.patch[k];
+    body.deviceId = armed.subject;
+    body.actor = el('c-actor').value.trim();
+    body.reason = el('c-reason').value.trim();
+    var state = el('c-state');
+    var send = function () {
+      return api('/api/admin/player/' + verb, 'POST', body).then(function (r) {
+        if (r.status === 428 && r.body && r.body.confirmToken) {
+          // The server's own delay: wait it out, then send the armed confirm.
+          body.confirm = r.body.confirmToken;
+          var wait = Math.max(0, (r.body.notBeforeMs || 0) - Date.now()) + 200;
+          state.textContent = 'server armed — confirming in ' + Math.ceil(wait / 1000) + 's…';
+          return new Promise(function (res2) { setTimeout(res2, wait); }).then(send);
+        }
+        if (r.status === 200) {
+          state.textContent = 'applied — ' + (r.body && r.body.result ? r.body.result : 'ok');
+          state.className = 'ok';
+          el('act-state').textContent = verb + ': ' + (r.body && r.body.result ? r.body.result : 'ok');
+          loadPlayer();
+          loadAudit();
+          setTimeout(function () { el('confirm').close(); }, 1200);
+          return;
+        }
+        state.textContent = 'refused: HTTP ' + r.status + ' — ' + (r.body && r.body.error ? r.body.error : r.text.slice(0, 200));
+        state.className = 'err';
+      });
+    };
+    state.textContent = 'writing…';
+    state.className = 'muted';
+    send();
+  }
+
   function fire() {
     if (!armed) return;
+    if (armed.player) { firePlayer(); return; }
     if (armed.release) { fireRelease(); return; }
     var body = {};
     for (var k in armed.patch) if (Object.prototype.hasOwnProperty.call(armed.patch, k)) body[k] = armed.patch[k];
@@ -1550,6 +1644,40 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   });
   el('player-go').addEventListener('click', function () { loadPlayer(); });
   el('player-key').addEventListener('keydown', function (e) { if (e.key === 'Enter') loadPlayer(); });
+  el('act-ban').addEventListener('click', function () {
+    var hours = parseFloat(el('act-ban-hours').value);
+    var untilMs = isFinite(hours) && hours > 0 ? Date.now() + hours * 3600000 : 0;
+    armPlayer('moderate', 'ban', { banned: true, untilMs: untilMs }, [
+      untilMs === 0 ? 'PERMANENT ban — no expiry.' : 'Ban until ' + new Date(untilMs).toISOString() + '.',
+      'Live connections are kicked now; no new socket credential mints while it stands.',
+    ]);
+  });
+  el('act-unban').addEventListener('click', function () {
+    armPlayer('moderate', 'lift ban', { banned: false, untilMs: 0 }, ['The ban is lifted; the player can connect on the next attempt.']);
+  });
+  el('act-currency').addEventListener('click', function () {
+    var delta = parseInt(el('act-delta').value, 10);
+    if (!isFinite(delta) || delta === 0) { el('act-state').textContent = 'delta must be a non-zero integer'; return; }
+    armPlayer('currency', 'adjust scrap', { delta: delta }, [
+      (delta > 0 ? '+' : '') + delta + ' Scrap, written as an admin.adjust JOURNAL row — the balance follows the ledger, never the reverse.',
+    ]);
+  });
+  el('act-revoke').addEventListener('click', function () {
+    var ref = el('act-ref').value.trim();
+    if (ref.length === 0) { el('act-state').textContent = 'type the item ref to revoke'; return; }
+    armPlayer('revoke-item', 'revoke item', { ref: ref }, [
+      'Adds ' + ref + ' to moderation.revokedItems — the only written item state; everything else stays derived from the live release.',
+    ]);
+  });
+  el('act-ads-on').addEventListener('click', function () {
+    armPlayer('entitlement', 'grant remove-ads', { adsRemoved: true }, ['Sets the entitlement on. A support grant, audited; not a purchase record.']);
+  });
+  el('act-ads-off').addEventListener('click', function () {
+    armPlayer('entitlement', 'take remove-ads away', { adsRemoved: false }, ['Sets the entitlement off. If money moved, the refund itself needs the payment provider (C8).']);
+  });
+  el('act-kick').addEventListener('click', function () {
+    armPlayer('kick', 'kick live connections', {}, ['Closes every live socket banking to this player, on this host. They can reconnect unless banned.']);
+  });
   el('c-cancel').addEventListener('click', function () { armed = null; el('confirm').close(); });
   el('c-go').addEventListener('click', fire);
   el('confirm').addEventListener('close', function () { if (ticker) { clearInterval(ticker); ticker = 0; } });

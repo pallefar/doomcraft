@@ -1422,6 +1422,23 @@ export class Room implements NetHost {
     this.net.detach(conn, 1000, 'client left');
   }
 
+  /**
+   * C6: remove every live connection banking to this profile key. The only
+   * removal before this was POST /api/admin/drain, which closes EVERY room
+   * on the host — a flamethrower where support needed tweezers.
+   */
+  kick(profileKey: string, reason = 'removed by operator'): number {
+    if (profileKey.length === 0) return 0;
+    let kicked = 0;
+    for (const m of this.members.values()) {
+      if (m.conn !== null && m.conn.deviceId === profileKey) {
+        this.net.detach(m.conn, 4403, reason);
+        kicked++;
+      }
+    }
+    return kicked;
+  }
+
   /* -------------------------------------------------------------- *
    * Persistence
    * -------------------------------------------------------------- */

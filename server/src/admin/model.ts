@@ -176,35 +176,34 @@ export interface MissingCapability {
  * deleting its row here is part of building it.
  */
 export const MISSING_CAPABILITIES: readonly MissingCapability[] = Object.freeze([
+  // C6 (2026-08-28) deleted its rows on the way in, as building them
+  // requires: ban (profile + account + live kick + ticket refusal), kick,
+  // currency adjust (admin.adjust journal rows), entitlement flip and item
+  // revoke are real now — /api/admin/player/*.
   Object.freeze({
-    verb: 'Ban / mute / shadowban',
-    why: 'No moderation field exists on a stored profile and nothing reads one at the socket upgrade. '
-      + 'The only "ban" in the tree is the signalling hub\'s IP-scoped, minutes-long room-code limiter.',
-    when: 'C6 — a PERSIST_VERSION 4→5 bump, with all five coordinated edits',
+    verb: 'Mute / shadowban',
+    why: 'The ban is all-or-nothing today: there is no chat to mute and no reward-strip-but-admit '
+      + 'path wired at the room. The moderation states exist on the account record; the enforcement '
+      + 'shades do not.',
+    when: 'with the social features that make them meaningful',
   }),
   Object.freeze({
-    verb: 'Kick one live player',
-    why: 'Room has no kick(). The only way to remove a player today is POST /api/admin/drain, '
-      + 'which closes EVERY room on this host.',
-    when: 'C6',
+    verb: 'Undo a merge',
+    why: 'The §3.6 raw material exists — the archived profile under merged/ and the journal pair — '
+      + 'but the reversal route and its support actor do not.',
+    when: 'C6.1 — on top of merge.jsonl and the archive that C5 writes',
   }),
   Object.freeze({
-    verb: 'Adjust a currency balance',
-    why: 'There is no store method for it. A raw update() would bypass the per-day anti-farm meter '
-      + 'and land unrecorded in the journal, which is worse than not doing it.',
-    when: 'C6 — an admin.adjust ledger kind plus a per-day operator cap',
-  }),
-  Object.freeze({
-    verb: 'Refund / clawback',
-    why: 'Unauditable by construction until the entitlement store is split out of the profile: '
-      + 'there is a balance and a lifetime total, and no record of what was bought.',
-    when: 'C6, on top of the journal that landed in C2',
+    verb: 'Refund a real purchase',
+    why: 'The entitlement FLIP is auditable now, but a money-out refund needs the provider that '
+      + 'took the money in. No Paddle, no clawback.',
+    when: 'C8 — the vendors',
   }),
   Object.freeze({
     verb: 'Reset progress',
     why: 'Mechanically possible — nothing calls it, and doing it without an audit row and a scope '
       + 'parameter is how a support action becomes an unexplained data loss.',
-    when: 'C6',
+    when: 'C6.1',
   }),
   Object.freeze({
     verb: 'Export a player\'s data (DSAR)',
