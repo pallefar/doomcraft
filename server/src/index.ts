@@ -81,6 +81,7 @@ import { AccountGraph, JsonGraphBackend, countableProfile } from './accountGraph
 import { mergeDeviceIntoAccount, planMerge } from './merge.js';
 import { ReferralService } from './referrals.js';
 import { TradeService, type TradeResult } from './trades.js';
+import { CompetitionService } from './competitions.js';
 import type { ItemDef } from '@doomcraft/shared/items';
 import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
@@ -574,6 +575,12 @@ const referrals = new ReferralService(dataRoot);
  * left behind. */
 const trades = new TradeService(dataRoot);
 
+/* Competitions (docs/ECONOMY.md "Competitions"): auto-rolling seasons and
+ * operator-created tournaments on a state-based ladder. Accrual rides the
+ * same onProfilePersisted seam as referrals and is gated on NOTHING —
+ * turning the tab off mid-season must never lose a season. */
+const competitions = new CompetitionService(dataRoot);
+
 /** The graph's name for a passphrase account. One player, one id. The
  * account store already namespaces its ids (`house:<hex>`), so the graph
  * adopts them verbatim — `pass:house:<hex>` would be two namespaces deep
@@ -916,7 +923,10 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
       journal,
       /* Viral tier 1: a paying round may newly satisfy the referred
        * player's engagement threshold. Fire-and-forget by contract. */
-      onProfilePersisted: (profileKey) => { void referrals.sweep(profileKey, { store, journal }); },
+      onProfilePersisted: (profileKey) => {
+        void referrals.sweep(profileKey, { store, journal });
+        void competitions.sweep(profileKey, { store, journal });
+      },
       hostId: HOST_ID,
       sessionOrigin: isInvite ? SessionOrigin.SERVER_INVITE : SessionOrigin.SERVER_MATCHMAKER,
       sessionIntent: isInvite ? MatchType.PRIVATE : MatchType.PUBLIC,
@@ -1919,6 +1929,113 @@ async function handleApi(
       outcome: paid ? 'applied' : 'refused', requestId: newRequestId(),
     });
     sendJson(res, paid ? 200 : 404, { ok: paid }, cors);
+    return true;
+  }
+
+  if (path === '/api/admin/competitions' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    sendJson(res, 200, {
+      status: competitions.status(),
+      competitions: await competitions.overview('', { store, journal }),
+    }, cors);
+    return true;
+  }
+
+  /** Creation IS the paying decision — the finaliser pays the table it
+   *  writes automatically — so it confirms like the C6 verbs. */
+  if (path === '/api/admin/competitions/create' && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = await readBody(req);
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+    const b = (body ?? {}) as Record<string, unknown>;
+    const name = typeof b.name === 'string' ? b.name : '';
+    const now = Date.now();
+    const pending = requireConfirm(`${who.actor}|competition-create|${name}`, b.confirm, now);
+    if (pending !== null) { sendJson(res, pending.status, pending.body, cors); return true; }
+    const made = competitions.createTournament({
+      name,
+      startMs: typeof b.startMs === 'number' ? b.startMs : now,
+      endMs: typeof b.endMs === 'number' ? b.endMs : 0,
+      minLevel: typeof b.minLevel === 'number' ? b.minLevel : 1,
+      scrapByRank: Array.isArray(b.scrapByRank) ? b.scrapByRank.filter((n): n is number => typeof n === 'number') : [],
+      winnerItems: Array.isArray(b.winnerItems) ? b.winnerItems.filter((r): r is string => typeof r === 'string') : [],
+      actor: who.actor,
+    });
+    await auditLog.record({
+      ms: now, actor: who.actor, verb: 'competition.create',
+      subject: made.ok ? made.id : name, reason: who.reason,
+      before: '', after: made.ok ? 'running' : made.error,
+      outcome: made.ok ? 'applied' : 'refused', requestId: newRequestId(),
+    });
+    if (!made.ok) { sendJson(res, 400, { error: made.error }, cors); return true; }
+    sendJson(res, 201, { id: made.id }, cors);
+    return true;
+  }
+
+  /** Cancel pays NOBODY — that is what distinguishes it from letting it end. */
+  if (path === '/api/admin/competitions/cancel' && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = await readBody(req);
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+    const b = (body ?? {}) as Record<string, unknown>;
+    const id = typeof b.id === 'string' ? b.id.slice(0, 64) : '';
+    const done = competitions.cancelCompetition(id, who.actor);
+    await auditLog.record({
+      ms: Date.now(), actor: who.actor, verb: 'competition.cancel',
+      subject: id, reason: who.reason,
+      before: '', after: done ? 'cancelled' : 'not cancellable',
+      outcome: done ? 'applied' : 'refused', requestId: newRequestId(),
+    });
+    sendJson(res, done ? 200 : 404, { ok: done }, cors);
+    return true;
+  }
+
+  /* --- competitions: seasons and tournaments (docs/ECONOMY.md) ----------- *
+   * Reads and enter are flag-gated on the caller's own `economy_competitions`
+   * bits (the tab), never the accrual. The admin verbs live with the other
+   * admin routes below: CREATE confirm-gates because the prize table it
+   * writes is money the finaliser will pay automatically.                   */
+  if ((path === '/api/competitions' || path === '/api/competitions/standings')
+      && (req.method === 'GET' || req.method === 'HEAD')) {
+    const raw = cookieValue(req.headers.cookie, DEVICE_COOKIE) ?? url.searchParams.get('device') ?? '';
+    if (!isValidDeviceId(raw)) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(raw));
+    if (!flagOn(flags.bitsFor(key), 'economy_competitions')) {
+      sendJson(res, 404, { error: 'competitions are not enabled' }, cors);
+      return true;
+    }
+    if (path === '/api/competitions') {
+      sendJson(res, 200, { competitions: await competitions.overview(key, { store, journal }) }, cors);
+      return true;
+    }
+    const table = await competitions.standings(
+      (url.searchParams.get('id') ?? '').slice(0, 64), key, { store, journal });
+    if (table === null) { sendJson(res, 404, { error: 'no such competition' }, cors); return true; }
+    sendJson(res, 200, { standings: table }, cors);
+    return true;
+  }
+
+  if (path === '/api/competitions/enter' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const device = deviceFromRequest(req, body);
+    if (device === null) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(device));
+    if (!flagOn(flags.bitsFor(key), 'economy_competitions')) {
+      sendJson(res, 404, { error: 'competitions are not enabled' }, cors);
+      return true;
+    }
+    const id = typeof body.id === 'string' ? body.id.slice(0, 64) : '';
+    const out = await competitions.enter(key, id, { store, journal });
+    if (!out.ok) { sendJson(res, out.status, { error: out.error }, cors); return true; }
+    sendJson(res, 200, { ok: true }, cors);
     return true;
   }
 
@@ -3368,6 +3485,10 @@ httpServer.on('upgrade', (req, socket, head) => { void (async () => {
 /* Finish any trade a crash left mid-settlement — the per-side guards make
  * this a no-op when the last process got everything to disk. */
 void trades.recover({ store, defs: liveItemDefs });
+
+/* Open the first season (or finalise one that ended while the host was
+ * down) — the journal makes a replayed finalisation pay nobody twice. */
+void competitions.ensure({ store, journal });
 
 httpServer.listen(PORT, HOST, () => {
   const hasBundle = existsSync(join(staticRoot, 'index.html'));

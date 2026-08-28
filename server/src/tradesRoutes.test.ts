@@ -95,7 +95,7 @@ beforeAll(async () => {
   [on, off] = await Promise.all([
     boot(
       {
-        DOOMCRAFT_FLAGS: '{"rules":{"economy_trading":{"force":true}}}',
+        DOOMCRAFT_FLAGS: '{"rules":{"economy_trading":{"force":true},"economy_competitions":{"force":true}}}',
         DOOMCRAFT_ADMIN_TOKEN: ADMIN_TOKEN,
       },
       (dataRoot) => {
@@ -167,6 +167,23 @@ describe('the whole arc, over HTTP', () => {
     const fresh = await call(on.origin, '/api/trade/open', { deviceId: 'efefefefefefefefefefefef' });
     expect(fresh.status).toBe(403);
     expect(String(fresh.json?.error)).toContain('no profile');
+  });
+});
+
+describe('competitions over the wire', () => {
+  it('a season exists at boot and the flagless host hides the tab', async () => {
+    const view = await call(on.origin, `/api/competitions?device=${ALFA}`);
+    expect(view.status).toBe(200);
+    const list = (view.json?.competitions ?? []) as Array<Record<string, unknown>>;
+    expect(list.length).toBeGreaterThan(0);
+    expect(list[0].kind).toBe('season');
+    expect(list[0].state).toBe('running');
+
+    const standings = await call(on.origin, `/api/competitions/standings?id=${list[0].id}&device=${ALFA}`);
+    expect(standings.status).toBe(200);
+
+    const hidden = await call(off.origin, `/api/competitions?device=${ALFA}`);
+    expect(hidden.status).toBe(404);
   });
 });
 

@@ -58,7 +58,7 @@ export type LedgerCurrency = 'xp' | 'scrap';
 export type LedgerKind =
   | 'match.payout' | 'merge.debit' | 'merge.credit'
   | 'admin.adjust' | 'purchase.grant' | 'purchase.refund' | 'spend'
-  | 'referral';
+  | 'referral' | 'prize';
 
 /** Written out so a `LedgerKind` typo in a call site is a compile error. */
 export const MATCH_PAYOUT: LedgerKind = 'match.payout';
@@ -66,7 +66,7 @@ export const MATCH_PAYOUT: LedgerKind = 'match.payout';
 export const LEDGER_KINDS: readonly LedgerKind[] = Object.freeze([
   'match.payout', 'merge.debit', 'merge.credit',
   'admin.adjust', 'purchase.grant', 'purchase.refund', 'spend',
-  'referral',
+  'referral', 'prize',
 ]);
 
 /**
@@ -134,7 +134,7 @@ export const MAX_SOURCE_ID = 160;
 export const MAX_ACTOR = 64;
 export const MAX_REASON = 120;
 /**
- * Everything else is a number, a date or one of seven kind strings, so this is
+ * Everything else is a number, a date or one of the kind strings, so this is
  * the worst case and not an estimate: the four clamps above plus the fixed key
  * names plus the widest integers this economy can hold.
  */
