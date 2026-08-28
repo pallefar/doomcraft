@@ -103,14 +103,17 @@ describe('the cascade', () => {
       .find((f) => f.surface === SurfaceId.MENU_TOP)?.source).toBe('house');
   });
 
-  it('skips a campaign whose creative needs the asset pipeline, with the reason in the log', () => {
+  it('skips an unservable creative kind with the reason in the log: video needs phase 2, image has no phase-one surface', () => {
     const clock = { now: T0 };
     const booking = textCampaign();
-    booking.creatives[0].kind = 'display';
-    const { ads, root } = service(booking, clock);
-    expect(ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP)?.source).toBe('house');
-    const log = readFileSync(join(root, 'ads.jsonl'), 'utf8');
-    expect(log).toContain('asset pipeline');
+    booking.creatives[0].kind = 'video';
+    const a = service(booking, clock);
+    expect(a.ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP)?.source).toBe('house');
+    expect(readFileSync(join(a.root, 'ads.jsonl'), 'utf8')).toContain('needs phase 2');
+    booking.creatives[0].kind = 'image';
+    const b = service(booking, clock);
+    expect(b.ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP)?.source).toBe('house');
+    expect(readFileSync(join(b.root, 'ads.jsonl'), 'utf8')).toContain('no phase-one surface');
   });
 
   it('per-session and per-day caps stop serving after counted impressions', () => {
@@ -167,6 +170,41 @@ describe('the cascade', () => {
     expect(fill?.label).toBe('Ad');
     const empty = service(null, clock);
     expect(empty.ads.decide({ ...REQ, surfaces: [SurfaceId.BOOT_LINE] }, CTX)).toEqual([]);
+  });
+
+  it('§2.2: a display campaign SERVES once its asset is uploaded — url from the store, size checked per platform', () => {
+    const clock = { now: T0 };
+    const booking = textCampaign();
+    booking.creatives[0].kind = 'display';
+    booking.creatives[0].sha256 = 'ab'.repeat(32);
+    const root = tempDir();
+    writeFileSync(join(root, 'sponsors.json'), JSON.stringify(booking), 'utf8');
+    const ads = new AdService(root, {
+      clock: () => clock.now, log: () => {},
+      assetFor: (sha) => (sha === 'ab'.repeat(32)
+        ? { url: `/cdn/crv/${sha}.png`, width: 728, height: 90 }
+        : null),
+    });
+    const top = ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP);
+    expect(top?.source).toBe('direct');
+    expect(top?.kind).toBe('display');
+    expect(top?.assetUrl).toBe(`/cdn/crv/${'ab'.repeat(32)}.png`);
+    // The same 728x90 does NOT fit the mobile top slot: house, with the reason logged.
+    const mob = ads.decide({ ...REQ, platform: 'mobile' }, CTX).find((f) => f.surface === SurfaceId.MENU_TOP);
+    expect(mob?.source).toBe('house');
+    const log = readFileSync(join(root, 'ads.jsonl'), 'utf8');
+    expect(log).toContain('does not fit surface');
+  });
+
+  it('§2.2: a display campaign whose asset was never uploaded still skips, with the reason in the log', () => {
+    const clock = { now: T0 };
+    const booking = textCampaign();
+    booking.creatives[0].kind = 'display';
+    booking.creatives[0].sha256 = 'cd'.repeat(32);
+    const { ads, root } = service(booking, clock);   // no assetFor at all — §2.2 absent
+    expect(ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP)?.source).toBe('house');
+    const log = readFileSync(join(root, 'ads.jsonl'), 'utf8');
+    expect(log).toContain('no uploaded asset');
   });
 
   it('a broken booking file serves house and does not throw', () => {

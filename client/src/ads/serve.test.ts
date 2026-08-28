@@ -47,7 +47,7 @@ describe('the S12 card model', () => {
 
   it('a direct text fill carries its disclosure label, and a click only on an interactive mount', () => {
     const m = interCardModel(inter(), true);
-    expect(m).toEqual({ kind: 'text', label: 'Sponsored', text: inter().text, href: '/r/abc' });
+    expect(m).toEqual({ kind: 'text', label: 'Sponsored', text: inter().text, href: '/r/abc', src: '' });
     // The deathmatch board is #hud, pointer-events none — an anchor there
     // would render as a link nobody can follow.
     expect(interCardModel(inter(), false)?.href).toBe('');

@@ -72,17 +72,29 @@ export interface AdPipelineOptions {
  * still read as one.
  */
 export interface InterCardModel {
-  kind: 'house' | 'text';
+  kind: 'house' | 'text' | 'img';
   label: string;
+  /** The line for text cards; the alt text for img cards. */
   text: string;
   href: string;
+  /** `/cdn/crv/…` for img cards, '' otherwise (§2.2). */
+  src: string;
 }
 
 export function interCardModel(fill: AdFill | null | undefined, interactive: boolean): InterCardModel | null {
   if (fill === null || fill === undefined) return null;
   if (fill.surface !== SurfaceId.INTERMISSION_CARD) return null;
   if (fill.source === 'house') {
-    return { kind: 'house', label: 'DOOMCRAFT', text: 'Sponsor-free results for ad-free players.', href: '' };
+    return { kind: 'house', label: 'DOOMCRAFT', text: 'Sponsor-free results for ad-free players.', href: '', src: '' };
+  }
+  if (fill.source === 'direct' && fill.kind === 'display' && fill.assetUrl.length > 0) {
+    return {
+      kind: 'img',
+      label: fill.label || 'Sponsored',
+      text: fill.altText,
+      href: interactive && fill.clickUrl.length > 0 ? fill.clickUrl : '',
+      src: fill.assetUrl,
+    };
   }
   const line = textFillOrNull(fill);
   if (line === null) return null;
@@ -91,6 +103,7 @@ export function interCardModel(fill: AdFill | null | undefined, interactive: boo
     label: line.label || 'Sponsored',
     text: line.text,
     href: interactive && line.clickUrl.length > 0 ? line.clickUrl : '',
+    src: '',
   };
 }
 
@@ -230,6 +243,34 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
     const slot = document.getElementById(slotId);
     if (slot === null) return;
 
+    // A direct-sold DISPLAY creative (§2.2): the slot empties NOW — measuring
+    // the direct fill's nonce over the house art would be dishonest — and the
+    // <img> lands only when its bytes have (creativeLoaded gates on children,
+    // and "a creative that failed to load is not an impression", §3.2.6).
+    // Never innerHTML: sponsor art is an src assignment, nothing else.
+    if (fill.source === 'direct' && fill.kind === 'display' && fill.assetUrl.length > 0) {
+      while (slot.firstChild) slot.removeChild(slot.firstChild);
+      const img = document.createElement('img');
+      img.className = 'dc-ad-img';
+      img.alt = fill.altText;
+      img.decoding = 'async';
+      img.onload = (): void => {
+        if (!inMenu || slot.childElementCount > 0) return;
+        if (fill.clickUrl.length > 0) {
+          const a = document.createElement('a');
+          a.className = 'dc-ad-imglink';
+          a.href = api(fill.clickUrl);
+          a.target = '_blank';
+          a.rel = 'noopener';
+          a.appendChild(img);
+          slot.appendChild(a);
+        } else {
+          slot.appendChild(img);
+        }
+      };
+      img.src = api(fill.assetUrl);
+    }
+
     // A direct-sold TEXT creative replaces the house card for this visit.
     // House fills leave the existing card exactly as it is — it is already
     // rendered, already labelled, and already the fallback by construction.
@@ -340,8 +381,19 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
           const label = document.createElement('b');
           label.textContent = model.label;
           card.appendChild(label);
-          card.appendChild(document.createTextNode(model.text));
-          mount.appendChild(card);
+          if (model.kind === 'img') {
+            const img = document.createElement('img');
+            img.alt = model.text;
+            img.decoding = 'async';
+            // Mounted only once loaded, so the meter's creativeLoaded gate
+            // (children of the mount) tells the truth (§3.2.6).
+            img.onload = (): void => { if (!disposed) mount.appendChild(card); };
+            img.src = api(model.src);
+            card.appendChild(img);
+          } else {
+            card.appendChild(document.createTextNode(model.text));
+            mount.appendChild(card);
+          }
           entry = watch(mount, fills[0], options.active);
         }).catch(() => { /* no card is the correct fallback */ });
       }

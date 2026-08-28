@@ -87,6 +87,39 @@ export interface AdServiceOptions {
   /** HMAC key for click ids. Random per boot when unset — clickIds are short-lived. */
   secret?: Buffer;
   log?: (line: string) => void;
+  /**
+   * The §2.2 asset resolver: the servable `/cdn/crv/…` URL and the stored
+   * file's REAL dimensions for a content hash, or null when nothing is
+   * uploaded. Unset (no store, old deployments) every asset kind still
+   * skips exactly as before §2.2 shipped.
+   */
+  assetFor?: (sha256: string) => { url: string; width: number; height: number } | null;
+}
+
+/**
+ * The creative sizes each phase-one surface accepts per platform (§1a/§3.2:
+ * the top and bottom slots are 728×90 desktop / 320×50-or-100 mobile, the
+ * side slot is 300×250 and hidden below 900 px, the intermission card takes
+ * the strip sizes). A display fill whose file is the wrong shape for THIS
+ * player's slot is skipped — a stretched creative mismeasures, and the MRC
+ * ratio would be computed against a box the art does not fill.
+ */
+const SLOT_SIZES: Readonly<Partial<Record<SurfaceId, {
+  desktop: ReadonlyArray<readonly [number, number]>;
+  mobile: ReadonlyArray<readonly [number, number]>;
+}>>> = Object.freeze({
+  [SurfaceId.MENU_TOP]: { desktop: [[728, 90]], mobile: [[320, 50], [320, 100]] },
+  [SurfaceId.MENU_BOTTOM]: { desktop: [[728, 90]], mobile: [[320, 50], [320, 100]] },
+  [SurfaceId.MENU_SIDE]: { desktop: [[300, 250]], mobile: [] },
+  [SurfaceId.INTERMISSION_CARD]: { desktop: [[728, 90]], mobile: [[320, 50], [320, 100]] },
+});
+
+export function displayFits(
+  surface: SurfaceId, platform: 'desktop' | 'mobile', width: number, height: number,
+): boolean {
+  const sizes = SLOT_SIZES[surface]?.[platform];
+  if (sizes === undefined) return false;
+  return sizes.some(([w, h]) => w === width && h === height);
 }
 
 export class AdService {
@@ -94,6 +127,7 @@ export class AdService {
   private readonly clock: () => number;
   private readonly secret: Buffer;
   private readonly logErr: (line: string) => void;
+  private readonly assetFor: AdServiceOptions['assetFor'];
 
   private sponsors: Sponsor[] = [];
   private campaigns: Campaign[] = [];
@@ -118,6 +152,7 @@ export class AdService {
     this.clock = options.clock ?? (() => Date.now());
     this.secret = options.secret ?? randomBytes(32);
     this.logErr = options.log ?? ((line) => { process.stderr.write(`${line}\n`); });
+    this.assetFor = options.assetFor;
     this.loadCampaigns();
   }
 
@@ -162,7 +197,7 @@ export class AdService {
     surface: SurfaceId, req: DecideRequest, ctx: DecideContext, deviceHash: string, now: number,
   ): AdFill | null {
     // 1-2. Direct-sold, one pass: live, in-window, targeted, capped, funded.
-    const eligible: { campaign: Campaign; creative: Creative; weight: number }[] = [];
+    const eligible: { campaign: Campaign; creative: Creative; assetUrl: string; weight: number }[] = [];
     for (const c of this.campaigns) {
       if (c.status !== 'live' || now < c.startMs || now >= c.endMs) continue;
       const binding = c.placements.find((p) => p.surface === surface);
@@ -178,17 +213,37 @@ export class AdService {
       const creative = this.rotate(binding.creativeIds, req.sessionId);
       if (creative === null) continue;
       if (creative.status !== 'approved') continue;
-      if (creative.kind === 'display' || creative.kind === 'image' || creative.kind === 'video') {
-        // No asset pipeline (§2.2) — a fill whose image we cannot serve is a
-        // broken slot, which is worse than the house card.
-        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: kind ${creative.kind} needs the asset pipeline` });
+      let assetUrl = '';
+      if (creative.kind === 'video') {
+        // Rewarded/interstitial video is phase 2 and its overlay does not exist.
+        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: kind video needs phase 2` });
         continue;
       }
-      eligible.push({ campaign: c, creative, weight: Math.max(1, Math.min(100, binding.weight)) });
+      if (creative.kind === 'image') {
+        // The image kind belongs to S2/S3/S8 shell surfaces, none of which is
+        // a phase-one surface — nothing can render it yet.
+        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: kind image has no phase-one surface` });
+        continue;
+      }
+      if (creative.kind === 'display') {
+        // §2.2: the content hash is the only address, and the stored file's
+        // own header — never the booking document — says what shape it is.
+        const asset = this.assetFor?.(creative.sha256) ?? null;
+        if (asset === null) {
+          this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: no uploaded asset for ${creative.sha256.slice(0, 12) || '(no sha256)'}` });
+          continue;
+        }
+        if (!displayFits(surface, req.platform, asset.width, asset.height)) {
+          this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: ${asset.width}x${asset.height} does not fit surface ${surface} on ${req.platform}` });
+          continue;
+        }
+        assetUrl = asset.url;
+      }
+      eligible.push({ campaign: c, creative, assetUrl, weight: Math.max(1, Math.min(100, binding.weight)) });
     }
     if (eligible.length > 0) {
       const pick = weightedPick(eligible, deviceHash + String(surface));
-      return this.mint(surface, 'direct', pick.campaign, pick.creative, deviceHash, req.sessionId, now);
+      return this.mint(surface, 'direct', pick.campaign, pick.creative, deviceHash, req.sessionId, now, pick.assetUrl);
     }
     // 3. Programmatic: no network integration exists; nothing to offer the slot to.
     // 4. House — the guaranteed floor, MENU slots and the intermission card only.
@@ -243,7 +298,7 @@ export class AdService {
   private mint(
     surface: SurfaceId, source: AdFill['source'],
     campaign: Campaign | null, creative: Creative | null,
-    deviceHash: string, sessionId: string, now: number,
+    deviceHash: string, sessionId: string, now: number, assetUrl = '',
   ): AdFill {
     const nonce = randomBytes(12).toString('hex');
     const record: FillRecord = {
@@ -266,7 +321,7 @@ export class AdService {
       surface, source,
       creativeId: record.creativeId,
       kind: creative?.kind ?? 'text',
-      assetUrl: '',
+      assetUrl,
       clickUrl,
       altText: creative?.altText ?? '',
       text: creative?.text ?? '',

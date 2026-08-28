@@ -349,6 +349,18 @@ bump and a 3→4 migration (the file already has a 2→3 migration to copy).
 
 ### 2.2 Asset pipeline and the moderation gate
 
+> **STATUS 2026-08-28 — the OPERATOR lane of this section shipped** (`server/src/creatives.ts`):
+> content-addressed storage (`creatives/<sha256>.<ext>` served at `/cdn/crv/<sha256>.<ext>`,
+> immutable + nosniff + CORP), upload over the audited admin surface only, the real MIME from
+> magic bytes (SVG/HTML refused by construction), static-only enforcement (APNG `acTL`, WebP
+> VP8X animation bit), exact IAB sizes for `display` read from the file's own header, and the
+> §2.2 byte caps. `decideOne` now serves `display` campaigns whose hash resolves in the store —
+> with a per-surface/per-platform size check — and skips the rest with the reason logged.
+> Stated deviations while the writer is the operator (Rule B, the same reduction PACKS §9 made
+> for the Studio): no separate CDN origin yet (blocked on a domain, HANDOVER §5), and no
+> re-encode/OCR/classifier battery — those are the self-serve lane's door, not the operator's.
+> `video` still needs phase 2; `image` still has no phase-one surface.
+
 Everything is uploaded to a **separate origin** (`cdn.doomcraft.…`), stored by content hash, and served
 with `Cross-Origin-Resource-Policy: cross-origin` and `X-Content-Type-Options: nosniff`. **The game
 document never hosts a sponsor byte.**

@@ -109,6 +109,7 @@ import { CONTENT_VERSION } from '@doomcraft/shared/version';
 import { PackInventory, ReleaseService, releaseContentHash, rollMatchDrops } from './packs.js';
 import { StudioService } from './studio.js';
 import { AdService } from './ads.js';
+import { CreativeStore, IMAGE_MAX_BYTES } from './creatives.js';
 import { PHASE_ONE_SURFACES, type AdEventType, type SurfaceId } from '@doomcraft/shared/sponsor';
 import { PackKind } from '@doomcraft/shared/packs';
 import { flagOn } from '@doomcraft/shared/flags';
@@ -739,7 +740,14 @@ const releases = new ReleaseService(dataRoot, inventory, { clock: () => Date.now
  * operator-authored in $DOOMCRAFT_DATA/sponsors.json; every counted event
  * lands in ads.jsonl because billing is a batch job over a log.
  */
-const ads = new AdService(dataRoot, { clock: () => Date.now() });
+/* §2.2 — content-addressed creatives, operator lane. The store answers the
+ * decide path with the stored file's OWN dimensions, so a display fill can
+ * never be a shape the slot did not book. */
+const creatives = new CreativeStore(dataRoot);
+const ads = new AdService(dataRoot, {
+  clock: () => Date.now(),
+  assetFor: (sha256) => creatives.info(sha256),
+});
 
 const studio = new StudioService(inventory, {
   packsRoot: process.env.DOOMCRAFT_PACKS ?? null,
@@ -1189,13 +1197,13 @@ function refuseCrossSiteWrite(req: IncomingMessage, res: ServerResponse, cors: s
   return false;
 }
 
-async function readBody(req: IncomingMessage): Promise<unknown> {
+async function readBody(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<unknown> {
   return new Promise((resolvePromise, rejectPromise) => {
     let size = 0;
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         rejectPromise(new Error('body too large'));
         req.destroy();
         return;
@@ -1961,6 +1969,60 @@ async function handleApi(
 
     if (!result.ok) { sendJson(res, result.status, { error: result.error }, cors); return true; }
     sendJson(res, 200, result, cors);
+    return true;
+  }
+
+  /* --- §2.2 CREATIVES, operator lane ------------------------------------ *
+   * Upload is admin-only and audited; the content hash is the only address,
+   * so approve-then-swap is impossible by construction. Serving is public,
+   * immutable and nosniffed — the bytes were vetted at the door.            */
+  if (path === '/api/admin/creatives' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    sendJson(res, 200, { creatives: creatives.list() }, cors);
+    return true;
+  }
+
+  if (path === '/api/admin/creatives' && req.method === 'POST') {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    // Base64 of the 400 KB image cap plus the audit fields; the default
+    // 64 KB body budget is for JSON, not art.
+    let body: unknown;
+    try { body = await readBody(req, Math.ceil(IMAGE_MAX_BYTES * 4 / 3) + 4096); }
+    catch { sendJson(res, 413, { error: 'body too large' }, cors); return true; }
+    const who = await refuseUnaudited(res, body, cors);
+    if (who === null) return true;
+    const b = (body ?? {}) as Record<string, unknown>;
+    const kind = b.kind === 'image' ? 'image' as const : 'display' as const;
+    const data = typeof b.dataBase64 === 'string' ? b.dataBase64 : '';
+    const result = creatives.put(Buffer.from(data, 'base64'), kind);
+    await auditLog.record({
+      ms: Date.now(), actor: who.actor, verb: 'ads.creative',
+      subject: result.ok ? result.sha256 : 'refused', reason: who.reason,
+      before: '',
+      after: result.ok ? `${result.url} ${result.width}x${result.height} ${result.bytes}B` : result.error,
+      outcome: result.ok ? 'applied' : 'refused', requestId: newRequestId(),
+    });
+    if (!result.ok) { sendJson(res, result.status, { error: result.error }, cors); return true; }
+    sendJson(res, 200, result, cors);
+    return true;
+  }
+
+  if (path.startsWith('/cdn/crv/') && (req.method === 'GET' || req.method === 'HEAD')) {
+    const m = /^\/cdn\/crv\/([0-9a-f]{64})\.(png|jpg|webp)$/.exec(path);
+    const hit = m === null ? null : creatives.resolve(m[1]);
+    if (hit === null) { sendJson(res, 404, { error: 'no such creative' }, cors); return true; }
+    const bytes = readFileSync(hit.path);
+    res.writeHead(200, {
+      'content-type': hit.mime,
+      'content-length': bytes.length,
+      'cache-control': 'public, max-age=31536000, immutable',
+      'x-content-type-options': 'nosniff',
+      'cross-origin-resource-policy': 'cross-origin',
+    });
+    res.end(req.method === 'HEAD' ? undefined : bytes);
     return true;
   }
 

@@ -271,6 +271,12 @@ const SHELL_CSS = `
 .dc-inter-card b{color:#f0a020;font-size:10px;font-weight:800;letter-spacing:.16em;
   text-transform:uppercase;white-space:nowrap}
 a.dc-inter-card:hover{border-color:rgba(255,255,255,.3);color:#e8e6e3}
+.dc-inter-card img{display:block;max-width:100%;height:auto}
+
+/* §2.2 display creatives in the reserved slots: an src assignment, centred,
+ * never larger than the box that was reserved at first paint. */
+.dc-ad-img{display:block;max-width:100%;max-height:100%;margin:auto}
+.dc-ad-imglink{display:grid;place-items:center;width:100%;height:100%}
 
 /* --- the mode layer ------------------------------------------------------ *
  * The ad slots are LAYOUT, not overlay (ref/BAR.md: "the ads are part of the
