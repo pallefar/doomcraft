@@ -41,8 +41,11 @@
  * `SHELL_CSS` are reused verbatim where they fit rather than restyled.
  */
 
+import { Feature, hasOverride, isEnabled } from '@shared/features';
+
 import { AVATAR_PALETTE, avatarLabel, unpackAvatar } from '@/characters/avatar';
 import { createAccountPanel, type AccountPanel, type AccountPanelOptions } from '@/ui/accountPanel';
+import { createLoadoutTab, economyTabs, type LoadoutTab } from '@/ui/loadoutTab';
 import { MatchTypeNotice } from '@/ui/matchType';
 import {
   buildProfileView,
@@ -174,6 +177,19 @@ export const PROFILE_CSS = `
 .dcp-worth h3{margin:0 0 9px;font:700 11px/1.2 system-ui;letter-spacing:.2em;
   text-transform:uppercase;color:#8d8781}
 
+/* ---- the tab strip (economy surfaces) ----
+   Hidden until the server's flag probe says a tab exists, so the static
+   build and a dark host render the overlay byte-identical to before. */
+.dcp-tabs{display:none;gap:8px;flex-wrap:wrap}
+.dcp-tabs.is-shown{display:flex}
+.dcp-tab{padding:9px 18px;border:1px solid var(--dcp-line);border-radius:2px;
+  background:rgba(255,255,255,.04);color:#b4aea8;cursor:pointer;text-transform:uppercase}
+.dcp-tab:hover{border-color:rgba(255,255,255,.42);color:#fff}
+.dcp-tab[aria-selected="true"]{background:#8f1a08;border-color:#e03c1c;color:#ffe6d8}
+.dcp-tabwrap{display:none}
+.dcp-tabwrap.is-on{display:block}
+.dcp-tabwrap > * + *{margin-top:11px}
+
 .dcp-foot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
   border-top:1px solid rgba(255,255,255,.09);padding-top:13px}
 .dcp-foot p{margin:0;flex:1;min-width:200px;font-size:11.5px;color:#7d7873}
@@ -186,6 +202,7 @@ export const PROFILE_CSS = `
 #ui .dcp-x{font:400 20px/1 system-ui}
 #ui .dcp-done{font:800 14px/1 "Arial Black",Impact,sans-serif;letter-spacing:.16em;
   padding:12px 30px;text-transform:uppercase}
+#ui .dcp-tab{font:700 12px/1 system-ui;letter-spacing:.14em}
 `;
 
 function ensureStyle(): void {
@@ -243,6 +260,11 @@ export class ProfileScreen {
   private readonly closeBtn: HTMLButtonElement;
 
   private readonly accountPanel: AccountPanel | null;
+  private readonly tabsEl: HTMLElement;
+  private readonly overviewWrap: HTMLElement;
+  private readonly loadoutWrap: HTMLElement;
+  private loadoutTab: LoadoutTab | null = null;
+  private tabButtons = new Map<string, HTMLButtonElement>();
   private opened = false;
   private destroyed = false;
   private last: ProfileView | null = null;
@@ -283,9 +305,16 @@ export class ProfileScreen {
     head.appendChild(this.closeBtn);
     shell.appendChild(head);
 
+    /* ---- the tab strip — hidden until the flags probe grants a tab ---- */
+    this.tabsEl = el('div', 'dcp-tabs');
+    this.tabsEl.setAttribute('role', 'tablist');
+    shell.appendChild(this.tabsEl);
+    this.overviewWrap = el('div', 'dcp-tabwrap is-on');
+    this.loadoutWrap = el('div', 'dcp-tabwrap');
+
     /* ---- tiles ---- */
     this.tilesEl = el('div', 'dcp-tiles');
-    shell.appendChild(this.tilesEl);
+    this.overviewWrap.appendChild(this.tilesEl);
 
     /* ---- level ---- */
     const level = el('div', 'dcp-level');
@@ -297,7 +326,7 @@ export class ProfileScreen {
     this.fillEl = el('div', 'dcp-fill');
     track.appendChild(this.fillEl);
     level.append(top, track);
-    shell.appendChild(level);
+    this.overviewWrap.appendChild(level);
 
     /* ---- what a match is worth: `matchType.ts`, which decides nothing ---- */
     this.worthEl = el('div', 'dcp-worth');
@@ -308,15 +337,24 @@ export class ProfileScreen {
     const seed = buildProfileView(opts.inputs());
     this.notice = new MatchTypeNotice(seed.worth.modeId, seed.worth.matchType);
     this.worthEl.appendChild(this.notice.element);
-    shell.appendChild(this.worthEl);
+    this.overviewWrap.appendChild(this.worthEl);
 
     /* ---- the account panel (C4) — interactive, so not a model panel ---- */
     this.accountPanel = opts.account === undefined ? null : createAccountPanel(opts.account);
-    if (this.accountPanel !== null) shell.appendChild(this.accountPanel.element);
+    if (this.accountPanel !== null) this.overviewWrap.appendChild(this.accountPanel.element);
 
     /* ---- panels ---- */
     this.gridEl = el('div', 'dcp-grid');
-    shell.appendChild(this.gridEl);
+    this.overviewWrap.appendChild(this.gridEl);
+
+    shell.appendChild(this.overviewWrap);
+    shell.appendChild(this.loadoutWrap);
+
+    /* ---- the economy tabs — the server's flag probe decides existence ----
+     * Async on purpose: the overlay is complete without an answer, and a
+     * host with every flag dark (or the static build, where the probe finds
+     * no server) never shows a strip at all. */
+    if (opts.account !== undefined) void this.initEconomyTabs(opts.account);
 
     /* ---- footer ---- */
     const foot = el('div', 'dcp-foot');
@@ -339,9 +377,63 @@ export class ProfileScreen {
   /** The view last painted. The harness reads it; nothing else should. */
   get view(): ProfileView | null { return this.last; }
 
+  /** The visible tab id. The harness reads it; nothing else should. */
+  get tab(): 'overview' | 'loadout' {
+    return this.loadoutWrap.classList.contains('is-on') ? 'loadout' : 'overview';
+  }
+
+  /**
+   * Build the strip only when the server grants at least one tab. One probe
+   * per page (`probeServerFlags` caches), so reopening the overlay is free.
+   */
+  private async initEconomyTabs(account: AccountPanelOptions): Promise<void> {
+    const tabs = await economyTabs(account.serverBase, account.deviceId());
+    if (this.destroyed || !tabs.includes('loadout')) return;
+    this.loadoutTab = createLoadoutTab({
+      serverBase: account.serverBase,
+      deviceId: account.deviceId,
+      /* NOT `inputs().economyProduct`: that is `game.economyProduct`, a
+       * snapshot taken at Game construction, and on the MENU the only session
+       * is the local Worker whose flag bridge writes `economy: false` — so
+       * both the snapshot AND a live `isEnabled` answer false here forever,
+       * and the balance this tab fetches FROM the server would hide behind a
+       * gate the server cannot open. On this surface the player's EXPLICIT
+       * toggle still wins both ways; absent one, the server's own
+       * `economy_scrap` flag (the probe, ANDed inside the tab) is the whole
+       * answer. The HUD keeps its stricter snapshot on purpose — nothing may
+       * appear mid-match. */
+      product: () => (hasOverride(Feature.ECONOMY) ? isEnabled(Feature.ECONOMY) : true),
+    });
+    this.loadoutWrap.appendChild(this.loadoutTab.element);
+    const add = (id: 'overview' | 'loadout', label: string): void => {
+      const b = el('button', 'dcp-tab', label);
+      b.type = 'button';
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-selected', id === 'overview' ? 'true' : 'false');
+      b.addEventListener('click', (e) => { e.preventDefault(); this.showTab(id); });
+      this.tabButtons.set(id, b);
+      this.tabsEl.appendChild(b);
+    };
+    add('overview', 'Overview');
+    add('loadout', 'Loadout');
+    this.tabsEl.classList.add('is-shown');
+  }
+
+  showTab(id: 'overview' | 'loadout'): void {
+    if (this.destroyed) return;
+    const on = id === 'loadout' && this.loadoutTab !== null;
+    if (on) { this.overviewWrap.classList.remove('is-on'); this.loadoutWrap.classList.add('is-on'); }
+    else { this.overviewWrap.classList.add('is-on'); this.loadoutWrap.classList.remove('is-on'); }
+    for (const [tabId, b] of this.tabButtons) {
+      b.setAttribute('aria-selected', (on ? tabId === 'loadout' : tabId === 'overview') ? 'true' : 'false');
+    }
+    if (on) void this.loadoutTab?.refresh();
+  }
+
   open(): void {
     if (this.opened || this.destroyed) return;
     this.opened = true;
+    this.showTab('overview');
     this.paint(buildProfileView(this.opts.inputs()));
     void this.accountPanel?.refresh();
     this.element.classList.add('is-open');
@@ -371,6 +463,7 @@ export class ProfileScreen {
     this.element.classList.remove('is-open');
     this.notice.destroy();
     this.accountPanel?.destroy();
+    this.loadoutTab?.destroy();
     this.element.remove();
     releaseStyle();
   }

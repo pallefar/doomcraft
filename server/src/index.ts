@@ -83,7 +83,7 @@ import { ReferralService } from './referrals.js';
 import { TradeService, type TradeResult } from './trades.js';
 import { CompetitionService } from './competitions.js';
 import { renderShareCard } from './shareCard.js';
-import type { ItemDef } from '@doomcraft/shared/items';
+import { parseItemRef, type ItemDef, type ItemKind } from '@doomcraft/shared/items';
 import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
@@ -134,8 +134,8 @@ import {
 } from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
-import { JsonFileStore, MAX_SCRAP_BALANCE, createProfile, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile } from './persistence.js';
-import type { PersistenceStore, StoredProfile } from './persistence.js';
+import { JsonFileStore, MAX_SCRAP_BALANCE, applyEquip, createProfile, equipVerdict, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile } from './persistence.js';
+import type { EquipSlot, PersistenceStore, StoredProfile } from './persistence.js';
 
 /* ------------------------------------------------------------------------ *
  * Paths and configuration
@@ -2731,6 +2731,59 @@ async function handleApi(
     sendJson(res, 200, {
       version: decl?.version ?? 0,
       items: installed?.manifest.items ?? [],
+    }, cors);
+    return true;
+  }
+
+  /* --- equipping (docs/ECONOMY.md "Items") ------------------------------- *
+   * The claim half of the ownership rule: `equippedSkin`/`title` are stored
+   * claims, and every surface that WEARS an item re-derives its state through
+   * `itemStateFor` at read time. Same identity resolution and per-caller
+   * `economy_items` gate as every other economy route.                       */
+  if (path === '/api/equip' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const device = deviceFromRequest(req, body);
+    if (device === null) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(device));
+    if (!flagOn(flags.bitsFor(key), 'economy_items')) {
+      sendJson(res, 404, { error: 'items are not enabled' }, cors);
+      return true;
+    }
+    const wants = new Map<EquipSlot, string>();
+    for (const slot of ['skin', 'title'] as const) {
+      if (!(slot in body)) continue;
+      const v = body[slot];
+      if (typeof v !== 'string' || v.length > 96) {
+        sendJson(res, 400, { error: `${slot} must be an item ref, or '' to unequip` }, cors);
+        return true;
+      }
+      wants.set(slot, v);
+    }
+    if (wants.size === 0) { sendJson(res, 400, { error: 'nothing to equip' }, cors); return true; }
+    const kindOf = (ref: string): ItemKind | null => {
+      const parsed = parseItemRef(ref);
+      if (parsed === null) return null;
+      const live = liveItemDefs().get(parsed.localId);
+      if (live !== undefined) return live.kind;
+      const granting = inventory.itemsAt(parsed.version);
+      return granting?.manifest.items.find((i) => i.id === parsed.localId)?.kind ?? null;
+    };
+    /* Validate then write inside ONE update callback: the callback runs
+     * synchronously over the live object, so a concurrent settlement cannot
+     * un-own an item between the check and the claim. A refusal writes no
+     * slot at all — both claims land or neither does. */
+    let refusal: string | null = null;
+    const updated = await store.update(key, (p) => {
+      for (const [slot, ref] of wants) {
+        const v = equipVerdict(p, slot, ref, kindOf);
+        if (!v.ok) { refusal = v.error; return; }
+      }
+      applyEquip(p, wants);
+    });
+    if (refusal !== null) { sendJson(res, 400, { error: refusal }, cors); return true; }
+    sendJson(res, 200, {
+      inventory: { equippedSkin: updated.inventory.equippedSkin, title: updated.inventory.title },
     }, cors);
     return true;
   }

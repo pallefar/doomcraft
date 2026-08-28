@@ -13,7 +13,7 @@
  * this module is safe to import (as types) from browser code.
  */
 
-import { parseItemRef, type OwnedItem } from '@doomcraft/shared/items';
+import { ITEM_KIND_NAMES, ItemKind, parseItemRef, type OwnedItem } from '@doomcraft/shared/items';
 import {
   DEFAULT_PROGRESS,
   DEFAULT_SETTINGS,
@@ -640,6 +640,64 @@ export function grantDrops(
     landed.push(item);
   }
   return landed;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Equipping — the claim, not the wear
+ *
+ * `inventory.equippedSkin` and `inventory.title` are CLAIMS: the renderer (and
+ * anything else that shows an item) derives the item's state through
+ * `itemStateFor` at read time and wears nothing that is not ACTIVE. So a
+ * dormant item may stay equipped — if its pack returns, it lights back up with
+ * no write — but a claim is still validated at the door: the caller must OWN
+ * the copy, it must not be revoked, and its KIND must fit the slot, or the
+ * player equips a title as a skin and the renderer silently shows nothing
+ * forever, which reads as a lost item.
+ * ------------------------------------------------------------------------ */
+
+export type EquipSlot = 'skin' | 'title';
+
+const KIND_FOR_SLOT: Readonly<Record<EquipSlot, ItemKind>> = Object.freeze({
+  skin: ItemKind.SKIN,
+  title: ItemKind.TITLE,
+});
+
+export type EquipVerdict = { ok: true } | { ok: false; error: string };
+
+/**
+ * Validate one slot assignment against a profile WITHOUT writing anything.
+ * `kindOf` resolves an owned ref to its kind — from the live items pack or the
+ * pack version that granted it — and null means no installed pack knows the id,
+ * in which case the claim is refused rather than guessed.
+ */
+export function equipVerdict(
+  profile: StoredProfile,
+  slot: EquipSlot,
+  ref: string,
+  kindOf: (ref: string) => ItemKind | null,
+): EquipVerdict {
+  if (ref === '') return { ok: true }; // unequip is always allowed
+  if (parseItemRef(ref) === null) return { ok: false, error: 'not an item ref' };
+  if (!profile.inventory.items.some((i) => i.ref === ref)) {
+    return { ok: false, error: 'you do not own this item' };
+  }
+  if (profile.moderation.revokedItems.some((r) => r.ref === ref)) {
+    return { ok: false, error: 'this item was revoked' };
+  }
+  const kind = kindOf(ref);
+  if (kind === null) return { ok: false, error: 'no installed pack defines this item' };
+  if (kind !== KIND_FOR_SLOT[slot]) {
+    return { ok: false, error: `a ${ITEM_KIND_NAMES[kind] ?? 'item'} cannot be equipped as a ${slot}` };
+  }
+  return { ok: true };
+}
+
+/** Write the claims. Call ONLY after every slot passed `equipVerdict`. */
+export function applyEquip(profile: StoredProfile, wants: ReadonlyMap<EquipSlot, string>): void {
+  const skin = wants.get('skin');
+  if (skin !== undefined) profile.inventory.equippedSkin = skin;
+  const title = wants.get('title');
+  if (title !== undefined) profile.inventory.title = title;
 }
 
 function clampInt(v: number, lo: number, hi: number): number {

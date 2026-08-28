@@ -15,13 +15,16 @@ import {
 import {
   MAX_OWNED_ITEMS,
   PERSIST_VERSION,
+  applyEquip,
   createProfile,
+  equipVerdict,
   grantDrops,
   migrateProfile,
   serialiseProfile,
 } from './persistence.js';
+import type { EquipSlot } from './persistence.js';
 import { buildSubmission } from './reward.js';
-import { parseItemsManifest } from '@doomcraft/shared/items';
+import { ItemKind, itemStateFor, parseItemRef, parseItemsManifest } from '@doomcraft/shared/items';
 
 /** A profile exactly as a v4 host serialised one (economy present, no inventory). */
 const V4_FIXTURE = {
@@ -159,5 +162,63 @@ describe('buildSubmission and drops', () => {
     const active = buildSubmission(tally({ kills: 3, damageDealt: 300, drops: ['items@1:c1'] }));
     expect(active.xp).toBeGreaterThan(0);
     expect(active.drops).toEqual(['items@1:c1']);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Equipping — the claim is validated at the door, then merely stored
+ * ------------------------------------------------------------------------ */
+
+describe('equipVerdict / applyEquip', () => {
+  const SKIN = 'items@1:skin-rust-marine';
+  const TITLE = 'items@1:title-hangar-rat';
+  const kinds = new Map<string, ItemKind>([
+    ['skin-rust-marine', ItemKind.SKIN],
+    ['title-hangar-rat', ItemKind.TITLE],
+  ]);
+  const kindOf = (ref: string): ItemKind | null => {
+    const parsed = parseItemRef(ref);
+    return parsed === null ? null : kinds.get(parsed.localId) ?? null;
+  };
+  const owner = (): ReturnType<typeof createProfile> => {
+    const p = createProfile('device-eq');
+    grantDrops(p, [SKIN, TITLE], 'drop', 'seed', 1);
+    return p;
+  };
+
+  it('equips an owned skin and an owned title, and \'\' unequips', () => {
+    const p = owner();
+    expect(equipVerdict(p, 'skin', SKIN, kindOf)).toEqual({ ok: true });
+    expect(equipVerdict(p, 'title', TITLE, kindOf)).toEqual({ ok: true });
+    applyEquip(p, new Map<EquipSlot, string>([['skin', SKIN], ['title', TITLE]]));
+    expect(p.inventory.equippedSkin).toBe(SKIN);
+    expect(p.inventory.title).toBe(TITLE);
+    expect(equipVerdict(p, 'skin', '', kindOf)).toEqual({ ok: true });
+    applyEquip(p, new Map<EquipSlot, string>([['skin', '']]));
+    expect(p.inventory.equippedSkin).toBe('');
+    expect(p.inventory.title).toBe(TITLE); // the untouched slot stays claimed
+  });
+
+  it('refuses junk, the unowned, the revoked, the unresolvable, and a kind mismatch', () => {
+    const p = owner();
+    expect(equipVerdict(p, 'skin', 'not-a-ref', kindOf).ok).toBe(false);
+    expect(equipVerdict(p, 'skin', 'items@1:skin-never-owned', kindOf).ok).toBe(false);
+    p.moderation.revokedItems.push({ ref: SKIN, ms: 2, reason: 'test' });
+    expect(equipVerdict(p, 'skin', SKIN, kindOf).ok).toBe(false);
+    const q = owner();
+    grantDrops(q, ['items@9:skin-from-nowhere'], 'drop', 'seed', 1);
+    expect(equipVerdict(q, 'skin', 'items@9:skin-from-nowhere', kindOf).ok).toBe(false);
+    // A title claimed as a skin: the renderer would wear nothing forever.
+    expect(equipVerdict(q, 'skin', TITLE, kindOf).ok).toBe(false);
+    expect(equipVerdict(q, 'title', SKIN, kindOf).ok).toBe(false);
+  });
+
+  it('a dormant item may still be claimed — state is derived at read, not at equip', () => {
+    // kindOf resolves it (the granting pack is installed) but the LIVE pack
+    // may not define it; the claim stands and lights up if the pack returns.
+    const p = owner();
+    expect(equipVerdict(p, 'skin', SKIN, kindOf)).toEqual({ ok: true });
+    expect(itemStateFor(SKIN, new Set<string>(), new Set<string>())).toBe('dormant');
+    expect(itemStateFor(SKIN, new Set(['skin-rust-marine']), new Set<string>())).toBe('active');
   });
 });
