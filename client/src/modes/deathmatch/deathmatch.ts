@@ -411,6 +411,9 @@ export class DeathmatchMode implements ModeInstance {
   private cShield = false;
   private cDeathOpen = false;
   private cBoardOpen = false;
+  /** S12 state: are we inside the intermission the card was decided for. */
+  private cInIntermission = false;
+  private sponsorCardDispose: (() => void) | null = null;
   private cRibbon = false;
   private cRibbonSub = '';
   private lastRound = -1;
@@ -458,6 +461,7 @@ export class DeathmatchMode implements ModeInstance {
 
     this.board = new Scoreboard({ root: this.hudRoot });
     ctx.scope.add(() => { this.board.destroy(); });
+    ctx.scope.add(() => { this.dropSponsorCard(); });
 
     this.hookKillEvents();
     this.applyFeedOffset();
@@ -529,6 +533,24 @@ export class DeathmatchMode implements ModeInstance {
       else this.showRibbon(true);      // refresh the body count while it is up
     }
 
+    // S12: the sponsor card exists exactly while the round is over — never on
+    // a Tab-hold mid-round, which is live play and carries no sponsor surface
+    // (docs/SPONSORS.md §4.3). One decision per intermission; the disposer
+    // flushes the meter and empties the mount when the next round starts.
+    const inIntermission = this.view.phase === ModePhase.INTERMISSION;
+    if (inIntermission !== this.cInIntermission) {
+      this.cInIntermission = inIntermission;
+      if (inIntermission) {
+        this.sponsorCardDispose = this.host.sponsorCard?.(this.board.sponsorMount, {
+          mode: ModeId.DEATHMATCH,
+          interactive: false,  // the board lives in #hud, pointer-events: none
+          active: () => this.view.phase === ModePhase.INTERMISSION && this.board.isOpen,
+        }) ?? null;
+      } else {
+        this.dropSponsorCard();
+      }
+    }
+
     // Tab holds the board; an intermission shows it without being asked, which
     // is the moment a player most wants to see where they finished.
     const wantBoard = (game.playing && game.input.isDown(InputAction.Scoreboard))
@@ -547,6 +569,11 @@ export class DeathmatchMode implements ModeInstance {
     this.telemetry.deaths = net.local.deaths;
     this.telemetry.confirmations = this.feed.confirmations;
     void dt;
+  }
+
+  private dropSponsorCard(): void {
+    try { this.sponsorCardDispose?.(); } catch { /* a card must never break the round loop */ }
+    this.sponsorCardDispose = null;
   }
 
   onResize(): void {

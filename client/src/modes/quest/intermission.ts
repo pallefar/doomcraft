@@ -77,6 +77,8 @@ const CSS = `
 .dcqi-btn.go:hover{background:#b02510}
 .dcqi-hint{margin-top:12px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;
   color:#736c66}
+.dcqi-sponsor{margin-top:22px}
+.dcqi-sponsor:empty{margin:0}
 `;
 
 function ensureStyle(): void {
@@ -121,6 +123,12 @@ export interface QuestIntermissionOptions {
   onAdvance(): void;
   onRestart(): void;
   onQuit(): void;
+  /**
+   * S12 (docs/SPONSORS.md §1b): the shell's sponsor-card hook, handed a mount
+   * this panel owns. The returned disposer runs in `destroy()`. Absent (an
+   * offline run, a test) the panel is exactly what it was before S12 existed.
+   */
+  sponsorCard?(mount: HTMLElement): () => void;
 }
 
 /** Percentage points per second while a percentage row counts. */
@@ -216,6 +224,7 @@ export class QuestIntermission {
   private pause = 0.45;
   private readonly shown: number[] = [];
   private disposed = false;
+  private disposeSponsor: (() => void) | null = null;
 
   private readonly onKey: (e: KeyboardEvent) => void;
 
@@ -269,6 +278,13 @@ export class QuestIntermission {
     const hint = div('dcqi-hint');
     hint.textContent = 'Enter or Space to continue';
     panel.appendChild(hint);
+
+    // S12: the results card, below the actions where it can never sit between
+    // the player and the Next button. The mount is built either way; empty it
+    // costs zero pixels, and the shell decides whether anything fills it.
+    const sponsorMount = div('dcqi-sponsor');
+    panel.appendChild(sponsorMount);
+    this.disposeSponsor = opts.sponsorCard?.(sponsorMount) ?? null;
 
     wrap.appendChild(panel);
     this.element = wrap;
@@ -422,6 +438,8 @@ export class QuestIntermission {
   destroy(): void {
     if (this.disposed) return;
     this.disposed = true;
+    try { this.disposeSponsor?.(); } catch { /* a card must never break teardown */ }
+    this.disposeSponsor = null;
     window.removeEventListener('keydown', this.onKey);
     this.element.remove();
     releaseStyle();

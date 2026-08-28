@@ -307,6 +307,16 @@ export interface ModeHost {
    * the game on top of the panel the mode just opened.
    */
   suppressAutoPause?(on: boolean): void;
+  /**
+   * S12 (docs/SPONSORS.md §1b): ask the shell for a sponsor results card in an
+   * intermission panel. The shell owns decide/measure/report; the mode only
+   * offers a mount and MUST run the returned disposer when the intermission
+   * closes. With ads off/removed the disposer is a working no-op and nothing
+   * renders. `interactive` is false for a mount inside `#hud`.
+   */
+  sponsorCard?(mount: HTMLElement, options: {
+    mode: ModeId; interactive: boolean; active: () => boolean;
+  }): () => void;
 }
 
 /**

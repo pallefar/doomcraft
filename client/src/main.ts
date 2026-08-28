@@ -260,6 +260,18 @@ const SHELL_CSS = `
 .dc-ad-house u{display:inline-block;margin-top:5px;color:#e8e6e3;text-decoration:none;
   border:1px solid rgba(255,255,255,.28);padding:3px 9px;border-radius:2px;cursor:pointer}
 
+/* S12 — the intermission results card (docs/SPONSORS.md §1b). One strip at
+ * 728×90 proportions, rendered into a mount the intermission panel owns; the
+ * mount reflows once on open, off-frame, and :empty costs zero pixels. */
+.dc-inter-card{display:flex;align-items:center;justify-content:center;gap:10px;
+  width:100%;max-width:728px;min-height:52px;margin:0 auto;padding:10px 16px;
+  background:linear-gradient(135deg,#141018,#1d1116);border:1px solid rgba(255,255,255,.14);
+  border-radius:3px;color:#cfc9c3;font:12.5px/1.4 system-ui,sans-serif;letter-spacing:.03em;
+  text-decoration:none;text-align:center}
+.dc-inter-card b{color:#f0a020;font-size:10px;font-weight:800;letter-spacing:.16em;
+  text-transform:uppercase;white-space:nowrap}
+a.dc-inter-card:hover{border-color:rgba(255,255,255,.3);color:#e8e6e3}
+
 /* --- the mode layer ------------------------------------------------------ *
  * The ad slots are LAYOUT, not overlay (ref/BAR.md: "the ads are part of the
  * layout... the page does not reflow when they fill" — that is the bar's one
@@ -1332,6 +1344,9 @@ const host: ModeHost = {
     void backToMenu();
   },
   suppressAutoPause(on: boolean): void { autoPauseSuppressed = on; },
+  sponsorCard(mount, options): () => void {
+    return adPipeline.intermissionCard(mount, options);
+  },
 };
 
 /** See `ModeHost.suppressAutoPause`. Cleared on every mode exit. */
@@ -2025,6 +2040,9 @@ window.addEventListener('pagehide', () => {
    * zero — that is the leak assertion the mode-switch loop makes.
    */
   modeScope(): ModeScopeStats { return registry.scopeStats(); },
+  /** The live mode instance, for a harness that must drive mode internals
+   *  (e.g. forcing the quest exit to verify the intermission). */
+  modeInstance(): unknown { return registry.active; },
   modeStats(): Record<string, unknown> {
     const r = registry.stats();
     const scope = registry.scopeStats();

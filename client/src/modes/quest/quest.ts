@@ -1028,6 +1028,16 @@ class QuestMode implements ModeInstance {
       onAdvance: () => { this.advance(next, endsEpisode); },
       onRestart: () => { this.restart(); },
       onQuit: () => { this.ctx.host.requestExit('quest-quit'); },
+      // S12: the shell decides whether a card fills the panel's mount. The
+      // quest intermission is in #ui and player-dismissed, so it may take a
+      // click; the active gate is "this intermission is still the screen".
+      // The disposer disconnects the meter at destroy, so "this intermission"
+      // and "the intermission phase" are the same gate.
+      sponsorCard: (mount): (() => void) => this.ctx.host.sponsorCard?.(mount, {
+        mode: ModeId.QUEST,
+        interactive: true,
+        active: (): boolean => this.phase === PHASE_INTERMISSION,
+      }) ?? ((): void => { /* no shell hook — nothing to dispose */ }),
     });
     this.intermission = inter;
     this.ctx.scope.add(() => { inter.destroy(); });

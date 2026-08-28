@@ -64,6 +64,48 @@ export interface AdPipelineOptions {
   bootTip?: () => HTMLElement | null;
 }
 
+/**
+ * What an INTERMISSION_CARD fill renders (S12), decided as pure data so a
+ * DOM-less runner can prove the refusals. `href` is non-empty only for an
+ * interactive mount — the deathmatch card lives in `#hud`, which is
+ * `pointer-events:none` by contract, and an anchor nobody can click would
+ * still read as one.
+ */
+export interface InterCardModel {
+  kind: 'house' | 'text';
+  label: string;
+  text: string;
+  href: string;
+}
+
+export function interCardModel(fill: AdFill | null | undefined, interactive: boolean): InterCardModel | null {
+  if (fill === null || fill === undefined) return null;
+  if (fill.surface !== SurfaceId.INTERMISSION_CARD) return null;
+  if (fill.source === 'house') {
+    return { kind: 'house', label: 'DOOMCRAFT', text: 'Sponsor-free results for ad-free players.', href: '' };
+  }
+  const line = textFillOrNull(fill);
+  if (line === null) return null;
+  return {
+    kind: 'text',
+    label: line.label || 'Sponsored',
+    text: line.text,
+    href: interactive && line.clickUrl.length > 0 ? line.clickUrl : '',
+  };
+}
+
+export interface IntermissionCardOptions {
+  /** The mode whose intermission this is — campaign mode-targeting applies. */
+  mode: number;
+  /**
+   * Whether the mount can take a click. Quest's intermission is in `#ui`
+   * (yes); the deathmatch scoreboard is in `#hud`, never interactive (no).
+   */
+  interactive: boolean;
+  /** The §3.2 screen gate: is the intermission actually open right now. */
+  active: () => boolean;
+}
+
 export interface AdPipeline {
   onMenuEnter(): void;
   onMenuExit(): void;
@@ -74,6 +116,12 @@ export interface AdPipeline {
    * nothing is shown (§4.3: a sponsor line must never wait for the game).
    */
   onBootReady(): void;
+  /**
+   * S12 — one decision per intermission, rendered into `mount`, measured
+   * until the returned disposer runs (which also flushes exposure and empties
+   * the mount). Ads-off / removed / flag-off return a working no-op disposer.
+   */
+  intermissionCard(mount: HTMLElement, options: IntermissionCardOptions): () => void;
 }
 
 interface WatchedFill {
@@ -128,7 +176,7 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
     }).catch(() => { /* a lost event is a lost event; it can only under-count */ });
   }
 
-  function decide(surfaces: readonly SurfaceId[]): Promise<AdFill[]> {
+  function decide(surfaces: readonly SurfaceId[], mode = 0): Promise<AdFill[]> {
     return fetch(api('/api/ads/decide'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -136,7 +184,7 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
         deviceId: opts.deviceId(),
         sessionId,
         surfaces,
-        mode: 0,
+        mode,
         platform: opts.platform,
       }),
     }).then(async (res) => {
@@ -270,6 +318,40 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
         // boot is ~366 ms — the line is presence, not a navigation target.
         bootWatched = watch(tip, fill, () => (opts.bootTip?.() ?? null) !== null);
       }).catch(() => { /* no line is the correct fallback */ });
+    },
+
+    intermissionCard(mount: HTMLElement, options: IntermissionCardOptions): () => void {
+      let disposed = false;
+      let entry: WatchedFill | null = null;
+      if (!offline() && !opts.adsRemoved()) {
+        void enabledNow().then(async (on) => {
+          if (!on || disposed) return;
+          const fills = await decide([SurfaceId.INTERMISSION_CARD], options.mode);
+          if (disposed) return;
+          const model = interCardModel(fills[0], options.interactive);
+          if (model === null) return;
+          const card = document.createElement(model.href.length > 0 ? 'a' : 'div');
+          card.className = 'dc-inter-card';
+          if (card instanceof HTMLAnchorElement) {
+            card.href = api(model.href);
+            card.target = '_blank';
+            card.rel = 'noopener';
+          }
+          const label = document.createElement('b');
+          label.textContent = model.label;
+          card.appendChild(label);
+          card.appendChild(document.createTextNode(model.text));
+          mount.appendChild(card);
+          entry = watch(mount, fills[0], options.active);
+        }).catch(() => { /* no card is the correct fallback */ });
+      }
+      return () => {
+        if (disposed) return;
+        disposed = true;
+        if (entry !== null) flush(entry);
+        entry = null;
+        while (mount.firstChild) mount.removeChild(mount.firstChild);
+      };
     },
   };
 }

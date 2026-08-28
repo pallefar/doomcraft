@@ -204,6 +204,8 @@ const CSS = `
 #hud .dm-sb td.ping[data-b="1"] .bars i:nth-child(1){background:#e03c1c}
 #hud .dm-sb td.ping .ms{font-size:11px;color:#8a8078}
 
+#hud .dm-sb .sponsor{padding:8px 16px 2px}
+#hud .dm-sb .sponsor:empty{display:none;padding:0}
 #hud .dm-sb .ft{display:flex;align-items:center;justify-content:space-between;gap:10px;
   padding:8px 16px 10px;border-top:1px solid rgba(255,255,255,.09);
   font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#6f6a66}
@@ -291,6 +293,13 @@ export const DEFAULT_MAX_ROWS = 14;
 
 export class Scoreboard {
   readonly element: HTMLElement;
+  /**
+   * S12 (docs/SPONSORS.md §1b): where the deathmatch intermission's sponsor
+   * card mounts. Empty it costs zero pixels; the MODE decides when to fill it
+   * (intermission only — a Tab-hold mid-round is live play, and live play
+   * carries no sponsor surface). Inside `#hud`, so never interactive.
+   */
+  readonly sponsorMount: HTMLElement;
 
   private readonly body: HTMLTableSectionElement;
   private readonly rows: RowNodes[] = [];
@@ -383,7 +392,10 @@ export class Scoreboard {
     this.footRight = document.createElement('span');
     ft.append(this.footLeft, this.footRight);
 
-    el.append(hd, wrap, this.moreEl, ft);
+    this.sponsorMount = document.createElement('div');
+    this.sponsorMount.className = 'sponsor';
+
+    el.append(hd, wrap, this.moreEl, this.sponsorMount, ft);
     options.root.appendChild(el);
     this.element = el;
 

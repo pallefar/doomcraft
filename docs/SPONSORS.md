@@ -1321,6 +1321,18 @@ Each phase is independently shippable and each ends in a state that is honest to
 9. Surfaces **S1**, **S3** (badge), **S4** (text), **S12**. Actions **A2**, **A7**, **A10**, **A11**.
 10. A minimal internal dashboard rendering the full metric set from §3.5 including the caveat block.
 
+> **STATUS 2026-08-28.** Items 6–8 shipped as `09a0257` (phase 1a). Item 9 shipped as phase 1b:
+> S3 renders as the gold `.dcm-ribbon-sponsor` variant on the tile named by `AdFill.modeId`
+> (refused when the tile carries the editorial ribbon — paid never displaces editorial), S4 as a
+> labelled text swap of `.boot-tip` deciding at shell start, S12 as `.dc-inter-card` in
+> `QuestIntermission` (interactive) and the deathmatch `Scoreboard` (display-only, intermission
+> phase only per §4.3 — a Tab-hold mid-round shows no card, verified). All three metered by the
+> §3.2 machine under their own screen gates. Booting the thing surfaced two 1a defects, both
+> fixed: the menu decide raced SESSION_CONFIG and never retried, and — worse — the menu session
+> is the LOCAL worker whose flag bits can never carry `sponsor_slots`, so the client now answers
+> the kill switch with one GET of `/api/flags` per page (a killed flag is false in both sources).
+> Item 10 (the dashboard) is NOT built yet; `ads.jsonl` is the truth it will render.
+
 **Why this is the right first slice:** combined in-game frame cost **0.000 ms**, zero third-party bytes,
 zero legal exposure beyond disclosure labels, and it proves the entire pipeline — decide → fill →
 measure → validate → settle → report — on surfaces where a mistake costs nothing. It also directly
