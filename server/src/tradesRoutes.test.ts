@@ -48,7 +48,10 @@ function seedTrader(dataRoot: string, device: string, refs: string[]): void {
   writeFileSync(join(shard, `${device}.json`), JSON.stringify({
     version: 5, deviceId: device,
     createdMs: Date.now() - TRADE_MIN_ACCOUNT_AGE_MS - 3_600_000,
-    stats: { matches: TRADE_MIN_MATCHES },
+    stats: {
+      matches: TRADE_MIN_MATCHES,
+      last: { ms: Date.now(), kills: 18, deaths: 4, won: true, seconds: 372, bestStreak: 7, xp: 320, scrap: 41 },
+    },
     inventory: { items: refs.map((ref) => ({ ref, ms: old, source: 'drop', sourceId: 'seed' })), equippedSkin: '', title: '' },
   }), 'utf8');
 }
@@ -95,7 +98,7 @@ beforeAll(async () => {
   [on, off] = await Promise.all([
     boot(
       {
-        DOOMCRAFT_FLAGS: '{"rules":{"economy_trading":{"force":true},"economy_competitions":{"force":true}}}',
+        DOOMCRAFT_FLAGS: '{"rules":{"economy_trading":{"force":true},"economy_competitions":{"force":true},"share_cards":{"force":true}}}',
         DOOMCRAFT_ADMIN_TOKEN: ADMIN_TOKEN,
       },
       (dataRoot) => {
@@ -183,6 +186,25 @@ describe('competitions over the wire', () => {
     expect(standings.status).toBe(200);
 
     const hidden = await call(off.origin, `/api/competitions?device=${ALFA}`);
+    expect(hidden.status).toBe(404);
+  });
+});
+
+describe('the share card over the wire', () => {
+  it('answers a real PNG of the seeded last round; the flagless host hides it', async () => {
+    const res = await fetch(`${on.origin}/api/share/card?device=${ALFA}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('image/png');
+    const bytes = Buffer.from(await res.arrayBuffer());
+    expect(bytes.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    expect(bytes.readUInt32BE(16)).toBe(1200);
+    expect(bytes.readUInt32BE(20)).toBe(630);
+
+    // No last round (fresh key on the SAME host) = an honest 404, not a blank card.
+    const blank = await call(on.origin, `/api/share/card?device=${'ab'.repeat(12)}`);
+    expect(blank.status).toBe(404);
+
+    const hidden = await fetch(`${off.origin}/api/share/card?device=${ALFA}`);
     expect(hidden.status).toBe(404);
   });
 });

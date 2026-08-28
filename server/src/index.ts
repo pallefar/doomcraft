@@ -82,6 +82,7 @@ import { mergeDeviceIntoAccount, planMerge } from './merge.js';
 import { ReferralService } from './referrals.js';
 import { TradeService, type TradeResult } from './trades.js';
 import { CompetitionService } from './competitions.js';
+import { renderShareCard } from './shareCard.js';
 import type { ItemDef } from '@doomcraft/shared/items';
 import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
@@ -580,6 +581,9 @@ const trades = new TradeService(dataRoot);
  * same onProfilePersisted seam as referrals and is gated on NOTHING —
  * turning the tab off mid-season must never lose a season. */
 const competitions = new CompetitionService(dataRoot);
+
+/** Where a share card points its reader. Overridable per deployment. */
+const SHARE_HOST = process.env.DOOMCRAFT_SHARE_HOST ?? 'doomcraft.vercel.app';
 
 /** The graph's name for a passphrase account. One player, one id. The
  * account store already namespaces its ids (`house:<hex>`), so the graph
@@ -1857,6 +1861,49 @@ async function handleApi(
     );
     if (!result.ok) { sendJson(res, result.status, { error: result.error }, cors); return true; }
     sendJson(res, 200, { eventId: result.eventId, plan: result.plan }, cors);
+    return true;
+  }
+
+  /* --- the share card (docs/ECONOMY.md "Share cards"; SPONSORS.md S36) --- *
+   * A 1200×630 PNG of the caller's LAST paying round, rendered server-side
+   * so it cannot be faked, carrying their referral code — the shareable
+   * artefact the referral loop was missing. S36: nothing third-party above
+   * the bottom strip; until sponsors phase 2 binds a real lockup the strip
+   * carries the house wordmark only, for everyone.                          */
+  if (path === '/api/share/card' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const raw = cookieValue(req.headers.cookie, DEVICE_COOKIE) ?? url.searchParams.get('device') ?? '';
+    if (!isValidDeviceId(raw)) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(raw));
+    if (!flagOn(flags.bitsFor(key), 'share_cards')) {
+      sendJson(res, 404, { error: 'share cards are not enabled' }, cors);
+      return true;
+    }
+    const profile = await store.load(key);
+    const last = profile?.stats.last ?? null;
+    if (profile === null || last === null) {
+      sendJson(res, 404, { error: 'play a match first — the card renders your last round' }, cors);
+      return true;
+    }
+    const code = await referrals.codeFor(key, clientAddress(req));
+    const mm = Math.floor(last.seconds / 60);
+    const ss = String(Math.floor(last.seconds % 60)).padStart(2, '0');
+    const png = renderShareCard({
+      name: profile.progress.name || 'Marine',
+      modeName: '',
+      headline: `${last.kills} KILLS ${last.won ? '· VICTORY' : `· ${last.deaths} DEATHS`}`,
+      subline: `+${last.xp} XP · +${last.scrap} SCRAP · ${mm}:${ss} PLAYED`,
+      refCode: code,
+      host: SHARE_HOST,
+      lockupText: '',
+    });
+    const headers: Record<string, string> = {
+      'content-type': 'image/png',
+      'content-length': String(png.length),
+      'cache-control': 'private, no-store',
+    };
+    if (cors !== null) headers['access-control-allow-origin'] = cors;
+    res.writeHead(200, headers);
+    res.end(req.method === 'HEAD' ? undefined : png);
     return true;
   }
 

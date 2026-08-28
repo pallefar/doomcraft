@@ -69,6 +69,23 @@ export interface StoredEntitlements {
   purchasedMs: number;
 }
 
+/**
+ * The one match most recently paid out — what a share card renders
+ * (docs/ECONOMY.md "Share cards"). `xp`/`scrap` are the amounts that
+ * actually LANDED after the caps and the ladder, because the card is a
+ * public artefact and must not promise more than the ledger recorded.
+ */
+export interface LastMatch {
+  ms: number;
+  kills: number;
+  deaths: number;
+  won: boolean;
+  seconds: number;
+  bestStreak: number;
+  xp: number;
+  scrap: number;
+}
+
 export interface StoredStats {
   matches: number;
   wins: number;
@@ -83,6 +100,8 @@ export interface StoredStats {
   favouriteWeapon: number;
   weaponKills: number[];
   lastSeenMs: number;
+  /** Null until the first paying round. */
+  last: LastMatch | null;
 }
 
 /**
@@ -306,6 +325,7 @@ export function defaultStats(): StoredStats {
     favouriteWeapon: WeaponId.PISTOL,
     weaponKills: new Array<number>(WEAPON_COUNT).fill(0),
     lastSeenMs: 0,
+    last: null,
   };
 }
 
@@ -492,6 +512,7 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
       favouriteWeapon: clampInt(num(stats.favouriteWeapon, 0), 0, WEAPON_COUNT - 1),
       weaponKills: intArray(stats.weaponKills, new Array<number>(WEAPON_COUNT).fill(0), 0, 1e9, WEAPON_COUNT),
       lastSeenMs: num(stats.lastSeenMs, 0),
+      last: lastMatchOf(stats.last),
     },
     /* Read from `eco`, NOT from `base`. The migration step above is a no-op
      * without these six lines: it writes `raw.economy` and this literal is the
@@ -578,6 +599,21 @@ function sanitiseModeration(mod: AnyRecord): StoredModeration {
 
 function ageBandOf(v: unknown): AgeBand {
   return v === 'u13' || v === '13-17' || v === '18plus' ? v : 'unknown';
+}
+
+function lastMatchOf(v: unknown): LastMatch | null {
+  const e = asRecord(v);
+  if (typeof e.ms !== 'number' || !Number.isFinite(e.ms) || e.ms <= 0) return null;
+  return {
+    ms: num(e.ms, 0),
+    kills: Math.max(0, num(e.kills, 0)),
+    deaths: Math.max(0, num(e.deaths, 0)),
+    won: e.won === true,
+    seconds: Math.max(0, num(e.seconds, 0)),
+    bestStreak: Math.max(0, num(e.bestStreak, 0)),
+    xp: Math.max(0, num(e.xp, 0)),
+    scrap: Math.max(0, num(e.scrap, 0)),
+  };
 }
 
 /**
@@ -904,6 +940,13 @@ export function applyMatchResult(profile: StoredProfile, r: MatchResult, nowMs =
     s.favouriteWeapon = best;
   }
   s.lastSeenMs = nowMs;
+  // The share card's whole data source: what THIS round was, with the
+  // amounts that actually landed — never the amounts the room asked for.
+  s.last = {
+    ms: nowMs, kills: r.kills, deaths: r.deaths, won: r.won,
+    seconds: r.seconds, bestStreak: r.bestStreak,
+    xp: grantedXp, scrap: grantedScrap,
+  };
   profile.updatedMs = nowMs;
   return { profile, xp: grantedXp, scrap: grantedScrap };
 }
