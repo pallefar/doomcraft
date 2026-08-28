@@ -646,6 +646,111 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
           <div class="card-body tscroll" id="audit-body"></div>
         </div>
       </section>
+
+      <section id="tab-guides">
+        <div class="page-title">Guides</div>
+        <div class="note">
+          How to create and run the game's content from this console: levels, item packs, flags,
+          competitions, creatives, referrals, merges. Each guide is the AS-BUILT flow — where a doc
+          disagrees with a route, the route wins — and each states its dangerous step out loud.
+        </div>
+
+        <div class="card">
+          <div class="card-head">0 &middot; before any mutation</div>
+          <div class="card-body">
+            <ol>
+              <li>Sign in with the operator bearer token, or with an owner account — the FIRST signup on a fresh host claims the owner seat.</li>
+              <li>Every mutating call carries an <code>actor</code> (2+ characters &mdash; a label, not authentication) and a <code>reason</code> (10+ characters). The console prompts for both.</li>
+              <li>Everything writes an audit row, refusals included. Two operators editing at once find each other in the Actions tab, not by surprise.</li>
+            </ol>
+            <div class="warn">This console runs on the game origin. The static site ships its own bundled copy of the content &mdash; a change here reaches it only through a client redeploy, and in-browser single-player rooms never talk to this host at all.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">1 &middot; publish a level</div>
+          <div class="card-body">
+            <ol>
+              <li>Studio tab &rarr; level lab. Paste or author the level JSON.</li>
+              <li>Validate first &mdash; a dry run through the real solver. An exit the flood-fill cannot reach, or a skipped solve, is a refusal, not a warning.</li>
+              <li>Save. The save mints the NEXT levels pack version containing the whole level set, installed on the volume.</li>
+              <li>Review tab: draft &rarr; run the gate &rarr; approve (a written note is required) &rarr; stage at 0% or 100% &rarr; promote. Every step is a compare-and-swap; on a 409, re-read the release screen and start from what it says. One pending release at a time.</li>
+            </ol>
+            <div class="warn">A saved pack is INSTALLED, never live. Even after promote, only NEW rooms pick it up &mdash; running rooms pin their content at creation. A 409 on save usually means the packs volume is missing or unwritable; check the boot line and the version probe before retrying.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">2 &middot; ship an items pack</div>
+          <div class="card-body">
+            <ol>
+              <li>Studio tab &rarr; items editor: skins, emblems, trails, titles, trophies. Titles and trophies can never be tradable &mdash; the parser refuses the manifest rather than correcting it.</li>
+              <li>Save &rarr; the next items pack version; then the same Review pipeline: gate, approve, stage, promote.</li>
+              <li>On the Review screen, read the gate report's <code>items.dormanted</code> line BEFORE promoting.</li>
+            </ol>
+            <div class="warn bad">The destructive direction is FORWARD: removing an item id silently dormants every owned copy at the next read. The save response and the gate report both warn, but <code>items.dormanted</code> is ok:true and can never block the release &mdash; reading it is on you.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">3 &middot; roll out a flag</div>
+          <div class="card-body">
+            <ol>
+              <li>Flags tab. The document has one revision; every write is a merge with compare-and-swap on it.</li>
+              <li>Plan first &mdash; the console shows the exact resulting document, the diff and the warnings before anything fires. Planning writes nothing.</li>
+              <li>Roll out on the ladder &mdash; 0 / 100 / 500 / 2500 / 10000 basis points. Off-ladder values are refused server-side unless the request says <code>allowCustomRollout</code> and the reason says why.</li>
+            </ol>
+            <div class="warn">The confirm delay applies only to writes that EXPAND reach; reductions and freeze fire immediately &mdash; the kill switch is never slow. Flag freeze does NOT pull back a flag already at 10000 bp; release freeze DOES beat a staged release. Two different rules &mdash; never assume one from the other.</div>
+            <div class="warn bad">Flag writes live in ONE process and revert on restart. The durable document is the DOOMCRAFT_FLAGS environment variable, which full-replaces at boot &mdash; make the env match what you flipped, or the next deploy silently undoes it.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">4 &middot; run a competition (no tab &mdash; use curl)</div>
+          <div class="card-body">
+            <ol>
+              <li>Create with the two-phase confirm: the first POST answers 428 with a confirm token and the earliest usable moment; repost with the token after the delay. Too early is 425; tokens live five minutes.</li>
+              <li>Limits: 10 minutes to 30 days, at most 100 paid ranks, at most 4 winner item refs. Tournaments may set a minimum level; seasons enrol everyone who plays.</li>
+            </ol>
+            <pre>curl -X POST "$ORIGIN/api/admin/competitions/create" -H "authorization: Bearer $DOOMCRAFT_ADMIN_TOKEN" -H "content-type: application/json" -d '{ "name": "...", "endMs": 0, "scrapByRank": [500,250,100], "actor": "you", "reason": "..." }'</pre>
+            <div class="warn bad">Creation IS the paying decision. The finaliser pays the prize table automatically at the end time, idempotently, forever &mdash; there is no edit route, and cancelling pays NOBODY. Write the prize table as if the money already left.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">5 &middot; upload and bind a creative (no tab &mdash; use curl)</div>
+          <div class="card-body">
+            <ol>
+              <li>POST the file to <code>/api/admin/creatives</code> as base64; note the returned sha256. Magic-byte MIME checks, static images only, exact IAB sizes, hard byte caps.</li>
+              <li>Bind that sha256 in <code>sponsors.json</code> under the data root with status approved.</li>
+              <li>Restart the process &mdash; the sponsors file is read once at construction; there is no reload route.</li>
+            </ol>
+            <div class="warn">An uploaded-but-unbound creative is silently skipped with only a log line. If the slot serves house ads after your upload, the binding or the restart is what is missing.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">6 &middot; approve a referral</div>
+          <div class="card-body">
+            <ol>
+              <li>Referrals tab: the queue shows WHY each conversion parked (same-network claim, daily cap).</li>
+              <li>Approve with the confirm walk. </li>
+            </ol>
+            <div class="warn bad">Approval pays BOTH sides through the journal, idempotently, forever. There is no unpay.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">7 &middot; undo a merge</div>
+          <div class="card-body">
+            <ol>
+              <li>Players tab &rarr; merges table: every device merge with its event id.</li>
+              <li>Undo with the confirm walk. The absorbed profile is restored from its archive; the Scrap moves back as a journal pair.</li>
+            </ol>
+            <div class="warn">The response's <code>shortfall</code> is Scrap the absorbing account already spent and cannot return &mdash; the restored player is still made whole from the house side. Archives are kept 90 days, not forever.</div>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 </div>
@@ -683,7 +788,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   var MIN_REASON = ${MIN_REASON_CHARS};
   var MIN_ACTOR = ${MIN_ACTOR_CHARS};
   var TOKEN_KEY = 'dc.admin.token';
-  var TABS = ['fleet', 'packs', 'review', 'rhistory', 'studio', 'flags', 'refusals', 'player', 'referrals', 'metrics', 'audit'];
+  var TABS = ['fleet', 'packs', 'review', 'rhistory', 'studio', 'flags', 'refusals', 'player', 'referrals', 'metrics', 'audit', 'guides'];
 
   /* ---- tiny DOM helpers. Everything below builds nodes; nothing sets
      innerHTML from data, so no value on this page needs escaping. ---- */
@@ -1733,6 +1838,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     else if (name === 'refusals') loadRefusals();
     else if (name === 'referrals') loadReferrals();
     else if (name === 'audit') loadAudit();
+    else if (name === 'guides') { /* static prose — nothing to fetch */ }
     else loadFleet();
     if (name === 'player') loadMerges();
   }
@@ -1759,6 +1865,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     { label: 'Releases', tabs: ['packs', 'review', 'rhistory', 'studio', 'flags'] },
     { label: 'Audit', tabs: ['refusals', 'audit'] },
     { label: 'Analytics', tabs: ['metrics'] },
+    { label: 'Help', tabs: ['guides'] },
   ];
   var TAB_META = {
     fleet: { title: 'Fleet', d: 'M4 4h16v7H4zM4 13h16v7H4zM7 7.5h.01M7 16.5h.01' },
@@ -1772,6 +1879,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     referrals: { title: 'Referrals', d: 'M9 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM3 16c.4-2.6 2.6-4 6-4M17 10a3 3 0 1 0 0-6M15 21l3-3-3-3M21 18h-6' },
     audit: { title: 'Actions', d: 'M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5' },
     metrics: { title: 'Metrics', d: 'M4 20h16M7 16v-5M12 16V6M17 16v-8' },
+    guides: { title: 'Guides', d: 'M12 6c-1.8-1.3-4.2-2-8-2v14c3.8 0 6.2.7 8 2 1.8-1.3 4.2-2 8-2V4c-3.8 0-6.2.7-8 2zM12 6v14' },
   };
 
   var nav = el('tabs');
