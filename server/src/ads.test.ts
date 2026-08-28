@@ -126,6 +126,49 @@ describe('the cascade', () => {
     expect(ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP)?.source).toBe('house');
   });
 
+  it('MODE_TILE: targeting.modes NAMES the tile — the fill carries it and the mode filter is skipped', () => {
+    const clock = { now: T0 };
+    const booking = textCampaign();
+    booking.campaigns[0].placements = [{
+      surface: SurfaceId.MODE_TILE, creativeIds: ['crv_text1'], weight: 50, floorMicrosCpm: 0,
+    }];
+    booking.campaigns[0].targeting.modes = [2]; // HORDE — while the decide comes from the menu with mode 0
+    const { ads } = service(booking, clock);
+    const fill = ads.decide({ ...REQ, surfaces: [SurfaceId.MODE_TILE] }, CTX)[0];
+    expect(fill?.source).toBe('direct');
+    expect(fill?.modeId).toBe(2);
+    // Every other surface still reports no tile.
+    const top = ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP);
+    expect(top?.modeId).toBe(-1);
+  });
+
+  it('MODE_TILE: a badge with no tile named is refused, with the reason in the log — and never falls to house', () => {
+    const clock = { now: T0 };
+    const booking = textCampaign();
+    booking.campaigns[0].placements = [{
+      surface: SurfaceId.MODE_TILE, creativeIds: ['crv_text1'], weight: 50, floorMicrosCpm: 0,
+    }];
+    booking.campaigns[0].targeting.modes = [];
+    const { ads, root } = service(booking, clock);
+    expect(ads.decide({ ...REQ, surfaces: [SurfaceId.MODE_TILE] }, CTX)).toEqual([]);
+    const log = readFileSync(join(root, 'ads.jsonl'), 'utf8');
+    expect(log).toContain('must name its tile');
+  });
+
+  it('BOOT_LINE: a booked text campaign serves it; an empty book leaves it EMPTY, never house', () => {
+    const clock = { now: T0 };
+    const booking = textCampaign();
+    booking.campaigns[0].placements = [{
+      surface: SurfaceId.BOOT_LINE, creativeIds: ['crv_text1'], weight: 50, floorMicrosCpm: 0,
+    }];
+    const booked = service(booking, clock);
+    const fill = booked.ads.decide({ ...REQ, surfaces: [SurfaceId.BOOT_LINE] }, CTX)[0];
+    expect(fill?.source).toBe('direct');
+    expect(fill?.label).toBe('Ad');
+    const empty = service(null, clock);
+    expect(empty.ads.decide({ ...REQ, surfaces: [SurfaceId.BOOT_LINE] }, CTX)).toEqual([]);
+  });
+
   it('a broken booking file serves house and does not throw', () => {
     const clock = { now: T0 };
     const root = tempDir();

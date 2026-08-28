@@ -324,6 +324,10 @@ export interface AdFill {
   creativeId: string; sha256: string; assetUrl: string; clickUrl: string;
   altText: string;
   label: string;              // "Ad" | "Sponsored" | "Paid partnership" — driven by Campaign.disclosure
+  modeId: number;             // MODE_TILE only: the tile the badge sits on, from targeting.modes[0]
+                              // (for that surface the list NAMES the tile — the decide comes from the
+                              // menu, so filtering on "the mode being played" would be meaningless).
+                              // -1 everywhere else.
   nonce: string; expiresMs: number;   // single-use, server-issued
 }
 ```

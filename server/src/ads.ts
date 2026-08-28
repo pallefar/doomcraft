@@ -167,7 +167,12 @@ export class AdService {
       if (c.status !== 'live' || now < c.startMs || now >= c.endMs) continue;
       const binding = c.placements.find((p) => p.surface === surface);
       if (binding === undefined) continue;
-      if (!this.targets(c, req, ctx)) continue;
+      if (surface === SurfaceId.MODE_TILE && c.targeting.modes.length === 0) {
+        // A badge with no tile is unplaceable — refused, never guessed.
+        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: a MODE_TILE badge must name its tile in targeting.modes` });
+        continue;
+      }
+      if (!this.targets(c, req, ctx, surface)) continue;
       if (!this.underCaps(c, deviceHash, req.sessionId, now)) continue;
       if ((this.spentMicros.get(c.id) ?? 0) >= c.budgetMicros) continue;
       const creative = this.rotate(binding.creativeIds, req.sessionId);
@@ -195,10 +200,13 @@ export class AdService {
     return null;
   }
 
-  private targets(c: Campaign, req: DecideRequest, ctx: DecideContext): boolean {
+  private targets(c: Campaign, req: DecideRequest, ctx: DecideContext, surface: SurfaceId): boolean {
     const t = c.targeting;
     if (t.platforms.length > 0 && !t.platforms.includes(req.platform)) return false;
-    if (t.modes.length > 0 && !t.modes.includes(req.mode)) return false;
+    // MODE_TILE is decided from the menu, where `req.mode` is whatever tile is
+    // preselected: for that surface `targeting.modes` NAMES the tile the badge
+    // sits on (§1a S3) instead of filtering on the mode being played.
+    if (surface !== SurfaceId.MODE_TILE && t.modes.length > 0 && !t.modes.includes(req.mode)) return false;
     if (t.excludeRegions.includes(ctx.region)) return false;
     if (t.regions.length > 0 && !t.regions.includes(ctx.region)) return false;
     // The LEGAL gate, fail-closed: a campaign that names age bands serves only
@@ -263,6 +271,9 @@ export class AdService {
       altText: creative?.altText ?? '',
       text: creative?.text ?? '',
       label: campaign === null ? '' : DISCLOSURE_LABEL[campaign.disclosure],
+      modeId: surface === SurfaceId.MODE_TILE && campaign !== null
+        ? (campaign.targeting.modes[0] ?? -1)
+        : -1,
       nonce,
       expiresMs: record.expiresMs,
     };

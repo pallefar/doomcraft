@@ -131,6 +131,13 @@ export interface AdFill {
   altText: string;
   text: string;
   label: string;              // "Ad" | "Sponsored" | "Paid partnership" — from Campaign.disclosure
+  /**
+   * MODE_TILE only: the ModeId whose tile carries the badge, taken from the
+   * campaign's `targeting.modes[0]` (for that surface the list NAMES the tile
+   * rather than filtering on the mode being played — the decide happens from
+   * the menu). -1 for every other surface.
+   */
+  modeId: number;
   nonce: string;              // single-use per event type, server-issued
   expiresMs: number;
 }
