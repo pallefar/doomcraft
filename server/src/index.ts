@@ -147,6 +147,36 @@ const repoRoot = resolve(here, '..', '..', '..');
 const staticRoot = resolve(process.env.DOOMCRAFT_STATIC ?? join(repoRoot, 'dist'));
 const dataRoot = resolve(process.env.DOOMCRAFT_DATA ?? join(repoRoot, 'server', '.data'));
 
+/*
+ * THE WRITABILITY PROBE — run at boot, carried on /api/version, and LOUD.
+ *
+ * Every durable store under dataRoot swallows its own write errors, each
+ * for a locally good reason ("an unwritable doc must not break play").
+ * Together those good reasons compose into the worst failure this host
+ * has had: on 2026-08-28 the Railway volume turned out to be mounted
+ * root-owned under `USER node`, and every profile, account, journal and
+ * release write since 2026-08-22 had failed SILENTLY — the host looked
+ * healthy while holding everything in memory and losing it on each
+ * deploy. A data root that cannot be written is not an inconvenience to
+ * shrug at; it is data loss with a delay. So it is checked ONCE, here,
+ * where it can scream.
+ */
+let dataWritable = true;
+let dataWriteError = '';
+try {
+  mkdirSync(dataRoot, { recursive: true });
+  writeFileSync(join(dataRoot, '.writable'), new Date().toISOString(), 'utf8');
+} catch (e) {
+  dataWritable = false;
+  dataWriteError = e instanceof Error ? e.message : String(e);
+  process.stderr.write(
+    `\n!!! DOOMCRAFT_DATA (${dataRoot}) IS NOT WRITABLE: ${dataWriteError}\n`
+    + '!!! Every profile, account, journal and release write on this host WILL BE LOST.\n'
+    + '!!! On Railway: check the volume is mounted at the data root and owned by the\n'
+    + '!!! container user (railway ssh -- chown node:node /data).\n\n',
+  );
+}
+
 const PORT = Number.parseInt(process.env.PORT ?? '', 10) || DEFAULT_SERVER_PORT;
 const HOST = process.env.HOST ?? '0.0.0.0';
 const MODE = parseMode(process.env.DOOMCRAFT_MODE);
@@ -1491,7 +1521,14 @@ async function handleApi(
    * is the failure nobody thinks to look for. See docs/PATCHING.md.
    * --------------------------------------------------------------------- */
   if (path === '/api/version') {
-    sendJson(res, 200, versionDocument(contentHash(), { ...releaseView(), deploy: lifecycle.report() }), cors);
+    sendJson(res, 200, versionDocument(contentHash(), {
+      ...releaseView(),
+      deploy: lifecycle.report(),
+      /* The writability probe's verdict rides the same document deploy
+       * tooling already reads, so "the volume is root-owned again" is one
+       * curl away instead of six days of silent loss away. */
+      data: { writable: dataWritable, error: dataWriteError },
+    }), cors);
     return true;
   }
 
