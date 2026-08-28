@@ -13,7 +13,17 @@
  * this module is safe to import (as types) from browser code.
  */
 
-import { ITEM_KIND_NAMES, ItemKind, parseItemRef, type OwnedItem } from '@doomcraft/shared/items';
+import { ITEM_KIND_NAMES, ItemKind, formatItemRef, parseItemRef, type OwnedItem } from '@doomcraft/shared/items';
+import {
+  challengeAggregation,
+  challengeContribution,
+  challengePeriodKey,
+  utcDayKey,
+  utcWeekKey,
+  type ChallengeDef,
+  type ChallengeStatSource,
+} from '@doomcraft/shared/challenges';
+import type { LedgerEntry } from './journal.js';
 import {
   DEFAULT_PROGRESS,
   DEFAULT_SETTINGS,
@@ -38,7 +48,7 @@ import { isPrototypePollutingKey } from '@doomcraft/shared/trust';
  * whitelist, so a migration step that adds a key the literal does not name is a
  * no-op with a version bump on it.
  */
-export const PERSIST_VERSION = 5;
+export const PERSIST_VERSION = 6;
 
 /** Hard ceiling on a stored balance. A bug, not a player, is what hits this. */
 export const MAX_SCRAP_BALANCE = 1_000_000_000;
@@ -125,6 +135,29 @@ export interface StoredEconomy {
 }
 
 /**
+ * Daily/weekly challenge state — progress counters and the PAID receipts,
+ * on the profile so one `store.update` lock covers the count, the credit,
+ * the item and the journal row atomically (the S4 design decision: the
+ * competitions service marks its doc finalised BEFORE paying and a crash
+ * mid-loop loses placements forever; one store has no such window).
+ *
+ * `done` is the durable once-per-period receipt: the journal's dedup set
+ * only spans ~48 h and a weekly period outlives it. Ids carry their period
+ * as a prefix by construction (`daily.`/`weekly.` — the parser refuses
+ * anything else), which is what lets the roll prune by prefix.
+ */
+export interface StoredChallenges {
+  /** UTC 'YYYY-MM-DD' the daily counters belong to. */
+  day: string;
+  /** ISO week 'YYYY-Www' the weekly counters belong to. */
+  week: string;
+  /** Per-challenge progress, clamped at each def's target. */
+  counts: Record<string, number>;
+  /** Challenge ids completed AND PAID in their current period. */
+  done: string[];
+}
+
+/**
  * What a player OWNS. `items` are granted refs with provenance; whether a
  * given ref is wearable is NEVER stored — it is derived from the live
  * release on read (docs/PACKS.md §7, `itemStateFor`), so a rollback
@@ -172,6 +205,7 @@ export interface StoredProfile {
   economy: StoredEconomy;
   inventory: StoredInventory;
   moderation: StoredModeration;
+  challenges: StoredChallenges;
   ageBand: AgeBand;
   /**
    * THE DOWNGRADE GUARD. Top-level keys this build does not recognise, carried
@@ -200,7 +234,7 @@ export interface StoredProfile {
 export const KNOWN_PROFILE_KEYS: readonly string[] = Object.freeze([
   'version', 'deviceId', 'accountId', 'accountSecret', 'createdMs', 'updatedMs',
   'progress', 'settings', 'bindings', 'loadout', 'entitlements', 'stats',
-  'economy', 'inventory', 'moderation', 'ageBand', '_unknown',
+  'economy', 'inventory', 'moderation', 'challenges', 'ageBand', '_unknown',
 ]);
 
 /**
@@ -223,7 +257,7 @@ export const KNOWN_PROFILE_KEYS: readonly string[] = Object.freeze([
  */
 export const GUARDED_PROFILE_SECTIONS: readonly string[] = Object.freeze([
   'progress', 'settings', 'loadout', 'entitlements', 'stats', 'economy',
-  'inventory', 'moderation',
+  'inventory', 'moderation', 'challenges',
 ]);
 
 /**
@@ -263,6 +297,16 @@ export interface MatchResult {
    * `grantDrops`, beside it, under the same lock.
    */
   drops: readonly string[];
+  /**
+   * Guard-verified challenge ids this match contributes to, and the payment
+   * gates read off the sealed trust row. REQUIRED, same doctrine as `scrap`:
+   * an optional field silently strands challenge progress the day a producer
+   * forgets it. `toMatchResult` is the only producer; `settleChallenges`
+   * consumes them under the same lock as everything else.
+   */
+  challengeIds: readonly string[];
+  mayPayChallenges: boolean;
+  mayGrantChallengeItems: boolean;
 }
 
 /**
@@ -350,12 +394,16 @@ export function createProfile(deviceId: string, nowMs = Date.now()): StoredProfi
     economy: defaultEconomy(),
     inventory: defaultInventory(),
     moderation: defaultModeration(),
+    challenges: defaultChallenges(),
     ageBand: 'unknown',
   };
 }
 
 function defaultInventory(): StoredInventory {
   return { items: [], equippedSkin: '', title: '' };
+}
+function defaultChallenges(): StoredChallenges {
+  return { day: '', week: '', counts: {}, done: [] };
 }
 function defaultModeration(): StoredModeration {
   return { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] };
@@ -437,6 +485,13 @@ const MIGRATIONS: Array<(raw: AnyRecord) => AnyRecord> = [
     raw.version = 5;
     return raw;
   },
+  // 5 -> 6: daily/weekly challenge state arrived (Studio S4). Reads what is
+  // there rather than overwriting it, same idempotency argument as 3 -> 4.
+  (raw) => {
+    raw.challenges = raw.challenges ?? { day: '', week: '', counts: {}, done: [] };
+    raw.version = 6;
+    return raw;
+  },
 ];
 
 /** Bring any stored shape up to the current version and sanity-check it. */
@@ -460,6 +515,7 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
   const eco = asRecord(raw.economy);
   const inv = asRecord(raw.inventory);
   const mod = asRecord(raw.moderation);
+  const chal = asRecord(raw.challenges);
 
   const out: StoredProfile = {
     version: PERSIST_VERSION,
@@ -529,6 +585,7 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
     },
     inventory: sanitiseInventory(inv),
     moderation: sanitiseModeration(mod),
+    challenges: sanitiseChallenges(chal),
     ageBand: ageBandOf(raw.ageBand),
   };
 
@@ -546,6 +603,35 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
   out.entitlements.adsRemoved = out.progress.adsRemoved;
   if (out.entitlements.adsRemoved) out.settings.showAds = false;
   return out;
+}
+
+/** Bounds on stored challenge state — a hostile or buggy write stays a small one. */
+const MAX_CHALLENGE_STATE_ENTRIES = 64;
+const MAX_CHALLENGE_ID_CHARS = 64;
+
+function sanitiseChallenges(raw: AnyRecord): StoredChallenges {
+  const counts: Record<string, number> = {};
+  const rawCounts = asRecord(raw.counts);
+  for (const [k, v] of Object.entries(rawCounts)) {
+    if (isPrototypePollutingKey(k) || k.length === 0 || k.length > MAX_CHALLENGE_ID_CHARS) continue;
+    if (Object.keys(counts).length >= MAX_CHALLENGE_STATE_ENTRIES) break;
+    const n = num(v, 0);
+    if (n > 0) counts[k] = Math.min(Math.floor(n), Number.MAX_SAFE_INTEGER);
+  }
+  const done: string[] = [];
+  if (Array.isArray(raw.done)) {
+    for (const id of raw.done) {
+      if (typeof id !== 'string' || id.length === 0 || id.length > MAX_CHALLENGE_ID_CHARS) continue;
+      if (done.length >= MAX_CHALLENGE_STATE_ENTRIES) break;
+      if (!done.includes(id)) done.push(id);
+    }
+  }
+  return {
+    day: str(raw.day, '').slice(0, 10),
+    week: str(raw.week, '').slice(0, 8),
+    counts,
+    done,
+  };
 }
 
 /** Inventory hard cap. Further grants are refused, never silently rotated. */
@@ -640,6 +726,164 @@ export function grantDrops(
     landed.push(item);
   }
   return landed;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Daily/weekly challenges (Studio S4) — accrual, completion, payment
+ *
+ * All of it runs INSIDE the same `store.update` callback that settles the
+ * match, so the counter, the receipt, the credit, the item and the journal
+ * row commit or vanish together. `docs/ECONOMY.md` "Daily / weekly
+ * challenges feeding Scrap and drops".
+ * ------------------------------------------------------------------------ */
+
+/** One completion owed and not yet paid — the settlement's work item. */
+export interface ChallengeCandidate {
+  id: string;
+  /** The period key the sourceId was derived from — NEVER recomputed later. */
+  periodKey: string;
+  /** `challenge:<id>:<periodKey>` — the journal idempotency source. */
+  sourceId: string;
+  scrap: number;
+  /** Items-manifest local id, or null. */
+  item: string | null;
+}
+
+/**
+ * Roll the period buckets, fold this match's contributions into the
+ * counters, and return every completion that is owed and unpaid. PURE
+ * PROGRESS — no money moves here; `settleChallenges` pays.
+ *
+ * Candidates are scanned over ALL defs, not just this match's granted ids:
+ * a completion banked in a session that could not pay (public Builder
+ * grants challenge progress but not Scrap) is owed until the first
+ * settlement that can.
+ */
+export function accrueChallenges(
+  profile: StoredProfile,
+  defs: readonly ChallengeDef[],
+  grantedIds: readonly string[],
+  stats: ChallengeStatSource,
+  nowMs: number,
+): ChallengeCandidate[] {
+  const ch = profile.challenges;
+  const day = utcDayKey(nowMs);
+  const week = utcWeekKey(nowMs);
+  if (ch.day !== day) {
+    ch.day = day;
+    for (const k of Object.keys(ch.counts)) if (k.startsWith('daily.')) delete ch.counts[k];
+    ch.done = ch.done.filter((id) => !id.startsWith('daily.'));
+  }
+  if (ch.week !== week) {
+    ch.week = week;
+    for (const k of Object.keys(ch.counts)) if (k.startsWith('weekly.')) delete ch.counts[k];
+    ch.done = ch.done.filter((id) => !id.startsWith('weekly.'));
+  }
+  const granted = new Set(grantedIds);
+  const out: ChallengeCandidate[] = [];
+  for (const def of defs) {
+    if (granted.has(def.id)) {
+      const c = challengeContribution(def, stats);
+      const prev = ch.counts[def.id] ?? 0;
+      const next = challengeAggregation(def.stat) === 'max' ? Math.max(prev, c) : prev + c;
+      // Clamped at target: the profile stores "how close", never a
+      // runaway counter.
+      ch.counts[def.id] = Math.min(next, def.target);
+    }
+    if ((ch.counts[def.id] ?? 0) >= def.target && !ch.done.includes(def.id)) {
+      const periodKey = challengePeriodKey(def.period, nowMs);
+      out.push({
+        id: def.id,
+        periodKey,
+        sourceId: `challenge:${def.id}:${periodKey}`,
+        scrap: def.scrap,
+        item: def.item,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * The one Scrap credit for a challenge completion. Bypasses `meterReward`
+ * deliberately — the bound is the PARSER's per-def and per-manifest caps,
+ * the prize precedent — and reports the OBSERVED movement, captured
+ * immediately around this one credit (never the asked amount: the
+ * `MAX_SCRAP_BALANCE` clamp is allowed to bite and the row must say so).
+ */
+export function creditChallengeScrap(
+  profile: StoredProfile, amount: number,
+): { before: number; after: number } {
+  const e = profile.economy;
+  const before = e.scrap;
+  const add = Math.max(0, Math.round(amount));
+  e.scrap = Math.min(before + add, MAX_SCRAP_BALANCE);
+  e.lifetimeScrap = Math.min(e.lifetimeScrap + (e.scrap - before), MAX_SCRAP_BALANCE);
+  return { before, after: e.scrap };
+}
+
+export interface ChallengeSettlementDeps {
+  defs: readonly ChallengeDef[];
+  /** The guard-verified ids this match contributes to. */
+  grantedIds: readonly string[];
+  stats: ChallengeStatSource;
+  /** ONE timestamp for the whole settlement — buckets, sourceIds, rows. */
+  nowMs: number;
+  deviceId: string;
+  /** The session grants REWARD_SCRAP — without it, progress banks and payment waits. */
+  mayPayScrap: boolean;
+  /** The session grants REWARD_ITEM_DROP — an item-bearing completion defers without it. */
+  mayGrantItems: boolean;
+  /** The paying room's pinned items version — grant-time ref formatting, as drops do. */
+  itemVersion: number;
+  journal: {
+    has(kind: 'prize', sourceId: string, playerId: string): Promise<boolean>;
+    append(rows: LedgerEntry[]): Promise<number>;
+  } | null;
+  /** Row id maker (`newLedgerId`) — injected so this module never imports the journal. */
+  rowId: (nowMs: number) => string;
+}
+
+/**
+ * Accrue, then pay what is owed — the has-first discipline of the match
+ * payout, per completion: the journal is asked BEFORE anything moves, and a
+ * yes means a torn write already paid this period, so the receipt is
+ * REPAIRED (done[] pushed) while no balance moves and no row is written.
+ * Without the repair, a weekly completion whose profile write was lost
+ * would pay a second time once the journal's ~48 h dedup window forgets
+ * the key.
+ */
+export async function settleChallenges(
+  profile: StoredProfile, deps: ChallengeSettlementDeps,
+): Promise<{ id: string; scrap: number }[]> {
+  const candidates = accrueChallenges(profile, deps.defs, deps.grantedIds, deps.stats, deps.nowMs);
+  if (!deps.mayPayScrap) return [];
+  const paid: { id: string; scrap: number }[] = [];
+  for (const c of candidates) {
+    if (deps.journal !== null && await deps.journal.has('prize', c.sourceId, deps.deviceId)) {
+      if (!profile.challenges.done.includes(c.id)) profile.challenges.done.push(c.id);
+      continue;
+    }
+    // An item-bearing completion pays BOTH halves or neither — a receipt
+    // written while the item silently dropped would lose it forever.
+    if (c.item !== null && !deps.mayGrantItems) continue;
+    const moved = creditChallengeScrap(profile, c.scrap);
+    profile.challenges.done.push(c.id);
+    if (c.item !== null) {
+      grantDrops(profile, [formatItemRef(deps.itemVersion, c.item)], 'challenge', c.sourceId, deps.nowMs);
+    }
+    if (deps.journal !== null) {
+      await deps.journal.append([{
+        id: deps.rowId(deps.nowMs), ms: deps.nowMs, kind: 'prize', sourceId: c.sourceId,
+        playerId: deps.deviceId, currency: 'scrap',
+        delta: moved.after - moved.before, balanceAfter: moved.after,
+        actor: 'system:challenge',
+        reason: `challenge ${c.id} (${c.periodKey})`,
+      }]);
+    }
+    paid.push({ id: c.id, scrap: moved.after - moved.before });
+  }
+  return paid;
 }
 
 /* ------------------------------------------------------------------------ *

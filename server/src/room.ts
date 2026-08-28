@@ -78,9 +78,10 @@ import {
 import { Connection, NetHub, sanitiseChat } from './net.js';
 import type { NetHost, NetTransport } from './net.js';
 import type { AppliedRewards, PersistenceStore, StoredProfile } from './persistence.js';
-import { applyMatchResult, grantDrops, randomToken } from './persistence.js';
+import { applyMatchResult, grantDrops, randomToken, settleChallenges } from './persistence.js';
+import { contributingChallengeIds, type ChallengeDef } from '@doomcraft/shared/challenges';
 import type { Journal } from './journal.js';
-import { MATCH_PAYOUT, matchPayoutRows } from './journal.js';
+import { MATCH_PAYOUT, matchPayoutRows, newLedgerId } from './journal.js';
 import {
   EntitlementGuard,
   toMatchResult,
@@ -121,6 +122,14 @@ export interface RoomOptions {
   rollDrops?: (ctx: {
     deviceId: string; flagBits: number; kills: number; seconds: number; won: boolean;
   }) => readonly string[];
+  /**
+   * The challenge defs from this room's pinned quests pack. Provided by the
+   * factory, same contract as `rollDrops`. Absent = no challenges, which is
+   * the browser worker and every test that does not care.
+   */
+  challenges?: readonly ChallengeDef[];
+  /** The pinned items version challenge item rewards are formatted against. */
+  challengeItemVersion?: number;
   seed?: number;
   mode?: GameMode;
   maxPlayers?: number;
@@ -297,6 +306,8 @@ export class Room implements NetHost {
   private readonly allWeaponsAtBoot: boolean;
   private readonly levelsResolver: ContentResolver | null;
   private readonly rollDrops: RoomOptions['rollDrops'];
+  private readonly challenges: readonly ChallengeDef[];
+  private readonly challengeItemVersion: number;
   /**
    * The authored level this room's world currently holds, and its content hash.
    *
@@ -404,6 +415,8 @@ export class Room implements NetHost {
 
     this.levelsResolver = options.levels ?? null;
     this.rollDrops = options.rollDrops;
+    this.challenges = options.challenges ?? [];
+    this.challengeItemVersion = options.challengeItemVersion ?? 1;
     this.modeLocked = options.lockMode === true;
     this.contentVersion = options.contentVersion ?? CONTENT_VERSION;
     this.contentHash = options.contentHash ?? BUILTIN_CONTENT_HASH;
@@ -1213,6 +1226,7 @@ export class Room implements NetHost {
       modeId: this.plan.modeId,
       origin: this.sessionOrigin,
       serverIntent: this.sessionIntent,
+      challenges: this.challenges,
     });
     if (newSeed) {
       this.seed = (this.seed * 1664525 + 1013904223) >>> 0;
@@ -1521,29 +1535,54 @@ export class Room implements NetHost {
       const updated = await this.store.update(deviceId, async (profile) => {
         const journal = this.journal;
         const sourceId = this.payoutSourceId();
+        // ONE wall clock for the whole settlement: drop timestamps, journal
+        // ms, and — load-bearing for challenges — the period keys, derived
+        // exactly once so a midnight straddle cannot split the receipt from
+        // the journal's idempotency key.
+        const now = Date.now();
         if (journal !== null && await journal.has(MATCH_PAYOUT, sourceId, deviceId)) return;
         const before = { xp: profile.progress.xp, scrap: profile.economy.scrap };
         landed = applyMatchResult(profile, result);
         /* Items land HERE, inside the same idempotency umbrella: the
          * journal.has check above already refused a replayed round, so a
          * granted drop can no more double than a balance can. */
-        if (result.drops.length > 0) grantDrops(profile, result.drops, 'drop', sourceId, Date.now());
+        if (result.drops.length > 0) grantDrops(profile, result.drops, 'drop', sourceId, now);
         paid = true;
         profile.progress.lastSeed = this.seed;
         if (profile.progress.name.length === 0) profile.progress.name = p.name;
-        if (journal === null) return;
-        await journal.append(matchPayoutRows({
-          playerId: deviceId,
-          sourceId,
-          ms: Date.now(),
-          before,
-          // Read back off the profile, not off `landed`: the two differ the
-          // moment `MAX_SCRAP_BALANCE` clamps, and the row has to describe the
-          // balance rather than the intention.
-          after: { xp: profile.progress.xp, scrap: profile.economy.scrap },
-          asked: { xp: result.xp, scrap: result.scrap },
-          code: verdict.code,
-        }));
+        if (journal !== null) {
+          await journal.append(matchPayoutRows({
+            playerId: deviceId,
+            sourceId,
+            ms: now,
+            before,
+            // Read back off the profile, not off `landed`: the two differ the
+            // moment `MAX_SCRAP_BALANCE` clamps, and the row has to describe the
+            // balance rather than the intention.
+            after: { xp: profile.progress.xp, scrap: profile.economy.scrap },
+            asked: { xp: result.xp, scrap: result.scrap },
+            code: verdict.code,
+          }));
+        }
+        /* Challenges settle LAST, same lock, own idempotency keys: accrual
+         * folds this round's guard-verified ids into the period counters,
+         * and every owed completion pays has-first, per completion, with
+         * its own journal row (server/src/persistence.ts settleChallenges —
+         * the crash-window analysis lives on that function). */
+        if (this.challenges.length > 0) {
+          await settleChallenges(profile, {
+            defs: this.challenges,
+            grantedIds: result.challengeIds,
+            stats: result,
+            nowMs: now,
+            deviceId,
+            mayPayScrap: result.mayPayChallenges,
+            mayGrantItems: result.mayGrantChallengeItems,
+            itemVersion: this.challengeItemVersion,
+            journal,
+            rowId: newLedgerId,
+          });
+        }
       });
       if (paid) this.tellPlayerWhatLanded(conn, landed, updated, verdict.code);
       /* Viral tier 1: a paying round is the moment an engagement threshold
@@ -1607,11 +1646,32 @@ export class Room implements NetHost {
       deaths,
       seconds,
       drops: this.rollDropsSafe(member, deviceId, won, kills, seconds),
+      challengeIds: this.challengeIdsFor(member, won, kills),
       bestStreak: p.bestStreak,
       damageDealt: p.damageDealt,
       blocksPlaced: p.blocksPlaced,
       blocksBroken: p.blocksBroken,
       favouriteWeapon: p.weapon,
+    });
+  }
+
+  /**
+   * The challengeIds producer: the ids this member's round contributes to,
+   * from the room's pinned defs — gated on the member's server-resolved
+   * `economy_competitions` bit (the flag registry claims daily/weekly
+   * challenges for it), the `rollDrops` pattern, so the kill switch is real.
+   */
+  private challengeIdsFor(member: Membership, won: boolean, kills: number): readonly string[] {
+    if (this.challenges.length === 0 || !member.conn) return [];
+    if (!flagOn(member.conn.flagBits, 'economy_competitions')) return [];
+    const p = member.player;
+    return contributingChallengeIds(this.challenges, {
+      kills,
+      won,
+      bestStreak: p.bestStreak,
+      damageDealt: p.damageDealt,
+      blocksPlaced: p.blocksPlaced,
+      blocksBroken: p.blocksBroken,
     });
   }
 

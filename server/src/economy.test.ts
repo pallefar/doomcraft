@@ -831,6 +831,7 @@ function matchResultOf(xp: number, scrap: number) {
     kills: 4, deaths: 2, won: true, bestStreak: 2, damageDealt: 300,
     blocksPlaced: 0, blocksBroken: 0, seconds: 300,
     xp, scrap, favouriteWeapon: 1, drops: [],
+    challengeIds: [], mayPayChallenges: false, mayGrantChallengeItems: false,
   };
 }
 

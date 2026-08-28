@@ -47,13 +47,28 @@ describe('v4 -> v5', () => {
   it('migrates a real v4 profile: balance intact, inventory empty, band unknown', () => {
     const p = migrateProfile(V4_FIXTURE, 'device-fixture-v4', 1_755_100_000_000);
     expect(p.version).toBe(PERSIST_VERSION);
-    expect(PERSIST_VERSION).toBe(5);
+    expect(PERSIST_VERSION).toBe(6);
     expect(p.economy.scrap).toBe(860);
     expect(p.economy.lifetimeScrap).toBe(1200);
     expect(p.progress.xp).toBe(4200);
     expect(p.inventory).toEqual({ items: [], equippedSkin: '', title: '' });
     expect(p.moderation).toEqual({ banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] });
     expect(p.ageBand).toBe('unknown');
+  });
+
+  it('migrates a frozen v5 profile: challenges seeded empty, the v5 economy intact', () => {
+    const v5 = {
+      ...V4_FIXTURE,
+      version: 5,
+      inventory: { items: [], equippedSkin: '', title: '' },
+      moderation: { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] },
+      ageBand: 'unknown',
+    };
+    const p = migrateProfile(v5, 'device-fixture-v5', 1_755_100_000_000);
+    expect(p.version).toBe(6);
+    expect(p.challenges).toEqual({ day: '', week: '', counts: {}, done: [] });
+    expect(p.economy.scrap).toBe(860);
+    expect(p.economy.lifetimeScrap).toBe(1200);
   });
 
   it('round-trips a v5 profile with items through serialise and back', () => {

@@ -73,6 +73,11 @@ import {
   type SessionTrust,
 } from '@doomcraft/shared/trust';
 import type { ModeId } from '@doomcraft/shared/modes';
+import {
+  MAX_CHALLENGES_PER_PACK,
+  challengeContribution,
+  type ChallengeDef,
+} from '@doomcraft/shared/challenges';
 
 import type { MatchResult } from './persistence.js';
 
@@ -91,7 +96,12 @@ export const MAX_SCRAP_PER_MATCH = 2_000;
 export const MAX_DROPS_PER_MATCH = 4;
 export const MAX_RATING_DELTA = 60;
 export const MAX_COMPETITION_POINTS = 10_000;
-export const MAX_CHALLENGE_IDS = 8;
+/**
+ * Aliased to the shared manifest cap, not re-declared: the whole active set
+ * must fit one submission, and one constant in two places is a drift waiting
+ * for a silent clamp.
+ */
+export const MAX_CHALLENGE_IDS = MAX_CHALLENGES_PER_PACK;
 
 /** A session with no submission after this long is swept out of the ledger. */
 export const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
@@ -135,6 +145,12 @@ export interface SessionRecord {
   readonly participants: Set<string>;
   /** Device ids that have already been paid for this session. */
   readonly settled: Set<string>;
+  /**
+   * The challenge definitions this session was opened with — the room's
+   * pinned quests pack, recorded at open so `reviewSubmission` stays pure.
+   * A claimed challenge id is checked against THESE, never a live lookup.
+   */
+  readonly challenges: readonly ChallengeDef[];
 }
 
 export interface OpenSessionSpec {
@@ -147,6 +163,8 @@ export interface OpenSessionSpec {
    * fact; `resolveMatchType` clamps it by origin anyway.
    */
   serverIntent: MatchType;
+  /** The room's pinned challenge defs. Absent means no challenges this session. */
+  challenges?: readonly ChallengeDef[];
   nowMs?: number;
 }
 
@@ -178,6 +196,7 @@ export class SessionLedger {
       closedMs: 0,
       participants: new Set<string>(),
       settled: new Set<string>(),
+      challenges: Object.freeze([...(spec.challenges ?? [])]),
     };
     this.sessions.set(spec.sessionId, record);
     return record;
@@ -406,6 +425,33 @@ function idList(v: readonly string[] | undefined, max: number, field: string, cl
   return out;
 }
 
+/**
+ * The challenge half of step 8: cap the claimed list, then keep only ids
+ * whose def exists in the session's recorded pack AND whose predicate the
+ * sanitised stats actually satisfy with a contribution > 0. Mode-blind by
+ * construction — the defs are data and `challengeContribution` reads
+ * nothing but stat fields.
+ */
+function verifyChallengeIds(
+  claimed: readonly string[] | undefined,
+  defs: readonly ChallengeDef[],
+  stats: SubmittedStats,
+  clamped: string[],
+): string[] {
+  const ids = idList(claimed, MAX_CHALLENGE_IDS, 'challengeIds', clamped);
+  if (ids.length === 0) return ids;
+  const byId = new Map(defs.map((d) => [d.id, d]));
+  const out: string[] = [];
+  let dropped = false;
+  for (const id of ids) {
+    const def = byId.get(id);
+    if (def === undefined || challengeContribution(def, stats) <= 0) { dropped = true; continue; }
+    out.push(id);
+  }
+  if (dropped && !clamped.includes('challengeIds')) clamped.push('challengeIds');
+  return out;
+}
+
 /** The topology's own reject code, so the audit line says which kind of untrusted. */
 function codeForTopology(t: Topology): RejectCode {
   if (t === Topology.PEER_HOSTED) return RejectCode.PEER_HOSTED;
@@ -516,12 +562,20 @@ export function reviewSubmission(
   const competitionPoints = may(REWARD_COMPETITION)
     ? cap(num(sub.competitionPoints), MAX_COMPETITION_POINTS, 'competitionPoints', clamped)
     : 0;
-  const challengeIds = may(REWARD_CHALLENGE)
-    ? idList(sub.challengeIds, MAX_CHALLENGE_IDS, 'challengeIds', clamped)
-    : [];
   const leaderboard = may(REWARD_LEADERBOARD) && sub.leaderboard === true;
   const shareCard = may(REWARD_SHARE_CARD) && sub.shareCard === true;
   const stats = may(REWARD_STATS) && sub.stats !== undefined ? sanitiseStats(sub.stats) : null;
+
+  /* Evaluation in the guard (docs/STUDIO.md S4): the room PROPOSES ids, the
+   * guard re-derives each one against the defs this session was opened with
+   * and the SANITISED stats — the same predicate the room used. An id that
+   * names no def, or one this match's stats did not move, is dropped and
+   * recorded in `clamped`: with ROOM_SIM the only admissible submitter that
+   * is an ours-bug signal, not an attack, so it does not raise `violation`.
+   * No stats, no basis to verify — nothing is granted. */
+  const challengeIds = may(REWARD_CHALLENGE) && stats !== null
+    ? verifyChallengeIds(sub.challengeIds, record.challenges, stats, clamped)
+    : [];
 
   // Rating is signed: a loss must be able to cost you points, so it is clamped
   // to a symmetric window rather than to 0..max.
@@ -606,6 +660,16 @@ export function toMatchResult(v: GuardVerdict): MatchResult | null {
     // Already gated by REWARD_ITEM_DROP and clamped to MAX_DROPS_PER_MATCH
     // in step 8; nothing downstream re-decides this either.
     drops: v.granted.drops,
+    // Verified in step 8 against the session's recorded defs — the ids this
+    // match contributes to. Settlement accrues them and pays completions.
+    challengeIds: v.granted.challengeIds,
+    /* The payment gate, read off the SAME sealed trust row as everything
+     * else: public Builder grants challenge PROGRESS but deliberately not
+     * Scrap ("any per-action payout is an idle farm"), so a completion
+     * banked there is owed, not paid, until a Scrap-granting session
+     * settles. Items ride the same logic on their own bit. */
+    mayPayChallenges: v.trust !== null && sessionMayGrant(v.trust, REWARD_SCRAP),
+    mayGrantChallengeItems: v.trust !== null && sessionMayGrant(v.trust, REWARD_ITEM_DROP),
   };
 }
 

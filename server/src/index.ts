@@ -1016,6 +1016,20 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
         if (installed === null) return [];
         return rollMatchDrops(installed.manifest, decl.version, Math.random);
       },
+      /* Challenge defs, from THIS room's pinned release when it names a
+       * quests version; releases cut before S4 name none, so the newest
+       * installed pack (bundle quests@1 at minimum) keeps the feature live
+       * rather than dark until the next promote. Item rewards format against
+       * the pinned items version, exactly as drops do. */
+      challenges: (() => {
+        const qdecl = release.packs.find((pk) => pk.kind === PackKind.QUESTS);
+        const qi = qdecl !== undefined
+          ? inventory.questsAt(qdecl.version)
+          : inventory.questsAt(inventory.questsVersions().at(-1) ?? 1);
+        return qi?.manifest.challenges ?? [];
+      })(),
+      challengeItemVersion: release.packs.find((pk) => pk.kind === PackKind.ITEMS)?.version
+        ?? (inventory.itemsVersions().at(-1) ?? 1),
     });
     room.start();
     return room;

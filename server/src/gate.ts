@@ -74,7 +74,7 @@ export const DEFAULT_QUESTS_FILE = join(repoRoot, 'content', 'quests.json');
  * rolled back (docs/PACKS.md §7, GateReport.schemaTouching), and that
  * property must be chosen, not discovered.
  */
-export const DECLARED_PERSIST_VERSION = 5;
+export const DECLARED_PERSIST_VERSION = 6;
 export const DECLARED_SAVES_VERSION = 4;
 
 /* ------------------------------------------------------------------------ *

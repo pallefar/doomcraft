@@ -47,6 +47,12 @@ export interface RoundTally {
   favouriteWeapon: number;
   /** Item refs the room rolled for this member. Zeroed with everything else when the round does not pay. */
   drops?: readonly string[];
+  /**
+   * Challenge ids this round's stats contribute to, computed by the room
+   * from its pinned quests pack. Zeroed with everything else when the round
+   * does not pay — an idle round banks no challenge progress either.
+   */
+  challengeIds?: readonly string[];
 }
 
 /** XP for a round. The formula the room has always used, moved verbatim. */
@@ -162,6 +168,8 @@ export function buildSubmission(t: RoundTally): ResultSubmission {
     // The same rule, deliberately: an idle round drops nothing, because "zero
     // pay for zero play" is the anti-farm floor and loot is pay.
     drops: pays ? (t.drops ?? []) : [],
+    // And the same rule a third time: challenge progress is pay too.
+    challengeIds: pays ? (t.challengeIds ?? []) : [],
     stats: {
       kills: t.kills,
       deaths: t.deaths,

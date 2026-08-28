@@ -32,8 +32,11 @@ import {
 } from '@doomcraft/shared/trust';
 import { ModeId } from '@doomcraft/shared/modes';
 
+import type { ChallengeDef } from '@doomcraft/shared/challenges';
+
 import {
   EntitlementGuard,
+  MAX_CHALLENGE_IDS,
   MAX_XP_PER_MATCH,
   RejectCode,
   SessionLedger,
@@ -80,12 +83,21 @@ interface Fixture {
 /** Open a session the way the server would, and put `DEVICE` in it. */
 function openWith(
   modeId: ModeId, origin: SessionOrigin, intent: MatchType, devices: string[] = [DEVICE],
+  challenges?: readonly ChallengeDef[],
 ): Fixture {
   const guard = new EntitlementGuard(() => 1_000);
   const sessionId = `s-${modeId}-${origin}-${intent}`;
-  guard.open({ sessionId, modeId, origin, serverIntent: intent });
+  guard.open({ sessionId, modeId, origin, serverIntent: intent, challenges });
   for (const d of devices) guard.ledger.addParticipant(sessionId, d);
   return { guard, sessionId };
+}
+
+/** Hand-built defs for the evaluation tests — the parser is tested in shared. */
+function challengeDef(over: Partial<ChallengeDef> = {}): ChallengeDef {
+  return {
+    id: 'daily.kill-5', name: 'Five', blurb: 'Take down five.',
+    period: 'daily', stat: 'kills', target: 5, scrap: 40, item: null, ...over,
+  };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -155,6 +167,92 @@ describe('a reward submitted from a peer-hosted session', () => {
     expect(v.code).toBe(RejectCode.GRANTS_NOTHING);
     expect(v.trust?.topology).toBe(Topology.SERVER_AUTHORITATIVE);
     expect(v.granted.xp).toBe(0);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * 1b. Evaluation in the guard — the challenge half of step 8 (Studio S4)
+ * ------------------------------------------------------------------------ */
+
+describe('challenge evaluation against the session\'s recorded defs', () => {
+  const KILLS = challengeDef();
+  const WINS = challengeDef({ id: 'daily.win-1', stat: 'wins', target: 1, scrap: 30 });
+
+  it('passes a verified claim through, drops a forged or unearned one, and says so in clamped', () => {
+    const { guard, sessionId } = openWith(
+      ModeId.DEATHMATCH, SessionOrigin.SERVER_MATCHMAKER, MatchType.PUBLIC, [DEVICE], [KILLS, WINS],
+    );
+    // kills: 12 contributes to KILLS; won: false means WINS is unearned;
+    // 'daily.ghost' names no def at all. The submission asks ONLY for what
+    // the casual row grants, so any violation could only come from the
+    // challenge path — which must clamp, never accuse.
+    const v = guard.submit({
+      sessionId,
+      deviceId: DEVICE,
+      submittedBy: SubmitterKind.ROOM_SIM,
+      xp: 250,
+      scrap: 90,
+      stats: { ...emptyStats(), kills: 12, seconds: 600, won: false },
+      challengeIds: ['daily.kill-5', 'daily.win-1', 'daily.ghost'],
+    });
+    expect(v.accepted).toBe(true);
+    expect(v.granted.challengeIds).toEqual(['daily.kill-5']);
+    expect(v.clamped).toContain('challengeIds');
+    // Dropping is a clamp, not a violation: ROOM_SIM is the only admissible
+    // submitter, so a bad id is an ours-bug, not an attack.
+    expect(v.violation).toBe(false);
+  });
+
+  it('a session opened with no defs grants no challenge ids at all', () => {
+    const { guard, sessionId } = openWith(
+      ModeId.DEATHMATCH, SessionOrigin.SERVER_MATCHMAKER, MatchType.PUBLIC,
+    );
+    const v = guard.submit(richSubmission(sessionId));
+    expect(v.accepted).toBe(true);
+    expect(v.granted.challengeIds).toEqual([]);
+  });
+
+  it('caps the claimed list at MAX_CHALLENGE_IDS', () => {
+    const many = Array.from({ length: MAX_CHALLENGE_IDS + 1 }, (_, i) =>
+      challengeDef({ id: `daily.c-${i}`, target: 1 }));
+    const { guard, sessionId } = openWith(
+      ModeId.DEATHMATCH, SessionOrigin.SERVER_MATCHMAKER, MatchType.PUBLIC, [DEVICE], many,
+    );
+    const v = guard.submit({
+      ...richSubmission(sessionId),
+      stats: { ...emptyStats(), kills: 12, seconds: 600, won: true },
+      challengeIds: many.map((d) => d.id),
+    });
+    expect(v.granted.challengeIds.length).toBe(MAX_CHALLENGE_IDS);
+    expect(v.clamped).toContain('challengeIds');
+  });
+
+  it('toMatchResult carries the ids and the payment gates: Deathmatch pays, Builder owes', () => {
+    const dm = openWith(
+      ModeId.DEATHMATCH, SessionOrigin.SERVER_MATCHMAKER, MatchType.PUBLIC, [DEVICE], [KILLS],
+    );
+    const paid = toMatchResult(dm.guard.submit({
+      ...richSubmission(dm.sessionId),
+      challengeIds: ['daily.kill-5'],
+    }));
+    expect(paid?.challengeIds).toEqual(['daily.kill-5']);
+    expect(paid?.mayPayChallenges).toBe(true);
+    expect(paid?.mayGrantChallengeItems).toBe(true);
+
+    /* Public Builder grants REWARD_CHALLENGE but deliberately not Scrap or
+     * drops — progress banks, payment waits for a session that can pay. */
+    const blocks = challengeDef({ id: 'daily.blocks-40', stat: 'blocksPlaced', target: 40, scrap: 25 });
+    const b = openWith(
+      ModeId.BUILDER, SessionOrigin.SERVER_MATCHMAKER, MatchType.PUBLIC, [DEVICE], [blocks],
+    );
+    const owed = toMatchResult(b.guard.submit({
+      ...richSubmission(b.sessionId),
+      stats: { ...emptyStats(), blocksPlaced: 64, seconds: 600 },
+      challengeIds: ['daily.blocks-40'],
+    }));
+    expect(owed?.challengeIds).toEqual(['daily.blocks-40']);
+    expect(owed?.mayPayChallenges).toBe(false);
+    expect(owed?.mayGrantChallengeItems).toBe(false);
   });
 });
 
