@@ -73,6 +73,38 @@ describe('applyMergeFields — the §3.7 worked example, field by field', () => 
     expect(a.createdMs).toBe(Math.min(profileA().createdMs, profileB().createdMs));
   });
 
+  it('carries challenge receipts and debts across the merge — one human, one board', () => {
+    const a = profileA(); const b = profileB();
+    const day = utcDay(NOW);
+    a.challenges = { day, week: '2026-W35', counts: { 'daily.kill-25': 4 }, done: [], owed: [] };
+    b.challenges = {
+      day, week: '2026-W35',
+      counts: { 'daily.kill-25': 19 },
+      done: ['daily.win-1'],
+      owed: [{ id: 'weekly.wins-10', periodKey: '2026-W35', sourceId: 'challenge:weekly.wins-10:2026-W35', scrap: 150, item: null }],
+    };
+    applyMergeFields(a, b, NOW);
+    /* The journal's idempotency key ends in the profile key, so a receipt
+     * left behind on B stops protecting anything — the same daily would pay
+     * a second time on A in the same period. */
+    expect(a.challenges.done).toContain('daily.win-1');
+    // Progress is one person's: MAX, never a sum that fakes a completion.
+    expect(a.challenges.counts['daily.kill-25']).toBe(19);
+    expect(a.challenges.owed.map((o) => o.id)).toEqual(['weekly.wins-10']);
+  });
+
+  it('ignores a stale-period board on B — yesterday\'s receipts do not silence today', () => {
+    const a = profileA(); const b = profileB();
+    a.challenges = { day: utcDay(NOW), week: '2026-W35', counts: {}, done: [], owed: [] };
+    b.challenges = {
+      day: '2020-01-01', week: '2020-W01',
+      counts: { 'daily.kill-25': 25 }, done: ['daily.kill-25'], owed: [],
+    };
+    applyMergeFields(a, b, NOW);
+    expect(a.challenges.done).toEqual([]);
+    expect(a.challenges.counts['daily.kill-25']).toBeUndefined();
+  });
+
   it("THE DAY-BUCKET FIX: B's stale cap does not throttle A for the rest of the day", () => {
     const a = profileA(); const b = profileB();
     applyMergeFields(a, b, NOW);

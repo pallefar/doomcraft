@@ -3303,6 +3303,11 @@ async function handleApi(
           p.stats = fresh.stats;
           p.economy = fresh.economy;
           p.inventory = fresh.inventory;
+          /* Challenge state is progress too: leaving the counters up after a
+           * reset lets pre-reset play mint post-reset Scrap on the next
+           * settlement, and leaves debts owed against a life that no longer
+           * exists. */
+          p.challenges = fresh.challenges;
         });
         if (!archived) { refused = 'could not archive the profile — nothing was reset'; break; }
         if (hadScrap > 0) {

@@ -132,7 +132,7 @@ try {
     'Exterminator', '10 / 25',            // live daily progress
     'Take the Day', 'done',               // the paid daily renders as done
     '100 Scrap + Knee-Deep',              // the item half, named
-    'midnight UTC', 'online matches only', // the teaching note
+    'midnight UTC', 'public online matches', // the teaching note
   ]) {
     if (!text.includes(needle)) throw new Error(`challenges section missing "${needle}" — ${text.slice(0, 500)}`);
   }

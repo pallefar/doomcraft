@@ -268,7 +268,8 @@ export function buildChallengesSection(
     heading: 'Challenges',
     rows,
     note: 'Daily challenges reset at midnight UTC, weeklies on Monday. Progress counts in '
-      + 'online matches only — solo play does not bank. Rewards land with a match payout.',
+      + 'public online matches — solo and private games do not bank. Rewards land with a '
+      + 'match payout.',
   };
 }
 

@@ -67,7 +67,7 @@ export interface ChallengesManifest {
 /**
  * The whole active set must fit one result submission: the entitlement
  * guard clamps `challengeIds` at its own MAX_CHALLENGE_IDS (a server-internal
- * cap, not a wire limit). server/src/challenges.test.ts asserts the two
+ * cap, not a wire limit). The test beside this file asserts the two
  * constants are equal so they cannot drift apart — raise them together.
  */
 export const MAX_CHALLENGES_PER_PACK = 8;

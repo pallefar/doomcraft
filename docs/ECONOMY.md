@@ -55,13 +55,25 @@ the room or the round state into the store.
 | Per-match ceiling | 900 XP, 120 Scrap | `server/src/reward.ts` — the only place that knows what one round did |
 | Minimum paid duration | 30 s | `server/src/reward.ts` — same fact |
 | Idle detection | zero kills **and** deaths **and** damage **and** blocks placed **and** blocks broken pays nothing, whatever the clock says | `server/src/reward.ts` `playedIdle` |
-| Per-day caps + diminishing returns | 6 000 XP / 800 Scrap a day; ladder `1×5 → 0.8 → 0.6 → 0.4 → 0.25 → 0.15`, indexed by matches already paid today, UTC midnight | `server/src/persistence.ts` `meterReward`, inside `applyMatchResult` — the only code that holds the profile **and** runs under the per-device lock |
+| Per-day caps + diminishing returns | 6 000 XP / 800 Scrap a day; ladder `1×5 → 0.8×2 → 0.6×2 → 0.4 → 0.25 → 0.15`, indexed by matches already paid today, UTC midnight | `server/src/persistence.ts` `meterReward`, inside `applyMatchResult` — the only code that holds the profile **and** runs under the per-device lock |
 | No reward for a match joined after it was decided | after the score limit is reached, past half the round, or once the round is over | `server/src/room.ts` `roundStillOpenToJoiners` — expressed as a refusal to **enrol**, because `SessionRecord.participants` has no join timestamp |
 | One payout per device per round | — | the entitlement ledger's `settled` set |
 
 The floor of the diminishing-returns ladder is 0.15 and never 0: a reward that silently becomes
 nothing reads as a broken game rather than as a limit. A match that was worth nothing before
 metering does not spend a rung, so browsing dead rooms costs a player nothing.
+
+*Corrected 2026-08-29:* the ladder above used to be written `1×5 → 0.8 → 0.6 → …`, one rung each.
+`DR_LADDER` has twelve rungs and repeats the middle two — `[1,1,1,1,1, 0.8,0.8, 0.6,0.6, 0.4,
+0.25, 0.15]`, `server/src/persistence.ts` — so the eleventh paid match of a day is worth a quarter,
+not the ninth. The code is the source; this table now copies it.
+
+`meterReward` is no longer the only mint. Challenge payouts (below) and competition prizes credit
+Scrap directly and deliberately skip the meter — a prize table an operator wrote, or a challenge
+board the release gate passed, is already a bounded promise, and metering it would turn a
+first-place finish into a silent rounding error. Their bound is the manifest, not the day: 500
+Scrap per definition and 2 000 across the whole board, refused by the parser
+(`shared/src/challenges.ts` `MAX_CHALLENGE_SCRAP` / `MAX_CHALLENGE_TOTAL_SCRAP`).
 
 Idle detection is also what makes the unfixed Builder/Horde round-timer defect
 (`docs/BUGS-FOUND.md` §4) safe to leave alone: those rooms run an eight-minute Deathmatch clock
@@ -87,6 +99,31 @@ competition prizes, sponsor awards, crafting from Scrap + duplicates.
 The performance contract (60 fps median / 53.8+ 1% low at 915×412 under 4× throttle) applies to a
 player wearing the rarest item in the game.
 
+**As built.** The catalogue is data — `content/items.json`, shipped as the items pack — and the
+"no trade" rule in the table above is enforced at parse time rather than at trade time:
+`shared/src/items.ts` refuses `tradable: true` on a Title or a Trophy with an error naming the
+reason. A rule the parser holds cannot be forgotten by a caller.
+
+| Verb | Where | What it does |
+|---|---|---|
+| `POST /api/equip` | `server/src/index.ts`, `equipVerdict`/`applyEquip` in `server/src/persistence.ts` | Sets the `skin` and `title` slots. Both claims land or neither does — validation and write share one `store.update` callback, so a concurrent settlement cannot un-own an item between the check and the claim, and a refusal on the second slot does not leave the first written |
+| `POST /api/craft` | `server/src/craft.ts` | Three duplicate copies of one item plus a Scrap fee become the item the player **chose**: same kind, exactly one rarity up. Fees by target rarity: 50 / 150 / 400 / 1000 |
+
+Equipping stores a **claim**, not a state. `inventory.equippedSkin` and `inventory.title` are
+re-derived through `itemStateFor` by every surface that wears them, so an item whose pack was
+rolled back goes dark and lights up again with no write — but the claim is still validated at the
+door, because equipping a Title into the skin slot would render nothing forever and read as a lost
+item.
+
+Crafting is **deterministic on purpose**: the player names the target. A random outcome would be a
+loot box with extra steps, and decision 2 above says no loot boxes — so a craft is a purchase whose
+price includes proof you played. Only the tradable kinds craft (skins, emblems, trails), for the
+same reason they trade; copies sitting on a live trade's table cannot be consumed, because a copy
+must never be in two stories at once. The fee is the journal's first `'spend'` rows — the kind was
+declared in `LedgerKind` from the start and nothing had written one until this route — debited
+under the same per-device lock that moves the balance and idempotent on the client's nonce, so a
+crash-replayed craft consumes and grants nothing twice.
+
 ## Trading
 
 Player-to-player, server-authoritative, with the failure modes designed for rather than discovered:
@@ -99,6 +136,32 @@ Player-to-player, server-authoritative, with the failure modes designed for rath
 - **Cooldowns**: newly acquired items are untradable for a period; new accounts cannot trade at all.
   Both exist to make item-laundering across throwaway accounts unprofitable.
 - **No trading of Titles or trophies** (see above).
+
+**As built.** `server/src/trades.ts` behind `POST /api/trade/{open,join,offer,confirm,cancel}` and
+`GET /api/trade/{mine,state}`, gated on `economy_trading`, with `client/src/ui/tradeTab.ts` as the
+face. The five bullets above, in the code:
+
+| Bullet | Numbers | Where |
+|---|---|---|
+| Two-sided escrow | Both confirms reset on **either** side's offer change | `trades.ts` `offer()` — the reset lives in the engine, not in a caller, so no route can forget it |
+| Atomic settlement | `'settling'` + a per-side inventory snapshot reaches disk before any profile is touched; `recover()` finishes a torn settlement at boot | `trades.ts` `settle()` / `recover()` |
+| Full audit log | every state change appended to `trades.jsonl` | `trades.ts` `audit()` |
+| Cooldowns | 48 h per item (a traded-in item lands with a fresh timestamp, so laundering costs a cooldown per hop), 72 h account age **and** 5 matches played before an account may trade at all | `TRADE_ITEM_COOLDOWN_MS`, `TRADE_MIN_ACCOUNT_AGE_MS`, `TRADE_MIN_MATCHES` |
+| No Titles or trophies | the tradable check reads the live definition, never the client's claim | `trades.ts`, against the parser rule in `shared/src/items.ts` |
+
+Escrow is never forever: a trade nobody touches for 15 minutes expires, at most 6 items go on a
+side, and one player may hold 3 live trades. The ACTIVE-state check runs at **offer and again at
+confirm** — a release rollback, an operator revoke, or the same copy being offered in a second
+trade can all happen between the two, and `confirm()` revalidates both sides from scratch rather
+than settling half a deal.
+
+Two things the spec did not say and the code had to decide. First, **the confirm reset is visible**:
+when a poll (not the player's own click) reveals that this player's confirm has vanished,
+`tradeTab.ts` says *"The offer changed — both confirms were reset. Check the deal again before
+confirming."* A silently unticked box reads as a lost click, or worse, as the scam the reset exists
+to prevent. Second, **`store.flush()` runs before the doc says `'settled'`**: the production store
+debounces profile writes by ~800 ms, so marking a trade settled first would let a crash void or
+half-apply a settlement the trade file swears is finished. The flush is the barrier.
 
 ## Viral sharing
 
@@ -114,6 +177,35 @@ Player-to-player, server-authoritative, with the failure modes designed for rath
 - **Challenges to share**: "beat my time" links that drop the recipient straight into the same level
   with the sender's ghost time to beat.
 
+**As built — three of the four.** The share card and the referral loop are live; "beat my time"
+links are not built and remain spec.
+
+*Share cards.* `GET /api/share/card` renders the caller's last paying round as a 1200×630 PNG
+server-side, gated on `share_cards`, with `client/src/ui/shareCard.ts` as the button — it hands the
+bytes to `navigator.share` where the browser has a share sheet, and otherwise downloads the PNG and
+puts the referral link on the clipboard. It appears on the Quest intermission, the Horde run card
+and in the profile overlay. **Zero dependencies by design**: `server/src/shareCard.ts` writes the
+PNG by hand (IHDR/IDAT/IEND over `node:zlib`) and draws text from a 5×7 pixel font scaled in
+integer steps, which is not a compromise — it is the voxel game's own aesthetic on the card. Server
+CPU only, no client frames. Any sponsor lockup is confined to a 72 px bottom strip (11.4% of the
+card, inside the ≤12% cap in `docs/SPONSORS.md` S36), and an ad-free player's card carries the
+house wordmark and nothing else — that player is doing us a favour.
+
+*Referrals.* `server/src/referrals.ts` behind `GET /api/referral/mine` and `POST
+/api/referral/claim`. The three rules the spec named are the three rules the code holds:
+attribution is **first-wins forever** (a second claim changes nothing); conversion is
+**engagement, never signup** — 30 minutes of paid play (`stats.secondsPlayed`, which only match
+payouts move) or account level 5, both measured server-side; and the payment **is** the journal,
+`kind: 'referral'`, `sourceId: referral:<referredKey>`, so a conversion can never pay twice
+whatever crashes or replays. 100 Scrap to the referrer, 50 to the referred. The fraud controls
+shipped with it rather than after it: 5 conversions per referrer per day, over which a conversion
+**parks in a review queue instead of paying**; a claim from the code owner's own `/24` is accepted
+but marked, and a marked conversion parks the same way; self-referral refused at claim; and a
+player already past the engagement threshold cannot be recruited at all — attribution is for new
+players, not a coupon for veterans. Parked conversions are an operator decision, not a black hole:
+`reviewQueue()` lists them and `approve()` pays one. The conversion check rides
+`onProfilePersisted`, fire-and-forget, because a referral must never delay or break a payout.
+
 ## Competitions
 
 - **Seasons** with a ladder, seasonal rewards, and a reset.
@@ -124,6 +216,83 @@ Player-to-player, server-authoritative, with the failure modes designed for rath
   results. Sponsor-supplied art is **untrusted third-party content** — moderated, size- and
   format-limited, sandboxed, and never injected as markup into the game page. Same rule as the
   advertiser creative in the ad platform.
+
+**As built — seasons, tournaments and challenges.** `server/src/competitions.ts` rides the same
+seam referrals do: `onProfilePersisted`, after every paying round, with zero `room.ts` changes.
+
+*Seasons.* 28 days, rolling, and they **run with no operator attention at all**: finalising one
+mints the next, and a player is auto-enrolled by their first paying round inside the window.
+Standings pay the top ten — 500 / 300 / 200 / 150 / 100 / 100 / 100 / 50 / 50 / 50 Scrap.
+
+*Tournaments* are operator-created, because creating one is where the prize table is decided and
+the finaliser pays that table automatically without asking anybody again. That is why
+`POST /api/admin/competitions/create` **confirm-gates** like the C6 verbs and writes an audit row
+either way, and why cancel is a separate verb — cancelling pays nobody, which is exactly what
+distinguishes it from letting an event end. Entry is explicit (`POST /api/competitions/enter`) with
+the `minLevel` rule checked at the door.
+
+The ladder's arithmetic is **state-based, not event-based**, and that is the whole design: an
+entrant's points are the growth of `progress.xp` — a monotonic counter only match payouts move —
+since the baseline snapshotted at enrolment. There is no per-match event to double-count, to lose
+in a crash, or to replay, and the watermark moves in the same doc write as the points. Each sweep's
+increment is clamped to `MATCH_XP_CAP` (900) and the excess is *forgotten*, so a mid-season account
+merge — which legitimately jumps `xp` by a pre-season amount — smuggles at most one match's worth of
+points into a ladder, once, rather than amortised across every later round.
+
+Prizes pay **only** through the journal, `kind: 'prize'`, `sourceId: prize:<competitionId>`, so
+finalisation is idempotent per player forever; item prizes ride the same tag through the
+inventory's provenance and are checked before granting. Accrual is gated on nothing at all — the
+`economy_competitions` flag hides the *surfaces*, because `shared/src/flags.ts` says a flag flip
+must never lose a season.
+
+**Daily / weekly challenges — the engine (Studio S4).** This bullet was the last unbuilt line in
+this section. It is now the sharpest example in the repo of the "definitions are data" rule.
+
+- **The definitions are a pack.** `content/quests.json` (`shared/src/challenges.ts` parses it),
+  released and versioned like every other pack, authored in the studio's quest editor. A challenge
+  is a **pure predicate over stats** — `kills`, `wins`, `bestStreak`, `damageDealt`, `blocksPlaced`,
+  `blocksBroken` — and never over a mode. `seconds` is deliberately absent: time passes for an idle
+  player too, and a stat you cannot fail to accumulate is a login reward wearing a challenge's name.
+- **Trust decides who banks.** Progress accrues only in sessions whose trust row grants
+  `REWARD_CHALLENGE` — the public server rows. Solo and private matches bank **nothing**, which is
+  the same boundary that already governs XP and drops rather than a second one invented for
+  challenges.
+- **The guard re-derives every claim.** The room attaches the ids its round contributed to; the
+  entitlement guard keeps only those whose definition exists in *that session's recorded pack* and
+  whose predicate the sanitised stats actually satisfy, using the same `challengeContribution`
+  function the room used. One predicate, three callers, zero modes.
+- **Payment happens inside the match payout.** `settleChallenges` runs in the same `store.update`
+  callback as `applyMatchResult`, under the same per-device lock, off one wall clock — so the
+  counter, the receipt, the Scrap, the item and the journal row commit or vanish together, and a
+  midnight straddle cannot split a receipt from its idempotency key. The row is `kind: 'prize'`,
+  `sourceId: challenge:<id>:<periodKey>`, and its `delta` is the **observed** movement read back
+  off the balance, never the amount asked for — the `MAX_SCRAP_BALANCE` clamp is allowed to bite
+  and the row has to say so. Once per UTC day, or per ISO week (Monday-start).
+- **A completion that cannot be paid becomes a DEBT.** Public Builder grants challenge progress but
+  deliberately not Scrap, so a challenge finished there would otherwise be earned and lost. Instead
+  it lands on the profile's period-stamped `owed` list and is paid at the first settlement that
+  can. This is what makes the midnight roll safe: wiping the counters at UTC midnight cannot eat a
+  completion earned at 23:50 in a room that was not allowed to pay it.
+- **Item rewards pay both halves or neither.** `grantDrops` refuses at the inventory cap and
+  reports what actually landed, so an item that cannot land keeps the whole completion owed rather
+  than writing a receipt for an item that silently evaporated.
+- **The mint bound is the parser.** Challenge payouts skip the daily meter (above), so the ceiling
+  is the manifest the release gate accepted: 500 Scrap per definition, 2 000 across the board, and
+  at most 8 definitions — the whole active set has to fit one result submission. The gate also
+  cross-checks every `item` a challenge pays against the paired items manifest, so renaming an item
+  and forgetting the quests pack fails the release rather than the player.
+
+The **kill switch is real on both halves**: `economy_competitions` gates the producer in the room
+*and* the payer in the settlement. Gating only the producer would leave an operator who pulled the
+flag over a mispriced definition still paying every player already sitting at target. Item rewards
+additionally ride `economy_items`, exactly as match drops do — one flag, one meaning, wherever an
+item is minted.
+
+**The sponsored half of this section is still spec.** `competitions.ts` reads no sponsor anywhere:
+a funded prize pool today is an operator typing a prize table into the create verb, and there is no
+branded event. The untrusted-art rule above is the one part that shipped, and it shipped next door
+— `server/src/creatives.ts` and the sha256-bound `sponsors.json` approval flow in the ad platform
+(`docs/SPONSORS.md`), which is the same rule applied to the same kind of content.
 
 ## Where it surfaces in the game
 

@@ -160,7 +160,8 @@ describe('the challenges section', () => {
     const v = buildChallengesSection([chal()]);
     expect(v.note).toContain('midnight UTC');
     expect(v.note).toContain('Monday');
-    expect(v.note).toContain('online matches only');
+    expect(v.note).toContain('public online matches');
+    expect(v.note).toContain('private');
   });
 
   it('no rendered string ever says NaN, Infinity or undefined', () => {

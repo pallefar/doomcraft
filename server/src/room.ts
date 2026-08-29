@@ -44,6 +44,7 @@ import {
   createModeContextMessage,
   createModeEventMessage,
   getMode,
+  WinCondition,
   legacyGameMode,
   type ModeActionMessage,
   type ModeContextMessage,
@@ -1282,8 +1283,15 @@ export class Room implements NetHost {
     for (const m of this.members.values()) {
       if (!best || m.player.kills > best.kills) best = m.player;
     }
+    /* A mode with no win condition has no winner to record. Builder's
+     * WinCondition.NONE used to still stamp `won` on whoever led the kill
+     * count (or, at 0 kills all round, on whoever happened to be first in
+     * the member map) — harmless while it only inflated a stat, money the
+     * moment a challenge pays for wins. Read off the mode DESCRIPTOR, never
+     * a ModeId literal: reward code stays mode-blind by construction. */
+    const winnable = getMode(this.plan.modeId).win !== WinCondition.NONE;
     for (const m of this.members.values()) {
-      void this.persistMember(m, best !== null && m.player.id === best.id);
+      void this.persistMember(m, winnable && best !== null && m.player.id === best.id);
     }
     // AFTER the loop, never before. `reviewSubmission` refuses anything that
     // arrives past `closedMs`, so closing first would reject the whole room.

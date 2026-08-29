@@ -342,6 +342,26 @@ describe('a server-hosted public deathmatch', () => {
     expect(guard.recent()).toEqual([]);
   });
 
+  it('a mode with NO win condition never stamps a win — Builder has no winner to record', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard, plan: planFor(ModeId.BUILDER), name: 'builder-public' });
+
+    const client = join(room, 'Mason', DEVICE);
+    client.player.kills = 3; // the kill LEAD, which used to be read as a win
+
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+
+    const profile = await store.ensure(DEVICE);
+    // gamesPlayed proves the round actually paid stats — without it a zero
+    // `wins` would pass for the wrong reason (a row that granted nothing).
+    expect(profile.progress.gamesPlayed).toBe(1);
+    expect(profile.progress.wins).toBe(0);
+    expect(profile.stats.wins).toBe(0);
+  });
+
   it('opens one ledger session per ROUND, named for the room and the round', () => {
     const store = new MemoryStore();
     const guard = new EntitlementGuard(() => 1_000);
@@ -719,7 +739,10 @@ describe('Scrap', () => {
     expect(unpaid.economy.lifetimeScrap).toBe(0);
     // Not "the room paid nothing" — the room asked and was refused. XP still
     // landed, so this is a strip of one reward kind rather than a dead room.
-    expect(unpaid.progress.xp).toBe(expectedXp(KILLS, true, PLAY_TICKS + 1));
+    // `won: false` because Builder is WinCondition.NONE: leading the kill
+    // count in a mode with no win condition is not a win, so no win bonus.
+    expect(unpaid.progress.xp).toBe(expectedXp(KILLS, false, PLAY_TICKS + 1));
+    expect(unpaid.progress.xp).toBeGreaterThan(0);
     expect(unpaid.progress.gamesPlayed).toBe(1);
 
     const audit = guard.recent();

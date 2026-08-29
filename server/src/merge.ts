@@ -135,6 +135,29 @@ export function applyMergeFields(a: StoredProfile, b: StoredProfile, nowMs: numb
   // are not touched — a half-merged control scheme is worse than either one.
   a.createdMs = Math.min(a.createdMs, b.createdMs);
 
+  /* CHALLENGES — one human, one board. The journal's idempotency key ends
+   * in the PROFILE KEY, so a receipt earned on B stops protecting anything
+   * the moment the player is A: without this union the same daily could be
+   * completed and paid a second time on the surviving profile in the same
+   * period. Counts take the MAX for a shared period (progress is one
+   * person's, not two), and debts union so a merge cannot swallow one. */
+  const ca = a.challenges;
+  const cb = b.challenges;
+  if (cb.day === ca.day) {
+    for (const id of cb.done) if (!ca.done.includes(id)) ca.done.push(id);
+  }
+  if (cb.week === ca.week) {
+    for (const id of cb.done) if (!ca.done.includes(id)) ca.done.push(id);
+  }
+  for (const [id, n] of Object.entries(cb.counts)) {
+    const samePeriod = id.startsWith('daily.') ? cb.day === ca.day : cb.week === ca.week;
+    if (!samePeriod) continue;
+    ca.counts[id] = Math.max(ca.counts[id] ?? 0, n);
+  }
+  for (const o of cb.owed) {
+    if (!ca.owed.some((x) => x.sourceId === o.sourceId)) ca.owed.push(o);
+  }
+
   // BAG — union, A wins on collision; B's bag stays on B's tombstone too.
   if (b._unknown !== undefined) a._unknown = { ...b._unknown, ...(a._unknown ?? {}) };
 

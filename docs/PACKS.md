@@ -103,7 +103,7 @@ The request names seven things. They are not seven of the same thing, and a desi
 | 3 | **expansion packs** | `PackKind.CAMPAIGN` (`content/episodes.json`) + the levels pack it names, published as **one release**. The release *is* the expansion unit | **data** | **SHIP** |
 | 4 | **weapons** | `PackKind.WEAPONS` — `shared/src/weapons.ts` | **build** | **SHIP** (identity, version, fingerprint, diff, rollback target — delivery stays a deploy) |
 | 5 | **characters** | `PackKind.CHARACTERS` — the `CharacterLook` table + `cast.glb`/`cast.png` | **build** | **LATER** (§11 phase 6) |
-| 6 | **quests** | `PackKind.QUESTS`, **reserved number, no producer** | — | **LATER** — nothing to extract, see §1.3 |
+| 6 | **quests** | `PackKind.QUESTS` — the daily/weekly challenge board: `shared/src/challenges.ts` + `content/quests.json` | **data** | **SHIP** — was **LATER** with nothing to extract until Studio S4 built the engine; §1.3 |
 | 7 | **maps** | folded into `PackKind.CORE` via `TERRAIN_VERSION` | **build** | **REJECTED as a pack** — see §1.4 |
 | + | *(implied by the economy)* | `PackKind.ITEMS`, **reserved number, no producer** | — | **LATER**, with the ownership rule written down now (§7) |
 
