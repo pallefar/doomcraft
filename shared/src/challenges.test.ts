@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CHALLENGE_STATS,
   MAX_CHALLENGES_PER_PACK,
+  MAX_CHALLENGE_INPUT_BYTES,
   MAX_CHALLENGE_SCRAP,
   MAX_CHALLENGE_TOTAL_SCRAP,
   challengeAggregation,
@@ -26,7 +27,7 @@ import {
   utcWeekKey,
   type ChallengeStatSource,
 } from './challenges.ts';
-import { PackKind, questsPack } from './packs.ts';
+import { MAX_PACK_INPUT_BYTES, PackKind, questsPack } from './packs.ts';
 
 const QUESTS_JSON = fileURLToPath(new URL('../../content/quests.json', import.meta.url));
 
@@ -89,6 +90,23 @@ describe('the parser refuses instead of correcting', () => {
     expect(r.manifest).toBeNull();
     expect(r.errors[0]).toContain('MAX_CHALLENGE_TOTAL_SCRAP');
     expect(2500).toBeGreaterThan(MAX_CHALLENGE_TOTAL_SCRAP);
+  });
+
+  it('refuses a def whose name+blurb overflow ONE pack input line — the gate would refuse the version forever', () => {
+    // Parser-legal on every other axis: 40-char name, 118-char blurb.
+    const r = parseChallengesManifest(manifest(def({
+      name: 'N'.repeat(40), blurb: 'B'.repeat(118),
+    })));
+    expect(r.manifest).toBeNull();
+    expect(r.errors[0]).toContain('MAX_PACK_INPUT_BYTES');
+    // And the cap agrees with the pack registry's, so they cannot drift.
+    expect(MAX_CHALLENGE_INPUT_BYTES).toBe(MAX_PACK_INPUT_BYTES);
+  });
+
+  it('counts UTF-8 BYTES, not UTF-16 units — an emoji blurb cannot smuggle a long line', () => {
+    const r = parseChallengesManifest(manifest(def({ blurb: '🔥'.repeat(40) })));
+    expect(r.manifest).toBeNull();
+    expect(r.errors[0]).toContain('byte pack input line');
   });
 
   it('refuses a challenge that pays nothing, has no name, or has no blurb', () => {

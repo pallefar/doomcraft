@@ -78,6 +78,22 @@ export const MAX_CHALLENGE_TOTAL_SCRAP = 2000;
 export const MAX_CHALLENGE_TARGET = 1_000_000;
 export const MAX_CHALLENGE_NAME = 48;
 export const MAX_CHALLENGE_BLURB = 120;
+/**
+ * Mirrors `MAX_PACK_INPUT_BYTES` (shared/src/packs.ts). Declared here rather
+ * than imported to keep this module free of the pack registry; the
+ * challenges test asserts the two agree, so they cannot drift.
+ */
+export const MAX_CHALLENGE_INPUT_BYTES = 160;
+
+/** UTF-8 byte length without node:Buffer — this module runs in the browser too. */
+function utf8Bytes(s: string): number {
+  let n = 0;
+  for (const ch of s) {
+    const c = ch.codePointAt(0) ?? 0;
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+  }
+  return n;
+}
 
 export interface ChallengesParseResult {
   manifest: ChallengesManifest | null;
@@ -169,6 +185,20 @@ export function parseChallengesManifest(text: string): ChallengesParseResult {
   if (totalScrap > MAX_CHALLENGE_TOTAL_SCRAP) {
     errors.push(`the manifest pays ${totalScrap} Scrap in total, over the `
       + `${MAX_CHALLENGE_TOTAL_SCRAP} cap (MAX_CHALLENGE_TOTAL_SCRAP)`);
+  }
+  /* Every def must fit ONE pack input line. The release gate caps input
+   * lines at MAX_PACK_INPUT_BYTES and a version directory is immutable, so
+   * a manifest that parses but overflows the line mints a pack that can
+   * never pass a gate and can never be edited in place — an editor that
+   * accepts what the machine will refuse forever. The parser owns the cap
+   * because the studio route and the bundled manifest share it. */
+  for (const line of challengesFingerprintInputs({ challenges: defs })) {
+    const bytes = utf8Bytes(line);
+    if (bytes > MAX_CHALLENGE_INPUT_BYTES) {
+      errors.push(`${line.slice(0, line.indexOf(':'))}: its name and blurb make a `
+        + `${bytes}-byte pack input line, over the ${MAX_CHALLENGE_INPUT_BYTES}-byte cap `
+        + '(MAX_PACK_INPUT_BYTES — the release gate would refuse the version forever)');
+    }
   }
   if (errors.length > 0) return { manifest: null, errors };
   return { manifest: Object.freeze({ challenges: Object.freeze(defs) }), errors };

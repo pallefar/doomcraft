@@ -920,6 +920,21 @@ export function checkTrustTable(rows: readonly TrustPolicy[]): string[] {
       );
     }
 
+    /* 2b. A paying row must also grant STATS, because the payout path reads
+     *     the granted stats block: `toMatchResult` returns null when it is
+     *     null, and by then the guard has already marked the device settled
+     *     for the session. A row that pays without STATS is therefore an
+     *     accepted, settled, silently unpaid round — no error, no audit
+     *     line, no replay. Convention held this true; nothing enforced it. */
+    const PAYING = REWARD_XP | REWARD_SCRAP | REWARD_ITEM_DROP | REWARD_CHALLENGE;
+    if ((p.grants & PAYING) !== 0 && (p.grants & REWARD_STATS) === 0) {
+      problems.push(
+        `${where}: grants ${rewardKeys(p.grants & PAYING).join('+')} without REWARD_STATS — `
+        + 'the payout reads the granted stats block, so this row would settle the device '
+        + 'and pay nothing',
+      );
+    }
+
     /* 3. Rating only where rating is at stake. */
     if ((p.grants & REWARD_RANKED_RATING) !== 0
       && p.matchType !== MatchType.RANKED && p.matchType !== MatchType.COMPETITION) {

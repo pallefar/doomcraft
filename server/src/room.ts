@@ -1569,7 +1569,14 @@ export class Room implements NetHost {
          * and every owed completion pays has-first, per completion, with
          * its own journal row (server/src/persistence.ts settleChallenges —
          * the crash-window analysis lives on that function). */
-        if (this.challenges.length > 0) {
+        /* The kill switch is real on BOTH halves: killing
+         * economy_competitions stops the producer (challengeIdsFor) and the
+         * payer, or an operator who pulls the flag over a mispriced def
+         * keeps paying every player already at target. Item rewards ride
+         * economy_items as well, exactly as match drops do — one flag, one
+         * meaning, wherever an item is minted. */
+        const challengeFlags = conn.flagBits;
+        if (this.challenges.length > 0 && flagOn(challengeFlags, 'economy_competitions')) {
           await settleChallenges(profile, {
             defs: this.challenges,
             grantedIds: result.challengeIds,
@@ -1577,7 +1584,7 @@ export class Room implements NetHost {
             nowMs: now,
             deviceId,
             mayPayScrap: result.mayPayChallenges,
-            mayGrantItems: result.mayGrantChallengeItems,
+            mayGrantItems: result.mayGrantChallengeItems && flagOn(challengeFlags, 'economy_items'),
             itemVersion: this.challengeItemVersion,
             journal,
             rowId: newLedgerId,

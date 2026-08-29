@@ -103,7 +103,14 @@ export class StudioService {
   /** tmp-then-rename into a version directory that must not exist yet. */
   private writeVersioned(key: string, version: number, files: Record<string, string>): void {
     const dir = join(this.packsRoot as string, key, String(version));
-    if (existsSync(dir)) throw new Error(`${key}@${version} already exists — a version directory is immutable`);
+    /* Immutability protects a version that EXISTS, not the empty directory a
+     * torn save left behind: the version numbering counts a version only
+     * once its manifest file is in it, so a crash between mkdir and rename
+     * used to wedge the studio forever — every retry recomputed the same
+     * number and hit this throw, with no way out but a shell on the volume. */
+    if (existsSync(dir) && readdirSync(dir).length > 0) {
+      throw new Error(`${key}@${version} already exists — a version directory is immutable`);
+    }
     mkdirSync(dir, { recursive: true });
     for (const [name, text] of Object.entries(files)) {
       const target = join(dir, name);
@@ -238,11 +245,25 @@ export class StudioService {
   validateQuestsSource(text: string): { ok: boolean; detail: string } {
     const parsed = parseChallengesManifest(text);
     if (parsed.manifest === null) return { ok: false, detail: parsed.errors.join('; ') };
+    /* Item refs are checked against EVERY installed items version, not just
+     * the newest. The gate checks the pairing the DRAFT names, so refusing
+     * an id that lives only in an older version would make a pairing the
+     * gate would happily pass unauthorable — and the dormant direction
+     * (an id dropped by a newer items cut) is legal by docs/PACKS.md §7. */
     const iv = this.inventory.itemsVersions();
-    const items = iv.length > 0 ? this.inventory.itemsAt(iv[iv.length - 1]) : null;
-    const refs = checkQuestsRefs(parsed.manifest, items?.manifest ?? null);
-    if (!refs.ok) {
-      return { ok: false, detail: `would fail quests.refs (against items@${iv.at(-1) ?? '?'}): ${refs.detail}` };
+    const known = new Set<string>();
+    for (const v of iv) {
+      for (const i of this.inventory.itemsAt(v)?.manifest.items ?? []) known.add(i.id);
+    }
+    const missing = parsed.manifest.challenges
+      .filter((c) => c.item !== null && !known.has(c.item))
+      .map((c) => `${c.id} pays "${c.item ?? ''}"`);
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        detail: `would fail quests.refs — no installed items version (${iv.join(', ') || 'none'}) `
+          + `carries: ${missing.join('; ')}`,
+      };
     }
     const total = parsed.manifest.challenges.reduce((sum, c) => sum + c.scrap, 0);
     return {

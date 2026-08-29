@@ -96,6 +96,21 @@ server.stdout?.resume(); server.stderr?.on('data', (d) => process.stderr.write(d
 try {
   if (!(await waitForPort(PORT, 60_000))) throw new Error('server did not come up');
 
+  /* Re-seed AFTER boot: the period keys a profile carries are only "current"
+   * until the next UTC midnight, and the build + boot above can take a
+   * minute. Seeding once at launch and asserting later is a capture that
+   * fails on correct code. */
+  writeFileSync(join(shard, `${SEED_DEVICE}.json`), JSON.stringify({
+    version: 6, deviceId: SEED_DEVICE, createdMs: Date.now() - 30 * 86_400_000,
+    progress: { name: 'Marine', xp: 4200 },
+    stats: { matches: 20 },
+    challenges: {
+      day: utcDayKey(Date.now()), week: utcWeekKey(Date.now()),
+      counts: { 'daily.kill-25': 10, 'weekly.streak-8': 5 },
+      done: ['daily.win-1'],
+    },
+  }), 'utf8');
+
   mkdirSync('shots', { recursive: true });
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });

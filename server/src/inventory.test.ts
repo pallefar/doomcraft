@@ -66,7 +66,7 @@ describe('v4 -> v5', () => {
     };
     const p = migrateProfile(v5, 'device-fixture-v5', 1_755_100_000_000);
     expect(p.version).toBe(6);
-    expect(p.challenges).toEqual({ day: '', week: '', counts: {}, done: [] });
+    expect(p.challenges).toEqual({ day: '', week: '', counts: {}, done: [], owed: [] });
     expect(p.economy.scrap).toBe(860);
     expect(p.economy.lifetimeScrap).toBe(1200);
   });

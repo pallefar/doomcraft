@@ -34,6 +34,8 @@ import {
   REWARD_ITEM_DROP,
   REWARD_NONE,
   REWARD_RANKED_RATING,
+  REWARD_SCRAP,
+  REWARD_STATS,
   REWARD_SPONSOR_PRIZE,
   REWARD_XP,
   SessionOrigin,
@@ -207,6 +209,16 @@ describe('a bad edit to the table is refused', () => {
     expect(dmPrivate.topology).toBe(Topology.SERVER_AUTHORITATIVE);
     const bad = mutate(dmPrivate, { grants: REWARD_CASUAL });
     expect(checkTrustTable([bad]).join('\n')).toMatch(/farm/i);
+  });
+
+  it('refuses a paying row that does not also grant REWARD_STATS', () => {
+    // toMatchResult returns null without the stats block, AFTER the guard has
+    // marked the device settled — such a row accepts, settles and pays
+    // nothing, silently and unreplayably. Convention held this; now the
+    // table does.
+    const bad = mutate(dmPublic, { grants: (dmPublic.grants | REWARD_SCRAP) & ~REWARD_STATS });
+    expect(checkTrustTable([bad]).join('\n')).toMatch(/REWARD_STATS/);
+    expect(() => { validateTrustTable([bad]); }).toThrow(/unsound/);
   });
 
   it('refuses ranked rating in a casual queue', () => {

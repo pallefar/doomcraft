@@ -179,6 +179,37 @@ describe('the challenge board editor (S4)', () => {
     expect(!r.ok && r.error).toContain('skin-ghost');
   });
 
+  it('accepts an item id that lives only in an OLDER items version — the gate checks the pairing the DRAFT names', () => {
+    const root = seededRoot();
+    const { studio } = studioWith(root);
+    // items@2 drops title-knee-deep (the dormant direction, gate-legal).
+    const manifest = JSON.parse(readFileSync(join(root, 'items', '1', 'items.json'), 'utf8')) as {
+      items: { id: string }[];
+    };
+    manifest.items = manifest.items.filter((i) => i.id !== 'title-knee-deep');
+    expect(studio.saveItems(JSON.stringify(manifest)).ok).toBe(true);
+    // A quests version paying it is still authorable: a draft pinning
+    // items@1 is a pairing runGate would pass.
+    const r = studio.saveQuests(board([def({ item: 'title-knee-deep' })]));
+    expect(r.ok).toBe(true);
+    // An id in NO installed version is still refused, naming what it looked in.
+    const ghost = studio.saveQuests(board([def({ item: 'skin-ghost' })]));
+    expect(ghost.ok).toBe(false);
+    expect(!ghost.ok && ghost.error).toContain('no installed items version');
+  });
+
+  it('recovers from a torn save: an EMPTY version directory is not an immutable version', () => {
+    const root = seededRoot();
+    const { studio } = studioWith(root);
+    // The crash shape: mkdir succeeded, the manifest never landed.
+    mkdirSync(join(root, 'quests', '2'), { recursive: true });
+    const r = studio.saveQuests(board([def()]));
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.label).toBe('quests@2');
+    // A version that really exists is still immutable.
+    expect(() => studio.saveQuests(board([def()]))).not.toThrow();
+  });
+
   it('mints the next quests version; immutability mints again, never rewrites', () => {
     const { studio, inv } = studioWith(seededRoot());
     const r = studio.saveQuests(board([def({ item: 'title-knee-deep' })]));

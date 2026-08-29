@@ -15,10 +15,12 @@ import type { ChallengeDef } from '@doomcraft/shared/challenges';
 
 import { JsonJournal, newLedgerId } from './journal.js';
 import {
+  MAX_OWNED_ITEMS,
   MAX_SCRAP_BALANCE,
   accrueChallenges,
   createProfile,
   creditChallengeScrap,
+  migrateProfile,
   settleChallenges,
   type ChallengeSettlementDeps,
   type StoredProfile,
@@ -146,6 +148,50 @@ describe('payment is has-first, once per period', () => {
     expect(await h.journal.has('prize', 'challenge:weekly.wins-2:2026-W35', DEVICE)).toBe(true);
   });
 
+  it('carries an owed completion ACROSS the period roll — the roll must not eat a debt', async () => {
+    const h = harness();
+    // Earned at 23:50 in a Builder-shaped session that may not pay.
+    const late = NOON + 11.8 * 3_600_000; // 2026-08-28 23:48 UTC
+    await settleChallenges(h.profile, h.deps({
+      grantedIds: ['daily.kill-5'], stats: stats({ kills: 5 }), nowMs: late, mayPayScrap: false,
+    }));
+    expect(h.profile.economy.scrap).toBe(0);
+    expect(h.profile.challenges.owed.map((o) => o.id)).toEqual(['daily.kill-5']);
+
+    // Next day, a paying match. The counter is rolled away — the DEBT is not.
+    const nextDay = late + 40 * 60_000; // 00:28 UTC on the 29th
+    const paid = await settleChallenges(h.profile, h.deps({ nowMs: nextDay }));
+    expect(paid).toEqual([{ id: 'daily.kill-5', scrap: 40 }]);
+    expect(h.profile.economy.scrap).toBe(40);
+    // Paid under YESTERDAY's key, so today's copy of the same challenge is
+    // still earnable — the receipt belongs to the period it was earned in.
+    expect(await h.journal.has('prize', 'challenge:daily.kill-5:2026-08-28', DEVICE)).toBe(true);
+    expect(h.profile.challenges.done).not.toContain('daily.kill-5');
+    expect(h.profile.challenges.owed).toEqual([]);
+  });
+
+  it('keeps an item-bearing completion owed when the inventory is FULL, then pays it when space frees', async () => {
+    const h = harness();
+    for (let i = 0; i < MAX_OWNED_ITEMS; i++) {
+      h.profile.inventory.items.push({ ref: `items@1:filler-${i}`, ms: NOON, source: 'drop', sourceId: 's' });
+    }
+    const blocked = await settleChallenges(h.profile, h.deps({
+      grantedIds: ['weekly.streak-3'], stats: stats({ bestStreak: 4 }),
+    }));
+    // BOTH halves or neither: no scrap, no receipt, no row — still owed.
+    expect(blocked).toEqual([]);
+    expect(h.profile.economy.scrap).toBe(0);
+    expect(h.profile.challenges.done).toEqual([]);
+    expect(h.profile.challenges.owed.map((o) => o.id)).toEqual(['weekly.streak-3']);
+    expect(await h.journal.has('prize', 'challenge:weekly.streak-3:2026-W35', DEVICE)).toBe(false);
+
+    h.profile.inventory.items.length = MAX_OWNED_ITEMS - 1;
+    const paid = await settleChallenges(h.profile, h.deps({}));
+    expect(paid).toEqual([{ id: 'weekly.streak-3', scrap: 100 }]);
+    expect(h.profile.inventory.items.some((i) => i.ref === 'items@1:title-knee-deep')).toBe(true);
+    expect(h.profile.challenges.owed).toEqual([]);
+  });
+
   it('banks progress where payment cannot happen, and pays in the first session that can', async () => {
     const h = harness();
     // A Builder-shaped settlement: challenge progress granted, Scrap not.
@@ -212,5 +258,43 @@ describe('creditChallengeScrap', () => {
     profile.economy.scrap = MAX_SCRAP_BALANCE - 3;
     const moved = creditChallengeScrap(profile, 40);
     expect(moved).toEqual({ before: MAX_SCRAP_BALANCE - 3, after: MAX_SCRAP_BALANCE });
+  });
+});
+
+describe('stored challenge state survives a disk round trip', () => {
+  it('keeps the NEWEST entries at the cap — evicting a live receipt would re-open double-pay', () => {
+    // 300 stale ids from re-cut packs at the FRONT, the live pack's at the back.
+    const counts: Record<string, number> = {};
+    const done: string[] = [];
+    for (let i = 0; i < 300; i++) { counts[`weekly.stale-${i}`] = 1; done.push(`weekly.stale-${i}`); }
+    counts['weekly.live'] = 3;
+    done.push('weekly.live');
+    const p = migrateProfile({
+      version: 6, deviceId: DEVICE,
+      challenges: { day: '2026-08-28', week: '2026-W35', counts, done, owed: [] },
+    }, DEVICE, NOON);
+    expect(p.challenges.counts['weekly.live']).toBe(3);
+    expect(p.challenges.done).toContain('weekly.live');
+    // The oldest are the ones that fall off, never the live pack's.
+    expect(p.challenges.counts['weekly.stale-0']).toBeUndefined();
+  });
+
+  it('round-trips owed entries and refuses malformed ones', () => {
+    const p = migrateProfile({
+      version: 6, deviceId: DEVICE,
+      challenges: {
+        day: '', week: '', counts: {}, done: [],
+        owed: [
+          { id: 'daily.kill-5', periodKey: '2026-08-28', sourceId: 'challenge:daily.kill-5:2026-08-28', scrap: 40, item: null },
+          { id: 'daily.kill-5', periodKey: '2026-08-28', sourceId: 'challenge:daily.kill-5:2026-08-28', scrap: 999, item: null },
+          { id: '', periodKey: 'x', sourceId: 'y', scrap: 1, item: null },
+          { nonsense: true },
+        ],
+      },
+    }, DEVICE, NOON);
+    expect(p.challenges.owed).toEqual([{
+      id: 'daily.kill-5', periodKey: '2026-08-28',
+      sourceId: 'challenge:daily.kill-5:2026-08-28', scrap: 40, item: null,
+    }]);
   });
 });

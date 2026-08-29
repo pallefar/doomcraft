@@ -139,16 +139,20 @@ export class CompetitionsTab {
         Promise<{ status: number; challenges?: WireChallenge[] }>,
     ]);
     if (this.destroyed) return;
+    this.challenges = chal.status === 200 && Array.isArray(chal.challenges)
+      ? chal.challenges
+      : null;
     if (res.status === 200 && Array.isArray(res.competitions)) {
       this.competitions = res.competitions;
       this.phase = 'ready';
     } else {
       this.competitions = [];
-      this.phase = 'offline';
+      /* Two independent fetches, one screen: only claim the server is
+       * unreachable when BOTH failed. A challenges board rendered live
+       * under 'No server answered' calls the same screen a liar. */
+      this.phase = this.challenges === null ? 'offline' : 'ready';
+      if (this.challenges !== null) this.error = 'Competitions could not be loaded.';
     }
-    this.challenges = chal.status === 200 && Array.isArray(chal.challenges)
-      ? chal.challenges
-      : null;
     // A stale expansion survives a refetch only if its competition still runs.
     if (this.open !== '' && !this.competitions.some((c) => c.id === this.open)) this.open = '';
     this.render();

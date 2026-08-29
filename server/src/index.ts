@@ -954,6 +954,10 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
      */
     const roomInstanceId = randomBytes(8).toString('hex');
     const release = releases.resolveFor(roomInstanceId);
+    /* The items version challenge rewards are formatted against — pinned
+     * once, read by both the defs filter and the settlement. */
+    const challengeItemVersion = release.packs.find((pk) => pk.kind === PackKind.ITEMS)?.version
+      ?? (inventory.itemsVersions().at(-1) ?? 1);
     const room = new Room({
       ...options,
       store,
@@ -1027,10 +1031,19 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
         const qi = qdecl !== undefined
           ? inventory.questsAt(qdecl.version)
           : inventory.questsAt(inventory.questsVersions().at(-1) ?? 1);
-        return qi?.manifest.challenges ?? [];
+        const defs = qi?.manifest.challenges ?? [];
+        /* The gate checks quests.refs against the items version THE SAME
+         * DRAFT names — but a release that names no quests pack falls back
+         * to the newest installed one, a pairing no gate ever saw (a
+         * rollback to a pre-S4 release is the live example). Re-check the
+         * pairing HERE, at pin time, and drop a def whose item id is not in
+         * the pinned items manifest: a challenge that cannot pay the reward
+         * it advertises must not be on the board at all. */
+        const pinnedItems = inventory.itemsAt(challengeItemVersion);
+        const known = new Set((pinnedItems?.manifest.items ?? []).map((i) => i.id));
+        return defs.filter((d) => d.item === null || known.has(d.item));
       })(),
-      challengeItemVersion: release.packs.find((pk) => pk.kind === PackKind.ITEMS)?.version
-        ?? (inventory.itemsVersions().at(-1) ?? 1),
+      challengeItemVersion,
     });
     room.start();
     return room;

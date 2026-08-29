@@ -73,7 +73,7 @@ function seedChallenger(
   }), 'utf8');
 }
 
-interface Boot { child: ChildProcess; origin: string }
+interface Boot { child: ChildProcess; origin: string; dataRoot: string }
 
 async function boot(env: Record<string, string>, seed: (dataRoot: string) => void): Promise<Boot> {
   const port = await freePort();
@@ -105,7 +105,7 @@ async function boot(env: Record<string, string>, seed: (dataRoot: string) => voi
     } catch { /* not up yet */ }
     await new Promise((r) => setTimeout(r, 150));
   }
-  return { child, origin };
+  return { child, origin, dataRoot };
 }
 
 let on: Boot;
@@ -125,10 +125,6 @@ beforeAll(async () => {
           day: '2020-01-01', week: '2020-W01',
           counts: { 'daily.kill-25': 25, 'weekly.wins-10': 10 },
           done: ['daily.kill-25', 'weekly.wins-10'],
-        });
-        seedChallenger(dataRoot, FRESH, {
-          day: utcDayKey(Date.now()), week: utcWeekKey(Date.now()),
-          counts: { 'daily.kill-25': 10 }, done: ['daily.win-1'],
         });
       },
     ),
@@ -218,6 +214,13 @@ describe('competitions over the wire', () => {
 
 describe('challenges over the wire (Studio S4)', () => {
   it('serves the shipped board with per-caller progress; the flagless host hides it', async () => {
+    /* Seeded HERE, not in beforeAll: the period keys a profile carries are
+     * only "current" until the next UTC midnight, so the gap between seed
+     * and request is the window in which correct code turns this red. */
+    seedChallenger(on.dataRoot, FRESH, {
+      day: utcDayKey(Date.now()), week: utcWeekKey(Date.now()),
+      counts: { 'daily.kill-25': 10 }, done: ['daily.win-1'],
+    });
     const view = await call(on.origin, `/api/challenges?device=${FRESH}`);
     expect(view.status).toBe(200);
     expect(view.json?.day).toBe(utcDayKey(Date.now()));

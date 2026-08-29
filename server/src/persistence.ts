@@ -145,7 +145,25 @@ export interface StoredEconomy {
  * only spans ~48 h and a weekly period outlives it. Ids carry their period
  * as a prefix by construction (`daily.`/`weekly.` — the parser refuses
  * anything else), which is what lets the roll prune by prefix.
+ *
+ * `owed` is the other durable half, and the reason a period roll cannot
+ * eat a debt: a completion banked in a session that may not PAY (public
+ * Builder grants challenge progress but not Scrap) lands here with the
+ * period key it was earned in, survives the roll that wipes `counts`, and
+ * pays at the first settlement that can. Without it the roll silently
+ * forfeited every banked-but-unpaid completion at UTC midnight.
  */
+export interface ChallengeOwed {
+  readonly id: string;
+  /** The period the completion was EARNED in — never recomputed at pay time. */
+  readonly periodKey: string;
+  /** `challenge:<id>:<periodKey>` — the journal idempotency source. */
+  readonly sourceId: string;
+  readonly scrap: number;
+  /** Items-manifest local id, or null. */
+  readonly item: string | null;
+}
+
 export interface StoredChallenges {
   /** UTC 'YYYY-MM-DD' the daily counters belong to. */
   day: string;
@@ -155,6 +173,8 @@ export interface StoredChallenges {
   counts: Record<string, number>;
   /** Challenge ids completed AND PAID in their current period. */
   done: string[];
+  /** Completions earned but not yet paid. Carries its own period key. */
+  owed: ChallengeOwed[];
 }
 
 /**
@@ -403,7 +423,7 @@ function defaultInventory(): StoredInventory {
   return { items: [], equippedSkin: '', title: '' };
 }
 function defaultChallenges(): StoredChallenges {
-  return { day: '', week: '', counts: {}, done: [] };
+  return { day: '', week: '', counts: {}, done: [], owed: [] };
 }
 function defaultModeration(): StoredModeration {
   return { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] };
@@ -488,7 +508,7 @@ const MIGRATIONS: Array<(raw: AnyRecord) => AnyRecord> = [
   // 5 -> 6: daily/weekly challenge state arrived (Studio S4). Reads what is
   // there rather than overwriting it, same idempotency argument as 3 -> 4.
   (raw) => {
-    raw.challenges = raw.challenges ?? { day: '', week: '', counts: {}, done: [] };
+    raw.challenges = raw.challenges ?? { day: '', week: '', counts: {}, done: [], owed: [] };
     raw.version = 6;
     return raw;
   },
@@ -605,16 +625,26 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
   return out;
 }
 
-/** Bounds on stored challenge state — a hostile or buggy write stays a small one. */
-const MAX_CHALLENGE_STATE_ENTRIES = 64;
+/**
+ * Bounds on stored challenge state — a hostile or buggy write stays a small
+ * one. The cap KEEPS THE NEWEST entries, never the oldest: `counts` and
+ * `done` are append-ordered, so a profile that accumulated ids from re-cut
+ * packs holds the stale ones at the front — trimming from the front would
+ * evict exactly the live pack's counters and, worse, its paid receipts.
+ * A `done` receipt older than the journal's ~48 h window is the ONLY thing
+ * standing between a re-cut and a double payout.
+ */
+const MAX_CHALLENGE_STATE_ENTRIES = 256;
+const MAX_CHALLENGE_OWED = 32;
 const MAX_CHALLENGE_ID_CHARS = 64;
+const MAX_CHALLENGE_SOURCE_CHARS = 160;
 
 function sanitiseChallenges(raw: AnyRecord): StoredChallenges {
   const counts: Record<string, number> = {};
-  const rawCounts = asRecord(raw.counts);
-  for (const [k, v] of Object.entries(rawCounts)) {
-    if (isPrototypePollutingKey(k) || k.length === 0 || k.length > MAX_CHALLENGE_ID_CHARS) continue;
-    if (Object.keys(counts).length >= MAX_CHALLENGE_STATE_ENTRIES) break;
+  const rawCounts = Object.entries(asRecord(raw.counts))
+    .filter(([k]) => !isPrototypePollutingKey(k) && k.length > 0 && k.length <= MAX_CHALLENGE_ID_CHARS)
+    .slice(-MAX_CHALLENGE_STATE_ENTRIES);
+  for (const [k, v] of rawCounts) {
     const n = num(v, 0);
     if (n > 0) counts[k] = Math.min(Math.floor(n), Number.MAX_SAFE_INTEGER);
   }
@@ -622,15 +652,31 @@ function sanitiseChallenges(raw: AnyRecord): StoredChallenges {
   if (Array.isArray(raw.done)) {
     for (const id of raw.done) {
       if (typeof id !== 'string' || id.length === 0 || id.length > MAX_CHALLENGE_ID_CHARS) continue;
-      if (done.length >= MAX_CHALLENGE_STATE_ENTRIES) break;
       if (!done.includes(id)) done.push(id);
+    }
+  }
+  const owed: ChallengeOwed[] = [];
+  if (Array.isArray(raw.owed)) {
+    for (const entry of raw.owed) {
+      const o = asRecord(entry);
+      const id = str(o.id, '').slice(0, MAX_CHALLENGE_ID_CHARS);
+      const periodKey = str(o.periodKey, '').slice(0, 16);
+      const sourceId = str(o.sourceId, '').slice(0, MAX_CHALLENGE_SOURCE_CHARS);
+      if (id.length === 0 || periodKey.length === 0 || sourceId.length === 0) continue;
+      if (owed.some((x) => x.sourceId === sourceId)) continue;
+      owed.push({
+        id, periodKey, sourceId,
+        scrap: clampInt(num(o.scrap, 0), 0, MAX_SCRAP_BALANCE),
+        item: typeof o.item === 'string' && o.item.length > 0 ? o.item.slice(0, MAX_CHALLENGE_ID_CHARS) : null,
+      });
     }
   }
   return {
     day: str(raw.day, '').slice(0, 10),
     week: str(raw.week, '').slice(0, 8),
     counts,
-    done,
+    done: done.slice(-MAX_CHALLENGE_STATE_ENTRIES),
+    owed: owed.slice(-MAX_CHALLENGE_OWED),
   };
 }
 
@@ -856,33 +902,58 @@ export interface ChallengeSettlementDeps {
 export async function settleChallenges(
   profile: StoredProfile, deps: ChallengeSettlementDeps,
 ): Promise<{ id: string; scrap: number }[]> {
+  const ch = profile.challenges;
   const candidates = accrueChallenges(profile, deps.defs, deps.grantedIds, deps.stats, deps.nowMs);
-  if (!deps.mayPayScrap) return [];
-  const paid: { id: string; scrap: number }[] = [];
+
+  /* Every completion becomes a DEBT before it becomes a payment. The owed
+   * list is durable and period-stamped, so the roll that wipes `counts` at
+   * UTC midnight cannot eat a completion earned at 23:50 in a session that
+   * was not allowed to pay it. */
   for (const c of candidates) {
-    if (deps.journal !== null && await deps.journal.has('prize', c.sourceId, deps.deviceId)) {
-      if (!profile.challenges.done.includes(c.id)) profile.challenges.done.push(c.id);
+    if (ch.done.includes(c.id)) continue;
+    if (ch.owed.some((o) => o.sourceId === c.sourceId)) continue;
+    if (ch.owed.length >= MAX_CHALLENGE_OWED) break;
+    ch.owed.push({ id: c.id, periodKey: c.periodKey, sourceId: c.sourceId, scrap: c.scrap, item: c.item });
+  }
+  if (!deps.mayPayScrap) return [];
+
+  const paid: { id: string; scrap: number }[] = [];
+  const keep: ChallengeOwed[] = [];
+  for (const o of ch.owed) {
+    /* A receipt belongs to the period the completion was EARNED in. Paying
+     * a debt carried across a boundary must not mark THIS period's copy of
+     * the same challenge done — the journal key is what stops the double
+     * pay, and dropping the entry from `owed` is the durable half. */
+    const current = o.periodKey === ch.day || o.periodKey === ch.week;
+    if (deps.journal !== null && await deps.journal.has('prize', o.sourceId, deps.deviceId)) {
+      if (current && !ch.done.includes(o.id)) ch.done.push(o.id);
       continue;
     }
-    // An item-bearing completion pays BOTH halves or neither — a receipt
-    // written while the item silently dropped would lose it forever.
-    if (c.item !== null && !deps.mayGrantItems) continue;
-    const moved = creditChallengeScrap(profile, c.scrap);
-    profile.challenges.done.push(c.id);
-    if (c.item !== null) {
-      grantDrops(profile, [formatItemRef(deps.itemVersion, c.item)], 'challenge', c.sourceId, deps.nowMs);
+    if (o.item !== null && !deps.mayGrantItems) { keep.push(o); continue; }
+    /* BOTH halves or neither, for real: grantDrops REFUSES at the inventory
+     * cap and returns what actually landed. A receipt written while the item
+     * silently dropped would lose it forever, so an item that cannot land
+     * keeps the whole completion owed — it pays when space frees. */
+    if (o.item !== null) {
+      const landed = grantDrops(
+        profile, [formatItemRef(deps.itemVersion, o.item)], 'challenge', o.sourceId, deps.nowMs,
+      );
+      if (landed.length === 0) { keep.push(o); continue; }
     }
+    const moved = creditChallengeScrap(profile, o.scrap);
+    if (current) ch.done.push(o.id);
     if (deps.journal !== null) {
       await deps.journal.append([{
-        id: deps.rowId(deps.nowMs), ms: deps.nowMs, kind: 'prize', sourceId: c.sourceId,
+        id: deps.rowId(deps.nowMs), ms: deps.nowMs, kind: 'prize', sourceId: o.sourceId,
         playerId: deps.deviceId, currency: 'scrap',
         delta: moved.after - moved.before, balanceAfter: moved.after,
         actor: 'system:challenge',
-        reason: `challenge ${c.id} (${c.periodKey})`,
+        reason: `challenge ${o.id} (${o.periodKey})`,
       }]);
     }
-    paid.push({ id: c.id, scrap: moved.after - moved.before });
+    paid.push({ id: o.id, scrap: moved.after - moved.before });
   }
+  ch.owed = keep;
   return paid;
 }
 
