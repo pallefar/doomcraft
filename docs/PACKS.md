@@ -103,9 +103,9 @@ The request names seven things. They are not seven of the same thing, and a desi
 | 3 | **expansion packs** | `PackKind.CAMPAIGN` (`content/episodes.json`) + the levels pack it names, published as **one release**. The release *is* the expansion unit | **data** | **SHIP** |
 | 4 | **weapons** | `PackKind.WEAPONS` — `shared/src/weapons.ts` | **build** | **SHIP** (identity, version, fingerprint, diff, rollback target — delivery stays a deploy) |
 | 5 | **characters** | `PackKind.CHARACTERS` — the `CharacterLook` table + `cast.glb`/`cast.png` | **build** | **LATER** (§11 phase 6) |
-| 6 | **quests** | `PackKind.QUESTS` — the daily/weekly challenge board: `shared/src/challenges.ts` + `content/quests.json` | **data** | **SHIP** — was **LATER** with nothing to extract until Studio S4 built the engine; §1.3 |
+| 6 | **quests** | `PackKind.QUESTS` — the daily/weekly challenge board: `shared/src/challenges.ts` + `content/quests.json` | **data** | **SHIP** — was **LATER** with nothing to extract until Studio S4 built the definitions and the engine that consumes them; §1.3 |
 | 7 | **maps** | folded into `PackKind.CORE` via `TERRAIN_VERSION` | **build** | **REJECTED as a pack** — see §1.4 |
-| + | *(implied by the economy)* | `PackKind.ITEMS`, **reserved number, no producer** | — | **LATER**, with the ownership rule written down now (§7) |
+| + | *(implied by the economy)* | `PackKind.ITEMS` — the drop/craft/trade table: `content/items.json`, parsed by `shared/src/items.ts` | **data** | **SHIP** — was **LATER**, *"reserved number, no producer"*, until the economy tier gave it one; §7 |
 
 ### 1.1 The class split — the one distinction that stops the console lying
 
@@ -124,9 +124,25 @@ So the expansion pack is a **release**: an immutable document naming one version
 
 ### 1.3 Quests — reserved, and deliberately empty
 
-There is no quest system. `ModeId.QUEST = 0` is the *campaign mode*. Per-level objectives — `exit`, `doors` with `KeyColor`, `switches`, `secrets`, `EX_ENDS_EPISODE` — are fields **inside the level file**, decoded by `client/src/modes/quest/levelRuntime.ts`. They already ship inside `PackKind.LEVELS` and already move its fingerprint.
+> **STATUS: the reservation ended in Studio S4, once there was an engine to consume a board.**
+> S4 (`f2f365c` … `75c23b4`, 2026-08-28/29) built `PackKind.QUESTS`'s producer and the challenge
+> engine in one run — five build commits and two review passes, sequenced in `docs/STUDIO.md` §3.
+> The order that mattered, and held, is **ENGINE before EDITOR**: the runtime landed in `39bef19`
+> and the authoring card in `a1c5906`. It is *not* true that the engine preceded the pack — the
+> definitions and the `PackDef` were commit 1 (`f2f365c`) and the release machinery commit 2
+> (`9d46c6d`) — and that is exactly what the paragraphs below predict: the producer had to land
+> beside its consumer, never as a green check over an empty board. Those paragraphs are kept, in
+> the past tense where they were overtaken.
 
-The nearest hook is `challengeIds` (`server/src/entitlementGuard.ts:267`, clamped at `:511`), which has a transport slot and **zero producers** — its only other occurrence in the tree is the test literal `'daily.kill-40'`. `PackKind.QUESTS = 5` is reserved as a number in the enum with no `PackDef`, no gate check and no test. A green check on a pack kind with no content is exactly the green test that cannot fail.
+"Quest" in this repo names the *campaign mode*, `ModeId.QUEST = 0`. Per-level objectives — `exit`, `doors` with `KeyColor`, `switches`, `secrets`, `EX_ENDS_EPISODE` — are fields **inside the level file**, decoded by `client/src/modes/quest/levelRuntime.ts`. They already ship inside `PackKind.LEVELS` and already move its fingerprint. That is unchanged, and a challenge is a different thing entirely: a level objective is geometry the campaign already carries, a challenge is a predicate over the stats a match reports. Neither is the other's data, and the quests pack touches no level file.
+
+The nearest hook was `challengeIds` (`server/src/entitlementGuard.ts:287`), which had a transport slot and **zero producers** — its only other occurrence in the tree was the test literal `'daily.kill-40'` (still at `server/src/entitlementGuard.test.ts:72`). `PackKind.QUESTS = 5` was a number in the enum with no `PackDef`, no gate check and no test, and it stayed one deliberately: a green check on a pack kind with no content is exactly the green test that cannot fail. That is precisely why the number could not be given a gate check while the board was empty — `quests.validate` over nothing is a check nothing can ever break — and why the editor could not ship before the engine, because a console offering a switch with nothing behind it lies. When the definitions did arrive they arrived full: `f2f365c` landed `content/quests.json`'s seven defs and the `PackDef` in one commit, so the first `quests.validate` ever run had something it could refuse.
+
+**What S4 shipped.** `shared/src/challenges.ts` carries the definitions as data and the ONE predicate that evaluates them: `challengeContribution`, reading nothing but stat fields, called by the room producer, by the guard and by the settlement, so no two of them can disagree about whether a match moved a counter. The parser refuses rather than corrects, and it is where the mint is bounded — eight defs per pack (`MAX_CHALLENGES_PER_PACK`, because the whole active set must fit one result submission), 500 Scrap per def, 2,000 across a manifest, since a challenge payout bypasses the daily meter. `content/quests.json` is the shipped board: four dailies and three weeklies, 525 Scrap for a full sweep, and the version-1 fallback the inventory serves when the volume has no `quests/<v>/` directory.
+
+The pack half is the same machinery every other data pack uses: a `data`-class `PackDef` with its own blast-radius line, `questsPack()` folding the manifest's canonical input lines exactly as `levelsPack()` and `itemsPack()` do, two gate checks — `quests.validate` (`server/src/gate.ts:342`) and `quests.refs` (`:356`, which is what stops a challenge advertising an item the paired items manifest does not carry) — and a `QUESTS` branch in `PackInventory.unsatisfied()` (`server/src/packs.ts:467`). The comment under that branch records the lesson in one line: a data kind with no branch there is permanently unsatisfiable, so every release naming it would Rule-E fall back, silently, forever.
+
+And `challengeIds` is now produced, re-verified and settled rather than carried. `Room.challengeIdsFor` (`server/src/room.ts:1679`) reports the ids a round moved, gated on the member's server-resolved `economy_competitions` bit so the kill switch is real; `verifyChallengeIds` (`server/src/entitlementGuard.ts:435`) re-runs the same predicate against the defs the session was **opened** with, never a live lookup; `settleChallenges` (`server/src/persistence.ts:902`) turns every completion into a durable debt before it turns it into Scrap, and writes one `prize` journal row per payment. The editor came last, as `docs/STUDIO.md` §3 said it would: the console's challenges card CHECKs against the save's own gates and mints `quests@<n+1>` (`server/src/studio.ts:275`), and what a player sees is `GET /api/challenges`, rendered in the Competitions tab.
 
 ### 1.4 Maps — REJECTED as a pack, with the number that killed it
 
@@ -147,6 +163,16 @@ The arena is not data. The browser Worker and the Node server produce the same w
 ## 2. The data model
 
 New file, `shared/src/packs.ts`. Real TypeScript, not a sketch.
+
+> **Two comments in the excerpt below have been overtaken; it is left as the author-time
+> design.** `PackKind.QUESTS` and `PackKind.ITEMS` are marked RESERVED here and the `PACKS`
+> registry below carries no row for either. Both now have producers and rows — items with the
+> economy, quests with the challenge engine in Studio S4 (§1.3, §7). In the shipped file the
+> `QUESTS` line reads *"Producer: `shared/src/challenges.ts` + `content/quests.json` — the S4
+> challenge engine."* and the `ITEMS` line *"Producer: `shared/src/items.ts` +
+> `content/items.json`. Ownership rule: `docs/PACKS.md` §7."* Where each row came from is
+> recorded where it was decided: §1.3's STATUS for quests, §7's for items. (Phase 1's STATUS in
+> §11 records four deviations, but none of them is either of these rows — it predates both.)
 
 ```ts
 /**
@@ -587,6 +613,22 @@ Two more screens exist because they are nearly free, and both are honest about b
 
 ## 7. Items and ownership — reserved, with the rule written down now
 
+> **STATUS: the reservation ended with the economy tier; the rule below was already there when it
+> did.** `PackKind.ITEMS` now has all three things this section opens by saying it lacks: a
+> `data`-class `PackDef` with its own blast-radius line (`shared/src/packs.ts:85-91`), the producer
+> `itemsPack()` folding a manifest's canonical input lines (`:450`) over `content/items.json`
+> parsed by `shared/src/items.ts`, and gate checks — `items.validate`
+> (`server/src/gate.ts:330`, in the check list at `:511`) plus the `items.dormanted` count the last
+> paragraph of this section demanded (`server/src/packs.ts:944`), which the console's own guide
+> tells the operator to read before promoting (`server/src/admin/console.ts:735`, with the warning
+> at `:737` saying in as many words that the check is `ok: true` and can never block a release).
+> `PackInventory.unsatisfied()` has its `ITEMS` branch (`server/src/packs.ts:462`). The ownership
+> rule below shipped as written: `itemStateFor` (`shared/src/items.ts`) derives state on read and
+> nothing stamps it into a profile. One sentence below was overtaken by the same work —
+> `StoredProfile` now carries `inventory: StoredInventory` (`server/src/persistence.ts:226`), so
+> drops are no longer granted and discarded. The paragraphs are left exactly as they were, because
+> the point of §7 was to be right before there was anything to be right about.
+
 `PackKind.ITEMS = 6` has no producer, no `PackDef` and no gate check. But the rule it will need is recorded **now**, because it is free today and expensive in six months.
 
 Verified, not assumed: `GrantedRewards.drops` is computed at `server/src/entitlementGuard.ts:507`, gated by `REWARD_ITEM_DROP` and clamped by `MAX_DROPS_PER_MATCH = 4` (`:90`) — and `MatchResult` has no drops field and `StoredProfile` (`server/src/persistence.ts:106-137`) has no inventory. **Item drops are granted and discarded. There is nothing to migrate.**
@@ -644,10 +686,10 @@ Every one of these came out of an adversarial pass over an earlier draft. None i
 - **It does not make the live site push-able.** `doomcraft.vercel.app` is `"framework": null`, no `functions`, no `api/`, no middleware. Until the `Dockerfile` runs somewhere with TLS and serves the document, every content change on the live site is a redeploy, exactly as today. The console is a tool for a host that does not yet exist, and phases 2–5 are marked.
 - **It does not change one byte on the wire.** §3 prices the change that would; nothing here needs it.
 - **It does not deliver `weapons`, `core` or `characters` independently.** Those are `build` class. They get versions, fingerprints, diffs and rollback targets; they do not get a push button, and the console says the words.
-- **It does not build a quest system.** `PackKind.QUESTS` is a reserved number with no producer, no def and no test. §1.3.
+- **It does not build a quest system.** `PackKind.QUESTS` is a reserved number with no producer, no def and no test. §1.3. — **REVISED 2026-08-29**: it stopped being true in Studio S4 (`docs/STUDIO.md` §3, and §1.3's STATUS above), which gave the number its producer in `f2f365c` and its engine in `39bef19`. What the sentence defends is unchanged: no pack kind gets content because the enum has a spare number.
 - **It does not make maps data.** §1.4.
 - **It does not upload packs through the panel.** Bytes arrive with the deploy or on a volume; the console decides *which installed version is live, and when*. An upload path means a moderation pipeline, and two thirds of `docs/SPONSORS.md` §2.2 defends against a stranger who paid you.
-- **It does not build items, trading or ownership.** §7 writes the rule down and reserves the number. That is all.
+- **It does not build items, trading or ownership.** §7 writes the rule down and reserves the number. That is all. — **REVISED 2026-08-29**: the economy tier built all three, and §7's STATUS above lists what landed. `PackKind.ITEMS` has a `data`-class `PackDef`, `itemsPack()` and two gate checks; `POST /api/equip` (`server/src/index.ts:2876`) and `POST /api/craft` (`:2930`) are live, and the trade escrow is server-authoritative under `/api/trade/*` (`:2236`). The rule the sentence reserved the number for is the rule that shipped — `itemStateFor` on read, nothing stamped into a profile.
 - **It does not resurrect the dead letters.** `CONTENT_UNAVAILABLE`/4003 and `BUILD_REVOKED`/4005 are documented in `docs/PATCHING.md:234-236` as live refusals and are emitted by **no server code path**. `CONTENT_MIN_SUPPORTED` (`shared/src/version.ts:90`) gates no routing decision. `PROTOCOL_WINDOW_DAYS` derives no deadline. `hostBucketFor` (`server/src/deploy.ts:351`) has no caller. All five stay dead, and this document **marks** them rather than pretending otherwise. `CONTENT_UNAVAILABLE` in particular only becomes reachable once a client can be told which pack to fetch — i.e. with the deferred wire change, or not at all.
 - **It does not add two-person approval, a reviewer role, a `reviewedBy` field, or an approval queue.** There is one person, and a second signature from the same account is a lie in the audit log.
 - **It does not gate on `fps1pctLow`.** When characters become measurable (Phase 6), the budget check reads `game.stats().drawCalls` / `charDraws` / `medianMs` (`client/src/main.ts:1943`) against the ~120 draw-call budget. Never `fps1pctLow`: `HANDOVER.md` §0.3 records it saturated at 53.5–53.8 in every configuration ever tried — headless to 20× throttle, 20 to 132 draw calls. It is Chrome's rAF jitter floor. A gate built on it **cannot fail**, which is worse than no gate.
@@ -666,7 +708,7 @@ Every one of these came out of an adversarial pass over an earlier draft. None i
 | Per-player or per-host rollout buckets (`flagBucket`, `hostBucket`, `hostBucketFor`) | **REJECTED** | Both are keyed on a player. `ModeRouter.route` puts two players in one room, and a room has one pack set. A player-keyed pack rollout either does nothing or splits a room. Rule D |
 | A semver range language for pack dependencies (`^`, `~`, a solver) | **REJECTED** | Five packs, one author, one release naming one version of each. A solver introduces the possibility of two runs disagreeing, which is the failure the whole design exists to remove |
 | A `<pack>__<local>` id namespace | **REJECTED** | `sanitiseContentId` permits `_` freely and `CONTENT_ID_PATTERN` allows both separators, so `levels__e1` is a legal *pack* id and the first-separator split silently mis-parses every item it owns. Global uniqueness by gate check instead. 8.10 |
-| A pack DSL for quests (declarative predicates over sim events) | **REJECTED** | A new interpreter with no test corpus, for a feature with no producer, against Rule A |
+| A pack DSL for quests (declarative predicates over sim events) | **REJECTED** | A new interpreter with no test corpus, for a feature with no producer, against Rule A. **Still rejected now that quests have a producer**: S4's challenges are not this — `stat` is a frozen six-value tuple (`CHALLENGE_STATS`, `shared/src/challenges.ts:28-30`) and the parser refuses anything outside it (`:146-150`), so a challenge is data the engine already understands, never a program. §1.3 |
 | A separate CDN origin for packs | **REJECTED** | It exists in `docs/SPONSORS.md` §2.2 so the game document never hosts a **sponsor** byte. A first-party level must come from the game's own origin — the CSP allows exactly `'self'`, and splitting costs the nonce and buys nothing |
 | Retrofitting `FlagService` with persistence and CAS | **REJECTED for now** | It works for what it does. Phase 0 fixes the two real bugs (merge semantics, `expectRevision`) and the console always sends the full document. The release document gets its own store because it has different requirements |
 | Merging the release document into the flag document | **REJECTED** | Different bucketing identity, different freeze fallback, different lifetime. §5.2 |

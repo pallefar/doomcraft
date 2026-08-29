@@ -31,6 +31,14 @@ winner determination and prize claim — is real, working software. Whether a co
 business conversation outside this repo. The system is built so that when one does, it is
 configuration rather than engineering.
 
+> **STATUS 2026-08-29: "prize claim" is the one item in that list decided against rather than
+> deferred.** Winner determination shipped — `finalise` (`server/src/competitions.ts:305`) ranks
+> entrants and pays the table. A claim flow did not, and the Competitions section below records why
+> in the same paragraph that revises its own bullet. Sponsored tournaments, funded prize pools and
+> branded events are still spec: `competitions.ts` reads no sponsor anywhere. The sentence above is
+> left as written, because it was a claim about what the platform can be built to do, not a
+> shipping manifest — this line says which parts of it are code today.
+
 ---
 
 ## Points — two currencies, deliberately not one
@@ -107,7 +115,7 @@ reason. A rule the parser holds cannot be forgotten by a caller.
 | Verb | Where | What it does |
 |---|---|---|
 | `POST /api/equip` | `server/src/index.ts`, `equipVerdict`/`applyEquip` in `server/src/persistence.ts` | Sets the `skin` and `title` slots. Both claims land or neither does — validation and write share one `store.update` callback, so a concurrent settlement cannot un-own an item between the check and the claim, and a refusal on the second slot does not leave the first written |
-| `POST /api/craft` | `server/src/craft.ts` | Three duplicate copies of one item plus a Scrap fee become the item the player **chose**: same kind, exactly one rarity up. Fees by target rarity: 50 / 150 / 400 / 1000 |
+| `POST /api/craft` | `server/src/craft.ts` | Three duplicate copies of one item plus a Scrap fee become the item the player **chose**: same kind, exactly one rarity up. Fee by TARGET rarity — Uncommon 50, Rare 150, Epic 400, Relic 1000. There is no Common target: nothing crafts down |
 
 Equipping stores a **claim**, not a state. `inventory.equippedSkin` and `inventory.title` are
 re-derived through `itemStateFor` by every surface that wears them, so an item whose pack was
@@ -120,9 +128,10 @@ loot box with extra steps, and decision 2 above says no loot boxes — so a craf
 price includes proof you played. Only the tradable kinds craft (skins, emblems, trails), for the
 same reason they trade; copies sitting on a live trade's table cannot be consumed, because a copy
 must never be in two stories at once. The fee is the journal's first `'spend'` rows — the kind was
-declared in `LedgerKind` from the start and nothing had written one until this route — debited
-under the same per-device lock that moves the balance and idempotent on the client's nonce, so a
-crash-replayed craft consumes and grants nothing twice.
+declared in `LedgerKind` from the start, nothing had written one until this route, and nothing else
+writes one yet (`server/src/index.ts:2969` is the only site in the tree) — debited under the same
+per-device lock that moves the balance and idempotent on the client's nonce, so a crash-replayed
+craft consumes and grants nothing twice.
 
 ## Trading
 
@@ -229,7 +238,27 @@ the finaliser pays that table automatically without asking anybody again. That i
 `POST /api/admin/competitions/create` **confirm-gates** like the C6 verbs and writes an audit row
 either way, and why cancel is a separate verb — cancelling pays nobody, which is exactly what
 distinguishes it from letting an event end. Entry is explicit (`POST /api/competitions/enter`) with
-the `minLevel` rule checked at the door.
+the `minLevel` rule checked at the door. The bounds are in `createTournament`: 10 minutes to 30
+days long, at most 100 paid ranks, no rank over 100 000 Scrap, and at most 4 winner items, granted
+to rank 1 only.
+
+Two places the build diverged from the bullet, both deliberate. **The format is the leaderboard,
+not a bracket** — a bracket needs seeded pairings and a re-entrant match schedule, neither of which
+the room has, and the points ladder is the format that falls out of a counter the server already
+keeps honest. **There is no prize claim flow**: finalisation pushes the prize into the profile
+rather than parking it behind a button. A claim step adds a way to win and never collect, and the
+push is already idempotent without one — but for a reason worth stating exactly, because the
+journal is not it. `finalise` is reached from one call site, guarded on `c.state === 'running'`
+(`server/src/competitions.ts:195`), and it writes `placements` and flips the state to `'finalised'`
+**before** it pays a single player (`:312-314`), so the transition is one-shot and durable in the
+competition document. What the journal adds is the retry window inside that one run: `has('prize',
+prize:<id>, <player>)` is checked first inside each `store.update` (`:327`), and its memory is the
+journal's ~48 h dedup window, not eternity (`server/src/journal.ts:453-465` seeds only today and
+yesterday, `:473-476` evicts the rest). An item prize carries a third, fully durable guard — the
+`sourceId` already sitting in the inventory (`competitions.ts:328`). That is the property a claim
+flow was there to provide. *This paragraph revises two sentences: the Competitions bullet above
+("and a prize claim flow") and decision 3's "winner determination and prize claim" at the top of
+this document.*
 
 The ladder's arithmetic is **state-based, not event-based**, and that is the whole design: an
 entrant's points are the growth of `progress.xp` — a monotonic counter only match payouts move —
@@ -239,24 +268,42 @@ increment is clamped to `MATCH_XP_CAP` (900) and the excess is *forgotten*, so a
 merge — which legitimately jumps `xp` by a pre-season amount — smuggles at most one match's worth of
 points into a ladder, once, rather than amortised across every later round.
 
-Prizes pay **only** through the journal, `kind: 'prize'`, `sourceId: prize:<competitionId>`, so
-finalisation is idempotent per player forever; item prizes ride the same tag through the
-inventory's provenance and are checked before granting. Accrual is gated on nothing at all — the
-`economy_competitions` flag hides the *surfaces*, because `shared/src/flags.ts` says a flag flip
-must never lose a season.
+Prizes pay **only** through the journal, `kind: 'prize'`, `sourceId: prize:<competitionId>`, so a
+retry inside a finalisation run cannot pay a player twice; the *forever* half of that guarantee is
+the state flip described above, not the journal, whose dedup memory spans about 48 hours. Item
+prizes ride the same tag through the inventory's provenance and are checked before granting, which
+is the half of the check that is durable in the profile. Accrual is gated on nothing at all —
+the `economy_competitions` flag hides the *surfaces*, because `shared/src/flags.ts` says a flag
+flip must never lose a season.
 
 **Daily / weekly challenges — the engine (Studio S4).** This bullet was the last unbuilt line in
 this section. It is now the sharpest example in the repo of the "definitions are data" rule.
 
 - **The definitions are a pack.** `content/quests.json` (`shared/src/challenges.ts` parses it),
-  released and versioned like every other pack, authored in the studio's quest editor. A challenge
+  released and versioned like every other pack, edited in the console's Studio → challenges card
+  and shipped through the same gate → approve → stage → promote walk as levels and items. The
+  bundle ships seven: four dailies and three weeklies, one of which also pays a Title. A challenge
   is a **pure predicate over stats** — `kills`, `wins`, `bestStreak`, `damageDealt`, `blocksPlaced`,
   `blocksBroken` — and never over a mode. `seconds` is deliberately absent: time passes for an idle
   player too, and a stat you cannot fail to accumulate is a login reward wearing a challenge's name.
+  `bestStreak` folds as a **max** across the period, not a sum — two matches with a 4-streak do not
+  make an 8-streak — and every other stat folds as a sum. `wins` is only stamped by a mode that has
+  a win condition: `endRound` reads it off the mode DESCRIPTOR (`const winnable`,
+  `server/src/room.ts:1292`), so Builder — `WinCondition.NONE` — no longer records its kill leader
+  as a winner. That was a cosmetic stat inflation until a challenge paid for `wins`; it became
+  money the moment this engine landed.
 - **Trust decides who banks.** Progress accrues only in sessions whose trust row grants
-  `REWARD_CHALLENGE` — the public server rows. Solo and private matches bank **nothing**, which is
-  the same boundary that already governs XP and drops rather than a second one invented for
-  challenges.
+  `REWARD_CHALLENGE`. That is eight of the sixteen rows in `TRUST_TABLE` (`shared/src/trust.ts`):
+  all four PUBLIC rows (Quest, Builder, Horde, Deathmatch), all three COMPETITION rows (Quest,
+  Horde, Deathmatch — Builder has none), and Deathmatch RANKED. The other eight — every SOLO and
+  every PRIVATE row — grant `REWARD_NONE`, so solo and invite-only matches bank **nothing**, which
+  is the same boundary that already governs XP and drops rather than a second one invented for
+  challenges. In practice only PUBLIC banks today: the live server opens every room with
+  `sessionIntent: isInvite ? MatchType.PRIVATE : MatchType.PUBLIC` (`server/src/index.ts:974`, the
+  only `new Room(...)` outside tests and the in-tab worker), so no RANKED or COMPETITION session
+  exists yet — and `resolveMatchType` would clamp a COMPETITION intent from the matchmaker down to
+  PUBLIC anyway (`shared/src/trust.ts:225`); only the event-scheduler origin passes one through,
+  and there is no scheduler.
 - **The guard re-derives every claim.** The room attaches the ids its round contributed to; the
   entitlement guard keeps only those whose definition exists in *that session's recorded pack* and
   whose predicate the sanitised stats actually satisfy, using the same `challengeContribution`
@@ -269,13 +316,30 @@ this section. It is now the sharpest example in the repo of the "definitions are
   off the balance, never the amount asked for — the `MAX_SCRAP_BALANCE` clamp is allowed to bite
   and the row has to say so. Once per UTC day, or per ISO week (Monday-start).
 - **A completion that cannot be paid becomes a DEBT.** Public Builder grants challenge progress but
-  deliberately not Scrap, so a challenge finished there would otherwise be earned and lost. Instead
-  it lands on the profile's period-stamped `owed` list and is paid at the first settlement that
-  can. This is what makes the midnight roll safe: wiping the counters at UTC midnight cannot eat a
-  completion earned at 23:50 in a room that was not allowed to pay it.
+  deliberately not Scrap — its trust row is `REWARD_XP | REWARD_CHALLENGE | REWARD_STATS |
+  REWARD_TRADE_UNLOCK` (`shared/src/trust.ts:521`) — so a challenge finished there would otherwise
+  be earned and lost. Instead it lands on the profile's period-stamped `owed` list **before**
+  anything is paid (`server/src/persistence.ts:912-917`, ahead of the `mayPayScrap` return), and is
+  paid at the first settlement that may. This is what makes the midnight roll safe: wiping the
+  counters at UTC midnight cannot eat a completion earned at 23:50 in a room that was not allowed
+  to pay it. A debt carries its earning period with it, so paying yesterday's does not mark today's
+  copy of the same challenge done (`:927-929`). The list is capped at 32 entries
+  (`MAX_CHALLENGE_OWED`), which is four full boards.
 - **Item rewards pay both halves or neither.** `grantDrops` refuses at the inventory cap and
-  reports what actually landed, so an item that cannot land keeps the whole completion owed rather
-  than writing a receipt for an item that silently evaporated.
+  reports what actually landed; a completion whose item does not land keeps the **whole** thing
+  owed — no Scrap, no receipt, no journal row — rather than writing a receipt for an item that
+  silently evaporated (`server/src/persistence.ts:937-941`). The line above it defers, rather than
+  drops, a completion whose item cannot be minted because `economy_items` is off (`:932`, fed by
+  `server/src/room.ts:1595`).
+- **An account merge carries the receipts and the debts.** The journal's idempotency key ends in
+  the **profile key**, so a receipt earned on the absorbed device stops protecting anything the
+  moment the player is the surviving profile — without this the same daily could pay a second time
+  in one period across a device link. `applyMergeFields` (`server/src/merge.ts:138-159`) unions the
+  `done` receipts for a period the two profiles share, takes the **max** of each counter rather
+  than the sum (the progress is one person's, not two), and unions `owed` so a merge cannot swallow
+  a debt. The mirror-image rule holds for the operator's reset-progress verb, which now clears
+  `challenges` with the rest of the profile (`server/src/index.ts:3310`): leaving the counters up
+  let pre-reset play mint post-reset Scrap at the next settlement.
 - **The mint bound is the parser.** Challenge payouts skip the daily meter (above), so the ceiling
   is the manifest the release gate accepted: 500 Scrap per definition, 2 000 across the board, and
   at most 8 definitions — the whole active set has to fit one result submission. The gate also
@@ -324,3 +388,42 @@ The in-tab Worker room answers `economy_scrap` from the page's own product flag
 (`localServer.ts` `localFlagBits`). It is not a second party — it runs in this tab, it has
 `store: null`, and it grants nothing — so the chips it unlocks read `XP 0 · SCRAP 0`, which is
 exactly the truth about an offline match.
+
+**As built — the menu, three tabs of four.** The bullet above says "Menu"; the tabs actually live
+in the **profile overlay** (`client/src/ui/profile.ts`), because that is where a player already
+goes to look at what they own. The strip is hidden outright until the server grants at least one
+tab — one `GET /api/flags` per page (`probeServerFlags`), shared by every tab and by the share
+button, so a static build with no server shows no strip rather than three tabs that 404.
+
+| Tab | Flag | Where |
+|---|---|---|
+| Loadout — balances, and every owned item in sections by kind (Skins, Titles, Emblems, Trails, Trophies), equipping through `POST /api/equip` and crafting through `POST /api/craft` | `economy_items` | `client/src/ui/loadoutTab.ts` |
+| Trade — the escrow table, both offers, both confirms | `economy_trading` | `client/src/ui/tradeTab.ts` |
+| Competitions — running seasons and tournaments, standings, Enter, **and the Challenges board** | `economy_competitions` | `client/src/ui/competitionsTab.ts` |
+| Store — spend Scrap | — | **not built** |
+
+`economyTabsFor` (`client/src/ui/loadoutModel.ts`) is the single place a flag becomes a tab.
+
+The Challenges board is a section at the top of the Competitions tab, fed by `GET /api/challenges`
+— which derives the period keys at **request** time, so a stored bucket left over from an older
+period answers zeroed counts and an empty done-list. Yesterday's finished board never renders as
+today's, and a read never writes the profile. Each row carries the definition's name and blurb, a
+progress bar, and what it pays. Under them sits the one line that teaches the whole trust rule in a
+player's words: *"Daily challenges reset at midnight UTC, weeklies on Monday. Progress counts in
+public online matches — solo and private games do not bank. Rewards land with a match payout."*
+
+**Two gaps, stated plainly.** There is **no Store tab**, so `POST /api/craft` is currently the only
+way a player can *spend* Scrap — the sole `'spend'` emitter in the journal, against four ways a
+player **earns** it (match payouts, challenges, competition prizes, referrals) and two more the
+system or the operator can move it by: `admin.adjust`, up to ±100 000 Scrap under the operator verb
+(`server/src/index.ts:3255`; the same kind carries the negative row reset-progress writes at
+`:3315`), and `merge.credit`, which moves a balance onto the surviving profile of an account link
+(`server/src/merge.ts:288`). Each of those six writes a `LedgerKind` row
+(`server/src/journal.ts:58-61`) — five distinct kinds, because challenges and competition prizes
+both write `'prize'` — and only the first four are things a player can go and do. Horde build materials and cosmetics bought
+outright, both named in the Points section above, have no route. The `economy_scrap` registry entry
+still describes itself as "Scrap accrual, the Store tab and spending", which is the flag naming its
+eventual job rather than its current one. The second gap is the **"beat my time" button**, already
+recorded in the Viral section above, which owns it: what is missing beyond the share card is a link
+that carries a level id plus the sender's clear time and drops the recipient into that level with
+the time to beat.
