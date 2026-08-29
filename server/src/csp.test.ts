@@ -511,6 +511,18 @@ describe('POST /api/profile is not a self-grant', () => {
     expect(typeof body.entitlement?.violations).toBe('number');
   });
 
+  it('does NOT publish the ad delivery counters on the public status', async () => {
+    // fills / impressions / billableClicks / liveCampaigns are commercial
+    // facts about a sponsor's campaign, not ops telemetry. They belong on the
+    // admin document, behind the bearer.
+    const res = await fetch(`${server.origin}/api/status`);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.ads, 'ad counters must not be world-readable').toBeUndefined();
+    // And the ops surface everyone reads is still intact.
+    expect(body.entitlement).toBeTruthy();
+    expect(body.rooms).toBeTruthy();
+  });
+
   it('keeps the refusal log behind the admin token, 404 without one', async () => {
     const anon = await fetch(`${server.origin}/api/admin/entitlement`);
     expect(anon.status).toBe(404);

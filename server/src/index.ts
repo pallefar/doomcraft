@@ -3472,7 +3472,11 @@ async function handleApi(
       // A healthy fleet shows a rising `accepted` and an all-but-empty `codes`
       // map. `violations` climbing is the number worth an alert.
       entitlement: guard.status(),
-    ads: ads.status(),
+      /* The ad counters are DELIBERATELY not here. `/api/status` is public
+       * (this file's own note above says so), and delivery numbers —
+       * fills, impressions, billableClicks, liveCampaigns — are commercial
+       * facts about a sponsor's campaign. They live on the admin document,
+       * behind the bearer, where the operator reads them. */
     }, cors);
     return true;
   }
