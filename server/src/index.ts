@@ -575,6 +575,25 @@ function stampNonce(html: string, nonce: string): string {
  * ------------------------------------------------------------------------ */
 
 const store: PersistenceStore = new JsonFileStore(dataRoot);
+
+/**
+ * The profile store's live durability signals, for `/api/version`.
+ *
+ * `PersistenceStore` is the interface; only `JsonFileStore` has these, and the
+ * browser-worker build uses a MemoryStore, so read them defensively rather than
+ * widening the interface for a diagnostic.
+ */
+function profileStoreHealth(): {
+  degraded: boolean; unflushed: number; quarantined: number; lostWrites: number;
+} {
+  const s = store as Partial<JsonFileStore>;
+  return {
+    degraded: s.degraded === true,
+    unflushed: typeof s.unflushed === 'number' ? s.unflushed : 0,
+    quarantined: typeof s.quarantined === 'function' ? s.quarantined().length : 0,
+    lostWrites: typeof s.postCloseWrites === 'number' ? s.postCloseWrites : 0,
+  };
+}
 const bootMs = Date.now();
 
 /**
@@ -1571,7 +1590,23 @@ async function handleApi(
       /* The writability probe's verdict rides the same document deploy
        * tooling already reads, so "the volume is root-owned again" is one
        * curl away instead of six days of silent loss away. */
-      data: { writable: dataWritable, error: dataWriteError },
+      /* `writable` is a BOOT probe and stays one. The three below are live, and
+       * they exist because this session found that a profile store which could
+       * not write reported nothing at all: `degraded` had no reader anywhere in
+       * the tree, a failed flush was dropped in silence, and a settlement that
+       * landed after the drain closed the store vanished without a counter.
+       * An operator watching a deploy should be able to see all three.
+       *   unflushed  — profile writes owed right now (a stuck non-zero is bad)
+       *   quarantined— profiles present but UNREADABLE, never written back
+       *   lostWrites — settlements that arrived after close(): a raced drain */
+      data: {
+        writable: dataWritable,
+        error: dataWriteError,
+        degraded: profileStoreHealth().degraded,
+        unflushed: profileStoreHealth().unflushed,
+        quarantined: profileStoreHealth().quarantined,
+        lostWrites: profileStoreHealth().lostWrites,
+      },
     }), cors);
     return true;
   }
