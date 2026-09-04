@@ -71,7 +71,7 @@ import {
   meterReward,
   utcDay,
 } from './persistence.js';
-import type { FsLike } from './persistence.js';
+import type { FsLike, PersistenceStore, StoredProfile } from './persistence.js';
 import { JsonJournal, MATCH_PAYOUT, matchPayoutRows, parseEntry } from './journal.js';
 import type { Journal, JournalFile, JournalFs, LedgerEntry } from './journal.js';
 import {
@@ -125,7 +125,7 @@ interface Client {
 }
 
 interface RoomSpec {
-  store: MemoryStore | null;
+  store: PersistenceStore | null;
   guard: EntitlementGuard | null;
   sessionOrigin?: SessionOrigin;
   sessionIntent?: MatchType;
@@ -283,7 +283,7 @@ function endRoundNow(room: Room, clients: Client[]): void {
  * queueing one more update behind it and awaiting that is a deterministic
  * barrier — no timers, no arbitrary tick counts.
  */
-async function settled(store: MemoryStore, deviceId: string): Promise<void> {
+async function settled(store: PersistenceStore, deviceId: string): Promise<void> {
   await store.update(deviceId, () => { /* barrier only */ });
 }
 
@@ -1509,5 +1509,140 @@ describe('item drops through the real room', () => {
     const idle = await store2.ensure('device-idle-drops-1');
     expect(idle.progress.xp).toBe(0);
     expect(idle.inventory.items).toEqual([]);
+  });
+});
+
+/**
+ * A store that holds `update` open until the test lets it go.
+ *
+ * The settlement path is `void persistMember(...)` -> `store.update(...)`, and
+ * everything that can go wrong between "the round ended" and "the money is on
+ * disk" needs that gap to be observable. Delegates everything else to a real
+ * MemoryStore so the profiles it returns are the genuine article.
+ */
+class GatedStore implements PersistenceStore {
+  private readonly inner = new MemoryStore();
+  private gate: Promise<void> | null = null;
+  private open: (() => void) | null = null;
+
+  /** Hold every subsequent `update` until `release()`. */
+  block(): void {
+    this.gate = new Promise<void>((r) => { this.open = r; });
+  }
+
+  release(): void {
+    this.open?.();
+    this.gate = null;
+    this.open = null;
+  }
+
+  async update(deviceId: string, mutate: (p: StoredProfile) => void | Promise<void>): Promise<StoredProfile> {
+    if (this.gate !== null) await this.gate;
+    return this.inner.update(deviceId, mutate);
+  }
+
+  load(deviceId: string): Promise<StoredProfile | null> { return this.inner.load(deviceId); }
+  ensure(deviceId: string): Promise<StoredProfile> { return this.inner.ensure(deviceId); }
+  save(p: StoredProfile): Promise<void> { return this.inner.save(p); }
+  grantEntitlement(d: string, product: string, receipt: string | null): Promise<StoredProfile> {
+    return this.inner.grantEntitlement(d, product, receipt);
+  }
+  linkAccount(d: string, a: string): Promise<{ profile: StoredProfile; secret: string }> {
+    return this.inner.linkAccount(d, a);
+  }
+  resolveAccount(a: string, s: string): Promise<StoredProfile | null> { return this.inner.resolveAccount(a, s); }
+  flush(): Promise<void> { return this.inner.flush(); }
+  close(): Promise<void> { return this.inner.close(); }
+}
+
+/**
+ * The drain, and the money it was leaving behind.
+ *
+ * HANDOVER §6 carried this as a critical-severity claim that the review never
+ * got to verify: "Deploy-drain discards final-round settlements the journal
+ * already recorded". Two independent passes confirmed it. These pin the fix.
+ */
+describe('a settlement in flight survives the drain that started it', () => {
+  const DEVICE = 'device-drain-1';
+
+  /**
+   * RED WITHOUT THE FIX: change `beginSettle` back to `void this.persistMember(...)`
+   * and delete the `settling` set. `settlementsInFlight` is then always 0 and
+   * `quiesce()` returns immediately — which is exactly what let `shutdown()`
+   * run `store.close()` and `process.exit(0)` straight through a live payout.
+   */
+  it('quiesce() does not resolve while a payout is still in the air', async () => {
+    const store = new GatedStore();
+    const j = memoryJournal(() => Date.now());
+    const room = makeRoom({
+      store, guard: new EntitlementGuard(() => 1_000),
+      journal: j.journal, hostId: 'host0001',
+    });
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+    run(room, [client], PLAY_TICKS);
+
+    store.block();
+    endRoundNow(room, [client]);
+
+    // The room KNOWS it owes money — this is the fact the drain needs.
+    expect(room.settlementsInFlight).toBeGreaterThan(0);
+
+    let quiesced = false;
+    const wait = room.quiesce().then(() => { quiesced = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(quiesced, 'quiesce resolved while a settlement was still blocked').toBe(false);
+
+    store.release();
+    await wait;
+
+    expect(quiesced).toBe(true);
+    expect(room.settlementsInFlight).toBe(0);
+    // And the money actually landed.
+    const profile = await store.ensure(DEVICE);
+    expect(profile.progress.xp).toBeGreaterThan(0);
+    expect(j.rows().filter((r) => r.currency === 'xp')).toHaveLength(1);
+  });
+
+  /**
+   * Codex found this one; it was in none of the six claims.
+   *
+   * RED WITHOUT THE FIX: move `const sourceId = this.payoutSourceId();` back
+   * inside the `store.update` callback. Round 1's settlement, resolving after
+   * the end screen has begun round 2, then journals itself under
+   * `...:dm-public#2` — and round 2's real settlement finds its own key already
+   * present, takes the `journal.has` early return, and pays nothing.
+   */
+  it('a late settlement journals the round it settled, not the round now running', async () => {
+    const store = new GatedStore();
+    const j = memoryJournal(() => Date.now());
+    const room = makeRoom({
+      store, guard: new EntitlementGuard(() => 1_000),
+      journal: j.journal, hostId: 'host0001',
+    });
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+    run(room, [client], PLAY_TICKS);
+
+    // Round 1 ends and its settlement is caught mid-flight...
+    store.block();
+    endRoundNow(room, [client]);
+    expect(room.settlementsInFlight).toBeGreaterThan(0);
+
+    // ...while the room moves on to round 2.
+    room.timeLeftMs = 1;
+    run(room, [client], 400);
+    expect(room.round, 'the room did not begin a second round').toBeGreaterThan(1);
+
+    store.release();
+    await room.quiesce();
+    await settled(store, DEVICE);
+
+    const rows = j.rows().filter((r) => r.currency === 'xp');
+    expect(rows.length).toBeGreaterThan(0);
+    // The row names round ONE. Under the bug it names round two, and round
+    // two's own payout is then silently refused as a duplicate.
+    expect(rows[0].sourceId).toBe(`host0001:${room.instanceId}:dm-public#1`);
   });
 });

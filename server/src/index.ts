@@ -203,6 +203,16 @@ const ROOM_IDLE_MS = intEnv('DOOMCRAFT_ROOM_IDLE_MS', DEFAULT_ROOM_IDLE_MS, 5_00
  * both default to 30 s, so 25 s is the largest safe default.
  */
 const DRAIN_MS = intEnv('DOOMCRAFT_DRAIN_MS', 25_000, 0, 30 * 60_000);
+/**
+ * How long shutdown waits for the settlements its own detach loop STARTED.
+ *
+ * Detaching a player begins a payout that is several awaits deep — a journal
+ * read, a journal append, a locked profile write. This is the budget for that
+ * work, and it is deliberately well under the 5 s forced-exit timer below: a
+ * settlement that cannot finish in 3 s is not going to, and a host that refuses
+ * to die is worse than one lost payout that `postCloseWrites` will now name.
+ */
+const SETTLE_DRAIN_MS = intEnv('DOOMCRAFT_SETTLE_DRAIN_MS', 3_000, 0, 30_000);
 /** Build the default room at boot so the first player never waits for terrain. */
 const PREWARM = process.env.DOOMCRAFT_PREWARM !== '0';
 /**
@@ -913,7 +923,10 @@ const lifecycle: HostLifecycle = new HostLifecycle({
   forceMigrateMs: FORCE_MIGRATE_MS,
   liveRooms: (): LiveRoom[] => router.keys()
     .map((key: string): LiveRoom => ({ key, humans: router.get(key)?.humanCount ?? 0 })),
-  stopRoom: (key: string): void => { router.get(key)?.stop(); },
+  /* END the round, do not merely stop its clock. `stop()` alone froze the room
+   * at LIVE with its ledger record open and its players still connected, which
+   * deferred every settlement to the last milliseconds of SIGTERM. */
+  stopRoom: (key: string): void => { router.get(key)?.forceEndForDeploy(); },
   onDrained: () => {
     process.stdout.write('deploy drain complete: every match finished, no player was dropped\n');
   },
@@ -4019,6 +4032,34 @@ async function shutdown(signal: string): Promise<void> {
     if (r === null) continue;
     for (const conn of [...r.net.connections]) r.net.detach(conn, 1001, 'server shutting down');
   }
+
+  /* THE BARRIER, and the reason this loop exists at all.
+   *
+   * `detach` above reaches `Room.onDisconnect`, which STARTS a settlement per
+   * player: guard submit, a journal read, a journal append, then a debounced
+   * profile write behind the device lock. Every one of those is at least a
+   * macrotask away. Without this wait, the next statements — `store.flush()`
+   * (which saw an empty dirty set and returned instantly), `store.close()` and
+   * `process.exit(0)` — all ran FIRST. The journal kept the payout row; the
+   * balance it described was still only in the cache, and the process took it
+   * to the grave. Every deploy, on every host, for every player mid-round —
+   * and this project deploys at every green stage.
+   *
+   * Bounded, because a stuck settlement must not out-wait the 5 s forced exit
+   * below and turn a lost payout into a host that never dies. */
+  const quiesced = Promise.all(
+    router.keys().map((key) => router.get(key)?.quiesce() ?? Promise.resolve()),
+  );
+  await Promise.race([
+    quiesced,
+    new Promise<void>((done) => {
+      const t = setTimeout(done, SETTLE_DRAIN_MS);
+      if (typeof t.unref === 'function') t.unref();
+    }),
+  ]);
+  const owed = router.keys().reduce((n, key) => n + (router.get(key)?.settlementsInFlight ?? 0), 0);
+  if (owed > 0) process.stdout.write(`shutdown: ${owed} settlement(s) did not finish in time\n`);
+
   router.stopAll();
   for (const client of wss.clients) {
     try { client.close(1001, 'server shutting down'); } catch { /* ignore */ }

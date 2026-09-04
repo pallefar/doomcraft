@@ -1112,7 +1112,7 @@ export class Room implements NetHost {
     if (id === 0) return;
     const member = this.members.get(id);
     if (member) {
-      void this.persistMember(member, false);
+      this.beginSettle(member, false);
       this.net.broadcastChat(id, ChatChannel.SYSTEM, `${member.player.name} left`);
     }
     this.members.delete(id);
@@ -1291,7 +1291,7 @@ export class Room implements NetHost {
      * a ModeId literal: reward code stays mode-blind by construction. */
     const winnable = getMode(this.plan.modeId).win !== WinCondition.NONE;
     for (const m of this.members.values()) {
-      void this.persistMember(m, winnable && best !== null && m.player.id === best.id);
+      this.beginSettle(m, winnable && best !== null && m.player.id === best.id);
     }
     // AFTER the loop, never before. `reviewSubmission` refuses anything that
     // arrives past `closedMs`, so closing first would reject the whole room.
@@ -1422,6 +1422,57 @@ export class Room implements NetHost {
   }
 
   /** Drive the room from a timer. Idempotent. */
+  /**
+   * Settlements that have been STARTED but not finished.
+   *
+   * `persistMember` is fired with `void` from two places — `onDisconnect` and
+   * `endRound` — and each one awaits a journal read, a journal append and a
+   * debounced profile write before the money is durable. Nothing used to hold
+   * those promises, so `shutdown()` could detach every player (starting a
+   * settlement per player), close the store, and `process.exit(0)` while the
+   * payout was still queued behind the device lock: the journal row reached the
+   * disk, the balance it described did not. This set is what makes the drain
+   * able to WAIT for the work it just triggered.
+   */
+  private readonly settling = new Set<Promise<void>>();
+
+  /** Fire a settlement and remember it until it lands. */
+  private beginSettle(member: Membership, won: boolean): void {
+    const p = this.persistMember(member, won).catch(() => undefined);
+    this.settling.add(p);
+    void p.then(() => { this.settling.delete(p); });
+  }
+
+  /**
+   * Resolve once every settlement this room has started has finished.
+   *
+   * Looped, not a single `allSettled`: a settlement can start another (the end
+   * of a round detaches players), so waiting on one snapshot of the set is not
+   * enough.
+   */
+  async quiesce(): Promise<void> {
+    for (let guard = 0; this.settling.size > 0 && guard < 100; guard++) {
+      await Promise.allSettled(Array.from(this.settling));
+    }
+  }
+
+  /** True while money this room owes is still in the air. */
+  get settlementsInFlight(): number { return this.settling.size; }
+
+  /**
+   * End the round properly because the DEPLOY drain's deadline expired.
+   *
+   * The deadline used to call `stop()`, which clears the tick timer and nothing
+   * else: the round stayed frozen at LIVE, its ledger record stayed open, and
+   * the players stayed connected to a dead room until SIGTERM — at which point
+   * the settlement had five milliseconds to finish. Ending the round here means
+   * the payout happens while the process is unambiguously alive.
+   */
+  forceEndForDeploy(): void {
+    if (this.state === RoundState.LIVE) this.endRound('deploy deadline');
+    this.stop();
+  }
+
   start(): void {
     if (this.timer !== null) return;
     this.lastAdvanceMs = this.clock();
@@ -1540,9 +1591,20 @@ export class Room implements NetHost {
        * a crash, which is the recoverable direction — a row with no balance can
        * be re-applied, a balance with no row cannot be explained.
        */
+      /* THE IDEMPOTENCY KEY IS PINNED HERE, OUTSIDE THE CALLBACK.
+       *
+       * `payoutSourceId()` reads `this.sessionId`, which `beginRound` replaces
+       * after the 8 s end screen. The callback below runs behind the per-device
+       * lock and behind a profile read, so it can easily still be waiting when
+       * that happens — and it then journals round N's payout under round N+1's
+       * key. The damage is not the mislabelled row: it is that the REAL N+1
+       * settlement then finds its own key already present, takes the
+       * `journal.has` early return, and pays the player nothing for a round
+       * they played. Captured at submission time, it names the round that was
+       * actually settled, whatever the room has moved on to. */
+      const sourceId = this.payoutSourceId();
       const updated = await this.store.update(deviceId, async (profile) => {
         const journal = this.journal;
-        const sourceId = this.payoutSourceId();
         // ONE wall clock for the whole settlement: drop timestamps, journal
         // ms, and — load-bearing for challenges — the period keys, derived
         // exactly once so a midnight straddle cannot split the receipt from
