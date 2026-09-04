@@ -643,6 +643,42 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         </div>
       </section>
 
+      <section id="tab-delivery">
+        <div class="page-title">Sponsor delivery</div>
+        <div class="note" id="delivery-note"></div>
+        <div class="card">
+          <div class="card-head">window</div>
+          <div class="card-body tscroll" id="delivery-window"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">impressions</div>
+          <div class="card-body tscroll" id="delivery-counts"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">rates</div>
+          <div class="card-body tscroll" id="delivery-rates"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">exposure</div>
+          <div class="card-body tscroll" id="delivery-exposure"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">audience</div>
+          <div class="card-body tscroll" id="delivery-audience"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">inventory</div>
+          <div class="card-body tscroll" id="delivery-inventory"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">not measured here</div>
+          <div class="card-body tscroll" id="delivery-quality"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">read this before quoting any number above</div>
+          <div class="card-body" id="delivery-caveats"></div>
+        </div>
+      </section>
       <section id="tab-referrals">
         <div class="page-title">Referrals</div>
         <div class="note">
@@ -848,7 +884,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
   var MIN_REASON = ${MIN_REASON_CHARS};
   var MIN_ACTOR = ${MIN_ACTOR_CHARS};
   var TOKEN_KEY = 'dc.admin.token';
-  var TABS = ['fleet', 'packs', 'review', 'rhistory', 'studio', 'flags', 'refusals', 'player', 'referrals', 'metrics', 'audit', 'guides'];
+  var TABS = ['fleet', 'packs', 'review', 'rhistory', 'studio', 'flags', 'refusals', 'player', 'referrals', 'metrics', 'delivery', 'audit', 'guides'];
 
   /* ---- tiny DOM helpers. Everything below builds nodes; nothing sets
      innerHTML from data, so no value on this page needs escaping. ---- */
@@ -1943,6 +1979,146 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     });
   }
 
+  /* ---- sponsor delivery (SPONSORS.md 3.5) ----
+
+     Every number on this screen comes from the DAILY AGGREGATES, and every
+     number the log cannot support prints an em-dash and the reason it cannot.
+     Never a 0, and never a 100%: a rate with an empty denominator is
+     unavailable, and a figure invented there is the conflation the spec's own
+     caveat block exists to forbid. All the arithmetic is in
+     server/src/admin/model.ts; this renders what it is given. ---- */
+  function measured(mv, unit) {
+    /* The one rendering rule that matters. A Measured with a null value is a
+       refusal, and the reason is shown beside the dash rather than hidden in a
+       tooltip, because the reason is the finding. */
+    var wrap = make('span');
+    if (!mv || mv.value === null || mv.value === undefined) {
+      wrap.appendChild(make('span', 'muted', '\u2014'));
+      if (mv && mv.reason) wrap.appendChild(make('span', 'muted', '  ' + mv.reason));
+      return wrap;
+    }
+    var txt = String(mv.value) + (unit || '');
+    if (mv.lowerBound) txt = 'at least ' + txt;
+    wrap.appendChild(make('span', null, txt));
+    if (mv.reason) wrap.appendChild(make('span', 'muted', '  ' + mv.reason));
+    return wrap;
+  }
+
+  function measuredRows(node, entries) {
+    clear(node);
+    var t = make('table');
+    var tb = make('tbody');
+    for (var i = 0; i < entries.length; i++) {
+      var tr = make('tr');
+      tr.appendChild(make('td', null, entries[i][0]));
+      var td = make('td');
+      td.appendChild(measured(entries[i][1], entries[i][2]));
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb);
+    node.appendChild(t);
+  }
+
+  function loadDelivery() {
+    return api('/api/admin/ads?days=30').then(function (r) {
+      var note = el('delivery-note');
+      if (r.status !== 200) { fail(note, r); return; }
+      var d = r.body;
+      clear(note);
+      note.appendChild(make('div', null,
+        'PROVISIONAL. No settlement layer exists, so nothing here is an invoice. '
+        + 'These are opportunity-to-see numbers: a viewable impression means pixels met a size, '
+        + 'occlusion and duration bar on a focused, active screen. It does not mean anyone looked.'));
+
+      var win = el('delivery-window');
+      clear(win);
+      win.appendChild(pairs({
+        from: d.fromDay || '(no aggregated day yet)',
+        days: d.days,
+        'days not yet aggregated': d.pendingDays,
+        'rows written before instrumentation': d.preInstrumentationRows,
+      }));
+      if (d.pendingDays > 0) {
+        win.appendChild(make('div', 'muted',
+          'Today is never aggregated while it is still being written to, so it is absent by design. '
+          + 'A total here covers the days listed and no others.'));
+      }
+
+      var c = d.counts;
+      var counts = el('delivery-counts');
+      clear(counts);
+      counts.appendChild(pairs({
+        'served (server-side allocation, NOT an impression)': c.served,
+        'rendered (the creative began to render)': c.rendered,
+        viewable: c.viewable,
+        'non-viewable (measured failures)': c.nonViewable,
+        'undetermined (never measured)': c.undetermined,
+        '  of which: no verdict ever arrived': c.undeterminedByAbsence,
+      }));
+      counts.appendChild(make('div', 'muted',
+        'Served is larger than rendered on purpose: a fill can be allocated and never displayed.'));
+
+      measuredRows(el('delivery-rates'), [
+        ['Measured Rate  (viewable + non-viewable) / rendered', d.rates.measuredRate, '%'],
+        ['Viewable Rate  viewable / (viewable + non-viewable)', d.rates.viewableRate, '%'],
+      ]);
+      var dist = d.rates.distributionOfRendered;
+      var ratesNode = el('delivery-rates');
+      if (dist) {
+        ratesNode.appendChild(make('div', 'muted',
+          'Distribution of rendered: ' + dist.viewable + '% viewable, '
+          + dist.nonViewable + '% non-viewable, ' + dist.undetermined + '% undetermined. '
+          + 'All three are shown together because quoting the viewable share of the total AS the '
+          + 'Viewable Rate is the one thing MRC explicitly forbids.'));
+      }
+
+      measuredRows(el('delivery-exposure'), [
+        ['Total exposure', d.exposure.totalMs, ' ms'],
+        ['Median viewable time', d.exposure.medianViewableMs, ' ms'],
+        ['Mean viewable time', d.exposure.meanViewableMs, ' ms'],
+        ['Sustained views (4s)', d.exposure.sustainedViews4s, ''],
+      ]);
+
+      measuredRows(el('delivery-audience'), [
+        ['Session-uniques', d.audience.sessionUniques, ''],
+        ['Distinct device handles', d.audience.deviceHandles, ''],
+        ['Person-uniques', d.audience.personUniques, ''],
+        ['Frequency distribution', d.audience.frequencyDistribution, ''],
+        ['Mobile portrait', d.audience.mobilePortrait, ''],
+      ]);
+
+      var inv = el('delivery-inventory');
+      clear(inv);
+      inv.appendChild(pairs({ direct: d.inventory.direct, house: d.inventory.house }));
+      if (d.inventory.direct === 0 && d.inventory.house > 0) {
+        inv.appendChild(make('div', 'muted',
+          'Nothing is booked, so every impression above is unsold house inventory.'));
+      }
+      inv.appendChild(pairs(d.inventory.bySurface));
+
+      measuredRows(el('delivery-quality'), [
+        ['Screen coverage p50', d.quality.screenCoverageP50, ''],
+        ['Screen coverage p90', d.quality.screenCoverageP90, ''],
+        ['View angle buckets', d.quality.viewAngleBuckets, ''],
+        ['Distance distribution', d.quality.distanceDistribution, ''],
+        ['Skew ratio', d.quality.skewRatio, ''],
+        ['Occluded vs non-occluded', d.quality.occludedSplit, ''],
+      ]);
+
+      var cav = el('delivery-caveats');
+      clear(cav);
+      var lines = [
+        'These are opportunity-to-see numbers. Nothing here measures attention, memory, recall or intent. There is no eye tracking.',
+        'Do not compare this viewable rate to a display benchmark without reading the definition. In-game viewability runs high across the industry because qualifying volume is defined by geometry, not scroll position. A high rate is a statement about placement authoring, not about attention.',
+        'Undetermined is not viewable and is not billed. It is also NOT a measured failure: a creative that never rendered was never measured, and folding it into non-viewable would flatter the Measured Rate.',
+        'We cannot detect a monitor that is off, a window covered by another application, or a player who looked away. Our mitigations - tab visibility, window focus, input liveness - all only reduce counts.',
+        'This is the 2D DOM path only. The in-world surfaces, their coverage, angle and occlusion measurement, and the calibration harness that would give those numbers empirical support, are phase 3 and do not exist yet.',
+      ];
+      for (var li = 0; li < lines.length; li++) cav.appendChild(make('div', 'muted', String(li + 1) + '. ' + lines[li]));
+    });
+  }
+
   /* ---- referrals (C6.1: the review queue as a screen) ---- */
   function loadReferrals() {
     return api('/api/admin/referrals').then(function (r) {
@@ -2092,6 +2268,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     else if (name === 'referrals') loadReferrals();
     else if (name === 'audit') loadAudit();
     else if (name === 'guides') { /* static prose — nothing to fetch */ }
+    else if (name === 'delivery') loadDelivery();
     else loadFleet();
     if (name === 'player') loadMerges();
   }
@@ -2117,7 +2294,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     { label: 'Live', tabs: ['fleet', 'player', 'referrals'] },
     { label: 'Releases', tabs: ['packs', 'review', 'rhistory', 'studio', 'flags'] },
     { label: 'Audit', tabs: ['refusals', 'audit'] },
-    { label: 'Analytics', tabs: ['metrics'] },
+    { label: 'Analytics', tabs: ['metrics', 'delivery'] },
     { label: 'Help', tabs: ['guides'] },
   ];
   var TAB_META = {
@@ -2132,6 +2309,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
     referrals: { title: 'Referrals', d: 'M9 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM3 16c.4-2.6 2.6-4 6-4M17 10a3 3 0 1 0 0-6M15 21l3-3-3-3M21 18h-6' },
     audit: { title: 'Actions', d: 'M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5' },
     metrics: { title: 'Metrics', d: 'M4 20h16M7 16v-5M12 16V6M17 16v-8' },
+    delivery: { title: 'Delivery', d: 'M3 12h4l3 7 4-14 3 7h4' },
     guides: { title: 'Guides', d: 'M12 6c-1.8-1.3-4.2-2-8-2v14c3.8 0 6.2.7 8 2 1.8-1.3 4.2-2 8-2V4c-3.8 0-6.2.7-8 2zM12 6v14' },
   };
 

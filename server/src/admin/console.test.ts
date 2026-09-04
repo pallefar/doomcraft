@@ -191,6 +191,45 @@ describe('the warnings the screen is required to print', () => {
     expect(ADMIN_CONSOLE_HTML).toContain('a label, not authentication');
   });
 
+  /**
+   * The delivery screen's rules are the ones a sponsor's money depends on, and
+   * every one of them is a sentence that can be deleted by accident.
+   */
+  it('renders the delivery report and refuses with an em-dash, never a number', () => {
+    expect(SCRIPT, 'the delivery route is not rendered anywhere').toContain('/api/admin/ads');
+    /* The em-dash IS the refusal, and this asserts the RENDERING PATH, not the
+     * mere presence of the character: an em-dash appears elsewhere in this
+     * console (the journal window note), so a looser check passes happily even
+     * when the refusal branch has been changed to print 0. */
+    expect(SCRIPT, 'the refusal branch prints something other than an em-dash')
+      .toContain("wrap.appendChild(make('span', 'muted', '\u2014'));");
+    expect(SCRIPT, 'the reason is not shown beside the dash').toContain('mv.reason');
+  });
+
+  it('says the report is provisional and not an invoice', () => {
+    expect(SCRIPT).toContain('PROVISIONAL');
+    expect(SCRIPT).toContain('nothing here is an invoice');
+  });
+
+  it('prints the caveat that undetermined is not a measured failure', () => {
+    expect(SCRIPT).toContain('Undetermined is not viewable and is not billed');
+    expect(SCRIPT, 'the flattering conflation is not warned against')
+      .toContain('folding it into non-viewable would flatter the Measured Rate');
+  });
+
+  it('shows all three buckets together, which is what makes the conflation impossible', () => {
+    expect(SCRIPT).toContain('quoting the viewable share of the total AS the');
+  });
+
+  it('says served is not an impression', () => {
+    expect(SCRIPT).toContain('served (server-side allocation, NOT an impression)');
+    expect(SCRIPT).toContain('a fill can be allocated and never displayed');
+  });
+
+  it('says the in-world half does not exist yet, rather than leaving blanks', () => {
+    expect(SCRIPT).toContain('are phase 3 and do not exist yet');
+  });
+
   it('says the metrics are in-memory and per-process, so nobody reads them as history', () => {
     expect(SCRIPT).toContain('in-memory and per-process');
     expect(SCRIPT).toContain('No event is emitted');
