@@ -1406,6 +1406,17 @@ export class MemoryStore implements PersistenceStore {
  * way to write a *deterministic* test about which of two concurrent readers
  * caches last, which is the bug in `load()` below.
  */
+/**
+ * ENOENT and nothing else. The distinction this function exists to make is the
+ * whole of `docs/BUGS-FOUND.md`'s blank-profile class: "absent" is a new player,
+ * "unreadable" is a player whose file we must not touch. Errno, not message —
+ * a fake that throws `new Error('ENOENT')` is NOT what node throws (rule 6:
+ * simulated-failure tests must pick platform-identical failure inputs).
+ */
+export function isMissingFile(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+}
+
 export interface FsLike {
   mkdir(path: string, opts: { recursive: boolean }): Promise<unknown>;
   readFile(path: string, encoding: 'utf8'): Promise<string>;
@@ -1431,6 +1442,26 @@ export class JsonFileStore implements PersistenceStore {
   private closed = false;
   /** Set when the disk is unusable; the store degrades to memory only. */
   degraded = false;
+  /**
+   * Devices whose file is PRESENT BUT UNREADABLE — a non-ENOENT read error, or
+   * bytes that would not parse. `accounts.ts:378` already argues this policy for
+   * the accounts file; this is the same argument one layer down, and it is the
+   * one that was missing. Such a device gets a working in-memory profile so the
+   * match it is in does not fall over, but it is NEVER written back, because the
+   * only thing we could write is a blank that would destroy the real file
+   * atomically and unrecoverably. The evidence survives for an operator.
+   */
+  private readonly unreadable = new Set<string>();
+  /**
+   * The in-flight `flush()`, so a second caller — the shutdown barrier, above
+   * all — AWAITS the writes already in the air instead of seeing an emptied
+   * dirty set and concluding there is nothing to do.
+   */
+  private flushing: Promise<void> | null = null;
+  /** Writes that arrived after `close()`. Non-zero means settlements were lost. */
+  postCloseWrites = 0;
+  /** Profiles whose last write failed and have not since been written. */
+  get unflushed(): number { return this.dirty.size; }
 
   constructor(root: string, flushDelayMs = 800) {
     this.root = root.replace(/\/+$/, '');
@@ -1526,9 +1557,30 @@ export class JsonFileStore implements PersistenceStore {
       this.degraded = true;
       return null;
     }
+    let text: string;
     try {
-      const text = await fs.readFile(this.filePath(deviceId), 'utf8');
-      const profile = migrateProfile(JSON.parse(text), deviceId);
+      text = await fs.readFile(this.filePath(deviceId), 'utf8');
+    } catch (err) {
+      // ONLY a missing file is "new player". Any other errno — EACCES from a
+      // volume that came back with different ownership (this project has had
+      // exactly that, for six days, silently), EIO on a bad block, EMFILE under
+      // match-end load — means the profile EXISTS and we could not read it.
+      // Returning null there tells `ensureLocked` to mint a blank, and the blank
+      // is then renamed over the real file. Quarantine instead.
+      if (!isMissingFile(err)) this.quarantine(deviceId, err);
+      return null;
+    }
+    try {
+      const parsed: unknown = JSON.parse(text);
+      // A file that parses to a non-object is corruption residue, not a profile.
+      // `migrateProfile` would silently merge it over the defaults and return a
+      // fully blank profile that LOOKS like a successful read — the worst shape
+      // of this bug, because it does not even take the catch below.
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        this.quarantine(deviceId, new Error('profile JSON is not an object'));
+        return null;
+      }
+      const profile = migrateProfile(parsed, deviceId);
       // And AGAIN, after the awaits. Belt and braces: `save()` is a public
       // method that writes the cache without taking the lock, so a caller who
       // uses it directly would otherwise re-open the window this closes. A
@@ -1538,10 +1590,33 @@ export class JsonFileStore implements PersistenceStore {
       this.cache.set(deviceId, profile);
       if (profile.accountId) this.accountIndex.set(profile.accountId, deviceId);
       return profile;
-    } catch {
+    } catch (err) {
+      // Truncated or corrupt bytes. Same argument as above: present, unreadable.
+      this.quarantine(deviceId, err);
       return null;
     }
   }
+
+  /**
+   * Mark a device present-but-unreadable: degrade loudly, and bar it from every
+   * future write for the life of the process. `flush()` skips it, so the file on
+   * disk — the only copy of that player's progress — is preserved for recovery
+   * rather than overwritten with the defaults we were about to invent.
+   */
+  private quarantine(deviceId: string, err: unknown): void {
+    this.degraded = true;
+    if (this.unreadable.has(deviceId)) return;
+    this.unreadable.add(deviceId);
+    this.dirty.delete(deviceId);
+    const code = (err as NodeJS.ErrnoException)?.code ?? '';
+    process.stderr.write(
+      `persistence: profile ${deviceId} is present but UNREADABLE (${code || (err as Error)?.message}); ` +
+      `it will not be written this process, so the file on disk survives for recovery\n`,
+    );
+  }
+
+  /** Devices barred from writing because their file could not be read. */
+  quarantined(): string[] { return Array.from(this.unreadable); }
 
   /**
    * Load or create — under the per-device lock.
@@ -1580,7 +1655,10 @@ export class JsonFileStore implements PersistenceStore {
     if (existing) return existing;
     const fresh = createProfile(deviceId);
     this.cache.set(deviceId, fresh);
-    this.markDirty(deviceId);
+    // A quarantined device gets the blank in MEMORY — the round it is in has to
+    // finish — but never on disk. `markDirty` is the line that used to rename a
+    // blank over a real profile; skipping it is the whole fix.
+    if (!this.unreadable.has(deviceId)) this.markDirty(deviceId);
     return fresh;
   }
 
@@ -1632,7 +1710,22 @@ export class JsonFileStore implements PersistenceStore {
   }
 
   private markDirty(deviceId: string): void {
-    if (this.closed) return;
+    // A quarantined profile is never written: the blank we hold would replace
+    // the real bytes still on disk.
+    if (this.unreadable.has(deviceId)) return;
+    if (this.closed) {
+      // This used to `return` in silence, and that silence is how a settlement
+      // that completed a few milliseconds after `close()` disappeared without a
+      // trace. Keep it dirty (a later flush can still save it) and SAY SO — a
+      // non-zero `postCloseWrites` at exit means the drain raced the payout.
+      this.postCloseWrites++;
+      this.dirty.add(deviceId);
+      process.stderr.write(
+        `persistence: profile ${deviceId} was written AFTER close() — the drain did not ` +
+        `wait for this settlement (postCloseWrites=${this.postCloseWrites})\n`,
+      );
+      return;
+    }
     this.dirty.add(deviceId);
     if (this.flushTimer !== null) return;
     this.flushTimer = setTimeout(() => {
@@ -1644,21 +1737,50 @@ export class JsonFileStore implements PersistenceStore {
     if (typeof t.unref === 'function') t.unref();
   }
 
-  async flush(): Promise<void> {
-    if (this.dirty.size === 0) return;
+  /**
+   * Force every dirty profile to disk.
+   *
+   * Two properties this MUST have, both of which it used to lack, and both of
+   * which cost a settlement when absent:
+   *
+   *   1. **A failed write stays dirty.** The id is removed only after `rename`
+   *      resolves. Clearing the set up front meant an EACCES dropped that
+   *      profile's pending write permanently — and because `flush()` still
+   *      resolved, the trade barrier at `trades.ts:623` could stamp a swap
+   *      'settled' with nothing on disk.
+   *   2. **A concurrent caller awaits the writes already in the air.** The
+   *      shutdown barrier calls `flush()` while a debounced flush may be
+   *      mid-`rename`; with the dirty set already emptied it saw size 0 and
+   *      returned instantly, then `process.exit` cut the write off.
+   */
+  flush(): Promise<void> {
+    // Join the in-flight flush, then run again: ids re-dirtied by a failed write
+    // (or arriving while it ran) still need their turn.
+    if (this.flushing !== null) return this.flushing.then(() => this.runFlush());
+    return this.runFlush();
+  }
+
+  private runFlush(): Promise<void> {
+    if (this.dirty.size === 0) return Promise.resolve();
+    const run = this.flushOnce().finally(() => { this.flushing = null; });
+    this.flushing = run;
+    return run;
+  }
+
+  private async flushOnce(): Promise<void> {
     let fs: FsLike;
     try {
       fs = await this.ready();
     } catch {
+      // Keep the dirty set. The disk may come back, and these are payouts.
       this.degraded = true;
-      this.dirty.clear();
+      this.rearm();
       return;
     }
-    const ids = Array.from(this.dirty);
-    this.dirty.clear();
-    for (const id of ids) {
+    for (const id of Array.from(this.dirty)) {
+      if (this.unreadable.has(id)) { this.dirty.delete(id); continue; }
       const p = this.cache.get(id);
-      if (!p) continue;
+      if (!p) { this.dirty.delete(id); continue; }
       try {
         await fs.mkdir(this.shardPath(id), { recursive: true });
         const path = this.filePath(id);
@@ -1667,19 +1789,53 @@ export class JsonFileStore implements PersistenceStore {
         // keys have to go back to the top level or they are lost on this write.
         await fs.writeFile(tmp, JSON.stringify(serialiseProfile(p)), 'utf8');
         await fs.rename(tmp, path);
-      } catch {
+        // ONLY here. Before the write, and a rejection loses it forever.
+        this.dirty.delete(id);
+      } catch (err) {
         this.degraded = true;
+        const code = (err as NodeJS.ErrnoException)?.code ?? (err as Error)?.message ?? '';
+        // A bare `catch {}` on a durability path is what made the 2026-08-22
+        // volume incident invisible for six days.
+        process.stderr.write(`persistence: FAILED to write profile ${id} (${code}); will retry\n`);
       }
     }
+    // Anything still dirty failed. Come back for it.
+    if (this.dirty.size > 0) this.rearm();
   }
 
+  /** Re-arm the debounce so a failed write is retried without a new mutation. */
+  private rearm(): void {
+    if (this.closed || this.flushTimer !== null || this.dirty.size === 0) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flush();
+    }, this.flushDelayMs);
+    const t = this.flushTimer as unknown as { unref?: () => void };
+    if (typeof t.unref === 'function') t.unref();
+  }
+
+  /**
+   * Final barrier. Retries a few times, because the last flush of a process is
+   * the one carrying the settlements nothing will ever re-dirty, and reports
+   * what it could not save rather than exiting quietly on a loss.
+   */
   async close(): Promise<void> {
     if (this.flushTimer !== null) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    await this.flush();
+    for (let attempt = 0; attempt < 3 && this.dirty.size > 0; attempt++) await this.flush();
     this.closed = true;
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.dirty.size > 0) {
+      process.stderr.write(
+        `persistence: SHUTDOWN LOST ${this.dirty.size} profile write(s): ` +
+        `${Array.from(this.dirty).join(', ')}\n`,
+      );
+    }
   }
 
   private withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {

@@ -84,6 +84,19 @@ import {
 import type { NetTransport } from './net.js';
 import type { PlayerEntity } from './sim.js';
 
+/**
+ * What node ACTUALLY throws for a missing file: an Error carrying `code`, not an
+ * Error whose message happens to read 'ENOENT'. The production loader now
+ * discriminates on the errno (a message-based check would be a test that cannot
+ * fail), so the fakes have to be platform-identical — rule 6.
+ */
+function enoent(): NodeJS.ErrnoException {
+  const e = new Error('ENOENT: no such file or directory') as NodeJS.ErrnoException;
+  e.code = 'ENOENT';
+  return e;
+}
+
+
 /* ------------------------------------------------------------------------ *
  * Harness
  * ------------------------------------------------------------------------ */
@@ -184,12 +197,12 @@ function memoryJournal(clock: () => number): { journal: JsonJournal; rows(): Led
     },
     async stat(path: string): Promise<{ size: number }> {
       const t = files.get(path);
-      if (t === undefined) throw new Error('ENOENT');
+      if (t === undefined) throw enoent();
       return { size: t.join('').length };
     },
     async readFile(path: string): Promise<string> {
       const t = files.get(path);
-      if (t === undefined) throw new Error('ENOENT');
+      if (t === undefined) throw enoent();
       return t.join('');
     },
     async writeFile(path: string, data: string): Promise<void> { files.set(path, [data]); },
@@ -595,7 +608,7 @@ describe('a payout landing while somebody reads the profile', () => {
           ?? (path.endsWith(`${DEV}.json`) ? onDisk : null);
         return new Promise<string>((resolve, reject) => {
           pending.push(() => {
-            if (snapshot === null) reject(new Error('ENOENT'));
+            if (snapshot === null) reject(enoent());
             else resolve(snapshot);
           });
         });
