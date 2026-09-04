@@ -2095,7 +2095,17 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         inv.appendChild(make('div', 'muted',
           'Nothing is booked, so every impression above is unsold house inventory.'));
       }
-      inv.appendChild(pairs(d.inventory.bySurface));
+      /* Only when there is something to show. A pairs() call on an empty
+         object renders a bare header with no rows, which reads as a broken
+         table rather than an empty one - and this screen's whole job is that
+         absence is legible. (No backticks in this file: rule 12.) */
+      var surfaceKeys = Object.keys(d.inventory.bySurface || {});
+      if (surfaceKeys.length > 0) {
+        inv.appendChild(make('div', 'muted', 'rows by surface'));
+        inv.appendChild(pairs(d.inventory.bySurface));
+      } else {
+        inv.appendChild(make('div', 'empty', 'no fills recorded in this window, so there is nothing to break down by surface'));
+      }
 
       measuredRows(el('delivery-quality'), [
         ['Screen coverage p50', d.quality.screenCoverageP50, ''],
