@@ -113,6 +113,7 @@ import {
 } from './adminAudit.js';
 import { ADMIN_CONSOLE_HTML, adminSignInHtml } from './admin/console.js';
 import {
+  adReport,
   connectionRollup,
   consoleCapabilities,
   flagRegistryView,
@@ -122,7 +123,8 @@ import {
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
 import { PackInventory, ReleaseService, releaseContentHash, rollMatchDrops } from './packs.js';
 import { StudioService } from './studio.js';
-import { sweepAdLog } from './adsRollup.js';
+import { rawDays, readRollup, rolledDays, sweepAdLog } from './adsRollup.js';
+import type { AdDayRollup } from './adsRollup.js';
 import { AdService } from './ads.js';
 import { CreativeStore, IMAGE_MAX_BYTES } from './creatives.js';
 import { PHASE_ONE_SURFACES, type AdEventType, type SurfaceId } from '@doomcraft/shared/sponsor';
@@ -2502,6 +2504,45 @@ async function handleApi(
   }
 
   /* --- the operator's fleet view ---------------------------------------- */
+  /**
+   * The sponsor delivery report (docs/SPONSORS.md §3.5).
+   *
+   * Reads the DAILY AGGREGATES, not the raw log: the raw shards are unbounded
+   * and device-keyed, and a panel that scanned them per request would inherit
+   * both problems. It writes nothing, including no audit row — planning is
+   * reading, and so is reporting.
+   *
+   * Every metric it cannot support honestly comes back as a null with a reason
+   * attached, and the console prints an em-dash and that reason. Never a 0, and
+   * above all never a 100%: a Viewable Rate with an empty denominator is
+   * unavailable, and printing a number there would be the exact conflation
+   * §3.5's caveat block exists to forbid.
+   */
+  if (path === '/api/admin/ads' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const gate = admitAdmin(req, path);
+    if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }
+    const daysRaw = Number(url.searchParams.get('days') ?? '30');
+    const want = Number.isFinite(daysRaw) ? Math.max(1, Math.min(400, Math.floor(daysRaw))) : 30;
+    const rolled = rolledDays(dataRoot);
+    const chosen = rolled.slice(Math.max(0, rolled.length - want));
+    const docs: AdDayRollup[] = [];
+    for (const d of chosen) {
+      const doc = readRollup(dataRoot, d);
+      if (doc !== null) docs.push(doc);
+    }
+    /* Raw days with no aggregate yet — today always, plus anything the sweep
+     * has not reached. The report says how many, because a total that silently
+     * omits days is the failure mode this whole arc exists to avoid. */
+    const pending = rawDays(dataRoot).filter((d) => !rolled.includes(d)).length;
+    sendJson(res, 200, adReport({
+      days: docs,
+      fromDay: chosen[0] ?? '',
+      pendingDays: pending,
+      live: ads.status(),
+    }), cors);
+    return true;
+  }
+
   if (path === '/api/admin/status' && (req.method === 'GET' || req.method === 'HEAD')) {
     const gate = admitAdmin(req, path);
     if (gate.verdict !== AdminVerdict.OK) { refuseAdmin(res, gate.verdict, cors); return true; }

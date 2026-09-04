@@ -14,6 +14,9 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 import { AD_LOG_VERSION } from '@doomcraft/shared/sponsor';
 import { pruneRaw, readRollup, rollupPending, rollupRows, sweepAdLog } from './adsRollup.js';
+import type { AdDayRollup } from './adsRollup.js';
+import { adReport } from './admin/model.js';
+import type { Measured } from './admin/model.js';
 
 const dirs: string[] = [];
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
@@ -204,5 +207,131 @@ describe('retention never deletes a day nobody has counted', () => {
     expect(pruned).toContain('2026-01-01');
     expect(readRollup(root, '2026-01-01')).not.toBeNull();
     expect(existsSync(join(root, 'ads', '2026-01-01.jsonl'))).toBe(false);
+  });
+});
+
+/**
+ * The report's honesty rules.
+ *
+ * A wrong number here is worse than no number, because a sponsor prices a buy
+ * off it. §3.5's caveat block exists for exactly this, and these are the cases
+ * where the tempting answer and the true one differ.
+ */
+describe('the delivery report refuses rather than invents', () => {
+  function report(over: Partial<AdDayRollup> = {}, days = 1): Record<string, unknown> {
+    const day: AdDayRollup = {
+      v: AD_LOG_VERSION, day: '2026-09-01', rows: 0, byType: {},
+      served: 0, rendered: 0, viewable: 0, nonViewable: 0, undetermined: 0,
+      renderedWithoutVerdict: 0, byCampaign: {}, bySurface: {}, bySource: {},
+      byMode: {}, byPlatform: {}, sessions: 0, devices: 0, exposureMs: 0,
+      straddled: 0, unversioned: 0, ...over,
+    };
+    return adReport({
+      days: Array.from({ length: days }, () => day),
+      fromDay: '2026-09-01', pendingDays: 0, live: {},
+    });
+  }
+
+  function m(doc: Record<string, unknown>, group: string, key: string): Measured {
+    return (doc[group] as Record<string, Measured>)[key];
+  }
+
+  /**
+   * THE ONE THAT KILLED THE ORIGINAL DASHBOARD. Viewable Rate is 2/(2+3). With
+   * viewable impressions but no measured failures the tempting answer is 100%,
+   * and MRC explicitly forbids quoting the viewable share of Total as the
+   * Viewable Rate. The honest answer is that it is unavailable.
+   *
+   * RED WITHOUT THE FIX: change `rate()` to return 100 when the denominator is
+   * zero, or to divide by `rendered` instead of by measured.
+   */
+  it('does not print 100% for a Viewable Rate with no measured failures', () => {
+    const doc = report({ rendered: 10, viewable: 0, nonViewable: 0, undetermined: 10 });
+    const vr = m(doc, 'rates', 'viewableRate');
+    expect(vr.value, 'a rate was invented from an empty denominator').toBeNull();
+    expect(vr.reason).toContain('nothing was measured');
+  });
+
+  it('does not print 0 for a rate that simply has no denominator', () => {
+    const doc = report({ rendered: 0 });
+    expect(m(doc, 'rates', 'measuredRate').value).toBeNull();
+    expect(m(doc, 'rates', 'measuredRate').reason).toContain('no rendered impressions');
+  });
+
+  it('computes both rates from the right denominators when it can', () => {
+    /* The two denominators are deliberately DIFFERENT here — 10 rendered, 9
+     * measured — because with them equal this test passes just as happily when
+     * the Viewable Rate is (wrongly) computed off Total, which is the precise
+     * conflation MRC forbids. 8/9 = 88.89%, and 8/10 = 80% is the wrong answer
+     * this asserts against. */
+    const doc = report({ rendered: 10, viewable: 8, nonViewable: 1, undetermined: 1 });
+    expect(m(doc, 'rates', 'measuredRate').value).toBe(90);
+    expect(m(doc, 'rates', 'viewableRate').value, 'the rate was computed off Total, not off measured').toBe(88.89);
+  });
+
+  /**
+   * Metric 7: all three side by side, so quoting the viewable share of Total as
+   * the Viewable Rate is impossible rather than merely discouraged.
+   */
+  it('renders the impression distribution as all three buckets at once', () => {
+    const doc = report({ rendered: 10, viewable: 5, nonViewable: 2, undetermined: 3 });
+    const dist = (doc.rates as Record<string, unknown>).distributionOfRendered as Record<string, number>;
+    expect(dist.viewable).toBe(50);
+    expect(dist.nonViewable).toBe(20);
+    expect(dist.undetermined).toBe(30);
+  });
+
+  /** Exposure that spans a shard boundary is a floor, and says so. */
+  it('marks exposure as a lower bound when a fill straddled two days', () => {
+    const doc = report({ exposureMs: 9_000, straddled: 1 });
+    const e = m(doc, 'exposure', 'totalMs');
+    expect(e.value).toBe(9_000);
+    expect(e.lowerBound).toBe(true);
+    expect(e.reason).toContain('floor');
+  });
+
+  /**
+   * §3.5 promises the quality-of-exposure block, and it is the part that
+   * justifies pricing an in-world surface above a banner. It needs the phase-3
+   * ray pipeline, which does not exist — so it is refused BY NAME. A missing
+   * row would read as zero.
+   */
+  it('names the metrics it cannot produce instead of omitting them', () => {
+    const doc = report();
+    for (const key of ['screenCoverageP50', 'viewAngleBuckets', 'occludedSplit']) {
+      const q = m(doc, 'quality', key);
+      expect(q.value, `${key} invented a value`).toBeNull();
+      expect(q.reason, `${key} gave no reason`).toContain('phase 3');
+    }
+  });
+
+  /** §3.5: "labelled session-uniques, not person-uniques". */
+  it('reports session-uniques and refuses person-uniques', () => {
+    const doc = report({ sessions: 12, devices: 9 });
+    expect(m(doc, 'audience', 'sessionUniques').value).toBe(12);
+    expect(m(doc, 'audience', 'personUniques').value).toBeNull();
+    expect(m(doc, 'audience', 'deviceHandles').lowerBound).toBe(true);
+  });
+
+  /**
+   * No settlement layer exists (docs/SPONSORS.md:1338 claims one shipped and is
+   * wrong), so nothing on this screen is an invoice.
+   */
+  it('marks the whole report provisional', () => {
+    expect(report().provisional).toBe(true);
+  });
+
+  it('says how many days it could not include', () => {
+    const doc = adReport({ days: [], fromDay: '', pendingDays: 3, live: {} });
+    expect(doc.pendingDays).toBe(3);
+    expect(doc.fromDay).toBe('');
+  });
+
+  /** With nothing booked, every impression is unsold house inventory. */
+  it('splits house from direct rather than reporting one delivery number', () => {
+    const doc = report({ bySource: { house: 7, direct: 3 } });
+    const inv = doc.inventory as Record<string, number>;
+    expect(inv.house).toBe(7);
+    expect(inv.direct).toBe(3);
   });
 });

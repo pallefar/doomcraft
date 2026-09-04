@@ -24,6 +24,7 @@ import { redactProfileKey } from '../adminAudit.js';
 import type { AuditEntry } from '../entitlementGuard.js';
 import type { ConnectionStats } from '../net.js';
 import type { LedgerEntry } from '../journal.js';
+import type { AdDayRollup } from '../adsRollup.js';
 import type { StoredProfile } from '../persistence.js';
 
 /* ------------------------------------------------------------------------ *
@@ -347,4 +348,167 @@ export function flagRegistryView(
       maskable: feature !== undefined,
     };
   });
+}
+
+/* ------------------------------------------------------------------------ *
+ * The sponsor delivery report (docs/SPONSORS.md §3.5)
+ * ------------------------------------------------------------------------ */
+
+/**
+ * A metric that may not be answerable, and says why when it is not.
+ *
+ * The §3.5 caveat block exists because a wrong number here is worse than no
+ * number: a sponsor prices a buy off it. So every metric is either a value or
+ * an explicit refusal carrying its reason, and the console prints an em-dash
+ * plus that reason — never 0, and never 100%. The two are not the same failure:
+ * a rate with an empty denominator is UNAVAILABLE, and printing 0 asserts a
+ * measurement that was never taken.
+ */
+export interface Measured {
+  value: number | null;
+  /** Empty when `value` is a number. Printed verbatim beside the em-dash. */
+  reason: string;
+  /** True when the value is a floor rather than a total. */
+  lowerBound?: boolean;
+}
+
+function has(value: number): Measured { return { value, reason: '' }; }
+function no(reason: string): Measured { return { value: null, reason }; }
+
+/** A rate, or the reason its denominator does not exist. */
+function rate(numerator: number, denominator: number, reason: string): Measured {
+  if (denominator <= 0) return no(reason);
+  return has(Math.round((numerator / denominator) * 10000) / 100);
+}
+
+export interface AdReportInput {
+  days: readonly AdDayRollup[];
+  /** The oldest day with an aggregate, or '' when there is none. */
+  fromDay: string;
+  /** Days whose raw rows exist but have not been aggregated yet. */
+  pendingDays: number;
+  /** In-process counters, for the live half of the screen. */
+  live: Record<string, number>;
+}
+
+/**
+ * Build the delivery report.
+ *
+ * Everything the 2D DOM path can honestly answer is answered; everything that
+ * needs the in-world ray pipeline is refused BY NAME, because §3.5 promises
+ * those metrics and a blank row would read as zero rather than as absent.
+ */
+export function adReport(input: AdReportInput): Record<string, unknown> {
+  const t = {
+    served: 0, rendered: 0, viewable: 0, nonViewable: 0, undetermined: 0,
+    renderedWithoutVerdict: 0, exposureMs: 0, straddled: 0, unversioned: 0,
+    sessions: 0, devices: 0, rows: 0,
+  };
+  const bySource: Record<string, number> = {};
+  const byCampaign: Record<string, number> = {};
+  const bySurface: Record<string, number> = {};
+  const byPlatform: Record<string, number> = {};
+  const byMode: Record<string, number> = {};
+  const merge = (into: Record<string, number>, from: Record<string, number>): void => {
+    for (const k of Object.keys(from)) into[k] = (into[k] ?? 0) + from[k];
+  };
+  for (const d of input.days) {
+    t.served += d.served; t.rendered += d.rendered; t.viewable += d.viewable;
+    t.nonViewable += d.nonViewable; t.undetermined += d.undetermined;
+    t.renderedWithoutVerdict += d.renderedWithoutVerdict;
+    t.exposureMs += d.exposureMs; t.straddled += d.straddled;
+    t.unversioned += d.unversioned; t.sessions += d.sessions;
+    t.devices += d.devices; t.rows += d.rows;
+    merge(bySource, d.bySource); merge(byCampaign, d.byCampaign);
+    merge(bySurface, d.bySurface); merge(byPlatform, d.byPlatform);
+    merge(byMode, d.byMode);
+  }
+
+  const measured = t.viewable + t.nonViewable;
+  const NO_3D = 'needs the in-world measurement pipeline (phase 3); no 2D DOM slot produces it';
+
+  return {
+    /* Nothing here is settled. §3.7.5's item 8 settlement layer does NOT exist,
+     * so no figure on this screen is an invoice — and docs/SPONSORS.md:1338
+     * claims otherwise and is wrong. */
+    provisional: true,
+    /* The window this actually covers, derived from the aggregates that exist
+     * rather than from a configured range — the `journal.fromDay` precedent. */
+    fromDay: input.fromDay,
+    days: input.days.length,
+    pendingDays: input.pendingDays,
+
+    counts: {
+      /* SERVER-SIDE ALLOCATION. Not an impression, not a rendered impression:
+       * the client may never have displayed it. */
+      served: t.served,
+      /* §3.5 metric 1, and it is the client that attests it. */
+      rendered: t.rendered,
+      viewable: t.viewable,
+      nonViewable: t.nonViewable,
+      undetermined: t.undetermined,
+      undeterminedByAbsence: t.renderedWithoutVerdict,
+    },
+
+    rates: {
+      /* Metric 5 = (2+3)/1. Target >95%. */
+      measuredRate: t.rendered > 0
+        ? has(Math.round((measured / t.rendered) * 10000) / 100)
+        : no('no rendered impressions in this window'),
+      /* Metric 6 = 2/(2+3). NOT viewable/rendered — MRC explicitly forbids
+       * quoting the viewable share of Total as the Viewable Rate, and with no
+       * measured failures recorded the honest answer is that it is unavailable,
+       * never 100%. */
+      viewableRate: rate(t.viewable, measured, 'nothing was measured in this window: no viewable and no measured-non-viewable impressions'),
+      /* Metric 7, all three side by side so the conflation is impossible. */
+      distributionOfRendered: t.rendered > 0 ? {
+        viewable: Math.round((t.viewable / t.rendered) * 10000) / 100,
+        nonViewable: Math.round((t.nonViewable / t.rendered) * 10000) / 100,
+        undetermined: Math.round((t.undetermined / t.rendered) * 10000) / 100,
+      } : null,
+    },
+
+    exposure: {
+      /* IIG §3.2.10.2 Total Exposure Time. Max-per-nonce within each day, so a
+       * fill that straddled midnight contributes only its part. */
+      totalMs: t.straddled > 0
+        ? { value: t.exposureMs, reason: `${t.straddled} fill(s) span more than one day shard, so this is a floor`, lowerBound: true }
+        : has(t.exposureMs),
+      medianViewableMs: no('exposure is accrued as a running total per fill, not as per-tick samples, so a median cannot be derived'),
+      meanViewableMs: no('same: no per-fill qualified-time distribution is recorded'),
+      sustainedViews4s: no('requires a continuous 4s qualified run to be recorded; the meter records only that a run completed'),
+    },
+
+    /* The quality-of-exposure block §3.5 promises. Named and refused, because a
+     * missing row reads as zero and these are the numbers that justify pricing
+     * an in-world surface above a banner. */
+    quality: {
+      screenCoverageP50: no(NO_3D), screenCoverageP90: no(NO_3D),
+      viewAngleBuckets: no(NO_3D), distanceDistribution: no(NO_3D),
+      skewRatio: no(NO_3D), occludedSplit: no(NO_3D),
+    },
+
+    audience: {
+      /* Labelled exactly as §3.5 requires: session-uniques, never person-uniques. */
+      sessionUniques: has(t.sessions),
+      deviceHandles: { value: t.devices, reason: 'an 8-hex 32-bit hash: distinct handles, a floor on distinct devices', lowerBound: true },
+      personUniques: no('we do not identify people; §3.5 requires this be reported as session-uniques'),
+      frequencyDistribution: no('per-device impression counts are not carried in the daily aggregate'),
+      byMode, byPlatform,
+      mobilePortrait: no('orientation is not captured at observation time; `platform` is a coarse-pointer classification only'),
+    },
+
+    inventory: {
+      /* With nothing booked, every impression is unsold house inventory, and
+       * saying so is the difference between a report and a sales sheet. */
+      direct: bySource.direct ?? 0,
+      house: bySource.house ?? 0,
+      byCampaign, bySurface,
+    },
+
+    /* Rows written before the instrumentation. Reported apart, never blended:
+     * they carry no nonce, so they cannot answer any of the above. */
+    preInstrumentationRows: t.unversioned,
+    live: input.live,
+  };
 }
