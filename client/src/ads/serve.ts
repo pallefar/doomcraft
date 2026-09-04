@@ -219,6 +219,16 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
     if (exposureMs > 0) {
       post('/api/ads/event', { nonce: entry.fill.nonce, type: 'exposure', ms: Date.now(), exposureMs }, true);
     }
+    /* The terminal verdict, and the reason this slot's teardown is worth a
+     * network call: without it the log records viewable impressions and nothing
+     * else, so Viewable Rate has no denominator and Non-Viewable is a bucket
+     * that can never be filled. Sent with `keepalive` (the `true`), because the
+     * commonest teardown is the player leaving. */
+    const v = entry.watched.meter.verdict();
+    post('/api/ads/event', {
+      nonce: entry.fill.nonce, type: 'verdict', ms: Date.now(),
+      exposureMs: v.exposureMs, qualified: v.qualified, basis: v.basis, reason: v.reason,
+    }, true);
     entry.watched.disconnect();
   }
 

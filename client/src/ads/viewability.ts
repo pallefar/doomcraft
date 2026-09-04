@@ -17,8 +17,33 @@ import {
 } from '@doomcraft/shared/sponsor';
 
 export interface MeterEvent {
-  type: 'impression' | 'replay' | 'exposure';
+  type: 'impression' | 'replay' | 'exposure' | 'rendered';
   /** Total exposure ms so far (exposure events only). */
+  exposureMs: number;
+}
+
+/**
+ * The terminal verdict for one fill, produced when the slot goes away.
+ *
+ * This is the row the whole §3.5 metric set was missing. Metric 6, Viewable
+ * Rate, is 2/(2+3) — viewable over viewable plus MEASURED NON-VIEWABLE — and
+ * with no way to record a measured failure the numerator and denominator were
+ * the same number. That does not print a wrong rate so much as an unavailable
+ * one, and a dashboard that shows 100% there is asserting something nobody
+ * measured.
+ *
+ * `basis` is what keeps metric 4 (Undetermined) honest, and the distinction it
+ * draws is the one caveat 6 exists to protect: **Undetermined is not
+ * non-viewable.** A creative that never rendered was never measured and belongs
+ * in bucket 4; a creative that rendered, was watched, and never met the bar is a
+ * measured failure and belongs in bucket 3. Collapsing them flatters the
+ * Measured Rate, which MRC asks us to maximise — exactly the wrong incentive.
+ */
+export interface SlotVerdict {
+  qualified: boolean;
+  basis: 'measured' | 'undetermined';
+  /** Why, when the basis is undetermined. Empty when measured. */
+  reason: string;
   exposureMs: number;
 }
 
@@ -52,6 +77,8 @@ export class SlotMeter {
   private exposureMs = 0;
   private lastExposedMs = -1;
   private impressionEmitted = false;
+  private renderedEmitted = false;
+  private everLoaded = false;
   private lastExposureEmit = 0;
   private readonly emit: (e: MeterEvent) => void;
 
@@ -60,6 +87,19 @@ export class SlotMeter {
   }
 
   update(nowMs: number, ratio: number, occluded: boolean, gates: GateState): void {
+    /* RENDERED, once, the first time the creative is actually in the slot.
+     *
+     * This is the MRC "Total (rendered) impressions" denominator, and it has to
+     * come from here: the server's `served` row records that a fill was
+     * ALLOCATED, which is a different and larger number — the client may never
+     * display it. Deliberately not gated on visibility or focus; rendering is
+     * not viewing, and conflating them is what caveat 1 is about. */
+    if (!this.renderedEmitted && gates.creativeLoaded) {
+      this.renderedEmitted = true;
+      this.everLoaded = true;
+      this.emit({ type: 'rendered', exposureMs: 0 });
+    }
+    if (gates.creativeLoaded) this.everLoaded = true;
     // Exposure accrues on the pixel test alone, before qualification — it is
     // deliberately a different, looser quantity than the impression run.
     const exposed = ratio >= AD_VIEWABLE_RATIO && gates.visible && gates.menuMode;
@@ -98,6 +138,25 @@ export class SlotMeter {
   /** Final flush for menu exit / page hide. */
   flush(): number {
     return Math.round(this.exposureMs);
+  }
+
+  /**
+   * The terminal verdict for this fill. Call once, when the slot is torn down.
+   *
+   * A fill that never gets here at all — the player closes the tab mid-menu —
+   * is Undetermined BY ABSENCE, and a reader counts it by subtracting verdicts
+   * from `rendered` rows. That is a measured count of the unmeasured, which is
+   * what metric 4 asks for; it is not a guess.
+   */
+  verdict(): SlotVerdict {
+    const exposureMs = Math.round(this.exposureMs);
+    if (this.impressionEmitted) return { qualified: true, basis: 'measured', reason: '', exposureMs };
+    // Never rendered => never measurable. Undetermined, NOT a measured failure.
+    if (!this.everLoaded) {
+      return { qualified: false, basis: 'undetermined', reason: 'creative never rendered', exposureMs };
+    }
+    // Rendered, watched for the whole time the slot existed, never met the bar.
+    return { qualified: false, basis: 'measured', reason: '', exposureMs };
   }
 }
 

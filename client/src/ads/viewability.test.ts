@@ -72,3 +72,72 @@ describe('the impression run', () => {
     expect(events.filter((e) => e.type === 'impression').length).toBe(0);
   });
 });
+
+/**
+ * The terminal verdict, and the distinction the whole §3.5 metric set rests on.
+ *
+ * Caveat 6: "Undetermined is not viewable and is not billed." It is also not a
+ * measured FAILURE. A creative that never rendered was never measured; a
+ * creative that rendered and never met the bar was. Folding the first into the
+ * second flatters the Measured Rate, which MRC explicitly asks measurers to
+ * maximise — so the incentive runs the wrong way and the check has to be here.
+ */
+describe('the terminal verdict', () => {
+  /**
+   * RED WITHOUT THE FIX: make `verdict()` return basis 'measured' whenever no
+   * impression was emitted. A slot whose creative never loaded is then reported
+   * as a measured non-viewable, inflating both the Measured Rate and the
+   * denominator of the Viewable Rate with something nobody measured.
+   */
+  it('a creative that never rendered is UNDETERMINED, not a measured failure', () => {
+    const { m } = meter();
+    m.update(0, 1, false, { ...OPEN, creativeLoaded: false });
+    m.update(5_000, 1, false, { ...OPEN, creativeLoaded: false });
+
+    const v = m.verdict();
+    expect(v.qualified).toBe(false);
+    expect(v.basis).toBe('undetermined');
+    expect(v.reason).toContain('never rendered');
+  });
+
+  it('a creative that rendered but never qualified IS a measured failure', () => {
+    const { m } = meter();
+    // Rendered, but the window never had focus: watched the whole time, failed.
+    m.update(0, 1, false, { ...OPEN, focused: false });
+    m.update(5_000, 1, false, { ...OPEN, focused: false });
+
+    const v = m.verdict();
+    expect(v.qualified).toBe(false);
+    expect(v.basis).toBe('measured');
+  });
+
+  it('a fill that met the bar is qualified', () => {
+    const { m } = meter();
+    m.update(0, 1, false, OPEN);
+    m.update(5_000, 1, false, OPEN);
+
+    const v = m.verdict();
+    expect(v.qualified).toBe(true);
+    expect(v.basis).toBe('measured');
+  });
+
+  /**
+   * `rendered` is the MRC metric-1 denominator and must come from the client —
+   * the server's `served` row records an ALLOCATION, which is a larger number.
+   * Deliberately not gated on visibility or focus: rendering is not viewing,
+   * and conflating them is what caveat 1 is about.
+   */
+  it('emits rendered once, on the creative arriving, regardless of visibility', () => {
+    const { m, events } = meter();
+    m.update(0, 0, true, { ...OPEN, creativeLoaded: true, visible: false, focused: false });
+    m.update(1_000, 0, true, { ...OPEN, creativeLoaded: true, visible: false, focused: false });
+
+    expect(events.filter((e) => e.type === 'rendered')).toHaveLength(1);
+  });
+
+  it('emits no rendered event when the creative never arrives', () => {
+    const { m, events } = meter();
+    m.update(0, 1, false, { ...OPEN, creativeLoaded: false });
+    expect(events.some((e) => e.type === 'rendered')).toBe(false);
+  });
+});

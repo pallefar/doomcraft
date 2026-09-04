@@ -152,6 +152,11 @@ export class AdService {
   readonly counters = {
     decides: 0, fills: 0, houseFills: 0, impressions: 0, replays: 0,
     blocked: 0, clicks: 0, billableClicks: 0, refusedEvents: 0,
+    /* The §3.5 buckets, kept apart on purpose. `undetermined` is NOT
+     * `nonViewable`: caveat 6 — undetermined is not viewable and is not billed,
+     * but it is also not a measured failure, and folding it into one flatters
+     * the Measured Rate that MRC asks us to maximise. */
+    rendered: 0, viewable: 0, nonViewable: 0, undetermined: 0,
     /**
      * Rows the log FAILED to persist. Non-zero means the counters above and the
      * log disagree, and the log is the billing substrate — so this number is
@@ -394,12 +399,40 @@ export class AdService {
 
   /* --- events ------------------------------------------------------------ */
 
-  event(nonce: string, type: AdEventType, ms: number, exposureMs = 0): { ok: boolean; reason: string } {
+  event(
+    nonce: string, type: AdEventType, ms: number, exposureMs = 0,
+    verdictOf: { qualified?: boolean; basis?: string; reason?: string } = {},
+  ): { ok: boolean; reason: string } {
+    const { qualified, basis = '', reason = '' } = verdictOf;
     const now = this.clock();
     const fill = this.fills.get(nonce);
     if (fill === undefined || now > fill.expiresMs) {
       this.counters.refusedEvents++;
       return { ok: false, reason: 'unknown or expired nonce' };
+    }
+    if (type === 'rendered' || type === 'verdict') {
+      /* Both are once-per-fill and both are TERMINAL FACTS a reader counts, so
+       * a duplicate must not inflate them. `verdict` in particular: a fill
+       * counted twice as non-viewable would deflate the Viewable Rate, and the
+       * whole point of these rows is that the rate is arithmetic over them. */
+      if (fill.counted.has(type)) {
+        this.counters.refusedEvents++;
+        return { ok: false, reason: `${type} already counted for this fill` };
+      }
+      fill.counted.add(type);
+      if (type === 'rendered') this.counters.rendered++;
+      else if (qualified === true) this.counters.viewable++;
+      else if (basis === 'measured') this.counters.nonViewable++;
+      else this.counters.undetermined++;
+      this.append({
+        ms: now, type, nonce, surface: fill.surface, source: fill.source,
+        campaignId: fill.campaignId, creativeId: fill.creativeId,
+        device: fill.deviceHash, sessionId: fill.sessionId,
+        mode: fill.mode, platform: fill.platform,
+        ...(type === 'verdict' ? { qualified: qualified === true, basis, reason } : {}),
+      });
+      this.flushRows();
+      return { ok: true, reason: '' };
     }
     if (type === 'impression' || type === 'replay' || type === 'blocked') {
       if (fill.counted.has(type)) {

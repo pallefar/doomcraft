@@ -166,7 +166,12 @@ export const AD_CLICK_SUSPECT_DWELL_MS = 1000;
 export const AD_CLICKS_PER_SESSION = 3;
 export const AD_CLICK_DEVICE_CREATIVE_HOURS = 24;
 
-export type AdEventType = 'impression' | 'replay' | 'exposure' | 'blocked' | 'click' | 'decide';
+export type AdEventType =
+  | 'impression' | 'replay' | 'exposure' | 'blocked' | 'click' | 'decide'
+  /** The creative began to render. The MRC metric-1 denominator; client-only. */
+  | 'rendered'
+  /** One fill's terminal measurement outcome. Carries `qualified` and `basis`. */
+  | 'verdict';
 
 /* -------------------------------------------------------------------------- *
  * The ad log's row schema (§3.7.5: "billing is a batch job over the log")

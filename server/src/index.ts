@@ -2876,10 +2876,20 @@ async function handleApi(
     const body = (await readBody(req) ?? {}) as Record<string, unknown>;
     const nonce = typeof body.nonce === 'string' ? body.nonce : '';
     const type = typeof body.type === 'string' ? body.type as AdEventType : 'impression';
+    /* A `verdict` row's payload is measurement evidence, so it is read
+     * defensively: an absent or non-boolean `qualified` is NOT treated as
+     * viewable, and an unrecognised `basis` degrades to undetermined rather
+     * than being counted as a measured failure. A client that lies can only
+     * cost itself an impression, never manufacture one. */
     const verdict = ads.event(
       nonce, type,
       typeof body.ms === 'number' ? body.ms : Date.now(),
       typeof body.exposureMs === 'number' ? body.exposureMs : 0,
+      {
+        qualified: body.qualified === true,
+        basis: body.basis === 'measured' ? 'measured' : 'undetermined',
+        reason: typeof body.reason === 'string' ? body.reason.slice(0, 80) : '',
+      },
     );
     /* A refused event answers 200 with ok:false — a 4xx would teach a probe
      * which nonces are live, and the client retry path must not treat a

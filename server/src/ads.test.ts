@@ -432,3 +432,100 @@ describe('the ad log carries what a billing batch job needs', () => {
     expect(ads.status().logWriteFailures).toBe(ads.counters.logWriteFailures);
   });
 });
+
+/**
+ * The three buckets §3.5 keeps apart, and the arithmetic that depends on it.
+ *
+ * Metric 6, Viewable Rate, is 2/(2+3) — viewable over viewable plus MEASURED
+ * non-viewable. Before this the log had no way to record a failure, so the
+ * numerator and the denominator were the same number and the honest value was
+ * "unavailable", not 100%. Metric 4, Undetermined, is a THIRD thing: caveat 6
+ * says undetermined is not viewable and is not billed, but it is also not a
+ * measured failure, and folding it into non-viewable flatters the Measured Rate
+ * that MRC asks us to maximise.
+ */
+describe('viewable, non-viewable and undetermined are three different answers', () => {
+  function rowsOf(root: string): Record<string, unknown>[] {
+    const raw = readFileSync(join(root, 'ads.jsonl'), 'utf8').trim();
+    return raw === '' ? [] : raw.split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  function oneFill(clock: { now: number }): { ads: AdService; root: string; nonce: string } {
+    const { ads, root } = service(textCampaign(), clock);
+    const fills = ads.decide(REQ, CTX);
+    return { ads, root, nonce: fills[0].nonce };
+  }
+
+  /**
+   * RED WITHOUT THE FIX: remove the `rendered`/`verdict` branch from
+   * `AdService.event`. Both events fall through to 'unknown event type', the
+   * rows are never written, and every one of these counts stays 0.
+   */
+  it('counts a measured failure as non-viewable, NOT as undetermined', () => {
+    const clock = { now: T0 };
+    const { ads, nonce, root } = oneFill(clock);
+
+    expect(ads.event(nonce, 'rendered', clock.now).ok).toBe(true);
+    // Rendered, watched, never met the bar: a measured failure.
+    expect(ads.event(nonce, 'verdict', clock.now, 0, { qualified: false, basis: 'measured' }).ok).toBe(true);
+
+    expect(ads.counters.rendered).toBe(1);
+    expect(ads.counters.nonViewable).toBe(1);
+    expect(ads.counters.undetermined).toBe(0);
+    expect(ads.counters.viewable).toBe(0);
+
+    const v = rowsOf(root).find((r) => r.type === 'verdict');
+    expect(v?.qualified).toBe(false);
+    expect(v?.basis).toBe('measured');
+  });
+
+  it('counts a creative that never rendered as undetermined, NOT as a failure', () => {
+    const clock = { now: T0 };
+    const { ads } = oneFill(clock);
+    const nonce = ads.decide({ ...REQ, sessionId: 'sess-2' }, CTX)[0].nonce;
+
+    expect(ads.event(nonce, 'verdict', clock.now, 0, {
+      qualified: false, basis: 'undetermined', reason: 'creative never rendered',
+    }).ok).toBe(true);
+
+    expect(ads.counters.undetermined).toBe(1);
+    expect(ads.counters.nonViewable, 'an unmeasured fill was booked as a measured failure').toBe(0);
+  });
+
+  it('counts a qualified fill as viewable', () => {
+    const clock = { now: T0 };
+    const { ads, nonce } = oneFill(clock);
+    expect(ads.event(nonce, 'rendered', clock.now).ok).toBe(true);
+    expect(ads.event(nonce, 'verdict', clock.now, 0, { qualified: true, basis: 'measured' }).ok).toBe(true);
+    expect(ads.counters.viewable).toBe(1);
+    expect(ads.counters.nonViewable).toBe(0);
+    expect(ads.counters.undetermined).toBe(0);
+  });
+
+  /**
+   * A verdict counted twice would deflate the Viewable Rate, and the whole
+   * point of these rows is that the rate is arithmetic over them.
+   */
+  it('refuses a second verdict for the same fill', () => {
+    const clock = { now: T0 };
+    const { ads, nonce } = oneFill(clock);
+    expect(ads.event(nonce, 'verdict', clock.now, 0, { qualified: false, basis: 'measured' }).ok).toBe(true);
+    const again = ads.event(nonce, 'verdict', clock.now, 0, { qualified: false, basis: 'measured' });
+    expect(again.ok).toBe(false);
+    expect(ads.counters.nonViewable, 'a duplicate verdict double-counted').toBe(1);
+  });
+
+  /**
+   * The route reads a verdict defensively. A client that omits `qualified`, or
+   * sends nonsense in `basis`, must not be able to manufacture a viewable
+   * impression or a measured failure — it can only cost itself one.
+   */
+  it('a malformed verdict degrades to undetermined and never to viewable', () => {
+    const clock = { now: T0 };
+    const { ads, nonce } = oneFill(clock);
+    expect(ads.event(nonce, 'verdict', clock.now, 0, { basis: 'nonsense' }).ok).toBe(true);
+    expect(ads.counters.viewable).toBe(0);
+    expect(ads.counters.nonViewable).toBe(0);
+    expect(ads.counters.undetermined).toBe(1);
+  });
+});
