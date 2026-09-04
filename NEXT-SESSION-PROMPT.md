@@ -16,29 +16,23 @@ redirect. **Sponsors phase 2 is the next arc.**
    the balance did not, on every deploy. §6 now lists only what is deliberately
    still open; the reconnect grace window is the one real piece of work in it.
 
-1. Sponsors phase 2 — but NOT the way its own doc orders it. A design panel
-   established that the §3.5 dashboard is NOT buildable from ads.jsonl as it
-   stands: `mint()` never appends, so "Total (rendered) impressions" has no
-   denominator, and with no non-viewable event a Viewable Rate computed from the
-   log prints 100% — the MRC-forbidden conflation the spec's own caveat block
-   exists to prevent. So the order is:
-   - P2a-0: instrument the log (nonce, mode, platform on every row; a `rendered`
-     event at mint; a terminal per-fill verdict carrying `qualified`; a `basis`
-     field so Undetermined is measured not guessed; day-shard + prune, because
-     the log keeps device-hashed rows forever against a documented 30-day
-     commitment).
-   - P2a-1: the dashboard, honest by construction — unsupported metrics print an
-     em-dash WITH THE REASON, never 0 and never 100%; PROVISIONAL banner (there
-     is no settlement layer, and docs/SPONSORS.md:1338 wrongly claims one
-     shipped); "billable" renamed provisionally-qualified; house/direct split;
-     accidentalRate as a floor; a 2D-path caveat block, not the verbatim one.
-   - P2b: S10 interstitial. The decide route silently drops SurfaceId.INTERSTITIAL
-     and REWARDED, and FrequencyCap.perDayInterstitials is typed, defaulted and
-     never read.
+1. Sponsors phase 2, CONTINUED — P2a is done, do not rebuild it. The log is
+   instrumented (`served` at mint, `nonce`/`v`/`mode`/`platform`/`decisionId` on
+   every row, write failures counted), day-sharded, aggregated into durable
+   per-day rollups, pruned only where an aggregate exists, and rendered by
+   `GET /api/admin/ads` and the console's Delivery tab — with every unsupported
+   metric printing an em-dash AND ITS REASON. Commits d42374b, 2c08f9e, f11e8d4,
+   9bb7e74, 74b5bcb, 2c4d498. What is left:
+   - P2b: S10 interstitial. The decide filter drops SurfaceId.INTERSTITIAL and
+     REWARDED BEFORE AdService sees them, so the drop is invisible in the log and
+     in the counters; `FrequencyCap.perDayInterstitials` is dead code; and
+     `#ad-overlay` has no `pointer-events: none`, so an open overlay swallows all
+     input. Design that out rather than discovering it.
    - P2c: S11 rewarded + the Gate 5 handshake. Durable per-day grant caps go ON
-     THE PROFILE (§0 rule 20's precedent), never in memory.
-   The full evidence is in the sponsors-p2 memory and the scratchpad design brief
-   the handover points at. Do not re-derive it; do challenge it.
+     THE PROFILE (§0 rule 20), never in memory.
+   READ §6 FIRST: Codex found real defects in the existing ad path that P2b will
+   otherwise inherit — above all that the client can measure one fill's pixels
+   under another fill's nonce, which corrupts what the log records.
 
 2. Then the variants arc V1–V5 per docs/VARIANTS.md §5: V1 SessionArsenal seam
    (byte-identical determinism proof) → V2 schema + pack + power-budget. STOP

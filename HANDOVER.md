@@ -1,13 +1,15 @@
 # Doomcraft — handover: where it stands, and what is left
 
-Written 2026-09-04. This session took the five money-path claims that the S4
+Written 2026-09-05. This session did two arcs. First it took the five money-path
+claims that the S4
 review recorded but never verified (old §6), put each one through TWO independent
 passes — a per-claim Claude fan-out and a Codex run over all six — and found
 **every one of them true**. Codex additionally found a money-loss bug that was in
 nobody's list. All of it is fixed, deployed and pinned by tests proven red.
 Previous handovers are in git history at `b77d907`, `56b23c5`, `108efa5`,
 `9da410b`, `bfdc647`, `557c7b6`. §0 is restated because it keeps earning it —
-rules 21–23 are new.
+rules 21–24 are new. Then it built **sponsors P2a end to end** — the ad log
+instrumented, aggregated, retained, and rendered as an honest delivery report.
 
 **Live:**
 - **https://doomcraft-production.up.railway.app** — the Node origin: game, rooms,
@@ -20,8 +22,12 @@ rules 21–23 are new.
   **github.com/pallefar/doomcraft** — `main`.
 - Owner seat claimed and durable: creds in `~/youtube/doomcraft-owner-credentials.txt`.
 - CI: `tsc -b` + `vitest run` + `release:verify` on every push; all pushes green.
-  Suite: **98 files / 2320 tests + 3 deliberate skips**. `release:verify` runs 15
+  Suite: **99 files / 2364 tests + 3 deliberate skips**. `release:verify` runs 15
   checks and emits 7 packs.
+- **Sponsor delivery is LIVE**: `GET /api/admin/ads` serves the §3.5 report from
+  durable daily aggregates, and the console's new **Delivery** tab (under
+  Analytics) renders it — every metric the log cannot support prints an em-dash
+  and the reason, never a 0 and never a 100%.
 - **`/api/version`'s `data` block now carries live durability signals** —
   `degraded`, `unflushed`, `quarantined`, `lostWrites` — beside the boot-time
   `writable`. They are also how you verify a deploy (rule 17).
@@ -106,6 +112,11 @@ follow its ordering, which is wrong), `docs/ECONOMY.md`, `docs/STUDIO.md`,
     counter; a double payout is money") with counters already on two routes.
     Rule 18 is about agent PROSE; this is the same rule for agent FINDINGS.
 
+24. **NEW — a `pairs()`-style render of an empty object is a broken table, not
+    an empty one**, and backticks in `console.ts` terminate the template literal
+    EVEN INSIDE A COMMENT (rule 12 applies to prose too). Both were found by
+    looking at the screenshot and at the compiler, not at the test result.
+
 ## 1. What this session shipped (all pushed, green, deployed)
 
 The whole of the old §6, verified twice and then fixed. Every fix has a
@@ -118,11 +129,24 @@ in the test body so the proof is cheap to repeat.
 | `3de4329` | **The critical one: the drain raced its own settlements.** `shutdown()` detached every player — each detach STARTS a payout several awaits deep — then ran `flush()` (empty dirty set, instant), `close()`, `process.exit(0)`. The journal row landed; the balance did not. Rooms now track in-flight settlements and expose `quiesce()`; shutdown awaits them, bounded by `DOOMCRAFT_SETTLE_DRAIN_MS`. The deploy deadline also now ENDS the round instead of only stopping its clock. **Plus Codex's find:** `payoutSourceId()` was evaluated INSIDE the deferred `store.update` callback, reading a `sessionId` that `beginRound` replaces — so a late settlement journalled round N under N+1's key and round N+1's real payout was then refused as a duplicate. Pinned at submission time. |
 | `ff12185` | **The fraud log stops accusing honest players.** `GRANTS_NOTHING` flagged a violation on `wanted !== 0`, and `wanted` is never 0 (every submission must carry `stats`), so friends in a private room minted a violation each per round. `ALREADY_SETTLED` did the same to any honest mid-round reconnect. And the ring itself logged every REFUSAL, so honest traffic evicted real attacks from a 256-row buffer — it now logs suspicion. Two existing tests updated (invariants kept, plus a direct replay so the guard's own check is still proven). |
 | `edbbe06` | **The award packet stops understating the round.** `landed` came from `applyMatchResult` alone, so a challenge prize appeared in `totalScrap` but not in the delta beside it — a first daily completion could count "+0 Scrap" on a round that paid 40. Display only; the ledger and balance were always right. |
+| `d42374b` | **Sponsors P2a-0: the log becomes readable by a billing job.** `served` rows at mint (a successful decide wrote NOTHING before, so no metric had a denominator); `nonce` on every fill-scoped row (exposure rows carry a RUNNING TOTAL, so without it two fills are indistinguishable from one); `v`/`mode`/`platform`; `decisionId` (a `decide` row is a REFUSAL, not a decision); write failures counted instead of swallowed; rows batched per call so `appendFileSync` is not multiplied on the serving path. **Codex, run over the plan BEFORE any code, overturned its central clause** — a row written at mint is `served`, not `rendered`; the client may never display it, and calling it rendered recreates the conflation §3.5 forbids. |
+| `2c08f9e` | **P2a-0b: non-viewable becomes recordable.** Client-attested `rendered` (metric 1's denominator, deliberately NOT gated on visibility — rendering is not viewing) and a terminal `verdict` carrying `qualified` + `basis`. The basis is load-bearing: rendered-and-failed is a MEASURED failure (bucket 3); never-rendered is UNDETERMINED (bucket 4); no verdict at all is undetermined BY ABSENCE. Folding 4 into 3 flatters the Measured Rate that MRC asks us to maximise. |
+| `f11e8d4` | **P2a-0c: aggregate first, then prune.** Codex's critical finding. Day-sharded rows, a durable per-day aggregate, and a prune that REFUSES to delete a day with no aggregate — retention runs on a timer and the billing job runs on nobody's schedule, so that race has one winner. Exposure is max-per-nonce, straddling fills make the day a lower bound. |
+| `9bb7e74` `74b5bcb` `2c4d498` | **P2a-1: the delivery report and its screen.** `GET /api/admin/ads` over the aggregates; a Delivery console tab. Every unsupported metric is an em-dash WITH ITS REASON. Viewable Rate with no measured failures is *unavailable*, not 100%. The phase-3 in-world metrics are refused BY NAME so a blank does not read as zero. PROVISIONAL banner; house/direct split; session-uniques, never person-uniques. |
 | `96d067a` | **A store that cannot write now says so.** `JsonFileStore.degraded` was set in four places and read in none. `/api/version`'s `data` gains `degraded`, `unflushed`, `quarantined`, `lostWrites`. |
 
 ## 2. Architecture delta
 
 ```
+ads log:    <data>/ads/<day>.jsonl         day-sharded; `served` at mint, `nonce` on every
+                                           fill-scoped row, v/mode/platform/decisionId
+ads roll:   <data>/ads-daily/<day>.json    written once, kept indefinitely, the prune's gate
+rollup:     server/src/adsRollup.ts        rollupRows (pure) + rollupPending + pruneRaw
+report:     admin/model.ts adReport        Measured = value | null + REASON; never 0, never 100%
+route:      GET /api/admin/ads             read-only, no audit row, reads aggregates not raw
+screen:     console.ts tab 'delivery'      em-dash + reason; PROVISIONAL; caveat block
+meter:      client/ads/viewability.ts      emits `rendered` + terminal `verdict{qualified,basis}`
+
 challenges: shared/src/challenges.ts    defs as data + challengeContribution (ONE predicate,
                                         three callers: room producer, guard, settlement)
 pack:       PackKind.QUESTS = 5         data class; content/quests.json is the v1 fallback
@@ -136,31 +160,24 @@ studio:     POST /api/admin/studio/quests (+ /validate)   mints quests@<n+1>
 
 ## 3. What is left — decided order
 
-**The item that used to sit above this list — §6's unverified findings — is
-DONE.** All six were confirmed by two independent passes and fixed; §6 below now
-holds only what is deliberately still open. Sponsors phase 2 is next.
+**Two items are now DONE.** §6's unverified findings (all six were true) and
+**sponsors P2a** — the log is instrumented, aggregated, retained and rendered.
+The queue below starts at P2b.
 
-1. **Sponsors phase 2.** The design panel found the §3.5 dashboard **is not
-   buildable from `ads.jsonl` as it stands** — `mint()` never appends, so
-   "Total (rendered) impressions" has no denominator, and with no non-viewable
-   event a Viewable Rate from the log prints **100%**, the MRC-forbidden
-   conflation the spec's own caveat block exists to prevent. So:
-   - **P2a-0 — instrument the log first.** `nonce`, `mode`, `platform` on every
-     row; a `rendered` event at mint (the missing denominator); a terminal
-     per-fill verdict carrying `qualified`; a `basis` field so Undetermined is
-     measured, not guessed; day-shard + prune (the log currently keeps
-     device-hashed rows forever, breaching the doc's own 30-day commitment).
-   - **P2a-1 — the dashboard, honest by construction.** Unsupported metrics
-     print an em-dash WITH THE REASON, never 0 and never 100%. PROVISIONAL
-     banner (no settlement layer exists — `docs/SPONSORS.md:1338` claims item 8
-     shipped and is WRONG); `billable` renamed "provisionally qualified";
-     house/direct split; accidentalRate as a floor; a 2D-path caveat block.
-   - **P2b — S10 interstitial.** Note `index.ts`'s decide filter silently drops
-     `SurfaceId.INTERSTITIAL`/`REWARDED`, and `FrequencyCap.perDayInterstitials`
-     is typed, defaulted and never read.
+1. **Sponsors phase 2, continued.**
+   - ~~P2a-0 instrument the log~~ / ~~P2a-1 the honest dashboard~~ — SHIPPED.
+   - **P2b — S10 interstitial.** `index.ts`'s decide filter silently drops
+     `SurfaceId.INTERSTITIAL`/`REWARDED` before `AdService` ever sees them, so
+     the drop is invisible in the log AND in the counters — "surfaces requested"
+     is not observable anywhere today, and that is worth fixing in the same
+     breath. `FrequencyCap.perDayInterstitials` is typed, defaulted and never
+     read. The `#ad-overlay` div has no `pointer-events: none`, so an open
+     overlay swallows ALL input — a soft-lock risk to design out, not discover.
    - **P2c — S11 rewarded + the Gate 5 handshake.** Durable per-day grant caps
      belong ON THE PROFILE (rule 20's precedent), never in memory.
-   Full evidence: the `sponsors-p2` memory and the scratchpad design brief.
+   Before building either, read §6: Codex found real defects in the EXISTING ad
+   path that P2b will otherwise inherit.
+
 2. **The variants arc, V1–V5** (`docs/VARIANTS.md` §5). **Three §7 decisions
    wait on the user before V2** (power-budget weights, variant rarity floor,
    competitive parity) — ask, do not assume.
@@ -197,28 +214,45 @@ three decisions** before variants V2.
 
 ## 6. What is deliberately still open
 
-The five claims this section used to list are fixed (§1). What follows is what
-this session found and chose NOT to build, so it is not mistaken for oversight.
+Findings this session produced and chose NOT to act on, so none is mistaken for
+oversight. The first three are Codex's, against the EXISTING ad path, and P2b
+will inherit them if they are not handled.
 
+- **The client can attribute one fill's pixels to another fill's nonce.**
+  (`client/src/ads/serve.ts`.) On menu exit the observers are flushed and the
+  badge cleared, but a reserved slot's previous creative is not restored; on the
+  next visit, if campaign A is now capped and house is allocated, the OLD A
+  creative can still be in the slot while a new observer measures it under the
+  HOUSE nonce. A late image callback from an earlier visit can do the same. The
+  fix is to make the rendered element own a fill generation and invalidate stale
+  completions. This is a correctness bug in what the log records, so it is worth
+  doing BEFORE more surfaces are added.
+- **`mode` and `platform` are logged but under-defined.** `serve.ts` defaults
+  `mode = 0` and `ModeId.QUEST` IS 0, so a menu impression with no declared mode
+  is indistinguishable from a Quest one — the server-side `AD_MODE_UNKNOWN` is
+  −1 and the client should send it. `platform` is a coarse-pointer
+  classification with no orientation, so §3.5's "mobile portrait broken out" is
+  refused on the screen rather than approximated.
+- **The 32-bit device hash is a floor, not an identity.** At a million devices
+  the expected distinct-hash count is ~999,884, and two colliding devices share
+  frequency caps and click dedup. The report labels the count a floor; a real
+  audience number needs a wider pseudonymous id and server-issued sessions.
 - **A reconnecting player still loses their post-reconnect earnings.** The false
   fraud violation is fixed; the value loss is not. A dropped socket settles the
   player immediately (right — a rage-quitter must not go unpaid), and the ledger
-  has no un-settle, so the second segment of their round cannot be paid without
-  breaking the one-payout-per-device invariant that stops double payment.
-  THE FIX IS A FEATURE, not a patch: hold the membership in a short
-  "awaiting reconnect" grace window (30–60 s) keyed on `deviceId`, re-attach the
-  returning connection to the existing `Membership` with its `joinedMs` and
-  `baseKills` intact, and settle only on grace expiry or `endRound`. That also
-  recovers the player id, streak and seconds accrual they currently lose.
-  Deliberately not attempted in the same commit as a set of money-path fixes.
+  has no un-settle, so the second segment cannot be paid without breaking the
+  one-payout-per-device invariant. THE FIX IS A FEATURE: hold the membership in
+  a 30–60 s "awaiting reconnect" grace window keyed on `deviceId`, re-attach the
+  returning connection with its `joinedMs`/`baseKills` intact, and settle only
+  on expiry or `endRound`.
 - **The journal claims its idempotency key BEFORE the write** (`journal.ts:510`),
   so an EIO during append leaves money moved with no audit row. Codex reported
-  this as a defect; it is not. The comment above it argues the tradeoff — "a lost
-  row is a counter; a double payout is money" — and `failed`/`degraded` are
-  already exposed on two routes. Recorded so the next reviewer does not re-raise
-  it. See rule 23.
-- **`FrequencyCap.perDayInterstitials` is typed, defaulted and never read**, and
-  the decide route silently drops `SurfaceId.INTERSTITIAL`/`REWARDED`. Both are
-  sponsors P2b's problem, noted in §3.
-- **`docs/SPONSORS.md:1338` claims a settlement layer shipped. It did not.**
-  Fix it when P2a-1 puts the PROVISIONAL banner in.
+  this as a defect; it is not. The comment above it argues the tradeoff — "a
+  lost row is a counter; a double payout is money" — and `failed`/`degraded` are
+  already exposed on two routes. Recorded so it is not re-raised. See rule 23.
+- **`docs/SPONSORS.md:1338` claims a settlement layer shipped. It did not.** The
+  report is flagged PROVISIONAL for exactly this reason; fix the doc line.
+- **The marketing site promises more than the tree delivers.**
+  `doomcraft-site/index.html:218` and `sponsors.html` say "every impression is
+  measured to the MRC viewability standard and reported to you line by line".
+  Line-by-line reporting does not exist, and the in-world half is phase 3.
