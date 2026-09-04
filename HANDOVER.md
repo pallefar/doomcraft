@@ -1,11 +1,13 @@
 # Doomcraft — handover: where it stands, and what is left
 
-Written 2026-08-29. This session shipped **Studio S4 — the challenge engine** end
-to end (five stages), then put it through a 179-agent adversarial review and
-fixed the sixteen findings that survived verification, then refreshed the three
-docs that had started asserting the opposite of the tree. Previous handovers are
-in git history at `56b23c5`, `108efa5`, `9da410b`, `bfdc647`, `557c7b6`. §0 is
-restated because it keeps earning it — rules 17–20 are new.
+Written 2026-09-04. This session took the five money-path claims that the S4
+review recorded but never verified (old §6), put each one through TWO independent
+passes — a per-claim Claude fan-out and a Codex run over all six — and found
+**every one of them true**. Codex additionally found a money-loss bug that was in
+nobody's list. All of it is fixed, deployed and pinned by tests proven red.
+Previous handovers are in git history at `b77d907`, `56b23c5`, `108efa5`,
+`9da410b`, `bfdc647`, `557c7b6`. §0 is restated because it keeps earning it —
+rules 21–23 are new.
 
 **Live:**
 - **https://doomcraft-production.up.railway.app** — the Node origin: game, rooms,
@@ -18,12 +20,16 @@ restated because it keeps earning it — rules 17–20 are new.
   **github.com/pallefar/doomcraft** — `main`.
 - Owner seat claimed and durable: creds in `~/youtube/doomcraft-owner-credentials.txt`.
 - CI: `tsc -b` + `vitest run` + `release:verify` on every push; all pushes green.
-  Suite: **97 files / 2304 tests + 3 deliberate skips**. `release:verify` runs 15
+  Suite: **98 files / 2320 tests + 3 deliberate skips**. `release:verify` runs 15
   checks and emits 7 packs.
+- **`/api/version`'s `data` block now carries live durability signals** —
+  `degraded`, `unflushed`, `quarantined`, `lostWrites` — beside the boot-time
+  `writable`. They are also how you verify a deploy (rule 17).
 
-Read this, then `docs/ECONOMY.md`, `docs/STUDIO.md`, `docs/PACKS.md` (all three
-were refreshed this session and no longer lag), `docs/SPONSORS.md` (the next
-arc), `docs/VARIANTS.md`, `ref/BAR.md`.
+Read this, then `docs/SPONSORS.md` (the next arc — and read §3 here before you
+follow its ordering, which is wrong), `docs/ECONOMY.md`, `docs/STUDIO.md`,
+`docs/PACKS.md` (refreshed 2026-08-29, still current), `docs/VARIANTS.md`,
+`ref/BAR.md`.
 
 ---
 
@@ -33,9 +39,9 @@ arc), `docs/VARIANTS.md`, `ref/BAR.md`.
    boot with a screenshot or a measurement. `client/src/ui/wiring.test.ts` fails
    the suite when a UI module ships to nobody.
 2. **A green test that cannot fail is worse than no test.** Prove every regression
-   test red with its fix reverted — and check WHAT goes red. (This session: a
-   revert made a *different* test red and that was the fix doing its job — see
-   the Builder win bonus in §1.)
+   test red with its fix reverted — and check WHAT goes red. It catches real
+   mistakes every time it is applied: this session TWO of the new tests passed
+   with their own fix removed and had to be rewritten (see rules 21 and 22).
 3. **Measure, don't eyeball.**
 4. **The bar is real and fetchable** (`ref/`). The gauntlet is still **0/23**.
 5. **`shared/src/flags.ts` NUL bytes are FIXED** (escapes now) — plain `grep`
@@ -81,19 +87,38 @@ arc), `docs/VARIANTS.md`, `ref/BAR.md`.
     midnight and the player is silently robbed. `StoredChallenges.owed` is the
     shape; `settleChallenges` is the pattern.
 
+21. **NEW — narrowing a flag does not fix the surface that consumed it.** The
+    audit ring was flooded by honest refusals, so the fix looked like "stop
+    calling them violations". My own new test then failed: the ring logs every
+    REFUSAL, not every violation, so the rows were still pushed and an
+    attacker's row was still evicted. When a finding names a downstream cost,
+    ASSERT THE DOWNSTREAM COST — the eviction, not the flag.
+22. **NEW — a multi-actor bug needs the other actors in its test.** The
+    honest-reconnect test passed with its fix reverted, because with the room
+    empty the round restarted and there was no collision to detect. It needed a
+    second player who never leaves, plus an assertion that the session id did
+    NOT change. A test whose scenario quietly fails to set up is rule 2 wearing
+    a disguise.
+23. **NEW — a second opinion needs verifying too, in both directions.** Codex
+    confirmed all six claims independently and found a real bug nobody had
+    (the payout `sourceId`). It also reported the journal's claim-before-write
+    as a defect — it is a deliberate, documented tradeoff ("a lost row is a
+    counter; a double payout is money") with counters already on two routes.
+    Rule 18 is about agent PROSE; this is the same rule for agent FINDINGS.
+
 ## 1. What this session shipped (all pushed, green, deployed)
+
+The whole of the old §6, verified twice and then fixed. Every fix has a
+regression test proven red with **its own** fix reverted, and the revert is named
+in the test body so the proof is cheap to repeat.
 
 | Commit | What |
 |---|---|
-| `f2f365c` | **Challenge definitions as data** — `shared/src/challenges.ts` (mode-blind stat predicates, a parser that refuses, UTC day + the repo's first ISO-week helper), `content/quests.json`, and `PackKind.QUESTS`'s PackDef + `questsPack()` producer. |
-| `9d46c6d` | **The quests pack enters the release machine** — inventory accessors with the sha256 digest, `installedPacks`/`summary`, the `unsatisfied()` QUESTS branch (proven red FIRST: without it every release naming quests is silently unsatisfiable forever), DraftPicks, and the gate checks `quests.validate` + `quests.refs`. |
-| `39bef19` | **The engine** — the room producer for `challengeIds`, `verifyChallengeIds` re-deriving every claimed id in the guard against the defs the session was OPENED with, `toMatchResult` carrying the ids plus the payment gates read off the sealed trust row, and `settleChallenges` paying inside the match-payout `store.update` with one `prize` journal row per completion. PERSIST_VERSION 5→6. |
-| `7fc85bf` | **The board** — `GET /api/challenges` (period keys computed at REQUEST time, so a stale bucket renders zeroed rather than as yesterday's finished board) and the Challenges section inside the Competitions tab. |
-| `a1c5906` | **The quest editor** — `StudioService.saveQuests` + the dry run, the console's challenges card, the expansion one-click's quests pick, and Guides card 8. |
-| `377c759` | **Review fixes** — the owed-debt list, item-at-cap, the cap that evicted live receipts, the parser's pack-input byte cap, the kill switch on payment, the pin-time quests↔items re-check, trust-table rule 2b. |
-| `75c23b4` | **Review, second pass** — Builder no longer mints fake wins (`WinCondition.NONE`), account merge carries challenge receipts and debts, `reset-progress` clears challenge state. |
-| `5a8b90a` | **Ad delivery counters are not public** — `fills`/`impressions`/`billableClicks`/`liveCampaigns` were world-readable on `/api/status`. Found by the sponsors design panel while auditing something else. |
-| `b453e8b` | **Docs refresh** — PACKS/STUDIO/ECONOMY no longer contradict the tree; every overtaken decision sentence preserved with a dated REVISED annotation. |
+| `1d0ae7b` | **The durability layer.** (a) A transient read error minted a blank profile and renamed it over the real file — one bare catch collapsed ENOENT, EACCES, EIO and a parse failure into "new player". Only an ENOENT *errno* is absence now; anything else QUARANTINES the device (a working profile in memory, never a write) so the bytes survive for recovery. A file that parses to a non-object is quarantined too — that path did not even take the catch. (b) A failed flush was dropped from `dirty` and never retried, while `flush()` still resolved — which is what made it dangerous, because `trades.ts:623` awaits `flush()` to know a swap is durable before stamping it 'settled'. Ids now clear only after their `rename`. (c) A post-`close()` write was discarded in silence; it is counted and logged. |
+| `3de4329` | **The critical one: the drain raced its own settlements.** `shutdown()` detached every player — each detach STARTS a payout several awaits deep — then ran `flush()` (empty dirty set, instant), `close()`, `process.exit(0)`. The journal row landed; the balance did not. Rooms now track in-flight settlements and expose `quiesce()`; shutdown awaits them, bounded by `DOOMCRAFT_SETTLE_DRAIN_MS`. The deploy deadline also now ENDS the round instead of only stopping its clock. **Plus Codex's find:** `payoutSourceId()` was evaluated INSIDE the deferred `store.update` callback, reading a `sessionId` that `beginRound` replaces — so a late settlement journalled round N under N+1's key and round N+1's real payout was then refused as a duplicate. Pinned at submission time. |
+| `ff12185` | **The fraud log stops accusing honest players.** `GRANTS_NOTHING` flagged a violation on `wanted !== 0`, and `wanted` is never 0 (every submission must carry `stats`), so friends in a private room minted a violation each per round. `ALREADY_SETTLED` did the same to any honest mid-round reconnect. And the ring itself logged every REFUSAL, so honest traffic evicted real attacks from a 256-row buffer — it now logs suspicion. Two existing tests updated (invariants kept, plus a direct replay so the guard's own check is still proven). |
+| `edbbe06` | **The award packet stops understating the round.** `landed` came from `applyMatchResult` alone, so a challenge prize appeared in `totalScrap` but not in the delta beside it — a first daily completion could count "+0 Scrap" on a round that paid 40. Display only; the ledger and balance were always right. |
+| `96d067a` | **A store that cannot write now says so.** `JsonFileStore.degraded` was set in four places and read in none. `/api/version`'s `data` gains `degraded`, `unflushed`, `quarantined`, `lostWrites`. |
 
 ## 2. Architecture delta
 
@@ -110,6 +135,10 @@ studio:     POST /api/admin/studio/quests (+ /validate)   mints quests@<n+1>
 ```
 
 ## 3. What is left — decided order
+
+**The item that used to sit above this list — §6's unverified findings — is
+DONE.** All six were confirmed by two independent passes and fixed; §6 below now
+holds only what is deliberately still open. Sponsors phase 2 is next.
 
 1. **Sponsors phase 2.** The design panel found the §3.5 dashboard **is not
    buildable from `ads.jsonl` as it stands** — `mint()` never appends, so
@@ -166,15 +195,30 @@ before real-money prizes · Play Console $25 / Apple Developer $99 / Steamworks
 $100 · a Mac with Xcode · GTA mode has no obtainable bar · **VARIANTS.md §7's
 three decisions** before variants V2.
 
-## 6. Findings raised but NOT acted on
+## 6. What is deliberately still open
 
-The review's later rounds lost their refuters to a usage limit, so these were
-never verified and are recorded rather than believed. Several are PRE-EXISTING,
-not S4. Worth a look before trusting the money path further:
-`Deploy-drain discards final-round settlements the journal already recorded`
-(critical, `server/src/index.ts`), `Any transient read error mints a blank
-profile that overwrites the real file` (`persistence.ts`), `Failed profile flush
-is dropped from dirty — no retry`, `mid-round reconnect forfeits the round and
-raises a fraud violation`, `Match-award packet's scrap delta stops reconciling
-the moment a challenge pays`. Also unfixed and real: honest invite-room rounds
-raise GRANTS_NOTHING violations that flood the audit ring (pre-S4, guard policy).
+The five claims this section used to list are fixed (§1). What follows is what
+this session found and chose NOT to build, so it is not mistaken for oversight.
+
+- **A reconnecting player still loses their post-reconnect earnings.** The false
+  fraud violation is fixed; the value loss is not. A dropped socket settles the
+  player immediately (right — a rage-quitter must not go unpaid), and the ledger
+  has no un-settle, so the second segment of their round cannot be paid without
+  breaking the one-payout-per-device invariant that stops double payment.
+  THE FIX IS A FEATURE, not a patch: hold the membership in a short
+  "awaiting reconnect" grace window (30–60 s) keyed on `deviceId`, re-attach the
+  returning connection to the existing `Membership` with its `joinedMs` and
+  `baseKills` intact, and settle only on grace expiry or `endRound`. That also
+  recovers the player id, streak and seconds accrual they currently lose.
+  Deliberately not attempted in the same commit as a set of money-path fixes.
+- **The journal claims its idempotency key BEFORE the write** (`journal.ts:510`),
+  so an EIO during append leaves money moved with no audit row. Codex reported
+  this as a defect; it is not. The comment above it argues the tradeoff — "a lost
+  row is a counter; a double payout is money" — and `failed`/`degraded` are
+  already exposed on two routes. Recorded so the next reviewer does not re-raise
+  it. See rule 23.
+- **`FrequencyCap.perDayInterstitials` is typed, defaulted and never read**, and
+  the decide route silently drops `SurfaceId.INTERSTITIAL`/`REWARDED`. Both are
+  sponsors P2b's problem, noted in §3.
+- **`docs/SPONSORS.md:1338` claims a settlement layer shipped. It did not.**
+  Fix it when P2a-1 puts the PROVISIONAL banner in.

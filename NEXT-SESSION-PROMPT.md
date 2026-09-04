@@ -1,20 +1,20 @@
 Continue Doomcraft (~/youtube/doomcraft). Start by reading HANDOVER.md at the repo
-root — it is the 2026-08-29 handover, rewritten at the end of the session that
-shipped Studio S4 (the challenge engine) and then reviewed it hard. Read §0
-first: rules 17–20 are new and each one cost real time. §1 is what shipped, §3
-is the work queue in the order I decided, §6 is a list of findings that were
-raised but NEVER verified. Follow the queue top-down unless I redirect.
+root — it is the 2026-09-04 handover, written at the end of the session that
+verified and fixed the whole of the old §6 (the money-path findings the S4 review
+never got to). Read §0 first: rules 21–23 are new, and two of them are about
+tests that passed when they should not have. §1 is what shipped, §3 is the work
+queue, §6 is what is deliberately still open. Follow the queue top-down unless I
+redirect. **Sponsors phase 2 is the next arc.**
 
-0. FIRST, before any new feature: §6's unverified findings. The adversarial
-   review's later rounds lost their refuters to a usage limit, so five money-path
-   claims were written down rather than believed. One is critical-severity —
-   "Deploy-drain discards final-round settlements the journal already recorded"
-   (server/src/index.ts) — and this project deploys at every green stage, so if
-   it is real it has been quietly losing settlements all along. Verify each claim
-   against the source (a fan-out is right for this: one agent per claim, each
-   returning a verdict with file:line evidence and a concrete failure scenario),
-   then fix what survives, red-proof first. Several are PRE-EXISTING, not S4 —
-   judge them on truth, not on provenance.
+0. §6's unverified findings are DONE — do not redo them. All five were
+   confirmed by two independent passes (a per-claim Claude fan-out and a Codex
+   run over all six), Codex found a sixth nobody had, and every one is fixed,
+   deployed and pinned by a test proven red with its own fix reverted. Commits
+   `1d0ae7b`, `3de4329`, `ff12185`, `edbbe06`, `96d067a`. The critical claim was
+   true: the drain detached players, which STARTS a payout, and then closed the
+   store and exited while it was still in the air — the journal row landed and
+   the balance did not, on every deploy. §6 now lists only what is deliberately
+   still open; the reconnect grace window is the one real piece of work in it.
 
 1. Sponsors phase 2 — but NOT the way its own doc orders it. A design panel
    established that the §3.5 dashboard is NOT buildable from ads.jsonl as it
@@ -48,7 +48,12 @@ raised but NEVER verified. Follow the queue top-down unless I redirect.
 3. Then the gauntlet (0/23), the deferred Deathmatch share surface (its scoreboard
    is pointer-events:none — it needs its own #ui element), and portals/TWA.
 
-USE WORKFLOW LOOPS THROUGHOUT — an explicit opt-in for multi-agent orchestration
+USE WORKFLOW LOOPS THROUGHOUT — and USE CODEX AS ONE OF THE VOICES. Running a
+Codex pass in parallel with the Claude fan-out is what caught the payout
+`sourceId` bug last session, and it independently confirmed all six claims,
+which is a much stronger signal than six agreeing agents from one model. It also
+mis-reported one deliberate design decision as a defect, so verify its findings
+the way you verify everyone's (rule 23). It is — an explicit opt-in for multi-agent orchestration
 on every substantive arc. What actually worked last session, in this shape:
 a parallel recon fan-out BEFORE each arc (map the seams, return file:line facts);
 an adversarial DESIGN panel before building anything expensive (it killed the
