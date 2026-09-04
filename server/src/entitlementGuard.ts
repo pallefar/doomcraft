@@ -478,6 +478,22 @@ function requestedMask(sub: ResultSubmission): number {
   return m;
 }
 
+/**
+ * Every bit an HONEST room tally can set.
+ *
+ * `buildSubmission` in reward.ts is the only producer of a `ROOM_SIM`
+ * submission, and it sets exactly these: `stats` unconditionally (hence
+ * REWARD_STATS and the REWARD_TRADE_UNLOCK that rides with it), plus xp, scrap,
+ * drops and challengeIds from the round's own tally. It has never set
+ * `ratingDelta`, `competitionPoints`, `leaderboard` or `shareCard` — so those
+ * four, and only those four, are an ask that no honest round produces and that
+ * therefore still deserves to be called a violation in a zero-grant row.
+ *
+ * Keep this in step with `buildSubmission`; `entitlementGuard.test.ts` pins it.
+ */
+const HONEST_TALLY =
+  REWARD_STATS | REWARD_TRADE_UNLOCK | REWARD_XP | REWARD_SCRAP | REWARD_ITEM_DROP | REWARD_CHALLENGE;
+
 /* ------------------------------------------------------------------------ *
  * The decision
  * ------------------------------------------------------------------------ */
@@ -544,10 +560,27 @@ export function reviewSubmission(
   }
 
   /* 7. The row may simply grant nothing — every SOLO and PRIVATE row does, on
-   *    the participation rule, even though we hosted it. */
+   *    the participation rule, even though we hosted it.
+   *
+   *    The REFUSAL is right and stays. What was wrong was calling it a
+   *    VIOLATION. `wanted !== 0` is true for every honest submission that ever
+   *    reaches this line, because `buildSubmission` always sets `stats` (it must
+   *    — `toMatchResult` returns null without it) and `requestedMask` turns
+   *    `stats` into two bits. So four friends in a private Builder room minted
+   *    four violations per round, every round, forever; and the audit ring holds
+   *    256 entries and evicts oldest-first, so honest traffic pushed the rows of
+   *    the four attacks this file exists to catch straight out of the operator's
+   *    only forensic view. The counter those rows feed is documented as "the
+   *    number worth an alert".
+   *
+   *    `room.ts:1506` already makes this exact argument for latecomers: "the
+   *    audit ring is for suspicion; filling it with honest latecomers is how a
+   *    security log stops being read." Same argument, one check along. A
+   *    zero-grant row is suspicious only when it asks for something an honest
+   *    room tally never produces. */
   const wanted = requestedMask(sub);
   if (trust.grants === REWARD_NONE) {
-    return reject(RejectCode.GRANTS_NOTHING, sessionId, deviceId, trust, wanted !== 0);
+    return reject(RejectCode.GRANTS_NOTHING, sessionId, deviceId, trust, (wanted & ~HONEST_TALLY) !== 0);
   }
 
   /* 8. Strip what this row does not grant, clamp what it does. */
@@ -820,9 +853,21 @@ export class EntitlementGuard {
     if (v.violation) this.violationCount++;
     this.byCode[v.code] = (this.byCode[v.code] ?? 0) + 1;
 
-    // Log every refusal, and every acceptance that had to be trimmed. A clean
-    // acceptance is the normal case and is not worth a line.
-    if (!v.accepted || v.stripped !== 0) {
+    /* Log SUSPICION, and every acceptance that had to be trimmed.
+     *
+     * This used to log every refusal, and that is what made the ring useless
+     * where it mattered: a private room refuses every honest round it hosts
+     * (GRANTS_NOTHING is the correct answer there), so ordinary friends playing
+     * ordinary matches pushed 256 rows through a 256-row buffer and evicted the
+     * forged submissions an operator actually needs to see. Narrowing
+     * `violation` alone did not fix that — the row was still pushed. The
+     * benign, high-volume codes keep their `byCode` counters, which never
+     * evict; MALFORMED stays because a submission whose shape is wrong is rare
+     * and always worth reading, even though it is not an accusation.
+     *
+     * The console's Refusals screen says an empty ring is a healthy one. That
+     * sentence is only true if this condition means "suspicious". */
+    if (v.violation || v.stripped !== 0 || v.code === RejectCode.MALFORMED) {
       this.ring.push(Object.freeze({
         ms: now,
         sessionId: v.sessionId,

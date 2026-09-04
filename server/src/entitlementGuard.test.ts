@@ -31,10 +31,12 @@ import {
   rewardKeys,
 } from '@doomcraft/shared/trust';
 import { ModeId } from '@doomcraft/shared/modes';
+import { buildSubmission } from './reward.js';
 
 import type { ChallengeDef } from '@doomcraft/shared/challenges';
 
 import {
+  AUDIT_RING_SIZE,
   EntitlementGuard,
   MAX_CHALLENGE_IDS,
   MAX_XP_PER_MATCH,
@@ -653,5 +655,88 @@ describe('a refused profile write reaches the counters', () => {
       'drops', 'scrap']) progress[k] = 1;
     guard.noteProfileWrite(DEVICE, guardProfileWrite({ deviceId: DEVICE, progress }));
     expect(guard.recent()[0].stripped.length).toBe(16);
+  });
+});
+
+/**
+ * Honest play must not look like an attack.
+ *
+ * Both of these were HANDOVER §6 claims, confirmed by two independent passes.
+ * The refusals themselves are correct and unchanged; what changed is whether
+ * they are counted as VIOLATIONS, because the audit ring holds 256 rows and
+ * evicts oldest-first — so a steady drip of honest refusals silently destroys
+ * the forensic rows for the attacks this file exists to catch.
+ */
+describe('the audit ring is for suspicion, not for honest players', () => {
+  /** What a room actually submits for an ordinary, well-played round. */
+  function honestRound(sessionId: string): ResultSubmission {
+    return buildSubmission({
+      sessionId,
+      deviceId: DEVICE,
+      kills: 7,
+      deaths: 2,
+      won: true,
+      seconds: 300,
+      bestStreak: 3,
+      damageDealt: 900,
+      blocksPlaced: 0,
+      blocksBroken: 0,
+      favouriteWeapon: 0,
+      drops: [],
+      challengeIds: [],
+    });
+  }
+
+  /**
+   * RED WITHOUT THE FIX: change the predicate back to `wanted !== 0`.
+   * `buildSubmission` always sets `stats` (it must — `toMatchResult` returns
+   * null without it) and `requestedMask` turns that into two bits, so every
+   * honest private-room round in the game becomes a violation.
+   */
+  it('an honest zero-grant round is refused WITHOUT being called a violation', () => {
+    const { guard, sessionId } = openWith(ModeId.DEATHMATCH, SessionOrigin.SERVER_INVITE, MatchType.PRIVATE);
+    const v = guard.submit(honestRound(sessionId));
+
+    expect(v.accepted).toBe(false);
+    expect(v.code).toBe(RejectCode.GRANTS_NOTHING);
+    expect(v.violation, 'four friends in a private Builder room are not four attacks').toBe(false);
+    expect(guard.status().violations).toBe(0);
+  });
+
+  /**
+   * The other half. Without this the fix would have turned a noisy check into a
+   * blind one — and a blind check is the worse of the two.
+   */
+  it('...but a zero-grant row claiming rating or a leaderboard slot still is', () => {
+    const { guard, sessionId } = openWith(ModeId.HORDE, SessionOrigin.SERVER_INVITE, MatchType.PRIVATE);
+    const v = guard.submit(richSubmission(sessionId));
+
+    expect(v.accepted).toBe(false);
+    expect(v.code).toBe(RejectCode.GRANTS_NOTHING);
+    expect(v.violation, 'nothing honest asks for ratingDelta in a private room').toBe(true);
+    expect(guard.status().violations).toBe(1);
+  });
+
+  /**
+   * The ring is 256 entries and evicts oldest-first, so this is the property
+   * that actually mattered: honest traffic must not push an attacker's row out.
+   *
+   * RED WITHOUT THE FIX: with `wanted !== 0`, all 300 honest rounds are logged
+   * as violations and the attacker's row is evicted long before an operator
+   * looks at it.
+   */
+  it('300 honest private rounds do not evict a real attack from the ring', () => {
+    const { guard, sessionId } = openWith(ModeId.DEATHMATCH, SessionOrigin.SERVER_INVITE, MatchType.PRIVATE);
+
+    // The attack lands FIRST, so eviction would take it first.
+    guard.ledger.addParticipant(sessionId, 'attacker');
+    guard.submit({ ...richSubmission(sessionId, 'attacker') });
+    expect(guard.status().violations).toBe(1);
+
+    for (let i = 0; i < 300; i++) guard.submit(honestRound(sessionId));
+
+    const ring = guard.recent(AUDIT_RING_SIZE);
+    expect(ring.some((r) => r.deviceId === 'attacker'), 'the attacker row was evicted by honest play').toBe(true);
+    expect(guard.status().violations, 'honest rounds inflated the alerting metric').toBe(1);
   });
 });

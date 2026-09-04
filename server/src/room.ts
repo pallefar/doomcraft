@@ -1563,6 +1563,30 @@ export class Room implements NetHost {
     const record = this.guard.ledger.get(this.sessionId);
     if (record === null || !record.participants.has(deviceId)) return;
 
+    /* And the same argument again, for the same reason.
+     *
+     * A player whose socket drops mid-round is settled right there by
+     * `onDisconnect` — correctly, so a rage-quitter cannot go unpaid. The client
+     * then reconnects on its own (it is unconditional for remote sessions, with
+     * backoff), the directory hands them back the seat they just vacated, and if
+     * anyone else is still in the room the round never restarted: same session,
+     * same device, already settled. Their end-of-round submission then hits
+     * check 6 and raises ALREADY_SETTLED with `violation: true`.
+     *
+     * That is exactly right for a replayed forgery and exactly wrong for a phone
+     * moving from WiFi to cellular, which is the commonest event on the network
+     * this game runs over. The room is the only thing that knows the difference,
+     * so — as with the latecomer check above — the room does not ask.
+     *
+     * NOTE, and it is not fixed by this line: the player still loses the
+     * earnings from their second segment, because the ledger has no un-settle
+     * and the "one payout per device per session" invariant is what stops
+     * double-payment. Recovering those needs a reconnect grace window that
+     * re-attaches the membership instead of settling on disconnect. Specced in
+     * HANDOVER §6; deliberately not attempted in the same commit as a set of
+     * money-path fixes. */
+    if (record.settled.has(deviceId)) return;
+
     const verdict = this.guard.submit(
       this.buildRoundSubmission(member, deviceId, won, kills, deaths, seconds),
     );

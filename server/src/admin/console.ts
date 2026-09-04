@@ -1938,7 +1938,7 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         var e = r.body.recent[i];
         rows.push([new Date(e.ms).toISOString(), e.device, e.code, e.reason, e.trust, (e.stripped || []).join(' ')]);
       }
-      if (rows.length === 0) ring.appendChild(make('div', 'empty', 'no refusals since this process started — a healthy ring is empty'));
+      if (rows.length === 0) ring.appendChild(make('div', 'empty', 'nothing suspicious since this process started — a healthy ring is empty. Ordinary refusals (a private room grants nothing, a late submission) are counted under codes, not listed here.'));
       else ring.appendChild(table(['when', 'player', 'code', 'reason', 'trust', 'stripped'], rows, [2]));
     });
   }

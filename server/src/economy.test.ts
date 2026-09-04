@@ -418,14 +418,26 @@ describe('the end-screen disconnect', () => {
     expect(profile.progress.xp).toBe(expectedXp(KILLS, true, PLAY_TICKS + 1));
     expect(guard.status().accepted).toBe(1);
 
-    // And the refusal is on the record rather than silently swallowed. The code
-    // is ALREADY_SETTLED under this test's frozen clock; on a moving clock the
-    // same submission lands after `closedMs` and reads SESSION_CLOSED. Either
-    // way it is one line in the audit ring and zero extra XP.
-    const audit = guard.recent();
-    expect(audit).toHaveLength(1);
-    expect(audit[0].code).toBe(RejectCode.ALREADY_SETTLED);
-    expect(audit[0].deviceId).toBe(DEVICE);
+    // REVISED 2026-09-04: the room no longer ASKS. It checks `record.settled`
+    // itself before submitting, for the same reason it already checked
+    // `participants` — an honest end-screen quit, and an honest mid-round
+    // reconnect, are not forgeries, and a fraud log full of them is a fraud log
+    // nobody reads. So there is no audit line here any more. What must still
+    // hold is that the player was paid ONCE.
+    expect(guard.recent()).toHaveLength(0);
+    expect(guard.status().violations).toBe(0);
+
+    // And the guard's own check 6 is still the thing standing behind that: a
+    // genuine replay, submitted directly rather than through the room, is still
+    // refused and still called a violation. Without this assertion the room-side
+    // pre-filter above could be hiding a guard that had stopped checking.
+    const replay = guard.submit(buildSubmission({
+      sessionId: 'dm-public#1',
+      deviceId: DEVICE,
+      kills: KILLS, deaths: 0, won: true, seconds: 300, bestStreak: 3,
+      damageDealt: 900, blocksPlaced: 0, blocksBroken: 0, favouriteWeapon: 0,
+    }));
+    expect(replay.accepted).toBe(false);
   });
 
   it('pays a second round, because the session id carries the round number', async () => {
@@ -507,10 +519,18 @@ describe('a private room', () => {
     expect(profile.progress.kills).toBe(0);
     expect(profile.progress.gamesPlayed).toBe(0);
 
-    const audit = guard.recent();
-    expect(audit).toHaveLength(1);
-    expect(audit[0].code).toBe(RejectCode.GRANTS_NOTHING);
+    // REVISED 2026-09-04: an honest zero-grant round is still REFUSED, and the
+    // refusal is still counted — but it is no longer written to the audit ring
+    // or counted as a violation. The ring is 256 entries and evicts
+    // oldest-first, so logging every honest private round there pushed real
+    // forged submissions out of the operator's only forensic view.
     expect(guard.status().accepted).toBe(0);
+    expect(guard.status().rejected).toBe(1);
+    const codes = guard.status().codes as Record<string, number>;
+    // Keyed by the enum NAME — `status()` renders `RejectCode[i]`.
+    expect(codes[RejectCode[RejectCode.GRANTS_NOTHING]]).toBe(1);
+    expect(guard.status().violations).toBe(0);
+    expect(guard.recent()).toHaveLength(0);
   });
 });
 
@@ -1644,5 +1664,62 @@ describe('a settlement in flight survives the drain that started it', () => {
     // The row names round ONE. Under the bug it names round two, and round
     // two's own payout is then silently refused as a duplicate.
     expect(rows[0].sourceId).toBe(`host0001:${room.instanceId}:dm-public#1`);
+  });
+});
+
+/**
+ * A phone moving from WiFi to cellular is not an attacker.
+ *
+ * HANDOVER §6: "mid-round reconnect forfeits the round and raises a fraud
+ * violation". Confirmed by both passes. The forfeit half needs a reconnect
+ * grace window and is specced, not built; the FALSE ACCUSATION half is fixed
+ * here, because that is the half that damages the security log.
+ */
+describe('an honest reconnect is not logged as fraud', () => {
+  const DEVICE = 'device-reconnect-1';
+  const STAYER = 'device-reconnect-2';
+
+  /**
+   * RED WITHOUT THE FIX: delete the `record.settled.has(deviceId)` pre-check in
+   * `persistMember`. The room then re-submits for a device the guard already
+   * settled, the guard answers ALREADY_SETTLED with `violation: true`, and an
+   * honest mobile player lands in the audit ring and on the public
+   * `/api/status` violations counter.
+   *
+   * TWO players, and that is load-bearing: the second one is what keeps the
+   * round alive across the reconnect. With the room briefly empty, `beginRound`
+   * fires, a NEW session opens, and the returning player collides with nothing —
+   * which is how the first version of this test passed with the fix removed.
+   */
+  it('a player who drops and returns mid-round raises no violation', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard, hostId: 'host0001' });
+
+    const stayer = join(room, 'Sarge', STAYER);
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+    run(room, [stayer, client], PLAY_TICKS);
+
+    const sessionBefore = guard.status().sessions;
+
+    // The socket dies mid-round: the room settles them there and then.
+    room.onDisconnect(client.conn);
+    await settled(store, DEVICE);
+    expect(guard.status().violations, 'the disconnect itself was flagged').toBe(0);
+
+    // They come straight back — and because Sarge never left, it is the SAME
+    // round, the same session, and the same already-settled device.
+    const again = join(room, 'Marine', DEVICE);
+    again.player.kills = KILLS + 3;
+    run(room, [stayer, again], PLAY_TICKS);
+    expect(guard.status().sessions, 'the round restarted, so this proves nothing').toBe(sessionBefore);
+
+    endRoundNow(room, [stayer, again]);
+    await settled(store, DEVICE);
+
+    expect(guard.status().violations, 'an honest reconnect was counted as fraud').toBe(0);
+    const ring = guard.recent(64);
+    expect(ring.some((r) => r.deviceId === DEVICE), 'an honest reconnect reached the audit ring').toBe(false);
   });
 });
