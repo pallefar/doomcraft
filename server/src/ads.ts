@@ -48,6 +48,16 @@ import {
 const FILL_TTL_MS = 10 * 60_000;
 const SPONSORS_FILE = 'sponsors.json';
 const LOG_FILE = 'ads.jsonl';
+/**
+ * Day-sharded rows live in `<root>/ads/<YYYY-MM-DD>.jsonl`.
+ *
+ * The flat `ads.jsonl` above is the LEGACY file and is never written again. It
+ * is kept, not deleted: its rows are real delivery history. They carry no `v`
+ * and no `nonce`, so a reader must treat them as a separate, poorer population
+ * — see AD_LOG_VERSION — but destroying evidence to tidy a schema would be the
+ * wrong trade for a log whose whole purpose is that a dispute can be replayed.
+ */
+const LOG_DIR = 'ads';
 
 interface FillRecord {
   nonce: string;
@@ -568,8 +578,12 @@ export class AdService {
     const batch = this.rows;
     this.rows = [];
     try {
-      mkdirSync(this.root, { recursive: true });
-      appendFileSync(join(this.root, LOG_FILE), batch.join('\n') + '\n', 'utf8');
+      const dir = join(this.root, LOG_DIR);
+      mkdirSync(dir, { recursive: true });
+      // Sharded by the day the rows were WRITTEN. A fill whose rows straddle
+      // midnight therefore appears in two shards; `rollupDay` records that
+      // rather than pretending otherwise (see its `straddled` count).
+      appendFileSync(join(dir, `${utcDay(this.clock())}.jsonl`), batch.join('\n') + '\n', 'utf8');
     } catch (err) {
       this.counters.logWriteFailures += batch.length;
       this.logErr(`ads: FAILED to persist ${batch.length} log row(s): ${(err as Error)?.message ?? ''}`);

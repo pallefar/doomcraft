@@ -5,7 +5,7 @@
  * because billing is a batch job over the log.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -23,6 +23,19 @@ function tempDir(): string {
 }
 
 const T0 = Date.UTC(2026, 7, 26, 12, 0, 0);
+
+/**
+ * The log text for the day the test clock is on.
+ *
+ * Rows are day-sharded under `<root>/ads/<YYYY-MM-DD>.jsonl` so retention can
+ * delete a whole day once its aggregate is durable (server/src/adsRollup.ts).
+ * `T0` is 2026-08-26, so that is the shard every test here writes to.
+ */
+function logText(root: string, day = '2026-08-26'): string {
+  const path = join(root, 'ads', day + '.jsonl');
+  return existsSync(path) ? readFileSync(path, 'utf8') : '';
+}
+
 
 function textCampaign(over: Partial<Campaign> = {}): { campaigns: Campaign[]; creatives: Creative[] } {
   return {
@@ -109,11 +122,11 @@ describe('the cascade', () => {
     booking.creatives[0].kind = 'video';
     const a = service(booking, clock);
     expect(a.ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP)?.source).toBe('house');
-    expect(readFileSync(join(a.root, 'ads.jsonl'), 'utf8')).toContain('needs phase 2');
+    expect(logText(a.root)).toContain('needs phase 2');
     booking.creatives[0].kind = 'image';
     const b = service(booking, clock);
     expect(b.ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP)?.source).toBe('house');
-    expect(readFileSync(join(b.root, 'ads.jsonl'), 'utf8')).toContain('no phase-one surface');
+    expect(logText(b.root)).toContain('no phase-one surface');
   });
 
   it('per-session and per-day caps stop serving after counted impressions', () => {
@@ -154,7 +167,7 @@ describe('the cascade', () => {
     booking.campaigns[0].targeting.modes = [];
     const { ads, root } = service(booking, clock);
     expect(ads.decide({ ...REQ, surfaces: [SurfaceId.MODE_TILE] }, CTX)).toEqual([]);
-    const log = readFileSync(join(root, 'ads.jsonl'), 'utf8');
+    const log = logText(root);
     expect(log).toContain('must name its tile');
   });
 
@@ -192,7 +205,7 @@ describe('the cascade', () => {
     // The same 728x90 does NOT fit the mobile top slot: house, with the reason logged.
     const mob = ads.decide({ ...REQ, platform: 'mobile' }, CTX).find((f) => f.surface === SurfaceId.MENU_TOP);
     expect(mob?.source).toBe('house');
-    const log = readFileSync(join(root, 'ads.jsonl'), 'utf8');
+    const log = logText(root);
     expect(log).toContain('does not fit surface');
   });
 
@@ -203,7 +216,7 @@ describe('the cascade', () => {
     booking.creatives[0].sha256 = 'cd'.repeat(32);
     const { ads, root } = service(booking, clock);   // no assetFor at all — §2.2 absent
     expect(ads.decide(REQ, CTX).find((f) => f.surface === SurfaceId.MENU_TOP)?.source).toBe('house');
-    const log = readFileSync(join(root, 'ads.jsonl'), 'utf8');
+    const log = logText(root);
     expect(log).toContain('no uploaded asset');
   });
 
@@ -228,7 +241,7 @@ describe('events and the nonce discipline', () => {
     expect(ads.event('feedfacefeedface', 'impression', clock.now).ok).toBe(false);
     expect(ads.counters.impressions).toBe(1);
     expect(ads.counters.refusedEvents).toBe(2);
-    const rows = readFileSync(join(root, 'ads.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { type: string });
+    const rows = logText(root).trim().split('\n').map((l) => JSON.parse(l) as { type: string });
     expect(rows.filter((r) => r.type === 'impression').length).toBe(1);
   });
 });
@@ -308,7 +321,7 @@ describe('the redirector (§4.5)', () => {
 describe('the ad log carries what a billing batch job needs', () => {
   /** Every row in the log, parsed. */
   function rowsOf(root: string): Record<string, unknown>[] {
-    const raw = readFileSync(join(root, 'ads.jsonl'), 'utf8').trim();
+    const raw = logText(root).trim();
     if (raw === '') return [];
     return raw.split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
   }
@@ -446,7 +459,7 @@ describe('the ad log carries what a billing batch job needs', () => {
  */
 describe('viewable, non-viewable and undetermined are three different answers', () => {
   function rowsOf(root: string): Record<string, unknown>[] {
-    const raw = readFileSync(join(root, 'ads.jsonl'), 'utf8').trim();
+    const raw = logText(root).trim();
     return raw === '' ? [] : raw.split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
   }
 

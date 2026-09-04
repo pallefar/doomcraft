@@ -122,6 +122,7 @@ import {
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
 import { PackInventory, ReleaseService, releaseContentHash, rollMatchDrops } from './packs.js';
 import { StudioService } from './studio.js';
+import { sweepAdLog } from './adsRollup.js';
 import { AdService } from './ads.js';
 import { CreativeStore, IMAGE_MAX_BYTES } from './creatives.js';
 import { PHASE_ONE_SURFACES, type AdEventType, type SurfaceId } from '@doomcraft/shared/sponsor';
@@ -746,9 +747,27 @@ void journal.ready();
 /* Retention. One sweep at boot and one every six hours: a day file is the unit,
  * so there is nothing to do more often than that. */
 void journal.sweep();
+/* The ad log's own retention, and the ORDER is the load-bearing part: aggregate
+ * the closed days first, then delete only the raw shards whose numbers are
+ * already durable. Pruning on a timer while the billing batch job runs on
+ * nobody's schedule is a race retention always wins — and the loser is a day of
+ * delivery that a sponsor was invoiced for. See server/src/adsRollup.ts. */
+const sweepAds = (): void => {
+  try {
+    const { rolled, pruned } = sweepAdLog(dataRoot, new Date().toISOString().slice(0, 10));
+    if (rolled.length > 0 || pruned.length > 0) {
+      process.stdout.write(`ads log: rolled up ${rolled.length} day(s), pruned ${pruned.length}\n`);
+    }
+  } catch (err) {
+    // Retention must never take the host down; a failure is loud, not fatal.
+    process.stderr.write(`ads log sweep failed: ${(err as Error)?.message ?? ''}\n`);
+  }
+};
+sweepAds();
 const journalSweeper = setInterval(() => {
   void journal.sweep();
   void auditLog.sweep();
+  sweepAds();
 }, 6 * 60 * 60 * 1000);
 if (typeof journalSweeper.unref === 'function') journalSweeper.unref();
 
