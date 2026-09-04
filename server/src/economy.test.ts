@@ -43,6 +43,7 @@ import {
   encodeInput,
 } from '@doomcraft/shared';
 import { FLAG_ORDER, defaultFlagBits } from '@doomcraft/shared/flags';
+import type { ChallengeDef } from '@doomcraft/shared/challenges';
 import { ModeId } from '@doomcraft/shared/modes';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 
@@ -139,6 +140,8 @@ interface RoomSpec {
   hostId?: string;
   /** The factory-provided drop roll. Absent = no drops, like the browser worker. */
   rollDrops?: (ctx: { deviceId: string; flagBits: number; kills: number; seconds: number; won: boolean }) => readonly string[];
+  /** Challenge defs the session is OPENED with. Absent = no challenge engine. */
+  challenges?: readonly ChallengeDef[];
 }
 
 /**
@@ -175,6 +178,7 @@ function makeRoom(spec: RoomSpec): Room {
     hostId: spec.hostId,
     resolveFlags: () => spec.flagBits ?? defaultFlagBits(),
     rollDrops: spec.rollDrops,
+    challenges: spec.challenges,
   });
 }
 
@@ -1721,5 +1725,59 @@ describe('an honest reconnect is not logged as fraud', () => {
     expect(guard.status().violations, 'an honest reconnect was counted as fraud').toBe(0);
     const ring = guard.recent(64);
     expect(ring.some((r) => r.deviceId === DEVICE), 'an honest reconnect reached the audit ring').toBe(false);
+  });
+});
+
+/**
+ * The award packet must describe the whole settlement.
+ *
+ * HANDOVER §6: "Match-award packet's scrap delta stops reconciling the moment a
+ * challenge pays". Confirmed by both passes, and narrowed by both to a display
+ * defect — the balance is server-authoritative and was always right. But the
+ * surface it corrupts is the one that tells a player their reward worked: a
+ * first daily completion could count "+0 Scrap" on a round that paid 40.
+ *
+ * No test anywhere passed `challenges` into a Room before this one, which is
+ * why the settle-inside-payout path was never checked against the packet.
+ */
+describe('what the player is told, when a challenge pays too', () => {
+  const DEVICE = 'device-award-delta';
+  const COMPETITIONS_ON = (SCRAP_ON | (1 << FLAG_ORDER.indexOf('economy_competitions'))) >>> 0;
+
+  /**
+   * RED WITHOUT THE FIX: delete the `landed = { xp: ..., scrap: ... }` line
+   * after `settleChallenges`. The packet then reports the match reward alone
+   * while `totalScrap` carries the prize as well, so `totalScrap - 0 !== scrap`
+   * for a fresh profile — the exact contract `protocol.ts` states.
+   */
+  it('the delta equals the whole balance movement, prize included', async () => {
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const kills5: ChallengeDef = {
+      id: 'daily.kill-5', name: 'Five', blurb: 'Take down five.',
+      period: 'daily', stat: 'kills', target: 5, scrap: 40, item: null,
+    };
+    const room = makeRoom({ store, guard, flagBits: COMPETITIONS_ON, challenges: [kills5] });
+
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = KILLS;
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+    await Promise.resolve();
+
+    const profile = await store.ensure(DEVICE);
+    const sent = awards(client);
+    expect(sent).toHaveLength(1);
+
+    // The challenge really did pay — otherwise this test proves nothing.
+    expect(profile.economy.scrap, 'the challenge did not pay, so there is no gap to test')
+      .toBeGreaterThan(sent[0].scrap - 40 + 1);
+    expect(profile.challenges?.done ?? []).toContain('daily.kill-5');
+
+    // The contract: total - previousTotal === delta. Previous total is 0 here.
+    expect(sent[0].totalScrap).toBe(profile.economy.scrap);
+    expect(sent[0].scrap, 'the packet understated the round by the prize').toBe(profile.economy.scrap);
+    expect(sent[0].xp).toBe(profile.progress.xp);
   });
 });

@@ -1684,6 +1684,25 @@ export class Room implements NetHost {
             rowId: newLedgerId,
           });
         }
+
+        /* THE DELTA THE PLAYER IS SHOWN MUST DESCRIBE THE WHOLE SETTLEMENT.
+         *
+         * `landed` came from `applyMatchResult` alone, which moves only the
+         * metered match reward — it cannot see a challenge prize, because
+         * `settleChallenges` credits after it. The packet then carried a
+         * pre-challenge delta next to a post-challenge total, breaking the
+         * contract `protocol.ts` states in as many words: "`xp`/`scrap` are the
+         * DELTA this round produced after every server-side reduction;
+         * `totalXp`/`totalScrap` are the balances the server just wrote."
+         *
+         * The balance was never wrong — the client adopts `totalScrap`
+         * wholesale — so nothing was owed. What was wrong is the number on the
+         * one surface that tells a player their reward worked: the intermission
+         * counted "+0 Scrap" for a round that paid 40, on the very first daily
+         * they ever completed. Derived from the same before/after pair the
+         * journal already uses, it now absorbs anything credited inside this
+         * lock, including a debt carried over from an earlier session. */
+        landed = { xp: profile.progress.xp - before.xp, scrap: profile.economy.scrap - before.scrap };
       });
       if (paid) this.tellPlayerWhatLanded(conn, landed, updated, verdict.code);
       /* Viral tier 1: a paying round is the moment an engagement threshold
