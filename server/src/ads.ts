@@ -41,6 +41,8 @@ import {
   type Campaign,
   type Creative,
   type Sponsor,
+  AD_LOG_VERSION,
+  AD_MODE_UNKNOWN,
 } from '@doomcraft/shared/sponsor';
 
 const FILL_TTL_MS = 10 * 60_000;
@@ -59,6 +61,11 @@ interface FillRecord {
   impressionMs: number;
   exposureMs: number;
   counted: Set<string>;
+  /* Captured at mint. A later `impression` or `exposure` row has no request to
+   * read these off, and a dimension recovered by joining rows after the fact is
+   * a dimension that goes missing the moment a row is lost. */
+  mode: number;
+  platform: string;
 }
 
 interface ClickRecord {
@@ -145,7 +152,29 @@ export class AdService {
   readonly counters = {
     decides: 0, fills: 0, houseFills: 0, impressions: 0, replays: 0,
     blocked: 0, clicks: 0, billableClicks: 0, refusedEvents: 0,
+    /**
+     * Rows the log FAILED to persist. Non-zero means the counters above and the
+     * log disagree, and the log is the billing substrate — so this number is
+     * the difference between "we served 1,000 impressions" and "we can PROVE we
+     * served 1,000 impressions". It used to be unobservable: the write was
+     * wrapped in a bare `catch {}` while the counter had already moved.
+     */
+    logWriteFailures: 0,
   };
+
+  /**
+   * Rows accumulated during one public call, flushed as ONE append.
+   *
+   * `append()` is `appendFileSync` on the serving path, and a single `decide()`
+   * mints up to eight fills. A row per mint would multiply synchronous writes
+   * on the request that has to answer fastest. Buffering per call keeps exactly
+   * the durability the log had before (still written before the response) while
+   * keeping it to one syscall per API call rather than one per row.
+   */
+  private rows: string[] = [];
+
+  /** Groups one decision's skip rows with the fill it did or did not produce. */
+  private decisionId = '';
 
   constructor(dataRoot: string, options: AdServiceOptions = {}) {
     this.root = dataRoot.replace(/\/+$/, '');
@@ -186,10 +215,16 @@ export class AdService {
     const now = this.clock();
     const out: AdFill[] = [];
     const deviceHash = hashDevice(req.deviceId);
+    /* One id for this whole decision. Several candidate SKIPS and at most one
+     * `served` row can belong to one surface's decision, and without this a
+     * reader counting `decide` rows would report four "requests" where there
+     * was one. It is not the nonce: a skip happens before any fill exists. */
+    this.decisionId = randomBytes(6).toString('hex');
     for (const surface of req.surfaces.slice(0, 8)) {
       const fill = this.decideOne(surface, req, ctx, deviceHash, now);
       if (fill !== null) out.push(fill);
     }
+    this.flushRows();
     return out;
   }
 
@@ -204,7 +239,7 @@ export class AdService {
       if (binding === undefined) continue;
       if (surface === SurfaceId.MODE_TILE && c.targeting.modes.length === 0) {
         // A badge with no tile is unplaceable — refused, never guessed.
-        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: a MODE_TILE badge must name its tile in targeting.modes` });
+        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: a MODE_TILE badge must name its tile in targeting.modes`, decisionId: this.decisionId, mode: req.mode, platform: req.platform });
         continue;
       }
       if (!this.targets(c, req, ctx, surface)) continue;
@@ -216,13 +251,13 @@ export class AdService {
       let assetUrl = '';
       if (creative.kind === 'video') {
         // Rewarded/interstitial video is phase 2 and its overlay does not exist.
-        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: kind video needs phase 2` });
+        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: kind video needs phase 2`, decisionId: this.decisionId, mode: req.mode, platform: req.platform });
         continue;
       }
       if (creative.kind === 'image') {
         // The image kind belongs to S2/S3/S8 shell surfaces, none of which is
         // a phase-one surface — nothing can render it yet.
-        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: kind image has no phase-one surface` });
+        this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: kind image has no phase-one surface`, decisionId: this.decisionId, mode: req.mode, platform: req.platform });
         continue;
       }
       if (creative.kind === 'display') {
@@ -230,11 +265,11 @@ export class AdService {
         // own header — never the booking document — says what shape it is.
         const asset = this.assetFor?.(creative.sha256) ?? null;
         if (asset === null) {
-          this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: no uploaded asset for ${creative.sha256.slice(0, 12) || '(no sha256)'}` });
+          this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: no uploaded asset for ${creative.sha256.slice(0, 12) || '(no sha256)'}`, decisionId: this.decisionId, mode: req.mode, platform: req.platform });
           continue;
         }
         if (!displayFits(surface, req.platform, asset.width, asset.height)) {
-          this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: ${asset.width}x${asset.height} does not fit surface ${surface} on ${req.platform}` });
+          this.append({ ms: now, type: 'decide', surface, note: `skip ${c.id}: ${asset.width}x${asset.height} does not fit surface ${surface} on ${req.platform}`, decisionId: this.decisionId, mode: req.mode, platform: req.platform });
           continue;
         }
         assetUrl = asset.url;
@@ -243,14 +278,14 @@ export class AdService {
     }
     if (eligible.length > 0) {
       const pick = weightedPick(eligible, deviceHash + String(surface));
-      return this.mint(surface, 'direct', pick.campaign, pick.creative, deviceHash, req.sessionId, now, pick.assetUrl);
+      return this.mint(surface, 'direct', pick.campaign, pick.creative, deviceHash, req.sessionId, now, pick.assetUrl, req.mode, req.platform);
     }
     // 3. Programmatic: no network integration exists; nothing to offer the slot to.
     // 4. House — the guaranteed floor, MENU slots and the intermission card only.
     if (surface === SurfaceId.MENU_TOP || surface === SurfaceId.MENU_SIDE
       || surface === SurfaceId.MENU_BOTTOM || surface === SurfaceId.INTERMISSION_CARD) {
       this.counters.houseFills++;
-      return this.mint(surface, 'house', null, null, deviceHash, req.sessionId, now);
+      return this.mint(surface, 'house', null, null, deviceHash, req.sessionId, now, '', req.mode, req.platform);
     }
     return null;
   }
@@ -299,6 +334,7 @@ export class AdService {
     surface: SurfaceId, source: AdFill['source'],
     campaign: Campaign | null, creative: Creative | null,
     deviceHash: string, sessionId: string, now: number, assetUrl = '',
+    mode: number = AD_MODE_UNKNOWN, platform = '',
   ): AdFill {
     const nonce = randomBytes(12).toString('hex');
     const record: FillRecord = {
@@ -308,9 +344,24 @@ export class AdService {
       deviceHash, sessionId,
       expiresMs: now + FILL_TTL_MS,
       impressionMs: 0, exposureMs: 0, counted: new Set(),
+      mode, platform,
     };
     this.fills.set(nonce, record);
     this.counters.fills++;
+
+    /* THE ROW THAT DID NOT EXIST. A successful decide used to write nothing at
+     * all, so the log held only refusals and there was no denominator for
+     * anything. It is `served`, NOT `rendered`: this is a server-side
+     * allocation and the client may never display it. What it can be divided
+     * into is fill and house share; what it must NEVER be presented as is the
+     * MRC "Total (rendered) impressions", which requires the creative to have
+     * begun rendering and can only come from the client. */
+    this.append({
+      ms: now, type: 'served', nonce, surface, source,
+      campaignId: record.campaignId, creativeId: record.creativeId,
+      device: deviceHash, sessionId, mode, platform,
+      decisionId: this.decisionId,
+    });
 
     let clickUrl = '';
     if (creative !== null && creative.clickUrl.startsWith('https://')) {
@@ -364,10 +415,12 @@ export class AdService {
       if (type === 'replay') this.counters.replays++;
       if (type === 'blocked') this.counters.blocked++;
       this.append({
-        ms: now, type, surface: fill.surface, source: fill.source,
+        ms: now, type, nonce, surface: fill.surface, source: fill.source,
         campaignId: fill.campaignId, creativeId: fill.creativeId,
         device: fill.deviceHash, sessionId: fill.sessionId,
+        mode: fill.mode, platform: fill.platform,
       });
+      this.flushRows();
       return { ok: true, reason: '' };
     }
     if (type === 'exposure') {
@@ -377,10 +430,12 @@ export class AdService {
       const clamped = Math.max(fill.exposureMs, Math.min(exposureMs, now - (fill.expiresMs - FILL_TTL_MS)));
       fill.exposureMs = clamped;
       this.append({
-        ms: now, type, surface: fill.surface, source: fill.source,
+        ms: now, type, nonce, surface: fill.surface, source: fill.source,
         campaignId: fill.campaignId, creativeId: fill.creativeId,
         device: fill.deviceHash, sessionId: fill.sessionId, exposureMs: clamped,
+        mode: fill.mode, platform: fill.platform,
       });
+      this.flushRows();
       return { ok: true, reason: '' };
     }
     this.counters.refusedEvents++;
@@ -442,12 +497,14 @@ export class AdService {
     this.counters.clicks++;
     if (billable) this.counters.billableClicks++;
     this.append({
-      ms: now, type: 'click',
+      ms: now, type: 'click', nonce: record.nonce,
       surface: fill?.surface ?? -1, source: fill?.source ?? 'house',
       campaignId: fill?.campaignId ?? '', creativeId: fill?.creativeId ?? '',
       device: fill?.deviceHash ?? '', sessionId: fill?.sessionId ?? '',
+      mode: fill?.mode ?? AD_MODE_UNKNOWN, platform: fill?.platform ?? '',
       billable, reason,
     });
+    this.flushRows();
     return { target: record.target, billable, reason };
   }
 
@@ -457,11 +514,33 @@ export class AdService {
     return { ...this.counters, liveCampaigns: this.campaigns.filter((c) => c.status === 'live').length };
   }
 
+  /**
+   * Stage one row. Every row is stamped with the schema version and the two
+   * dimensions the dashboard needs and could never recover later.
+   */
   private append(row: Record<string, unknown>): void {
+    this.rows.push(JSON.stringify({ v: AD_LOG_VERSION, ...row }));
+  }
+
+  /**
+   * Write the staged rows, or say loudly that we could not.
+   *
+   * Serving still wins over logging — an unwritable disk must not take ads down
+   * — but the failure is now COUNTED and logged instead of vanishing into a
+   * bare catch. A log that silently drops rows while the in-memory counters
+   * keep climbing is not an accounting substrate, it is a rumour.
+   */
+  private flushRows(): void {
+    if (this.rows.length === 0) return;
+    const batch = this.rows;
+    this.rows = [];
     try {
       mkdirSync(this.root, { recursive: true });
-      appendFileSync(join(this.root, LOG_FILE), JSON.stringify(row) + '\n', 'utf8');
-    } catch { /* an unwritable log must not break serving; counters still move */ }
+      appendFileSync(join(this.root, LOG_FILE), batch.join('\n') + '\n', 'utf8');
+    } catch (err) {
+      this.counters.logWriteFailures += batch.length;
+      this.logErr(`ads: FAILED to persist ${batch.length} log row(s): ${(err as Error)?.message ?? ''}`);
+    }
   }
 
   private sweep(): void {

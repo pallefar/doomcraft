@@ -167,3 +167,54 @@ export const AD_CLICKS_PER_SESSION = 3;
 export const AD_CLICK_DEVICE_CREATIVE_HOURS = 24;
 
 export type AdEventType = 'impression' | 'replay' | 'exposure' | 'blocked' | 'click' | 'decide';
+
+/* -------------------------------------------------------------------------- *
+ * The ad log's row schema (§3.7.5: "billing is a batch job over the log")
+ * -------------------------------------------------------------------------- */
+
+/**
+ * Row types in `ads.jsonl`.
+ *
+ * `served` is SERVER-SIDE ALLOCATION and is deliberately NOT called "rendered".
+ * A fill is minted inside `decide()`; the client may never display it. The MRC
+ * metric "Total (rendered) impressions" requires that the creative BEGAN TO
+ * RENDER, which only the client can attest — so `served` is the denominator for
+ * fill/serve rates and for nothing else. Naming it `rendered` would recreate,
+ * one layer along, exactly the conflation §3.5's caveat block exists to forbid.
+ *
+ * `decide` rows are REFUSALS ONLY (a candidate that was skipped). They are not
+ * a decision stream: several skips and one `served` can all belong to the same
+ * decision, which is what `decisionId` is for.
+ */
+export type AdLogType = AdEventType | 'served';
+
+/**
+ * The schema version stamped on every row.
+ *
+ * Rows written before this existed carry no `v` and no `nonce`, and cannot be
+ * repaired retroactively — an exposure row from then cannot be attributed to a
+ * fill. A reader MUST treat unversioned rows as a separate, poorer population
+ * and say so, rather than blending them into a total that implies they are
+ * comparable. `AD_LOG_V1_FROM_MS` is unknown per deployment; the reader
+ * discovers the cutover by the first versioned row it sees.
+ */
+export const AD_LOG_VERSION = 1;
+
+/**
+ * Fields every versioned row carries.
+ *
+ * `mode` is the play mode the request declared, or `AD_MODE_UNKNOWN` — never 0,
+ * because `ModeId.QUEST` IS 0 and a missing mode logged as 0 would silently
+ * report every menu impression as Quest.
+ */
+export interface AdLogBase {
+  v: number;
+  ms: number;
+  type: AdLogType;
+  surface: number;
+  mode: number;
+  platform: string;
+}
+
+/** No mode was declared. Distinct from `ModeId.QUEST`, which is 0. */
+export const AD_MODE_UNKNOWN = -1;

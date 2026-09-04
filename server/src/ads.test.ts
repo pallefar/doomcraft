@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { SurfaceId, type Campaign, type Creative } from '@doomcraft/shared/sponsor';
+import { AD_LOG_VERSION, SurfaceId, type Campaign, type Creative } from '@doomcraft/shared/sponsor';
 
 import { AdService } from './ads.js';
 
@@ -294,5 +294,141 @@ describe('the redirector (§4.5)', () => {
     const clock = { now: T0 };
     const { ads } = service(null, clock);
     expect(ads.redirect('AAAAAAAAAAAAAAAAAAAAAAAA')).toBeNull();
+  });
+});
+
+/**
+ * The log is the billing substrate (§3.7.5: "billing is a batch job over the
+ * log, never a live counter"). Before P2a-0 it could not carry that weight: a
+ * successful decide wrote NOTHING, so there was no denominator for anything;
+ * no row named its fill, so an exposure could not be attributed; and a failed
+ * write vanished into a bare `catch {}` while the in-memory counter had already
+ * moved. These pin the instrumentation.
+ */
+describe('the ad log carries what a billing batch job needs', () => {
+  /** Every row in the log, parsed. */
+  function rowsOf(root: string): Record<string, unknown>[] {
+    const raw = readFileSync(join(root, 'ads.jsonl'), 'utf8').trim();
+    if (raw === '') return [];
+    return raw.split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  /**
+   * RED WITHOUT THE FIX: delete the `served` append in `mint()`. A successful
+   * decide then writes no row at all and this file stays empty — which is the
+   * whole reason the §3.5 dashboard was found unbuildable.
+   */
+  it('writes a row when a fill is SERVED — the denominator that did not exist', () => {
+    const clock = { now: T0 };
+    const { ads, root } = service(textCampaign(), clock);
+
+    const fills = ads.decide(REQ, CTX);
+    expect(fills.length).toBeGreaterThan(0);
+
+    const served = rowsOf(root).filter((r) => r.type === 'served');
+    expect(served).toHaveLength(fills.length);
+    expect(served[0].nonce).toBe(fills[0].nonce);
+    expect(served[0].source).toBe(fills[0].source);
+  });
+
+  /**
+   * The naming is the point, not a detail. `served` is a SERVER-SIDE
+   * allocation; the client may never display it. Calling it `rendered` would
+   * recreate the conflation §3.5's caveat block exists to forbid, one layer
+   * along — an MRC "rendered impression" requires the creative to have begun
+   * rendering, which only the client can attest.
+   */
+  it('does NOT call a server-side allocation "rendered"', () => {
+    const clock = { now: T0 };
+    const { ads, root } = service(textCampaign(), clock);
+    ads.decide(REQ, CTX);
+    expect(rowsOf(root).some((r) => r.type === 'rendered')).toBe(false);
+  });
+
+  /**
+   * RED WITHOUT THE FIX: drop `nonce` from the event append. An exposure row
+   * then cannot be tied to the fill it describes, and because exposure rows
+   * carry a RUNNING TOTAL, two fills' rows under identical dimensions become
+   * indistinguishable from one fill's — max-per-nonce stops being computable.
+   */
+  it('names the fill on every fill-scoped row, so exposure can be attributed', () => {
+    const clock = { now: T0 };
+    const { ads, root } = service(textCampaign(), clock);
+    const fills = ads.decide(REQ, CTX);
+    const nonce = fills[0].nonce;
+
+    expect(ads.event(nonce, 'impression', clock.now).ok).toBe(true);
+    clock.now += 5_000;
+    expect(ads.event(nonce, 'exposure', clock.now, 5_000).ok).toBe(true);
+
+    const rows = rowsOf(root);
+    for (const type of ['served', 'impression', 'exposure']) {
+      const row = rows.find((r) => r.type === type);
+      expect(row, `no ${type} row`).toBeDefined();
+      expect(row?.nonce, `${type} row does not name its fill`).toBe(nonce);
+    }
+  });
+
+  /**
+   * RED WITHOUT THE FIX: remove the `v` stamp in `append`. A reader then cannot
+   * tell an instrumented row from a pre-P2a-0 one, and would blend two
+   * populations of different quality into one total.
+   */
+  it('stamps a schema version and the two dimensions nothing could recover later', () => {
+    const clock = { now: T0 };
+    const { ads, root } = service(textCampaign(), clock);
+    ads.decide({ ...REQ, mode: 3, platform: 'mobile' }, CTX);
+
+    for (const row of rowsOf(root)) {
+      expect(row.v, 'an unversioned row').toBe(AD_LOG_VERSION);
+      expect(row.mode, 'a row with no mode').toBe(3);
+      expect(row.platform, 'a row with no platform').toBe('mobile');
+    }
+  });
+
+  /**
+   * A `decide` row is a REFUSAL, not a decision. Several candidate skips and
+   * the fill that finally served all belong to ONE decision; without a shared
+   * id a reader counting `decide` rows reports several requests where there was
+   * one, and computes a fill rate out of nothing.
+   */
+  it('groups a decision\'s refusals with the fill they preceded', () => {
+    const clock = { now: T0 };
+    // A video creative is refused ("needs phase 2"), so this decision both
+    // skips and then falls through to a house fill.
+    const booking = textCampaign();
+    booking.creatives[0] = { ...booking.creatives[0], kind: 'video' };
+    const { ads, root } = service(booking, clock);
+
+    ads.decide({ ...REQ, surfaces: [SurfaceId.MENU_TOP] }, CTX);
+
+    const rows = rowsOf(root);
+    const skip = rows.find((r) => r.type === 'decide');
+    const served = rows.find((r) => r.type === 'served');
+    expect(skip, 'the video creative was not refused').toBeDefined();
+    expect(served, 'no house fill followed the refusal').toBeDefined();
+    expect(skip?.decisionId).toBeTruthy();
+    expect(served?.decisionId, 'the refusal and the fill look like two decisions')
+      .toBe(skip?.decisionId);
+  });
+
+  /**
+   * RED WITHOUT THE FIX: restore the bare `catch {}` in the writer. The counters
+   * then climb while nothing reaches disk and NOTHING SAYS SO — the exact shape
+   * that hid the volume incident for six days. Serving still wins; the silence
+   * is what is unacceptable in an accounting substrate.
+   */
+  it('COUNTS rows it failed to persist instead of swallowing them', () => {
+    const clock = { now: T0 };
+    // A root that cannot be created: a path underneath a regular file. This is
+    // a real ENOTDIR from the real fs, not a simulated error (rule 6).
+    const blocker = join(tempDir(), 'not-a-dir');
+    writeFileSync(blocker, 'x', 'utf8');
+    const ads = new AdService(join(blocker, 'nested'), { clock: () => clock.now, log: () => {} });
+
+    const fills = ads.decide(REQ, CTX);
+    expect(fills.length, 'serving must survive an unwritable log').toBeGreaterThan(0);
+    expect(ads.counters.logWriteFailures, 'a dropped row was not counted').toBeGreaterThan(0);
+    expect(ads.status().logWriteFailures).toBe(ads.counters.logWriteFailures);
   });
 });
