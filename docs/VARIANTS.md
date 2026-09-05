@@ -226,6 +226,64 @@ Each phase lands as its own green stage (suite + release:verify + harness),
 per the standing push-at-every-stage rule. Phases V1–V2 are Mac-friendly;
 V3–V4 want the two-browser harness this repo already runs headless.
 
+## 5a. V4 IS FIVE SUB-PHASES, and why (decided 2026-09-05, third session)
+
+V4 was written as one phase — content, the ownership token, the equip claim, the
+killfeed, the display readers and crafting — and put to an adversarial review as
+eleven numbered clauses before a line was written. The review refused it:
+
+> "I would not approve V4 as written."
+
+Nine of the eleven were broken, and FOUR of the findings were not about the plan
+at all but about shipped code (they are fixed: see `9f3b472`, `d3528a1`). The
+conclusion that matters for this document is the one about SHAPE: a phase whose
+plan can be broken in nine places is a phase too big to judge. Each of the five
+concerns below has its own failure modes, its own proof, and its own way of
+being silently wrong.
+
+- **V4a — the pack reaches a room.** `content/variants.json`; a `content/`
+  fallback in `PackInventory` (packsRoot winning, because a fallback-first
+  implementation lets a bundled six-shell definition replace an installed
+  four-shell `variants@1` and serve 6 instead of 4); `runReleaseVerify` reading
+  and EMITTING the variants pack. Ends when a production room hands a capable
+  client a non-empty table. **No ownership, no equip — every player stays at
+  slot 0.**
+- **V4b — the ownership token.** `ItemKind.WEAPON_VARIANT`, `ItemDef.variantId`,
+  and items-manifest serialization. Landmines: there are NO `ITEMS_*` literals
+  (items are a dynamically fingerprinted DATA pack); appending a field
+  unconditionally changes every old item line and the recomputed digests of
+  already-installed items versions; the naive new line is 177 bytes against a
+  160-byte cap; and `guessKind` splits an id on `-` and indexes
+  `ITEM_KIND_NAMES`, so a token must be `weapon_variant-shotgun-slug` or it
+  renders under "Skins".
+- **V4c — the claim reaches the body.** `inventory.variants`, `/api/equip`, and
+  `RoomOptions.variantClaims`. The room is known BEFORE ticket redemption
+  (`router.route` returns `{key, room}` before the await), and the claim must
+  resolve against THAT room's pinned ordering rather than `releases.live()`, or
+  a reversed row order grants 6 shells instead of 4. `equipVerdict` learns only
+  an item's KIND today, so it must follow `ref -> ItemDef.variantId ->
+  VariantDef.base`; a shotgun token submitted for `variant:0` currently returns
+  200 while the arsenal resolves pistol damage 17. Mode eligibility is a COLUMN
+  on the trust table — and note that `trust.test.ts`'s scan does NOT cover it:
+  its regex is `rank|reward|grant|scrap|xp|entitle|payout|prize|leaderboard|drop`
+  with no `variant` term, so the protection §4 claims does not exist yet.
+- **V4d — display truth.** The killfeed cannot tell two shotgun variants apart,
+  and the client holds no variant NAMES (`VariantWireEntry` carries id, base and
+  values only), so a display name is a separate additive message. A 9th KILL
+  byte is compatible — an old decoder reads all five fields and leaves one byte
+  unread — but a new decoder must accept 8-byte messages and RESET the reused
+  event's slot, or it retains the previous kill's. Shot identity must PROPAGATE
+  from the firing path, not be looked up at kill time.
+- **V4e — acquisition.** §7.2 says craft-only, uncommon floor. As written that
+  is unreachable: initial supply 0, drops supply none, trading conserves, and
+  every craft needs three variants, so supply stays 0 forever. It needs a
+  distinct ENTRY recipe (e.g. three common cosmetic duplicates + a Scrap fee ->
+  a chosen uncommon variant), which extends §7.2 rather than contradicting it —
+  acquisition is still at the bench and the floor is still uncommon.
+
+Each sub-phase goes to the review as its own numbered clauses before it is
+built. V4a's are in `.verify/plans/S3-v4a.txt`.
+
 ## 6. Explicit non-goals
 
 - No new weapon archetypes, no new `FireKind`, no behaviour in packs (Rule A).

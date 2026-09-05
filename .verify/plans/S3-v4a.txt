@@ -1,0 +1,128 @@
+You are reviewing a PLAN before any code is written, for the Doomcraft repo at
+/Users/karstenhaldan/youtube/doomcraft.
+
+CONTEXT YOU SHOULD KNOW FIRST. You reviewed a plan for "V4" earlier today and
+refused it: "I would not approve V4 as written", breaking nine of eleven
+clauses. Your verdict is checked in at `.verify/plans/S2-codex.txt`. Every
+shipped-code defect you found has since been fixed and deployed (commits
+`9f3b472`, `d3528a1`, `14fc0f0`): the parser/decoder acceptance invariant, the
+representability rail, the second kill producer, the vanishing unparseable
+pack, and `name` in the variants fingerprint. The live origin now serves
+`weapons@2` and `release:verify` runs 17 checks.
+
+The main conclusion drawn from your verdict is that **V4 was too big to judge**,
+so it is now five sub-phases. THIS PLAN IS ONLY THE FIRST, V4a, and it
+deliberately does NOT include `ItemKind.WEAPON_VARIANT`, the equip claim, the
+killfeed, the display readers or crafting. Review V4a on its own terms; a later
+plan will carry the rest.
+
+YOUR JOB. Attack every numbered clause. For each one you judge WRONG, give a
+CONCRETE FAILURE SCENARIO ending in a SPECIFIC WRONG NUMBER, a specific wrong
+string, or a specific test that stays green when it should not. Read the real
+files.
+
+REQUIRED CLOSING SECTION headed "CLAUSES I JUDGE CORRECT", listing by number
+every clause you could not break.
+
+---------------------------------------------------------------------------
+V4a — THE FIRST VARIANT CONTENT ACTUALLY REACHES A ROOM
+
+Today `variantsVersions()` is empty on every host that has no
+`DOOMCRAFT_PACKS/variants/<v>/variants.json`, which is all of them. So the whole
+V1-V3 machine — the parser, the pack kind, the wire, the arsenal seam — is live
+and carries nothing. V4a is the smallest change that puts real content through
+it end to end, and nothing else.
+
+E1. THE CONTENT FILE. Add `content/variants.json`, a
+    `{ "variants": [...] }` document that `parseVariantsManifest`
+    (`shared/src/variants.ts`) accepts, holding the first real variants — the
+    intended set is four: three HITSCAN archetypes and one PROJECTILE, each a
+    genuine sidegrade that survives the payload band, the +/-12% budget and the
+    strict-dominance refusal.
+    ATTACK: is four the right first set? You noted earlier that a magazine-only
+    variant will not parse (a shorter magazine reloads faster, so it is better
+    on every axis and worse on none). What is the SMALLEST honest set that
+    exercises every branch a later phase depends on — hitscan and projectile,
+    a pellet change and a rate change — without any entry existing only to fill
+    the table?
+
+E2. THE `content/` FALLBACK, WHICH WAS DELIBERATELY ABSENT AND CAN NOW EXIST.
+    `PackInventory.variantsFileFor` (`server/src/packs.ts:206`) is packsRoot-only
+    and its comment says why: "V2 ships the BINARY that understands variants and
+    no content ... the variants-aware binary must be live BEFORE the first
+    release names kind 7, or a host that predates it silently serves the
+    previous release (Rule E)."
+    **That condition is now satisfied — the variants-aware binary is deployed
+    and `/api/version` reports it.** So the plan is to give `variantsFileFor`
+    and `variantsVersions` a `content/variants.json` fallback as version 1,
+    exactly as `itemsFileFor` (`:165`) and `itemsVersions` (`:174`) already do.
+    **packsRoot MUST WIN** — you gave the failure yourself: a fallback-first
+    implementation lets a bundled six-shell definition replace an installed
+    four-shell `variants@1` and the host serves 6 instead of 4.
+    ATTACK: (a) is "bundled content is version 1" right, or does it collide the
+    day an operator installs their own `variants/1/`? Say what `itemsFileFor`
+    does about that collision and whether copying it is correct here.
+    (b) The comment's Rule E argument — is it fully retired by the deploy, or
+    does some part of it still hold for a host running an OLDER binary against
+    a release that names kind 7?
+    (c) Does adding the fallback change what `unsatisfied()` reports on a host
+    with no packs root, and could that flip a currently-green gate?
+
+E3. `runReleaseVerify` MUST READ AND EMIT THE VARIANTS PACK BY DEFAULT.
+    `server/src/gate.ts` reads items from `DEFAULT_ITEMS_FILE` unconditionally
+    and pushes an `itemsPack`; variants are read only if a caller passes
+    `options.variantsFile`, and there is NO `variantsPack` push in
+    `runReleaseVerify` at all. `tools/release-verify.mjs` calls it with no
+    options.
+    PROPOSAL: add `DEFAULT_VARIANTS_FILE`, read it by default, and push a
+    `variantsPack` beside the items one — **before `checkPackInputs`**, so the
+    new pack's input lines are length-checked like every other.
+    You measured earlier that this should leave the count at 17 and take the
+    emitted packs from 7 to 8.
+    ATTACK: (a) confirm the check count and pack count against the CURRENT tree,
+    which has changed since you last measured (a `packs.parse` check was added).
+    (b) `packSetHash` moves when the emitted set gains kind 7 — you measured
+    ordinal-1 going from 2251357389 to 1491019016 on your own fixture. Name
+    every checked-in literal, stored document or test that must move with it,
+    and say which of them is NOT affected and why.
+    (c) The offline gate runs over the TREE and the service gate over a DRAFT.
+    Which of the two changes here, which does not, and is there anything that
+    must be added to both?
+
+E4. THE ONLY CLAIM THAT MATTERS: A PRODUCTION ROOM SERVES THE CONTENT.
+    Everything above is bookkeeping unless a real room built the way production
+    builds one hands a connecting client a non-empty variant table.
+    `server/src/index.ts:1030` constructs `new Room({...})` and passes
+    `variants`; `Room`'s constructor builds its `SessionArsenal` from that, and
+    `Room.onHello` sends `S2C.VARIANT_TABLE`.
+    PROPOSAL: the acceptance test boots the actual server binary, connects a
+    real WebSocket client that sets `CAP_VARIANTS`, and asserts the decoded
+    table has the manifest's rows in the manifest's order and that
+    `arsenal.slotCount` is `variants.length + 1`.
+    ATTACK: you said of the earlier plan that "source scanning is neither the
+    only available proof nor sufficient proof — keep `variantClaims,` in the
+    factory but make the callback return zeros: the proposed scan stays green
+    while the first shotgun magazine is 8 instead of 4." **That argument was
+    about the per-player CLAIM, which V4a does not build.** Does the same
+    objection apply to the room's TABLE, which V4a does build? What is the
+    weakest link between `content/variants.json` on disk and a byte on the wire
+    that this test would NOT catch, and is `tools/smoke-signal.mjs` — which runs
+    against production and already asserts "a client that sets CAP_VARIANTS is
+    told the room's variant table" — able to see it?
+
+E5. WHAT V4a DELIBERATELY DOES NOT DO, and whether that is coherent.
+    No `ItemKind.WEAPON_VARIANT`; no ownership; no equip; no per-player slot
+    (every player stays at slot 0); no killfeed change; no display change; no
+    crafting. The room pins and BROADCASTS a table that nobody is yet eligible
+    for.
+    ATTACK THAT SHAPE. Is a shipped table with no eligible players a coherent
+    intermediate state, or does it create an observable lie — a client that has
+    a table and shows nothing, an operator who sees an installed pack that
+    changes no gameplay, a metric that counts variants as live? Is there a
+    smaller first piece than this one? Is there anything in V4a that CANNOT be
+    validated until the later sub-phases exist, and if so should it move?
+
+E6. THE STAGE'S CLAIM. After E1-E4: "a variants pack ships in the repo, every
+    gate sees it, and a production room serves its table to a capable client —
+    with no player yet able to equip anything from it."
+    ATTACK THAT CLAIM. What does it still not cover?
