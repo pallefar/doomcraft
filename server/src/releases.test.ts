@@ -199,6 +199,15 @@ describe('PackInventory', () => {
     expect(inv.itemsVersions().length, 'the same shape items has').toBeGreaterThan(0);
   });
 
+  it('carries an installed variants pack in the boot identity', () => {
+    // `installedPacks()` is where `createDraft` starts before applying picks,
+    // so a kind missing from it is silently DROPPED from the next routine
+    // draft — a live variants pack would vanish from the following release
+    // without anyone asking for that.
+    const inv = new PackInventory({ packsRoot: packsRoot(false, true), log: () => {} });
+    expect(inv.installedPacks().map((p) => p.label)).toContain('variants@1');
+  });
+
   it('has no variants until one is installed — V2 ships the binary, not content', () => {
     const inv = new PackInventory({ packsRoot: packsRoot(), log: () => {} });
     expect(inv.variantsVersions()).toEqual([]);
@@ -512,6 +521,37 @@ describe('the expansion one-click (S3): a draft from PICKED versions', () => {
     const missing = await svc.createDraft(doc.revision, { items: 9 });
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.error).toContain('items@9');
+  });
+});
+
+describe('the draft route passes through every pick the service accepts', () => {
+  /*
+   * A SOURCE SCAN, in the style of trust.test.ts's, and it is here because of
+   * how the gap it closes was made. `ReleaseService.createDraft` learned
+   * `picks.variants` and every service-level test passed — while the HTTP
+   * handler in server/src/index.ts, which is the only way the admin console
+   * can ever call it, silently dropped the field. A release drafted through
+   * the product would contain no variants pack however hard you asked.
+   *
+   * This scans rather than boots because the value is in catching the CLASS:
+   * the next pack kind will add a `DraftPicks` field too, and the person
+   * adding it will not read this file.
+   */
+  it('names every DraftPicks field in the POST /api/admin/release handler', () => {
+    const picksSrc = readFileSync(join(repoRoot, 'server', 'src', 'packs.ts'), 'utf8');
+    const block = /export interface DraftPicks \{([\s\S]*?)\}/.exec(picksSrc);
+    expect(block, 'DraftPicks moved — update this scan').not.toBeNull();
+    const fields = [...(block as RegExpExecArray)[1].matchAll(/^\s*(\w+)\?:/gm)].map((m) => m[1]);
+    expect(fields).toContain('variants');
+    expect(fields.length).toBeGreaterThanOrEqual(5);
+
+    const routeSrc = readFileSync(join(repoRoot, 'server', 'src', 'index.ts'), 'utf8');
+    const call = /createDraft\(ifRevision, \{([\s\S]*?)\}\)/.exec(routeSrc);
+    expect(call, 'the draft route moved — update this scan').not.toBeNull();
+    const passed = (call as RegExpExecArray)[1];
+    for (const f of fields) {
+      expect(passed, `POST /api/admin/release drops picks.${f}`).toContain(`${f}:`);
+    }
   });
 });
 

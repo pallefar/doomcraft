@@ -55,10 +55,22 @@ import {
  * Shape
  * ------------------------------------------------------------------------ */
 
-/** The 17 fields a variant may move. Everything else is a refusal. */
+/**
+ * The 16 fields a variant may move. Everything else is a refusal.
+ *
+ * `terrainDamage` WAS here and is deliberately gone. It is genuinely live —
+ * detonation passes it straight to `world.carveSphere` — but it belongs to no
+ * budget axis, so `{ terrainDamage: 3.9 }` on a rocket parsed with a budget of
+ * exactly 1.0 and no dominance, and bought a carve radius of 2.6 m -> 3.9 m
+ * for nothing at all. A field the budget cannot charge for is not a sidegrade
+ * dimension. The choice was to price it or to remove it; removing it is the
+ * smaller and reversible answer, and it takes the `carveSphere`
+ * non-termination hazard off the variant surface entirely rather than merely
+ * banding it away.
+ */
 export type VariantField =
   | 'damage' | 'pellets' | 'headshotMultiplier' | 'rpm' | 'magSize' | 'reloadMs'
-  | 'splashRadius' | 'splashDamage' | 'terrainDamage'
+  | 'splashRadius' | 'splashDamage'
   | 'spread' | 'spreadMax' | 'spreadPerShot'
   | 'falloffStart' | 'falloffEnd' | 'falloffMin' | 'falloffCurve'
   | 'projectileSpeed';
@@ -131,7 +143,6 @@ const BANDS: Readonly<Record<VariantField, Band>> = Object.freeze({
   reloadMs: { rel: [0.5, 2.0] },
   splashRadius: { rel: [0, 1.5] },
   splashDamage: { rel: [0, 1.5] },
-  terrainDamage: { rel: [0, 1.5] },
   // Down to a tenth, because a slug is not a buckshot cone narrowed by a
   // fifth — docs/VARIANTS.md §1's example asks for 0.012 against a base of
   // 0.09, and a tighter cone is CHARGED by the handling axis anyway. Which is
@@ -192,8 +203,6 @@ export function isInert(base: WeaponDef, field: VariantField): boolean {
     case 'splashRadius':
     case 'splashDamage':
       return base.splashRadius <= 0 || base.splashDamage <= 0;
-    case 'terrainDamage':
-      return base.terrainDamage <= 0;
     case 'damage':
     case 'rpm':
       return false;
@@ -415,7 +424,13 @@ export function parseVariantsManifest(text: string): VariantsParseResult {
     let bad = false;
     for (const key of Object.keys(rawOver)) {
       const field = key as VariantField;
-      const band = BANDS[field];
+      // `Object.hasOwn`, not `BANDS[key] === undefined`. `JSON.parse` gives
+      // `{"toString": 1}` an OWN key, `Object.keys` returns it, and
+      // `BANDS.toString` then finds Object.prototype's method — which is not
+      // undefined, so the whitelist ADMITTED it and the band read below threw
+      // "Cannot read properties of undefined (reading '0')" out of both
+      // `checkVariantsValidate` and `variantsAt`, instead of refusing.
+      const band = Object.hasOwn(BANDS, key) ? BANDS[field] : undefined;
       if (band === undefined) {
         // Not ignored. A field outside the whitelist is a variant asking for
         // something the schema does not sell, and silently dropping it would
@@ -522,7 +537,6 @@ function inertReason(base: WeaponDef, field: VariantField): string {
       return 'a projectile stores its damage at spawn and falloff never runs';
     case 'projectileSpeed': return 'it fires no projectile';
     case 'splashRadius': case 'splashDamage': return 'it has no splash to scale';
-    case 'terrainDamage': return 'it carves no terrain';
     default: return 'it is not read on this archetype';
   }
 }

@@ -3240,6 +3240,7 @@ async function handleApi(
           campaign: typeof b.campaign === 'number' ? b.campaign : undefined,
           items: typeof b.items === 'number' ? b.items : undefined,
           quests: typeof b.quests === 'number' ? b.quests : undefined,
+          variants: typeof b.variants === 'number' ? b.variants : undefined,
           note: typeof b.note === 'string' ? b.note : undefined,
         });
         break;

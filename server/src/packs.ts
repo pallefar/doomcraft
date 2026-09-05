@@ -397,6 +397,14 @@ export class PackInventory {
       const q = this.questsAt(qv[qv.length - 1]);
       if (q !== null) out.push(q.pack);
     }
+    const vv = this.variantsVersions();
+    if (vv.length > 0) {
+      // The NEWEST installed variants pack, exactly as every other data kind.
+      // Omitting it meant an ordinary draft — which starts from this set —
+      // silently dropped a live variants pack from the next release.
+      const v = this.variantsAt(vv[vv.length - 1]);
+      if (v !== null) out.push(v.pack);
+    }
     return out;
   }
 

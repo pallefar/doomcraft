@@ -153,7 +153,6 @@ describe('a variant may not pay in currency the engine does not spend', () => {
     expect(isInert(WEAPONS[WeaponId.CHAINSAW], 'spread')).toBe(true);       // melee has no cone
     expect(isInert(WEAPONS[WeaponId.PISTOL], 'projectileSpeed')).toBe(true);
     expect(isInert(WEAPONS[WeaponId.PISTOL], 'splashRadius')).toBe(true);
-    expect(isInert(WEAPONS[WeaponId.PISTOL], 'terrainDamage')).toBe(true);
     // And the live ones stay live.
     expect(isInert(WEAPONS[WeaponId.SHOTGUN], 'pellets')).toBe(false);
     expect(isInert(WEAPONS[WeaponId.PISTOL], 'reloadMs')).toBe(false);
@@ -218,15 +217,41 @@ describe('no straight upgrades', () => {
  * ------------------------------------------------------------------------ */
 
 describe('bands', () => {
-  it('refuses a terrainDamage that would hang the server forever', () => {
-    // `world.carveSphere` starts `for (let y = y0; y <= y1; y++)` at
-    // `floor(cy - radius)`. At 1e20 that is -1e20, and -1e20 + 1 === -1e20, so
-    // y never advances and one projectile blocks the event loop. The value is
-    // finite, whitelisted, and moves none of the budget axes — bands are the
-    // only thing standing in front of it.
+  it('does not sell terrainDamage at all — no axis can charge for it', () => {
+    /*
+     * It was on the whitelist and banded, and that was not enough: it belongs
+     * to no budget axis, so `{ terrainDamage: 3.9 }` on a rocket scored a
+     * budget of exactly 1.0 with no dominance and bought a carve radius of
+     * 2.6 m -> 3.9 m for nothing. A field the budget cannot charge for is not
+     * a sidegrade dimension.
+     *
+     * Removing it also takes the `carveSphere` non-termination hazard off the
+     * surface rather than merely banding it away: that loop is
+     * `for (let y = y0; y <= y1; y++)` from `floor(cy - radius)`, and at 1e20
+     * the counter cannot advance at all.
+     */
     expect(-1e20 + 1).toBe(-1e20);
-    expect(refusal(one({ terrainDamage: 1e20 }, WeaponId.ROCKET))).toContain('terrainDamage');
-    expect(refusal(one({ terrainDamage: 1e20 }, WeaponId.PLASMA))).toContain('terrainDamage');
+    expect(VARIANT_FIELDS).not.toContain('terrainDamage');
+    for (const value of [3.9, 1e20]) {
+      for (const base of [WeaponId.ROCKET, WeaponId.PLASMA, WeaponId.PISTOL]) {
+        expect(refusal(one({ terrainDamage: value }, base, `td-${base}`)))
+          .toContain('"terrainDamage" is not a variant-able field');
+      }
+    }
+  });
+
+  it('refuses an INHERITED property instead of throwing on it', () => {
+    // `JSON.parse('{"toString":1}')` gives an OWN key that `Object.keys`
+    // returns, and `BANDS.toString` finds Object.prototype's method — not
+    // undefined — so the whitelist admitted it and the band read threw
+    // "Cannot read properties of undefined (reading '0')" out of both
+    // `checkVariantsValidate` and `variantsAt`.
+    for (const key of ['toString', 'constructor', 'valueOf', 'hasOwnProperty']) {
+      const r = parseVariantsManifest(
+        `{"variants":[{"id":"proto","base":0,"name":"X","over":{"${key}":1}}]}`);
+      expect(r.manifest, key).toBeNull();
+      expect(r.errors.join(' '), key).toContain(`"${key}" is not a variant-able field`);
+    }
   });
 
   it('bands EVERY whitelisted field — none is left open', () => {
