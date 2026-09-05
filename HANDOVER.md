@@ -192,7 +192,7 @@ THE PROOFS
    2026-09-05). That matters beyond "a stage finished": the pack kind's own
    rule is that the variants-aware BINARY must be live before any release names
    kind 7, or a host that predates it silently serves the previous release. It
-   is. `release:verify` is 16 checks now and reports
+   is. `release:verify` is 17 checks now and reports
    `variants.validate — no variants manifest installed`.
 
    **V3 IS DONE and deployed** (`6529e82`, `aeff8e2`, 2026-09-05):

@@ -15,7 +15,14 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { compileLevel, parseLevelJson, validateLevel, type Level } from '@doomcraft/shared/level';
-import { BUILTIN_FLAG_ORDER, BUILTIN_PACKS, PackKind, type PackVersion } from '@doomcraft/shared/packs';
+import {
+  BUILTIN_FLAG_ORDER,
+  BUILTIN_PACKS,
+  MAX_PACK_INPUTS,
+  PackKind,
+  type PackVersion,
+} from '@doomcraft/shared/packs';
+import { weaponsFingerprintInputs } from '@doomcraft/shared/version';
 import { parseChallengesManifest } from '@doomcraft/shared/challenges';
 import { parseItemsManifest } from '@doomcraft/shared/items';
 
@@ -26,6 +33,7 @@ import {
   checkFlagsOrder,
   checkLevelsCanonical,
   checkLevelsValidate,
+  checkPackInputs,
   checkPacksDeclared,
   checkProtocolStable,
   checkQuestsRefs,
@@ -42,6 +50,19 @@ import { SAVES_VERSION } from '@doomcraft/shared/saves';
 const here = fileURLToPath(import.meta.url);
 const CONTENT_LEVELS = join(here, '..', '..', '..', 'content', 'levels');
 const EPISODES = join(here, '..', '..', '..', 'content', 'episodes.json');
+
+/*
+ * The two things a legitimate ratchet bump moves, named ONCE.
+ *
+ * A weapons schema rewrite changes every input line and the pack's version;
+ * nothing in this file may spell either out, or the bump lands on a wall of
+ * red tests that are about the gate rather than about weapons. Everything
+ * below derives its expectations from the running binary and the checked-in
+ * declaration, so a bump updates them by moving the two names it already has
+ * to move in shared/src/.
+ */
+const WEAPONS_COMPUTED = weaponsFingerprintInputs();
+const WEAPONS_DECL = BUILTIN_PACKS.find((p) => p.key === 'weapons') as PackVersion;
 
 const tempDirs: string[] = [];
 afterAll(() => { for (const d of tempDirs) rmSync(d, { recursive: true, force: true }); });
@@ -75,7 +96,9 @@ describe('packs.declared', () => {
     const checks = checkPacksDeclared(doctored);
     const weapons = checks.find((c) => c.id === 'packs.declared.weapons');
     expect(weapons?.ok).toBe(false);
-    expect(weapons?.detail).toContain('weapons@1');
+    // Named from the declaration, not typed in: a legitimate ratchet bump
+    // moves WEAPONS_PACK_VERSION and must not have to move this file too.
+    expect(weapons?.detail).toContain(WEAPONS_DECL.label);
     // And the other two are untouched — per-pack refusal, not a blanket one.
     expect(checks.find((c) => c.id === 'packs.declared.core')?.ok).toBe(true);
     expect(checks.find((c) => c.id === 'packs.declared.characters')?.ok).toBe(true);
@@ -291,6 +314,7 @@ describe('runReleaseVerify over the shipped tree', () => {
     const ids = report.checks.map((c) => c.id);
     for (const required of [
       'packs.declared.core', 'packs.declared.weapons', 'packs.declared.characters',
+      'packs.inputs',
       'packs.installed', 'packs.unique', 'levels.validate', 'levels.canonical',
       'campaign.refs', 'quests.validate', 'quests.refs', 'variants.validate',
       'protocol.stable', 'flags.order', 'saves.schema', 'gate.nonempty',
@@ -382,18 +406,157 @@ describe('packs.declared refuses what it cannot verify', () => {
   });
 
   it('prints a real line diff when a declaration drifts, not two hex numbers', () => {
+    // The mutation is a SUFFIX rather than a field edit spelled out here, so
+    // the weapons input schema can be rewritten wholesale without this test
+    // needing to know a single thing about its shape. The property under test
+    // is "the changed line is rendered on both sides", not "17 becomes 18".
+    const declaredFirst = `${WEAPONS_COMPUTED[0]}#drift`;
     const doctored = BUILTIN_PACKS.map((p) => (p.key === 'weapons'
       ? {
         ...p,
         fingerprint: (p.fingerprint ^ 1) >>> 0,
-        inputs: p.inputs.map((l, i) => (i === 0 ? l.replace(':17/', ':18/') : l)),
+        inputs: p.inputs.map((l, i) => (i === 0 ? `${l}#drift` : l)),
       }
       : p));
     const bad = checkPacksDeclared(doctored).find((c) => c.id === 'packs.declared.weapons');
     expect(bad?.ok).toBe(false);
-    // The declared line (18) shows as removed, the computed line (17) as added.
-    expect(bad?.detail).toContain('- 0:18/');
-    expect(bad?.detail).toContain('+ 0:17/');
+    // The declared line shows as removed, the computed one as added.
+    expect(bad?.detail).toContain(`- ${declaredFirst}`);
+    expect(bad?.detail).toContain(`+ ${WEAPONS_COMPUTED[0]}`);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The declaration's OTHER half, and the caps — in the OFFLINE gate
+ * ------------------------------------------------------------------------ */
+
+describe('packs.declared checks the declared INPUT LINES, not only the number', () => {
+  it('REFUSES a declaration whose fingerprint is right and whose input lines lie', () => {
+    /*
+     * The review's exact input, and the reason this check exists at all.
+     * `p.inputs` was read for ONE purpose — rendering the failure diff — and
+     * compared against nothing, so a weapons declaration carrying this
+     * build's fingerprint over the single line `0:lies` returned ok from both
+     * gates. shared/src/packs.ts keeps those literals precisely so a firing
+     * ratchet prints a field-level diff instead of two hex numbers, and calls
+     * the diff "the reviewable artifact". An unverified literal makes that
+     * artifact a claim about the previous build that nothing ever tested.
+     */
+    const declaredPacks = BUILTIN_PACKS.map((p) => (p.key === 'weapons'
+      ? { ...p, inputs: ['0:lies'] } : p));
+    const { report } = runReleaseVerify({ levelsDir: CONTENT_LEVELS, episodesFile: EPISODES, declaredPacks });
+    const weapons = report.checks.find((c) => c.id === 'packs.declared.weapons');
+    expect(weapons?.ok, JSON.stringify(report.checks)).toBe(false);
+    // Which of the two halves is wrong, because the remedies differ: this one
+    // is "paste the lines", not "recompute the hash".
+    expect(weapons?.detail).toContain('INPUT LINES');
+    expect(weapons?.detail).toContain('- 0:lies');
+    expect(weapons?.detail).toContain(`+ ${WEAPONS_COMPUTED[0]}`);
+    expect(report.ok).toBe(false);
+    // Per-pack, as the fingerprint half already was.
+    expect(report.checks.find((c) => c.id === 'packs.declared.core')?.ok).toBe(true);
+    expect(report.checks.find((c) => c.id === 'packs.declared.characters')?.ok).toBe(true);
+  });
+
+  it('REFUSES this build\'s own lines declared in the WRONG ORDER', () => {
+    // The set difference is empty here, so the naive diff would have printed
+    // nothing at all — and the fingerprint folds `inputs.join('|')`, which
+    // makes a reorder a genuinely different pack. A comparison by set would
+    // call these two lists equal and pass.
+    expect(WEAPONS_COMPUTED.length, 'a one-line pack cannot be reordered').toBeGreaterThan(1);
+    const swapped = [WEAPONS_COMPUTED[1], WEAPONS_COMPUTED[0], ...WEAPONS_COMPUTED.slice(2)];
+    const declaredPacks = BUILTIN_PACKS.map((p) => (p.key === 'weapons' ? { ...p, inputs: swapped } : p));
+    const { report } = runReleaseVerify({ levelsDir: CONTENT_LEVELS, episodesFile: EPISODES, declaredPacks });
+    const weapons = report.checks.find((c) => c.id === 'packs.declared.weapons');
+    expect(weapons?.ok).toBe(false);
+    expect(weapons?.detail).toContain('different ORDER');
+    expect(weapons?.detail).toContain('position 0');
+  });
+
+  it('tells the operator when only the FINGERPRINT is wrong, so they do not hunt for a diff', () => {
+    // The other quadrant, and the other remedy. Lines correct, hex mistyped.
+    const declaredPacks = BUILTIN_PACKS.map((p) => (p.key === 'weapons'
+      ? { ...p, fingerprint: (p.fingerprint ^ 1) >>> 0 } : p));
+    const weapons = checkPacksDeclared(declaredPacks).find((c) => c.id === 'packs.declared.weapons');
+    expect(weapons?.ok).toBe(false);
+    expect(weapons?.detail).toContain('only the declared fingerprint is wrong');
+    expect(weapons?.detail).not.toContain('INPUT LINES');
+  });
+
+  it('still PASSES the declaration this build actually ships', () => {
+    // The other half of the bar: a check that cannot pass is worth what one
+    // that cannot fail is worth. This is the line a legitimate ratchet bump
+    // must leave green.
+    for (const c of checkPacksDeclared()) expect(c.ok, `${c.id}: ${c.detail}`).toBe(true);
+  });
+});
+
+describe('packs.inputs — the caps, in the gate that runs over the TREE', () => {
+  /**
+   * A 161-byte input line used to pass `runReleaseVerify()` outright: the
+   * ONLY enforcement of MAX_PACK_INPUT_BYTES anywhere was an inline loop in
+   * `ReleaseService.runGate()`. So `npm run release:verify` and CI said yes,
+   * and the refusal arrived later from the other gate, at the moment someone
+   * tried to publish. Both gates call the same helper now.
+   *
+   * 161 and 160 rather than 400 and 10: a cap is only enforced if it is
+   * enforced AT the cap.
+   */
+  const over = `${'x'.repeat(155)}:1/2/3`;
+  const under = over.slice(1);
+
+  const verifyWith = (inputs: readonly string[]): ReturnType<typeof runReleaseVerify> => runReleaseVerify({
+    levelsDir: CONTENT_LEVELS,
+    episodesFile: EPISODES,
+    declaredPacks: BUILTIN_PACKS.map((p) => (p.key === 'weapons' ? { ...p, inputs } : p)),
+  });
+
+  it('REFUSES a 161-byte declared line and accepts the 160-byte one', () => {
+    expect(Buffer.byteLength(over, 'utf8')).toBe(161);
+    expect(Buffer.byteLength(under, 'utf8')).toBe(160);
+
+    const bad = verifyWith([...WEAPONS_COMPUTED, over]).report;
+    const cap = bad.checks.find((c) => c.id === 'packs.inputs');
+    expect(cap?.ok, JSON.stringify(bad.checks.map((c) => c.id))).toBe(false);
+    expect(cap?.detail).toContain('input line over 160 bytes');
+    expect(bad.ok).toBe(false);
+
+    // One byte shorter and the CAP is satisfied. (The declaration still
+    // drifts — an extra line is an extra line — so this asserts the cap
+    // check alone, which is the one under test.)
+    const fine = verifyWith([...WEAPONS_COMPUTED, under]).report;
+    expect(fine.checks.find((c) => c.id === 'packs.inputs')?.ok).toBe(true);
+  });
+
+  it('counts bytes, not characters, so a multi-byte line cannot slip past', () => {
+    // 160 characters, 320 bytes. A `.length` check would pass this.
+    const wide = 'é'.repeat(160);
+    expect(wide.length).toBe(160);
+    expect(Buffer.byteLength(wide, 'utf8')).toBe(320);
+    const cap = verifyWith([...WEAPONS_COMPUTED, wide]).report.checks.find((c) => c.id === 'packs.inputs');
+    expect(cap?.ok).toBe(false);
+  });
+
+  it('REFUSES a pack over the input COUNT cap, and says one thing per pack', () => {
+    const many = Array.from({ length: MAX_PACK_INPUTS + 1 }, (_, i) => `${i}:x`);
+    const pack: PackVersion = {
+      kind: PackKind.LEVELS, key: 'levels', version: 1, fingerprint: 0,
+      inputs: many, digest: '', label: 'levels@1',
+    };
+    // The same pack handed in twice — which is what the offline gate does,
+    // once from the declaration and once from the set it would release.
+    const checks = checkPackInputs([pack, pack]);
+    expect(checks.length).toBe(1);
+    expect(checks[0].ok).toBe(false);
+    expect(checks[0].id).toBe('packs.inputs');
+    expect(checks[0].detail).toContain(`over the ${MAX_PACK_INPUTS} cap`);
+  });
+
+  it('reports GREEN over the shipped tree, so the check is seen to pass', () => {
+    const { report } = runReleaseVerify();
+    const cap = report.checks.find((c) => c.id === 'packs.inputs');
+    expect(cap, JSON.stringify(report.checks.map((c) => c.id))).toBeDefined();
+    expect(cap?.ok).toBe(true);
   });
 });
 

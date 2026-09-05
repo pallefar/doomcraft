@@ -18,7 +18,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { PackKind, type Release, type ReleaseDoc } from '@doomcraft/shared/packs';
+import {
+  PackKind,
+  type GateReport,
+  type PackVersion,
+  type Release,
+  type ReleaseDoc,
+} from '@doomcraft/shared/packs';
+import { weaponsFingerprintInputs } from '@doomcraft/shared/version';
 
 import { PackInventory, ReleaseService } from './packs.js';
 import { Room } from './room.js';
@@ -271,6 +278,126 @@ describe('the production gate and pack kind 7', () => {
     const r = await svc.createDraft(doc.revision, { variants: 9 });
     expect(r.ok).toBe(false);
     expect(r.ok === false ? r.error : '').toContain('variants@9 is not installed on this host');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The declaration's OTHER half, and the caps — in the ONLINE gate
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Doctor the pending draft inside the DURABLE document and hand back a fresh
+ * service reading it.
+ *
+ * `createDraft` assembles build packs straight out of `BUILTIN_PACKS`, so it
+ * can never produce a declaration that disagrees with this binary — which is
+ * exactly why the hole below survived: nothing a test could reach through the
+ * happy path could express it. A release document on disk CAN, and that is
+ * not a contrivance; it is a document written by another binary, or by a hand
+ * with a text editor and the volume mounted, and `runGate` re-reads the
+ * document every time it runs. Same route the schemaTouching rollback test
+ * above uses, for the same reason.
+ */
+function doctorDraft(
+  dataRoot: string,
+  inv: PackInventory,
+  mutate: (packs: PackVersion[]) => PackVersion[],
+): ReleaseService {
+  const file = join(dataRoot, 'releases.json');
+  const raw = JSON.parse(readFileSync(file, 'utf8')) as ReleaseDoc;
+  const draft = raw.history.find((r) => r.state === 'draft');
+  expect(draft, 'no draft in the durable document to doctor').toBeDefined();
+  const doctored = { ...(draft as Release), packs: mutate([...(draft as Release).packs]) };
+  const history = raw.history.map((r) => (r.revision === doctored.revision ? doctored : r));
+  writeFileSync(file, JSON.stringify({ ...raw, history }), 'utf8');
+  return new ReleaseService(dataRoot, inv, { clock: () => 2_000, log: () => {} });
+}
+
+/** The gate report from gating whatever draft is pending. */
+async function gateReport(svc: ReleaseService): Promise<GateReport> {
+  const gated = await svc.gateDraft(svc.document().revision);
+  expect(gated.ok, 'gateDraft itself failed, which is not what these tests are about').toBe(true);
+  const report = gated.ok ? gated.release?.gate : null;
+  expect(report, 'the gate produced no report').not.toBeNull();
+  return report as GateReport;
+}
+
+describe('the ONLINE gate checks the declared input lines, not only the number', () => {
+  it('REFUSES a draft whose weapons fingerprint is right and whose input lines lie', async () => {
+    /*
+     * The reviewer's exact input, on the service half of §0's two-gate split.
+     * `p.inputs` used to be read for one purpose — rendering a failure diff —
+     * and compared against nothing, so a declaration carrying this binary's
+     * fingerprint over the single line `0:lies` gated GREEN. The declaration
+     * is the only record of what the previous build declared; if it can lie,
+     * the line diff a firing ratchet prints is not evidence of anything.
+     */
+    const { svc, inv, dataRoot } = service(packsRoot());
+    expect((await svc.createDraft(svc.document().revision)).ok).toBe(true);
+    const svc2 = doctorDraft(dataRoot, inv, (packs) => packs.map((p) => (p.kind === PackKind.WEAPONS
+      ? { ...p, inputs: ['0:lies'] } : p)));
+
+    const report = await gateReport(svc2);
+    const weapons = report.checks.find((c) => c.id === 'packs.declared.weapons');
+    expect(weapons?.ok, JSON.stringify(report.checks)).toBe(false);
+    expect(weapons?.detail).toContain('INPUT LINES');
+    expect(weapons?.detail).toContain('- 0:lies');
+    // The first line THIS build computes, whatever it is after a schema bump.
+    expect(weapons?.detail).toContain(`+ ${weaponsFingerprintInputs()[0]}`);
+    expect(report.ok).toBe(false);
+    // Per-pack, not a blanket refusal: the other two declarations are intact.
+    expect(report.checks.find((c) => c.id === 'packs.declared.core')?.ok).toBe(true);
+    expect(report.checks.find((c) => c.id === 'packs.declared.characters')?.ok).toBe(true);
+  });
+
+  it('REFUSES a 161-byte input line, and passes the 160-byte one beside it', async () => {
+    /*
+     * The service gate already refused this before `checkPackInputs` existed,
+     * so this is a NON-REGRESSION test rather than a red proof of the split:
+     * the split was that `runReleaseVerify()` had no length check at all (see
+     * gate.test.ts). It still goes red on its own terms — delete the byte-cap
+     * branch inside `checkPackInputs` and both gates stop refusing — which is
+     * the property that matters now that one helper serves both.
+     *
+     * 161 and 160 rather than 400 and 10, because a cap is only enforced if
+     * it is enforced AT the cap, and an off-by-one here is silent forever.
+     */
+    const { svc, inv, dataRoot } = service(packsRoot());
+    expect((await svc.createDraft(svc.document().revision)).ok).toBe(true);
+    const at160 = `${'x'.repeat(155)}:1/2/3`; // 161 bytes; its 160-byte sibling below
+    expect(Buffer.byteLength(at160, 'utf8')).toBe(161);
+    const svc2 = doctorDraft(dataRoot, inv, (packs) => packs.map((p) => (p.kind === PackKind.LEVELS
+      ? { ...p, inputs: [...p.inputs, at160] } : p)));
+
+    const report = await gateReport(svc2);
+    const cap = report.checks.find((c) => c.id === 'packs.inputs');
+    expect(cap?.ok, JSON.stringify(report.checks)).toBe(false);
+    expect(cap?.detail).toContain('input line over 160 bytes');
+    expect(report.ok).toBe(false);
+
+    // And the boundary from the legal side, on a fresh document: 160 bytes
+    // passes, so the refusal above is the cap and not "any long line".
+    const { svc: svcB, inv: invB, dataRoot: rootB } = service(packsRoot());
+    expect((await svcB.createDraft(svcB.document().revision)).ok).toBe(true);
+    const svcB2 = doctorDraft(rootB, invB, (packs) => packs.map((p) => (p.kind === PackKind.LEVELS
+      ? { ...p, inputs: [...p.inputs, at160.slice(1)] } : p)));
+    expect(Buffer.byteLength(at160.slice(1), 'utf8')).toBe(160);
+    const okReport = await gateReport(svcB2);
+    expect(okReport.checks.find((c) => c.id === 'packs.inputs')?.ok).toBe(true);
+  });
+
+  it('reports packs.inputs GREEN on an honest draft, so the check is seen to pass', async () => {
+    // The old inline loop pushed a check ONLY when something was over a cap,
+    // so `packs.inputs` never appeared in a passing report and no operator
+    // could tell "measured and fine" from "never measured". A gate that
+    // cannot be seen to pass is worth what one that cannot fail is worth.
+    const { svc } = service(packsRoot());
+    expect((await svc.createDraft(svc.document().revision)).ok).toBe(true);
+    const report = await gateReport(svc);
+    const cap = report.checks.find((c) => c.id === 'packs.inputs');
+    expect(cap, JSON.stringify(report.checks.map((c) => c.id))).toBeDefined();
+    expect(cap?.ok).toBe(true);
+    expect(report.ok).toBe(true);
   });
 });
 

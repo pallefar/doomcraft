@@ -31,8 +31,6 @@ import { join, resolve } from 'node:path';
 import {
   BUILTIN_PACKS,
   MAX_ORDINAL,
-  MAX_PACK_INPUTS,
-  MAX_PACK_INPUT_BYTES,
   MAX_RELEASE_HISTORY,
   PACKS,
   PackKind,
@@ -82,6 +80,7 @@ import {
   checkFlagsOrder,
   checkLevelsCanonical,
   checkLevelsValidate,
+  checkPackInputs,
   checkPacksDeclared,
   checkPacksInstalled,
   checkPacksUnique,
@@ -923,15 +922,19 @@ export class ReleaseService {
 
     checks.push(...checkPacksDeclared(draft.packs.filter((p) => PACKS[p.kind]?.cls === 'build')));
 
-    for (const p of draft.packs) {
-      if (p.inputs.length > MAX_PACK_INPUTS) {
-        checks.push({ id: 'packs.inputs', ok: false, detail: `${p.label} has ${p.inputs.length} inputs, over the ${MAX_PACK_INPUTS} cap` });
-      }
-      const oversize = p.inputs.find((l) => Buffer.byteLength(l, 'utf8') > MAX_PACK_INPUT_BYTES);
-      if (oversize !== undefined) {
-        checks.push({ id: 'packs.inputs', ok: false, detail: `${p.label} input line over ${MAX_PACK_INPUT_BYTES} bytes: ${oversize.slice(0, 40)}…` });
-      }
-    }
+    /*
+     * packs.inputs — the caps, and the SAME code gate.ts runs.
+     *
+     * This used to be an inline loop here and nowhere else, which made the
+     * offline gate structurally unable to see a 161-byte input line: it
+     * passed `npm run release:verify` and CI and was refused only here, by
+     * the operator's publish attempt. §0's rule cuts both ways — a check that
+     * lives only in the ONLINE gate is as split as one that lives only in the
+     * offline one. `checkPackInputs` is the single implementation now, and it
+     * returns a passing row when nothing is over, so the report can show the
+     * caps were measured rather than showing nothing at all.
+     */
+    checks.push(...checkPackInputs(draft.packs));
 
     const levelsDecl = draft.packs.find((p) => p.kind === PackKind.LEVELS);
     let installedIds = new Set<string>();

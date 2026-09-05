@@ -507,7 +507,8 @@ The operator is one person. Anything whose only enforcement is careful reading i
 | id | Refuses when | Input that makes it fail | Anchor |
 |---|---|---|---|
 | `gate.nonempty` | `checks.length === 0` | delete every other check | — |
-| `packs.declared` | a `build` pack's declared fingerprint ≠ the one **this binary** computes now | edit one bit of a declared fingerprint; deploy a release authored against a different build | `shared/src/version.ts:331`, split |
+| `packs.declared` | a `build` pack's declared fingerprint ≠ the one **this binary** computes now, **or its declared `inputs` lines ≠ the ones this binary computes** (order included — the fingerprint folds the join) | edit one bit of a declared fingerprint; declare the correct fingerprint over lying input lines; deploy a release authored against a different build | `shared/src/version.ts:331`, split |
+| `packs.inputs` | any pack's `inputs` exceed `MAX_PACK_INPUTS` (512) or any line exceeds `MAX_PACK_INPUT_BYTES` (160 **bytes**) | paste a 161-byte input line into a declaration | `server/src/gate.ts` `checkPackInputs`, called by **both** gates |
 | `packs.installed` | a `data` pack version named by the release is absent, or its recomputed sha256 differs from the declared one | edit a level file under an already-published version | `server/src/levels.ts:217-249` |
 | `packs.unique` | two packs in the release provide the same content id | add `e1m1-hangar` to a second levels pack | `CONTENT_ID_PATTERN`, `shared/src/modes.ts:648` |
 | `levels.validate` | any level has `validation.ok === false`, **or emits `W_REACH_SKIPPED`** | ship a level with an unreachable exit, or one too large for the solve | `shared/src/level.ts:1777`, `:1899` |

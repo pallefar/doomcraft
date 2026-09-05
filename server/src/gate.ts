@@ -43,6 +43,8 @@ import {
   questsPack,
   BUILTIN_PACKS,
   BUILTIN_PROTOCOL_FINGERPRINT,
+  MAX_PACK_INPUTS,
+  MAX_PACK_INPUT_BYTES,
   PackKind,
   campaignPack,
   levelsPack,
@@ -160,12 +162,40 @@ const fail = (id: string, detail: string): GateCheck => ({ id, ok: false, detail
 
 /**
  * `packs.declared` — the keystone. Fails when a build pack's declared
- * fingerprint differs from the one THIS process computes now. Input that
+ * fingerprint differs from the one THIS process computes now, OR when its
+ * declared INPUT LINES differ from the ones this build computes. Input that
  * makes it fail: edit one weapon field without bumping the declaration in
  * shared/src/packs.ts. Its limit is stated honestly in docs/PACKS.md 8.5:
  * for build packs it refuses a release authored against a different binary,
  * never a balance change already compiled in — the review of a balance
  * change is the input diff, read by a human.
+ *
+ * WHY THE INPUT LINES ARE CHECKED AND NOT MERELY PRINTED. Until this was
+ * fixed, `p.inputs` was read for one purpose only — rendering the failure
+ * diff — and never compared against anything. A review handed both gates a
+ * weapons declaration whose `inputs` were the single line `0:lies` while
+ * leaving the declared fingerprint correct, and both returned ok. That is
+ * not a cosmetic hole. shared/src/packs.ts says the input lists are
+ * checked-in literals ON PURPOSE, because "the input lists are what make a
+ * firing ratchet print a field-level LINE DIFF instead of two hex numbers"
+ * and "the reviewable artifact is the diff, never the number". An unchecked
+ * literal means the ratchet's one deliverable — the diff an operator reads
+ * to decide whether they meant the change — can be a lie about what the
+ * previous build declared, while the check that is supposed to be watching
+ * the declaration prints ok. A green check that cannot fail is worse than no
+ * check; this one could not fail on the half of the declaration the whole
+ * mechanism exists to produce.
+ *
+ * WHY IT IS THE SAME CHECK ID, NOT A NEW ONE. A pack gets one verdict.
+ * `GateCheck.id` is what the console groups on, and `packs.declared.<key>`
+ * IS the per-pack row; minting a second id would let one pack render green
+ * and red at once in the same report, and would leave every existing
+ * consumer that matches on `packs.declared.` blind to the new refusal. The
+ * remedy genuinely differs between the two halves, so the DETAIL differs
+ * instead — it names which of the fingerprint and the lines is wrong, and
+ * the fp-agrees-lines-lie case says outright that the declaration is
+ * internally inconsistent, because that is the one an operator will not
+ * guess.
  */
 export function checkPacksDeclared(declared: readonly PackVersion[] = BUILTIN_PACKS): GateCheck[] {
   const computed: Partial<Record<PackKind, readonly string[]>> = {
@@ -196,25 +226,101 @@ export function checkPacksDeclared(declared: readonly PackVersion[] = BUILTIN_PA
     }
     buildChecked++;
     const now = fingerprint(inputs.join('|'));
-    if (now === (p.fingerprint >>> 0)) {
+    const fpAgrees = now === (p.fingerprint >>> 0);
+    // ORDER-SENSITIVE, element by element, because the fingerprint folds
+    // `inputs.join('|')` — a reordered list is a different pack even when it
+    // is the same SET of lines, and a set comparison would call that equal.
+    const linesAgree = p.inputs.length === inputs.length
+      && p.inputs.every((l, i) => l === inputs[i]);
+    if (fpAgrees && linesAgree) {
       out.push(ok(`packs.declared.${p.key}`));
-    } else {
-      const removed = p.inputs.filter((l) => !inputs.includes(l));
-      const added = inputs.filter((l) => !p.inputs.includes(l));
+      continue;
+    }
+    const diff = linesAgree ? '' : inputLineDiff(p.inputs, inputs);
+    if (!fpAgrees) {
       out.push(fail(
         `packs.declared.${p.key}`,
         `${p.label} declares ${hex(p.fingerprint)} but this build computes ${hex(now)}; `
         + `bump ${p.key.toUpperCase()}_PACK_VERSION and paste the new fingerprint and input lines in shared/src/packs.ts, in the same commit`
-        + (added.length + removed.length > 0
-          ? ` | ${[...removed.map((l) => `- ${l}`), ...added.map((l) => `+ ${l}`)].slice(0, 6).join(' | ')}`
-          : ''),
+        // The lines already being right narrows the remedy to one field, so
+        // say so: this is a mistyped hex paste, not a content change, and
+        // telling the operator to re-paste the lines would send them looking
+        // for a diff that does not exist.
+        + (linesAgree
+          ? ' | the declared input lines ARE this build\'s — only the declared fingerprint is wrong, so recompute it rather than editing the lines'
+          : diff),
       ));
+      continue;
     }
+    // Fingerprint agrees, lines do not. The declaration is self-contradictory:
+    // the hex says "this build" and the literals say something else, so the
+    // literals cannot be what the hex was computed from. This is the shape a
+    // doctored release document takes, and it is also what a half-finished
+    // ratchet bump looks like (fingerprint pasted, lines forgotten). Either
+    // way the artifact the ratchet exists to print is worthless until the
+    // lines are the ones the fingerprint covers.
+    out.push(fail(
+      `packs.declared.${p.key}`,
+      `${p.label}: the declared fingerprint ${hex(p.fingerprint)} agrees with this build but the declared INPUT LINES do not — `
+      + 'the declaration is internally inconsistent, so the line diff a firing ratchet prints from it would be a LIE about what the previous build declared; '
+      + `paste this build's input lines into ${p.key.toUpperCase()}_INPUTS in shared/src/packs.ts (the fingerprint is already correct)`
+      + diff,
+    ));
   }
   if (buildChecked !== 3) {
     out.push(fail('packs.declared', `expected the 3 build packs (core, weapons, characters) in the declared list, verified ${buildChecked}`));
   }
   return out;
+}
+
+/**
+ * `packs.inputs` — every input line of every pack this release names is
+ * inside `MAX_PACK_INPUTS` and `MAX_PACK_INPUT_BYTES`. Input that makes it
+ * fail: a 161-byte declared input line, or a 513th line.
+ *
+ * WHY THIS IS A SHARED HELPER AND NOT TWO COPIES. The caps are declared in
+ * shared/src/packs.ts and, until this landed, were enforced in exactly ONE
+ * place: the loop inside `ReleaseService.runGate()`. `runReleaseVerify()` —
+ * the gate `npm run release:verify` and CI run over the TREE — had no length
+ * check at all, so a 161-byte line compiled into WEAPONS_INPUTS passed the
+ * offline gate and was refused only later, by the online one, at the moment
+ * an operator was trying to publish. That is §0's standing hazard in this
+ * repo (two gates, and a check added to one is not added to the other) with
+ * the arrow pointing the unhelpful way: the cheap gate says yes and the
+ * expensive one says no. Duplicating the loop into gate.ts would have been
+ * the next instance of the same defect, so both gates now call this, and the
+ * failure ids and detail strings are BYTE-IDENTICAL to what the service gate
+ * emitted before — anything downstream matching on `packs.inputs` keeps
+ * matching.
+ *
+ * Unlike the old loop this returns a check when everything is in range. A
+ * check that only ever appears in a report when it is failing can never be
+ * seen to pass, and a gate that cannot pass is worth what one that cannot
+ * fail is worth. Identical failure details are collapsed, because the
+ * offline gate hands this both the declared list and the pack set it would
+ * release — the same pack twice, and one pack deserves one line.
+ */
+export function checkPackInputs(packs: readonly PackVersion[]): GateCheck[] {
+  const out: GateCheck[] = [];
+  const said = new Set<string>();
+  const refuse = (detail: string): void => {
+    if (said.has(detail)) return;
+    said.add(detail);
+    out.push(fail('packs.inputs', detail));
+  };
+  for (const p of packs) {
+    if (p.inputs.length > MAX_PACK_INPUTS) {
+      refuse(`${p.label} has ${p.inputs.length} inputs, over the ${MAX_PACK_INPUTS} cap`);
+    }
+    // BYTES, not characters: the cap is a wire/storage budget and one emoji
+    // in a pack name is four of them (shared/src/challenges.ts makes the same
+    // point about MAX_CHALLENGE_INPUT_BYTES, which mirrors this constant).
+    const oversize = p.inputs.find((l) => Buffer.byteLength(l, 'utf8') > MAX_PACK_INPUT_BYTES);
+    if (oversize !== undefined) {
+      refuse(`${p.label} input line over ${MAX_PACK_INPUT_BYTES} bytes: ${oversize.slice(0, 40)}…`);
+    }
+  }
+  return out.length > 0 ? out : [ok('packs.inputs')];
 }
 
 /**
@@ -530,30 +636,14 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
   const questsText = existsSync(questsFile) ? readFileSync(questsFile, 'utf8') : null;
   const parsedQuests = questsText === null ? null : parseChallengesManifest(questsText).manifest;
 
-  const checks: GateCheck[] = [
-    ...checkPacksDeclared(declared),
-    checkPacksInstalled(files, dir),
-    checkPacksUnique(files),
-    checkLevelsValidate(served.map((f) => ({ id: f.id, validation: validateLevel(f.level, f.level.meta.defaultSkill) }))),
-    checkLevelsCanonical(files),
-    checkCampaignRefs(manifest, installedIds),
-    checkItemsValidate(itemsText),
-    checkVariantsValidate(variantsText),
-    checkQuestsValidate(questsText),
-    checkQuestsRefs(parsedQuests, parsedItems),
-    checkProtocolStable(options.declaredProtocol),
-    checkFlagsOrder(FLAG_ORDER, options.declaredFlagOrder),
-  ];
-  const saves = checkSavesSchema();
-  checks.push(saves.check);
-  checks.push(checks.length === 0
-    ? fail('gate.nonempty', 'the gate ran no checks — an empty list is a failure, never a pass')
-    : ok('gate.nonempty'));
-
   // The pack set this tree would release: the build packs AS THIS BINARY
   // COMPUTES THEM (declared version, computed fingerprint + inputs — so the
   // diff against the declaration shows real lines when they drift) plus the
   // data packs this tree installs.
+  //
+  // Assembled BEFORE the check list, not after, because `packs.inputs` has to
+  // see it: the caps bind on the lines that would actually ship, and a data
+  // pack's lines are computed from content/ rather than declared anywhere.
   const computedInputs: Partial<Record<PackKind, readonly string[]>> = {
     [PackKind.CORE]: coreFingerprintInputs(),
     [PackKind.WEAPONS]: weaponsFingerprintInputs(),
@@ -587,6 +677,33 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
     packs.push({ ...qp, digest: sha256(Buffer.from(inputs.join('\n'), 'utf8')) });
   }
 
+  const checks: GateCheck[] = [
+    ...checkPacksDeclared(declared),
+    // BOTH lists. The DECLARED literals in shared/src/packs.ts are where an
+    // over-long line is actually pasted, and the RELEASED set is what the
+    // service gate later measures — checking only one of the two would leave
+    // whichever half was skipped enforced nowhere until publish time.
+    // Identical failures collapse inside the helper, so a green tree, where
+    // the two lists agree by construction, still prints one row.
+    ...checkPackInputs([...declared, ...packs]),
+    checkPacksInstalled(files, dir),
+    checkPacksUnique(files),
+    checkLevelsValidate(served.map((f) => ({ id: f.id, validation: validateLevel(f.level, f.level.meta.defaultSkill) }))),
+    checkLevelsCanonical(files),
+    checkCampaignRefs(manifest, installedIds),
+    checkItemsValidate(itemsText),
+    checkVariantsValidate(variantsText),
+    checkQuestsValidate(questsText),
+    checkQuestsRefs(parsedQuests, parsedItems),
+    checkProtocolStable(options.declaredProtocol),
+    checkFlagsOrder(FLAG_ORDER, options.declaredFlagOrder),
+  ];
+  const saves = checkSavesSchema();
+  checks.push(saves.check);
+  checks.push(checks.length === 0
+    ? fail('gate.nonempty', 'the gate ran no checks — an empty list is a failure, never a pass')
+    : ok('gate.nonempty'));
+
   const diff = diffAgainstDeclared(packs, declared);
   const failures = checks.filter((c) => !c.ok);
   const report: GateReport = {
@@ -604,6 +721,34 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
  * ------------------------------------------------------------------------ */
 
 function hex(v: number): string { return `0x${(v >>> 0).toString(16).padStart(8, '0')}`; }
+
+/**
+ * The reviewable half of a `packs.declared` refusal: what the declaration
+ * says, minus what this build computes, as ` | - old | + new` lines.
+ *
+ * Only ever called when the two lists actually differ. The set difference is
+ * the useful rendering in the overwhelming case (a field changed), but it
+ * can come back EMPTY on a real difference — the same lines in a different
+ * order, or one line repeated a different number of times, both of which
+ * move the fingerprint because it folds the join. The old code appended
+ * nothing in that case and printed two hex numbers, which is precisely what
+ * the input lists exist to avoid, so the fallbacks below name the first
+ * position that disagrees instead.
+ */
+function inputLineDiff(declared: readonly string[], computed: readonly string[]): string {
+  const removed = declared.filter((l) => !computed.includes(l));
+  const added = computed.filter((l) => !declared.includes(l));
+  if (removed.length + added.length > 0) {
+    return ` | ${[...removed.map((l) => `- ${l}`), ...added.map((l) => `+ ${l}`)].slice(0, 6).join(' | ')}`;
+  }
+  const n = Math.min(declared.length, computed.length);
+  for (let i = 0; i < n; i++) {
+    if (declared[i] !== computed[i]) {
+      return ` | the same lines in a different ORDER, which the fingerprint folds: position ${i} declares "${declared[i]}", this build computes "${computed[i]}"`;
+    }
+  }
+  return ` | the declared list is ${declared.length} line(s), this build computes ${computed.length}`;
+}
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;

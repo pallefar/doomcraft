@@ -116,7 +116,7 @@ before choosing a shape. The rules that will bite:
 Full suite green before any commit AND CAPTURED TO A FILE (three
 load-sensitive flakes have appeared once each and passed in isolation:
 `accounts.test.ts > signin`, `synth.test.ts` boot budget, `chunkz.test.ts`
-compression ratio). `release:verify` is 16 checks and there are TWO gates —
+compression ratio). `release:verify` is 17 checks and there are TWO gates —
 `runReleaseVerify()` over the tree and `ReleaseService.runGate()` over a
 draft — and adding a check to one does not add it to the other.
 Commit → push → redeploy at every green stage.
