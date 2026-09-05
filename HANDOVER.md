@@ -22,8 +22,11 @@ instrumented, aggregated, retained, and rendered as an honest delivery report.
   **github.com/pallefar/doomcraft** — `main`.
 - Owner seat claimed and durable: creds in `~/youtube/doomcraft-owner-credentials.txt`.
 - CI: `tsc -b` + `vitest run` + `release:verify` on every push; all pushes green.
-  Suite: **99 files / 2364 tests + 3 deliberate skips**. `release:verify` runs 15
+  Suite: **99 files / 2383 tests + 3 deliberate skips**. `release:verify` runs 15
   checks and emits 7 packs.
+- **The S10 between-match interstitial is BUILT** (flag `sponsor_interstitial`,
+  defaultOn:false — flipping it in production is the user's launch call). Fires
+  after EVERY mode. Proof harness: `tools/shot-interstitial.mjs`.
 - **Sponsor delivery is LIVE**: `GET /api/admin/ads` serves the §3.5 report from
   durable daily aggregates, and the console's new **Delivery** tab (under
   Analytics) renders it — every metric the log cannot support prints an em-dash
@@ -133,6 +136,10 @@ in the test body so the proof is cheap to repeat.
 | `2c08f9e` | **P2a-0b: non-viewable becomes recordable.** Client-attested `rendered` (metric 1's denominator, deliberately NOT gated on visibility — rendering is not viewing) and a terminal `verdict` carrying `qualified` + `basis`. The basis is load-bearing: rendered-and-failed is a MEASURED failure (bucket 3); never-rendered is UNDETERMINED (bucket 4); no verdict at all is undetermined BY ABSENCE. Folding 4 into 3 flatters the Measured Rate that MRC asks us to maximise. |
 | `f11e8d4` | **P2a-0c: aggregate first, then prune.** Codex's critical finding. Day-sharded rows, a durable per-day aggregate, and a prune that REFUSES to delete a day with no aggregate — retention runs on a timer and the billing job runs on nobody's schedule, so that race has one winner. Exposure is max-per-nonce, straddling fills make the day a lower bound. |
 | `9bb7e74` `74b5bcb` `2c4d498` | **P2a-1: the delivery report and its screen.** `GET /api/admin/ads` over the aggregates; a Delivery console tab. Every unsupported metric is an em-dash WITH ITS REASON. Viewable Rate with no measured failures is *unavailable*, not 100%. The phase-3 in-world metrics are refused BY NAME so a blank does not read as zero. PROVISIONAL banner; house/direct split; session-uniques, never person-uniques. |
+| `d6c74ed` | **A slot is never measured over another fill's creative.** Two pre-existing defects Codex found while attacking the P2a design, both of which P2b would have multiplied. A direct creative REPLACED the house card and nothing put it back, so on the next visit — with that campaign now capped and HOUSE allocated — the old art was still on screen while a new observer measured it under the house nonce, crediting unsold inventory with a sponsor's exposure. A slot now declares whose pixels it is showing. Also: the client defaulted `mode` to 0 and `ModeId.QUEST` IS 0, so every menu impression would have been reported as Quest reach. |
+| `2e2780c` | **P2b (server): the interstitial is admitted, and rationed.** `SERVABLE_SURFACES` = phase one + S10; `perDayInterstitials` — typed, defaulted and read by nothing since it was written — is now a real platform ceiling across ALL campaigns (two campaigns each under their own cap still add up), plus the 180 s interval, both refused with the reason in the log. Counted on SERVE, not impression. A surface this build cannot serve is refused and counted instead of dropped in silence. |
+| `136620f` | **P2b (client): the interstitial, and a skip a keyboard can actually press.** THREE defects the screenshot harness found and no unit test could: the skip starts disabled so `focus()` left the keyboard on nothing; the game binds keys globally and SWALLOWED Enter, so the focused high-contrast skip could not be operated at all; and "Skip (14s)" reads as "wait 14 seconds to skip" — the AADC's named pattern, described in words even though the control was live. |
+| `7bd0274` | **The site promises the reporting we actually ship.** "reported to you line by line" was false — the report is daily aggregates, and the in-world half is phase 3. |
 | `96d067a` | **A store that cannot write now says so.** `JsonFileStore.degraded` was set in four places and read in none. `/api/version`'s `data` gains `degraded`, `unflushed`, `quarantined`, `lostWrites`. |
 
 ## 2. Architecture delta
@@ -160,23 +167,25 @@ studio:     POST /api/admin/studio/quests (+ /validate)   mints quests@<n+1>
 
 ## 3. What is left — decided order
 
-**Two items are now DONE.** §6's unverified findings (all six were true) and
-**sponsors P2a** — the log is instrumented, aggregated, retained and rendered.
-The queue below starts at P2b.
+**Three items are now DONE.** §6's unverified findings (all six were true),
+**sponsors P2a** (the log instrumented, aggregated, retained and rendered) and
+**P2b** (the S10 interstitial, server and client). The queue starts at P2c.
 
 1. **Sponsors phase 2, continued.**
-   - ~~P2a-0 instrument the log~~ / ~~P2a-1 the honest dashboard~~ — SHIPPED.
-   - **P2b — S10 interstitial.** `index.ts`'s decide filter silently drops
-     `SurfaceId.INTERSTITIAL`/`REWARDED` before `AdService` ever sees them, so
-     the drop is invisible in the log AND in the counters — "surfaces requested"
-     is not observable anywhere today, and that is worth fixing in the same
-     breath. `FrequencyCap.perDayInterstitials` is typed, defaulted and never
-     read. The `#ad-overlay` div has no `pointer-events: none`, so an open
-     overlay swallows ALL input — a soft-lock risk to design out, not discover.
+   - ~~P2a-0 / P2a-1 / P2b~~ — SHIPPED.
    - **P2c — S11 rewarded + the Gate 5 handshake.** Durable per-day grant caps
-     belong ON THE PROFILE (rule 20's precedent), never in memory.
-   Before building either, read §6: Codex found real defects in the EXISTING ad
-   path that P2b will otherwise inherit.
+     belong ON THE PROFILE (rule 20's precedent), never in memory — this is
+     money, unlike the interstitial's player-protecting cap, which is in memory
+     with the rest of the cap machine. `SurfaceId.REWARDED` is still absent from
+     `SERVABLE_SURFACES` on purpose; adding it is P2c's first line. The Gate 5
+     spec is `docs/SPONSORS.md:1063` and the caps are at :1075. Ad-free players
+     must still see the button and be paid instantly ("included with your
+     purchase — no video required"), or the $4.99 purchase makes them strictly
+     worse off. There is no video ingest and none is needed: rewarded ships on
+     display creatives plus the Gate 5 timer.
+   - Also worth folding in: the interstitial has NO Guides card and no Basic
+     Training drill yet, and the standing tutorial directive asks for one when a
+     player-facing system ships.
 
 2. **The variants arc, V1–V5** (`docs/VARIANTS.md` §5). **Three §7 decisions
    wait on the user before V2** (power-budget weights, variant rarity floor,
@@ -215,28 +224,24 @@ three decisions** before variants V2.
 ## 6. What is deliberately still open
 
 Findings this session produced and chose NOT to act on, so none is mistaken for
-oversight. The first three are Codex's, against the EXISTING ad path, and P2b
-will inherit them if they are not handled.
+oversight. The three Codex findings against the existing ad path that used to
+head this list are FIXED (`d6c74ed`), and the false site claim with them
+(`7bd0274`).
 
-- **The client can attribute one fill's pixels to another fill's nonce.**
-  (`client/src/ads/serve.ts`.) On menu exit the observers are flushed and the
-  badge cleared, but a reserved slot's previous creative is not restored; on the
-  next visit, if campaign A is now capped and house is allocated, the OLD A
-  creative can still be in the slot while a new observer measures it under the
-  HOUSE nonce. A late image callback from an earlier visit can do the same. The
-  fix is to make the rendered element own a fill generation and invalidate stale
-  completions. This is a correctness bug in what the log records, so it is worth
-  doing BEFORE more surfaces are added.
-- **`mode` and `platform` are logged but under-defined.** `serve.ts` defaults
-  `mode = 0` and `ModeId.QUEST` IS 0, so a menu impression with no declared mode
-  is indistinguishable from a Quest one — the server-side `AD_MODE_UNKNOWN` is
-  −1 and the client should send it. `platform` is a coarse-pointer
-  classification with no orientation, so §3.5's "mobile portrait broken out" is
-  refused on the screen rather than approximated.
 - **The 32-bit device hash is a floor, not an identity.** At a million devices
   the expected distinct-hash count is ~999,884, and two colliding devices share
-  frequency caps and click dedup. The report labels the count a floor; a real
-  audience number needs a wider pseudonymous id and server-issued sessions.
+  frequency caps and click dedup. The delivery report labels the count a floor
+  and refuses person-uniques outright; a real audience number needs a wider
+  pseudonymous id and server-issued sessions, which is a schema change.
+- **Orientation is never captured.** `platform` is a coarse-pointer
+  classification, so §3.5's "mobile portrait broken out" — named in the doc as
+  our differentiator against the bar — is refused on the screen rather than
+  approximated. Capturing it means recording viewport shape at observation time.
+- **The interstitial's daily cap is in memory**, like every other cap in
+  `ads.ts`, so a restart forgives the day's count and this project deploys
+  often. That is the conservative direction for a cap that protects a PLAYER,
+  and it keeps one cap machine rather than two. It is NOT acceptable for a
+  rewarded grant, which is money — see P2c in §3.
 - **A reconnecting player still loses their post-reconnect earnings.** The false
   fraud violation is fixed; the value loss is not. A dropped socket settles the
   player immediately (right — a rage-quitter must not go unpaid), and the ledger
@@ -251,8 +256,11 @@ will inherit them if they are not handled.
   lost row is a counter; a double payout is money" — and `failed`/`degraded` are
   already exposed on two routes. Recorded so it is not re-raised. See rule 23.
 - **`docs/SPONSORS.md:1338` claims a settlement layer shipped. It did not.** The
-  report is flagged PROVISIONAL for exactly this reason; fix the doc line.
-- **The marketing site promises more than the tree delivers.**
-  `doomcraft-site/index.html:218` and `sponsors.html` say "every impression is
-  measured to the MRC viewability standard and reported to you line by line".
-  Line-by-line reporting does not exist, and the in-world half is phase 3.
+  delivery report is flagged PROVISIONAL for exactly this reason; fix the line.
+- **OBSERVED FLAKE, not diagnosed.** `server/src/accounts.test.ts > signin >
+  accepts the right passphrase and refuses a wrong one` failed once in roughly
+  six full-suite runs on 2026-09-05, and passes in isolation every time. It uses
+  `CHEAP` scrypt (N=16) and a fresh temp root per test, so neither KDF cost nor
+  shared state is the obvious cause, and the error text was not captured. Worth
+  a real look before it is trusted as a gate — a flaky test in the auth path
+  quietly weakens "full suite green before any commit".
