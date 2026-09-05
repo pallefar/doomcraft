@@ -1,7 +1,7 @@
 {
-  "updated": "2026-09-05T15:25:00Z",
-  "phase": "DEPLOYED · V4 replanning against a verdict that broke 9 of 11 clauses",
-  "phaseNote": "Both stages live and verified: Railway SUCCESS, /api/version reports weapons@2 (a pack version only this commit declares — better proof than any hash), data.writable true, and the live smoke gate passes 14/14 including the two V3 wire checks. Suite 107 files / 2622 passed / 3 skipped. Six new rules in HANDOVER §0. Next: V4 replanned against the verdict, then back to Codex before a line is built.",
+  "updated": "2026-09-05T17:15:00Z",
+  "phase": "V4a LIVE — the first variant content is on the wire",
+  "phaseNote": "The origin serves eight packs including variants@1, and the production wire carries shotgun-slug and rocket-swift, 293 bytes, decoded whole and cross-checked against the version the origin says it pins. Suite 107 files / 2626 passed / 3 skipped. Nine defects fixed in shipped code today, six of them found by putting plans to an adversary before writing code. V4b-V4e specified and unstarted; the gauntlet is still 0/23 with its harness verified.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -403,6 +403,18 @@
     {
       "t": "15:25",
       "m": "V4 SPLIT INTO FIVE SUB-PHASES, recorded in docs/VARIANTS.md §5a. The conclusion from the refusal was not just its nine findings but its verdict on SHAPE: a phase whose plan can be broken in nine places is a phase too big to judge. V4a is the smallest piece that puts real content through the whole V1-V3 machine end to end — and it is buildable only now, because variantsFileFor deliberately had no content/ fallback until the variants-aware binary was live, which it is as of this afternoon deploy."
+    },
+    {
+      "t": "15:32",
+      "m": "THE GAUNTLET HARNESS STILL WORKS. tools/capture-ours.mjs produced 86 frames, the twelve baseline points lining up 1:1 with ref/voxiom/desktop-*.png — our last capture was Aug 22, before the economy, sponsors and variants work. Looked at the combat frame rather than the exit code: real render, textured blocks, a detailed rocket-launcher viewmodel, corner-only HUD, visible light shafts against the bar flat lighting. Real GPU too (ANGLE Metal, M3 Pro), not SwiftShader. BUT THE NUMBERS ARE NOT COMPARABLE YET: 120.5 fps median is headless and unthrottled — the handover already records that the 120 fps was a headless capture artifact and that headed plus 4x throttle put us at 60.2/53.8, IDENTICAL to the bar. And 8.85 MB transfer is the dev server unminified, not the 3.34 MB prod figure. A fair A/B needs --headed --prod and the same throttle on both sides."
+    },
+    {
+      "t": "17:15",
+      "m": "V4a IS LIVE. content/variants.json ships two rows — a slug shotgun trading seven 11-damage pellets for one 62-damage slug and paying in rate (budget +2.0%), and a swift rocket buying speed and rate with damage and blast (budget -1.21%). Two entries, not four: a variant has ONE base, so covering hitscan and projectile takes two and a third would exist only to make the table look fuller. The content/ fallback finally exists because its blocking condition — the variants-aware binary being live — was met by this afternoon deploy, and packsRoot wins so a bundled definition can never replace an installed one."
+    },
+    {
+      "t": "17:16",
+      "m": "AND THE DEPLOY GATE CAN FINALLY FAIL. tools/smoke-signal.mjs is called in the handover the only check that can see a deployed binary whose room factory forgot its pinned content. Its predicate was d[0] === 13 — a lone opcode byte satisfied it, an empty table satisfied it, it proved a message was SENT. Sixth gate this session found reporting green while testing nothing. It now asks /api/version which version the origin pins and asserts pinned means non-empty in BOTH directions. Production: variants@1 pinned, 2 rows on the wire, named. An hour ago the same line would have printed ok for one byte."
     }
   ],
   "bars": [
@@ -435,7 +447,7 @@
       "name": "V4 — now five sub-phases",
       "state": "building",
       "what": "Split after the review refused it as one phase. V4a: the pack reaches a room (content/variants.json, the content/ fallback, the gate emitting kind 7) — no ownership, every player still at slot 0. V4b: the ownership token. V4c: the claim reaches the body. V4d: display truth — the killfeed cannot tell two shotgun variants apart. V4e: acquisition, which as specified leaves variant supply at zero forever.",
-      "detail": "V4a is with Codex now as six numbered clauses. Each sub-phase gets its own review before it is built."
+      "detail": "V4a DONE and deployed (ef1100d). V4b-V4e specified in docs/VARIANTS.md §5a with the trap each one carries. Nobody can own or equip a variant yet — every player still resolves to slot 0."
     },
     {
       "id": "s3",
