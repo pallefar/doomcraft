@@ -16,7 +16,7 @@
  *    house-filled, and measured under the gate of the screen they live on.
  */
 
-import { SurfaceId, type AdFill } from '@doomcraft/shared/sponsor';
+import { AD_MODE_UNKNOWN, SurfaceId, type AdFill } from '@doomcraft/shared/sponsor';
 
 import { detectBlocked, observeSlot, type ObservedSlot } from './viewability';
 
@@ -44,6 +44,44 @@ export function textFillOrNull(fill: AdFill | null | undefined): AdFill | null {
   return fill;
 }
 
+/**
+ * Does this fill render its OWN creative into the slot?
+ *
+ * A direct-sold display or text creative replaces what is there. A house fill
+ * writes nothing on purpose — the house card is already rendered, already
+ * labelled, and already the fallback by construction — and so does a direct
+ * display whose bytes have not arrived.
+ */
+export function writesOwnCreative(fill: AdFill): boolean {
+  if (fill.source !== 'direct') return false;
+  if (fill.kind === 'text') return true;
+  return fill.kind === 'display' && fill.assetUrl.length > 0;
+}
+
+/**
+ * Must the slot be handed back to the house card BEFORE this fill is measured?
+ *
+ * True exactly when the slot still shows some other fill's creative and this
+ * fill will not overwrite it. That is the state in which a meter attributes one
+ * sponsor's pixels to another fill's nonce: visit one renders campaign A, visit
+ * two is frequency-capped to HOUSE, A's art is still on screen, and the house
+ * nonce collects A's exposure. The report then credits unsold inventory with a
+ * sponsor's delivery and the sponsor's own numbers lose it.
+ */
+export function mustReleaseBefore(currentOwner: string, fill: AdFill): boolean {
+  if (writesOwnCreative(fill)) return false;
+  return currentOwner !== '' && currentOwner !== fill.nonce;
+}
+
+/**
+ * Is this image completion stale — i.e. did the slot move on to another fill
+ * while the bytes were in flight? A late `onload` from an earlier menu visit
+ * must not drop its image into a later visit's slot.
+ */
+export function staleCompletion(currentOwner: string, fill: AdFill): boolean {
+  return currentOwner !== fill.nonce;
+}
+
 export interface AdPipelineOptions {
   /** '' = static build with no server: the pipeline never activates. */
   serverBase: string;
@@ -62,6 +100,17 @@ export interface AdPipelineOptions {
   clearModeTile?: () => void;
   /** S4: the live `.boot-tip` element while the boot screen is up, else null. */
   bootTip?: () => HTMLElement | null;
+  /**
+   * Put the house creative back into any reserved slot that is empty.
+   *
+   * Needed because a direct-sold creative REPLACES the house card, and the
+   * house card is the honest resting state of a slot. Without this, a slot that
+   * once carried a sponsor keeps carrying it after the pipeline lets go — shown
+   * to the player, measured for nobody, and available to be measured under the
+   * NEXT fill's nonce. `main.ts`'s `fillAdSlots` is idempotent (it skips a slot
+   * that has children), so this is safe to call whenever.
+   */
+  restoreHouse?: () => void;
 }
 
 /**
@@ -189,7 +238,14 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
     }).catch(() => { /* a lost event is a lost event; it can only under-count */ });
   }
 
-  function decide(surfaces: readonly SurfaceId[], mode = 0): Promise<AdFill[]> {
+  /**
+   * `AD_MODE_UNKNOWN`, never 0. `ModeId.QUEST` IS 0, so defaulting to it made a
+   * menu decision — which has no play mode at all — indistinguishable from a
+   * Quest one, and every menu impression would have been reported as Quest
+   * reach. The dashboard's mode breakdown is only worth printing if the absence
+   * of a mode is representable.
+   */
+  function decide(surfaces: readonly SurfaceId[], mode: number = AD_MODE_UNKNOWN): Promise<AdFill[]> {
     return fetch(api('/api/ads/decide'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -238,6 +294,40 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
     bootWatched = null;
   }
 
+  /**
+   * THE SLOT SAYS WHOSE PIXELS IT IS SHOWING.
+   *
+   * A direct creative replaces the house card, and nothing used to put the
+   * house card back. So: visit one renders campaign A; the player leaves; on
+   * visit two A is frequency-capped and the server allocates HOUSE — and
+   * because a house fill deliberately leaves existing content alone, A's art is
+   * still on screen while a new observer measures it under the HOUSE nonce.
+   * The report then attributes a sponsor's exposure to unsold inventory, and
+   * the sponsor's own numbers lose it. A late `img.onload` from an earlier
+   * visit could land in a later visit's slot the same way.
+   *
+   * The marker makes that impossible to express: content is stamped with the
+   * nonce that wrote it, a stale completion is dropped, and a fill that writes
+   * nothing refuses to be measured over somebody else's creative.
+   */
+  function ownedBy(slot: HTMLElement): string {
+    return slot.dataset.adFill ?? '';
+  }
+
+  function releaseSlot(slot: HTMLElement): void {
+    while (slot.firstChild) slot.removeChild(slot.firstChild);
+    delete slot.dataset.adFill;
+  }
+
+  /** Hand every reserved slot back to the house card. */
+  function releaseAllSlots(): void {
+    for (const id of Object.values(SLOT_FOR_SURFACE)) {
+      const slot = id === undefined ? null : document.getElementById(id);
+      if (slot !== null && ownedBy(slot) !== '') releaseSlot(slot);
+    }
+    opts.restoreHouse?.();
+  }
+
   function applyFill(fill: AdFill): void {
     if (fill.surface === SurfaceId.MODE_TILE) {
       const line = textFillOrNull(fill);
@@ -259,13 +349,16 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
     // and "a creative that failed to load is not an impression", §3.2.6).
     // Never innerHTML: sponsor art is an src assignment, nothing else.
     if (fill.source === 'direct' && fill.kind === 'display' && fill.assetUrl.length > 0) {
-      while (slot.firstChild) slot.removeChild(slot.firstChild);
+      releaseSlot(slot);
+      slot.dataset.adFill = fill.nonce;
       const img = document.createElement('img');
       img.className = 'dc-ad-img';
       img.alt = fill.altText;
       img.decoding = 'async';
       img.onload = (): void => {
-        if (!inMenu || slot.childElementCount > 0) return;
+        // Identity, not just emptiness: a completion from an EARLIER visit
+        // would otherwise drop its bytes into a later visit's slot.
+        if (!inMenu || slot.childElementCount > 0 || staleCompletion(ownedBy(slot), fill)) return;
         if (fill.clickUrl.length > 0) {
           const a = document.createElement('a');
           a.className = 'dc-ad-imglink';
@@ -285,7 +378,8 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
     // House fills leave the existing card exactly as it is — it is already
     // rendered, already labelled, and already the fallback by construction.
     if (fill.source === 'direct' && fill.kind === 'text') {
-      while (slot.firstChild) slot.removeChild(slot.firstChild);
+      releaseSlot(slot);
+      slot.dataset.adFill = fill.nonce;
       const card = document.createElement(fill.clickUrl.length > 0 ? 'a' : 'div');
       card.className = 'dc-ad-house';
       if (card instanceof HTMLAnchorElement && fill.clickUrl.length > 0) {
@@ -300,6 +394,14 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
       inner.appendChild(document.createTextNode(fill.text));
       card.appendChild(inner);
       slot.appendChild(card);
+    }
+
+    /* A fill that wrote no content of its own must not be measured over the
+     * previous fill's creative. Hand the slot back to the house card first —
+     * then what the meter sees belongs to this fill, whatever it is. */
+    if (mustReleaseBefore(ownedBy(slot), fill)) {
+      releaseSlot(slot);
+      opts.restoreHouse?.();
     }
 
     menuWatched.push(watch(slot, fill));
@@ -340,6 +442,10 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
       for (const entry of menuWatched) flush(entry);
       menuWatched = [];
       opts.clearModeTile?.();
+      /* The resting state of a slot is the house card. A sponsor's creative
+       * left standing after the pipeline lets go is shown to the player,
+       * measured for nobody, and waiting to be measured under the next fill. */
+      releaseAllSlots();
     },
 
     onBootReady(): void {

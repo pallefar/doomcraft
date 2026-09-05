@@ -564,6 +564,8 @@ const adPipeline = createAdPipeline({
    * A hoisted function, because SESSION_CONFIG can fire before this module's
    * later `let`s are initialised. */
   bootTip: bootTipEl,
+  // The honest resting state of a reserved slot (see AdPipelineOptions).
+  restoreHouse: () => { fillAdSlots(); },
 });
 
 /**
