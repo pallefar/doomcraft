@@ -383,3 +383,134 @@ describe('the console knows there is a session now', () => {
     expect(SCRIPT).toContain('SESSIONS DO NOT SURVIVE A RESTART');
   });
 });
+
+/* ------------------------------------------------------------------------ *
+ * V4c — the Inventory screen actually RUNS, against a fake DOM
+ *
+ * Every other check in this file reads the console as text. That catches a
+ * renamed id and a syntax error and nothing else: `PackInventory.summary()`
+ * gaining a `variants` key changes NOTHING a person can see unless the
+ * renderer draws it, and until V4c the renderer read `detail.levels` and
+ * `detail.campaign` only — the generic pack loop above it skips anything
+ * carrying a digest, which is every data pack. So this one lifts the real
+ * `paintInventory` out of the page's own source, feeds it a real
+ * `/api/admin/release` shape, and asserts a ROW APPEARS.
+ * ------------------------------------------------------------------------ */
+
+/** One function's source, brace-matched out of the page's script. */
+function fnSource(name: string): string {
+  const at = SCRIPT.indexOf(`function ${name}(`);
+  if (at < 0) throw new Error(`the console no longer declares ${name}()`);
+  const open = SCRIPT.indexOf('{', SCRIPT.indexOf(')', at));
+  let depth = 0;
+  for (let i = open; i < SCRIPT.length; i++) {
+    if (SCRIPT[i] === '{') depth++;
+    else if (SCRIPT[i] === '}' && --depth === 0) return SCRIPT.slice(at, i + 1);
+  }
+  throw new Error(`${name}() does not close`);
+}
+
+interface FakeNode {
+  nodeType: number;
+  tagName: string;
+  className: string;
+  textContent: string;
+  children: FakeNode[];
+  firstChild: FakeNode | null;
+  appendChild(n: FakeNode): void;
+  removeChild(n: FakeNode): void;
+}
+
+function fakeNode(tagName: string): FakeNode {
+  const n: FakeNode = {
+    nodeType: 1,
+    tagName,
+    className: '',
+    textContent: '',
+    children: [],
+    get firstChild() { return n.children[0] ?? null; },
+    appendChild(child: FakeNode) { n.children.push(child); },
+    removeChild(child: FakeNode) {
+      const at = n.children.indexOf(child);
+      if (at >= 0) n.children.splice(at, 1);
+    },
+  };
+  return n;
+}
+
+function textOf(n: FakeNode): string {
+  return n.textContent + n.children.map(textOf).join('\n');
+}
+
+/** Run the page's own `paintInventory` over a response and return each panel. */
+function paint(response: unknown): Record<string, string> {
+  const panels = new Map<string, FakeNode>();
+  const document = {
+    getElementById: (id: string): FakeNode => {
+      let n = panels.get(id);
+      if (n === undefined) { n = fakeNode('div'); panels.set(id, n); }
+      return n;
+    },
+    createElement: (tag: string): FakeNode => fakeNode(tag),
+  };
+  const src = ['el', 'make', 'clear', 'table', 'fp', 'paintInventory']
+    .map(fnSource).join('\n');
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const run = new Function('document', `${src}\nreturn paintInventory;`) as
+    (d: unknown) => (st: unknown) => void;
+  run(document)(response);
+  const out: Record<string, string> = {};
+  for (const [id, node] of panels) out[id] = textOf(node);
+  return out;
+}
+
+describe('the Inventory screen shows what is installed', () => {
+  const response = {
+    installed: {
+      packs: [{ label: 'weapons@2', fingerprint: 0x1234, digest: '' }],
+      detail: {
+        levels: [],
+        campaign: [],
+        items: [{ version: 1, count: 9, fingerprint: 0xabc, digest: 'aabbccddeeff0011' }],
+        quests: [{ version: 1, count: 4, fingerprint: 0xdef, digest: '2233445566778899' }],
+        variants: [{ version: 1, count: 2, fingerprint: 0x51c, digest: 'ff00ff00ff00ff00' }],
+      },
+    },
+  };
+
+  it('draws a row for the installed variants version', () => {
+    const panels = paint(response);
+    expect(panels['inv-data']).toContain('variants@1');
+    expect(panels['inv-data'], 'the row must name the version AND its size').toContain('2 entries');
+    expect(panels['inv-data'], 'the fingerprint, hex').toContain('0x51c');
+    expect(panels['inv-data'], 'the digest, truncated the way every other row is')
+      .toContain('sha256 ff00ff00ff00');
+  });
+
+  it('draws items and quests on the same screen — they were invisible too', () => {
+    const panels = paint(response);
+    expect(panels['inv-data']).toContain('items@1');
+    expect(panels['inv-data']).toContain('quests@1');
+  });
+
+  it('says so when nothing is installed rather than drawing an empty box', () => {
+    const panels = paint({ installed: { packs: [], detail: {
+      levels: [], campaign: [], items: [], quests: [], variants: [],
+    } } });
+    expect(panels['inv-data']).toContain('no data packs installed');
+  });
+
+  it('survives a response from a host that has not got the new summary key', () => {
+    // A rolled-back origin answers without `detail.variants`. The screen must
+    // still render, because this is also what a stale cached response is.
+    const panels = paint({ installed: { packs: [], detail: { levels: [], campaign: [] } } });
+    expect(panels['inv-data']).toContain('no data packs installed');
+  });
+
+  it('extracted the real functions, not empty strings', () => {
+    // Rule 2 on the harness itself: if `fnSource` silently returned nothing,
+    // every assertion above would be about a page that never ran.
+    expect(fnSource('paintInventory')).toContain("el('inv-data')");
+    expect(fnSource('fp').length).toBeGreaterThan(20);
+  });
+});

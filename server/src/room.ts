@@ -98,7 +98,7 @@ import {
   type ResultSubmission,
 } from './entitlementGuard.js';
 import { buildSubmission } from './reward.js';
-import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
+import { MatchType, SessionOrigin, trustPolicyFor } from '@doomcraft/shared/trust';
 import { PlayerEntity, Simulation } from './sim.js';
 import { ServerWorld } from './world.js';
 
@@ -1192,8 +1192,16 @@ export class Room implements NetHost {
      * slot decided one line later is a slot that arrived after the magazine
      * it was supposed to size. A variant that pays for its damage with four
      * shells instead of eight would hand this player eight. */
+    /* AND WHETHER THIS ROW MAY WEAR ONE AT ALL is a COLUMN, not an `if`
+     * (docs/VARIANTS.md §7.3). A ranked-adjacent row resolves everybody to
+     * slot 0; the profile keeps its claim and it lights back up in the next
+     * casual match, exactly as a dormant item does. Reading the table rather
+     * than naming a mode is what `trust.test.ts`'s tree scan enforces. */
+    const mayWearVariants = trustPolicyFor(this.plan.modeId, this.sessionIntent).variantsAllowed;
     const player = this.sim.addPlayer(
-      id, name, skin, false, resolveVariantSlots(this.variantClaims?.(conn), caps, this.sim.arsenal.slotCount),
+      id, name, skin, false, resolveVariantSlots(
+        mayWearVariants ? this.variantClaims?.(conn) : undefined, caps, this.sim.arsenal.slotCount,
+      ),
     );
     const member: Membership = {
       conn, player, isBot: false, joinedMs: this.elapsedMs,

@@ -40,7 +40,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import type { WebSocket } from 'ws';
 
-import { DEFAULT_SERVER_PORT, GameMode, WS_PATH } from '@doomcraft/shared';
+import { DEFAULT_SERVER_PORT, GameMode, WEAPON_COUNT, WS_PATH } from '@doomcraft/shared';
 import { MODE_KEYS, ModeId } from '@doomcraft/shared/modes';
 import { SIGNAL_PATH } from '@doomcraft/shared/signal';
 import { Room } from './room.js';
@@ -84,6 +84,8 @@ import { TradeService, type TradeResult } from './trades.js';
 import { CompetitionService } from './competitions.js';
 import { renderShareCard } from './shareCard.js';
 import { parseItemRef, type ItemDef, type ItemKind } from '@doomcraft/shared/items';
+import type { VariantDef } from '@doomcraft/shared/variants';
+import { variantSlotsFor } from './variantClaims.js';
 import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
@@ -871,6 +873,18 @@ function liveItemIdSet(): ReadonlySet<string> {
   return new Set((installed?.manifest.items ?? []).map((i) => i.id));
 }
 
+/**
+ * The live variants pack as variantId -> def. What a weapon_variant TOKEN
+ * points at: the equip door needs `VariantDef.base` to tell a shotgun variant
+ * from a pistol one, and a token whose row no live pack defines cannot be
+ * checked against anything.
+ */
+function liveVariantDefs(): ReadonlyMap<string, VariantDef> {
+  const decl = releases.live().packs.find((pk) => pk.kind === PackKind.VARIANTS);
+  const installed = decl === undefined ? null : inventory.variantsAt(decl.version);
+  return new Map((installed?.manifest.variants ?? []).map((v) => [v.id, v]));
+}
+
 /** The live items pack as localId -> def — what "tradable" and ACTIVE mean. */
 function liveItemDefs(): ReadonlyMap<string, ItemDef> {
   const decl = releases.live().packs.find((pk) => pk.kind === PackKind.ITEMS);
@@ -1027,11 +1041,31 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
     const variantsVersion = release.packs.find((pk) => pk.kind === PackKind.VARIANTS)?.version;
     const variants = variantsVersion === undefined
       ? null : (inventory.variantsAt(variantsVersion)?.manifest ?? null);
-    const room = new Room({
+    /* Annotated because `variantClaims` below closes over `room` — the
+     * closure runs only at HELLO, long after this returns, and the room's own
+     * decoded table is the only ordering a claim may be resolved against. */
+    const room: Room = new Room({
       ...options,
       store,
       guard,
       journal,
+      /* THE PLAYER'S EQUIPPED VARIANT, resolved per join against THIS ROOM'S
+       * ordering — `room.variantTable`, the array the room decoded from the
+       * bytes it will send, and never `releases.live()`. Two releases holding
+       * the same two variants in the opposite order would otherwise hand the
+       * player the OTHER gun, and `resolveVariantSlots` cannot catch it: it
+       * clamps by COUNT and both indices are in range.
+       *
+       * `conn.deviceId` is the REDEEMED profile key — assigned immediately
+       * after `room.join()` in the upgrade handler, which also warms
+       * `store.peek` with an await, and HELLO cannot arrive before either. A
+       * miss (no ticket, or a profile this host has never read) is the base
+       * weapon, not an error.
+       *
+       * The closure reads `room` after construction, which is the only time
+       * it is ever called; the factory holds the release, so room.ts still
+       * does not learn that a release tier exists. */
+      variantClaims: (conn) => variantSlotsFor(store.peek(conn.deviceId), room.variantTable),
       /* Viral tier 1: a paying round may newly satisfy the referred
        * player's engagement threshold. Fire-and-forget by contract. */
       onProfilePersisted: (profileKey) => {
@@ -3109,7 +3143,13 @@ async function handleApi(
       return true;
     }
     const wants = new Map<EquipSlot, string>();
-    for (const slot of ['skin', 'title'] as const) {
+    /* The two cosmetic slots, plus one `variant:<weaponId>` slot per weapon
+     * (V4c). The slot names the BASE WEAPON, never a table row: which row of
+     * which table that becomes is decided per room, against the ordering that
+     * room will actually send. */
+    const slots: EquipSlot[] = ['skin', 'title'];
+    for (let w = 0; w < WEAPON_COUNT; w++) slots.push(`variant:${w}`);
+    for (const slot of slots) {
       if (!(slot in body)) continue;
       const v = body[slot];
       if (typeof v !== 'string' || v.length > 96) {
@@ -3127,6 +3167,21 @@ async function handleApi(
       const granting = inventory.itemsAt(parsed.version);
       return granting?.manifest.items.find((i) => i.id === parsed.localId)?.kind ?? null;
     };
+    /* `ref -> ItemDef.variantId -> VariantDef.base`, the second resolver.
+     * WITHOUT IT the kind check alone accepts ANY weapon_variant token for
+     * ANY weapon slot: a shotgun token filed under `variant:0` answers 200 and
+     * then resolves through the arsenal to the PISTOL row, so the player is
+     * told yes and fires base pistol damage forever. Null when no installed
+     * variants pack names the row — refused at the door rather than stored as
+     * a claim nothing can ever satisfy. */
+    const variantBaseOf = (ref: string): number | null => {
+      const parsed = parseItemRef(ref);
+      if (parsed === null) return null;
+      const def = liveItemDefs().get(parsed.localId)
+        ?? inventory.itemsAt(parsed.version)?.manifest.items.find((i) => i.id === parsed.localId);
+      if (def === undefined || def.variantId === '') return null;
+      return liveVariantDefs().get(def.variantId)?.base ?? null;
+    };
     /* Validate then write inside ONE update callback: the callback runs
      * synchronously over the live object, so a concurrent settlement cannot
      * un-own an item between the check and the claim. A refusal writes no
@@ -3134,14 +3189,18 @@ async function handleApi(
     let refusal: string | null = null;
     const updated = await store.update(key, (p) => {
       for (const [slot, ref] of wants) {
-        const v = equipVerdict(p, slot, ref, kindOf);
+        const v = equipVerdict(p, slot, ref, kindOf, variantBaseOf);
         if (!v.ok) { refusal = v.error; return; }
       }
       applyEquip(p, wants);
     });
     if (refusal !== null) { sendJson(res, 400, { error: refusal }, cors); return true; }
     sendJson(res, 200, {
-      inventory: { equippedSkin: updated.inventory.equippedSkin, title: updated.inventory.title },
+      inventory: {
+        equippedSkin: updated.inventory.equippedSkin,
+        title: updated.inventory.title,
+        variants: { ...updated.inventory.variants },
+      },
     }, cors);
     return true;
   }
@@ -4121,6 +4180,26 @@ httpServer.on('upgrade', (req, socket, head) => { void (async () => {
   if (ticket !== null && ticket.moderation === 'banned') {
     refuseUpgrade(socket, 403, 'Forbidden');
     return;
+  }
+  /* WARM THE PROFILE BEFORE THE SOCKET EXISTS. `Room.onHello` resolves the
+   * equipped variant SYNCHRONOUSLY — it has to, because `spawnPlayer` fills
+   * the first magazine through `sim.statsFor` and a slot decided one line
+   * later hands a four-shell variant an eight-shell magazine — so the claim
+   * resolver reads `store.peek`, which never touches a disk. This await is
+   * what makes that a hit. It is on a path that already awaited the ticket
+   * redemption, and a failure here is not a refusal: a player whose profile
+   * will not load still joins, and fires the base weapon.
+   *
+   * MEASURED, because it matters: deleting this line does NOT break the
+   * end-to-end socket test. Two unrelated lines already warm the cache on the
+   * paths that test drives — /api/equip's own `store.update`, and the DEVICE
+   * ticket route's ban check (`store.load(bannedKey)`) above. Neither runs on
+   * the ACCOUNT ticket path, which returns from `mintAccountTicket` before the
+   * ban check ever happens, and neither is anywhere near the code that would
+   * depend on it. `persistence.durability.test.ts` pins the property this
+   * rests on — `peek` is the cache and nothing else. */
+  if (ticket !== null) {
+    try { await store.load(ticket.profileKey); } catch { /* base weapon, not a refusal */ }
   }
 
   wss.handleUpgrade(req, socket, head, (ws) => {

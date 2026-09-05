@@ -559,6 +559,31 @@ describe('guardProfileWrite', () => {
     expect(v.rejectedFields).toEqual([]);
   });
 
+  /*
+   * V4c. `POST /api/equip` is where a variant claim is validated — owned, not
+   * revoked, and its `VariantDef.base` matching the slot. `POST /api/profile`
+   * merges a client body straight into the profile with none of that, so
+   * `inventory.variants` arriving here is a claim through the wrong door.
+   *
+   * The ownership half is re-derived at every join, so this is not what makes
+   * the claim safe; it is what makes the attempt LOUD. Note the shape of the
+   * body: `items` is already server-owned, so the same request cannot also
+   * grant itself the copy the claim would need.
+   */
+  it('refuses a variant claim posted straight at the profile', () => {
+    const v = guardProfileWrite({
+      deviceId: DEVICE,
+      inventory: {
+        variants: { 1: 'items@1:weapon_variant-shotgun-slug' },
+        items: [{ ref: 'items@1:weapon_variant-shotgun-slug', ms: 1, source: 'drop', sourceId: 'x' }],
+      },
+    });
+    expect(v.rejectedFields).toContain('inventory.variants');
+    expect(v.rejectedFields).toContain('inventory.items');
+    expect(v.violation, 'an operator must see this in the ring').toBe(true);
+    expect('variants' in (v.accepted.inventory as Record<string, unknown>)).toBe(false);
+  });
+
   it('is not fooled by a non-object body', () => {
     expect(guardProfileWrite(null).violation).toBe(false);
     expect(guardProfileWrite('xp=999').accepted).toEqual({});

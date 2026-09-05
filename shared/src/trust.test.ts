@@ -96,6 +96,41 @@ function sourceFiles(): Array<{ rel: string; text: string }> {
   return out;
 }
 
+type SourceFile = { rel: string; text: string };
+
+/**
+ * The one line that decides what "pairs a mode with a verdict" means.
+ *
+ * `(?<![a-z])variant` and not `\bvariant`: `_` is a regex word character, so
+ * `\b` finds no boundary inside `WEAPON_VARIANT` and the term would match
+ * nothing this codebase writes while looking exactly like a guard. Executed
+ * both ways before it was written down.
+ */
+const ECONOMY_TERM = /rank|reward|grant|scrap|\bxp\b|entitle|payout|prize|leaderboard|drop/i;
+const VARIANT_TERM = /(?<![a-z])variant/i;
+const MODE_LITERAL = /\bModeId\.[A-Z_]+/;
+
+/** How many lines AFTER the mode literal still count as the same decision. */
+const VARIANT_WINDOW = 3;
+
+function scan(files: readonly SourceFile[], term: RegExp, window: number): string[] {
+  const offenders: string[] = [];
+  for (const f of files) {
+    if (f.rel === TRUST_FILE || f.rel.endsWith('.test.ts')) continue;
+    const lines = f.text.split('\n');
+    lines.forEach((line, i) => {
+      if (!MODE_LITERAL.test(line)) return;
+      if (!term.test(lines.slice(i, i + window).join('\n'))) return;
+      offenders.push(`${f.rel}:${i + 1} ${line.trim()}`);
+    });
+  }
+  return offenders;
+}
+
+const economyOffenders = (files: readonly SourceFile[]): string[] => scan(files, ECONOMY_TERM, 1);
+const variantOffenders = (files: readonly SourceFile[]): string[] =>
+  scan(files, VARIANT_TERM, VARIANT_WINDOW);
+
 /** A row with one field changed, for proving an invariant bites. */
 function mutate(base: TrustPolicy, patch: Partial<TrustPolicy>): TrustPolicy {
   return Object.freeze({ ...base, ...patch });
@@ -411,21 +446,107 @@ describe('the trust table is the single source of truth', () => {
    * booted the wrong mode still cannot pay anybody. "What a match is worth" has
    * no such backstop outside this table, so that is what is policed here.
    */
+  /*
+   * V4c. The column exists so `variantsAllowed` can be READ instead of
+   * decided, and this pins WHICH rows it is off for — docs/VARIANTS.md §7.3:
+   * ranked-adjacent until a season rolls, on everywhere else. Written as a
+   * comparison against the match types rather than as a list of pairs, so a
+   * new mode inherits the rule rather than a hand-copied boolean.
+   */
+  it('turns variants off in exactly the ranked-adjacent rows (VARIANTS 7.3)', () => {
+    const name = (r: TrustPolicy): string => `${r.modeId}/${r.matchType}`;
+    const rankedAdjacent = TRUST_TABLE
+      .filter((r) => r.matchType === MatchType.RANKED || r.matchType === MatchType.COMPETITION);
+    expect(rankedAdjacent.length, 'no ranked-adjacent rows at all — nothing is gated')
+      .toBeGreaterThan(0);
+    expect(TRUST_TABLE.filter((r) => !r.variantsAllowed).map(name))
+      .toEqual(rankedAdjacent.map(name));
+    // And the casual rows really are on, or the assertion above is satisfied
+    // by a table that gates everything.
+    expect(TRUST_TABLE.filter((r) => r.variantsAllowed).length).toBeGreaterThan(0);
+    // The pair nobody wrote down fires nothing either.
+    expect(DENY_ALL.variantsAllowed).toBe(false);
+    expect(trustPolicyFor(999, 999).variantsAllowed).toBe(false);
+  });
+
   it('never pairs a mode literal with a reward verdict anywhere in the tree', () => {
-    const offenders: string[] = [];
-    const economy = /rank|reward|grant|scrap|\bxp\b|entitle|payout|prize|leaderboard|drop/i;
-    for (const f of files) {
-      if (f.rel === TRUST_FILE || f.rel.endsWith('.test.ts')) continue;
-      f.text.split('\n').forEach((line, i) => {
-        if (!/\bModeId\.[A-Z_]+/.test(line)) return;
-        if (!economy.test(line)) return;
-        offenders.push(`${f.rel}:${i + 1} ${line.trim()}`);
-      });
-    }
     expect(
-      offenders,
+      economyOffenders(files),
       'read trustPolicyFor(modeId, matchType).grants instead of naming the mode',
     ).toEqual([]);
+  });
+
+  /*
+   * THE SAME SCAN FOR VARIANTS (V4c), with two differences that are the whole
+   * reason it is a second scan and not another `|` in the regex above.
+   *
+   * 1. THE TERM. `/\bvariant/i` DOES NOT MATCH `ItemKind.WEAPON_VARIANT` —
+   *    `_` is a regex word character, so there is no word boundary before
+   *    `VARIANT`, and a term that silently matches nothing is the seventh gate
+   *    this project has caught reporting green while testing nothing. A
+   *    negative lookbehind for a LETTER admits `WEAPON_VARIANT` and still
+   *    excludes `invariant`.
+   *
+   * 2. THE WINDOW. The economy scan tests ONE PHYSICAL LINE, so
+   *    `if (modeId === ModeId.DEATHMATCH) {` on one line and
+   *    `variantsAllowed = false;` on the next is zero offenders — which is
+   *    exactly the shape the `if` this rule forbids would take. This one looks
+   *    at a small window of following lines.
+   *
+   *    The window is NOT applied to the economy terms, and that is measured
+   *    rather than assumed: widening those to three lines makes two innocent
+   *    lines offend today — `shared/src/saves.ts`'s DEATHMATCH card, whose
+   *    next line renders the word "Unranked", and `server/src/room.ts`'s
+   *    `plan.grantAllWeapons` beside the boot arsenal check. Neither is a
+   *    reward decision, and a scan that has to be argued with is a scan that
+   *    gets deleted.
+   */
+  it('never pairs a mode literal with a variant verdict anywhere in the tree', () => {
+    expect(
+      variantOffenders(files),
+      'read trustPolicyFor(modeId, matchType).variantsAllowed instead of naming the mode',
+    ).toEqual([]);
+  });
+
+  it('the variant term matches the spellings this codebase actually uses', () => {
+    // Every one of these is a real identifier in the tree. If the term stops
+    // matching one of them the scan above passes while protecting nothing.
+    for (const spelling of [
+      'if (kind === ItemKind.WEAPON_VARIANT) return true;',
+      'const id = def.variantId;',
+      'variantClaims: (conn) => slots,',
+      'let variant = 0;',
+      'VARIANT_FIELDS.length',
+    ]) {
+      expect(
+        variantOffenders([{ rel: 'planted.ts', text: `x(ModeId.HORDE);\n${spelling}\n` }]),
+        spelling,
+      ).toHaveLength(1);
+    }
+    // …and does not fire on the word that shares five of its letters.
+    expect(variantOffenders([
+      { rel: 'planted.ts', text: 'x(ModeId.HORDE);\n// the invariant holds here\n' },
+    ])).toEqual([]);
+  });
+
+  it('sees a mode literal and a variant verdict on DIFFERENT lines', () => {
+    // The single-line scan reports zero for this, which is why the window
+    // exists. Written as the `if` §7.3 forbids, because that is how it would
+    // actually be typed.
+    const planted = {
+      rel: 'planted.ts',
+      text: 'function gate(modeId: number) {\n'
+        + '  if (modeId === ModeId.DEATHMATCH) {\n'
+        + '    variantsAllowed = false;\n'
+        + '  }\n'
+        + '}\n',
+    };
+    // The mode is DEATHMATCH and not a RANKED_* one on purpose: `ModeId.RANKED`
+    // contains "rank", so the economy term would fire on the literal itself
+    // and this would prove the window rather than the term.
+    expect(economyOffenders([planted])).toEqual([]);
+    expect(variantOffenders([planted])).toHaveLength(1);
+    expect(variantOffenders([planted])[0]).toContain('planted.ts:2');
   });
 
   it('never declares its own list of which modes may be peer-hosted', () => {

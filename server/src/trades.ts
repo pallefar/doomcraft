@@ -681,6 +681,18 @@ export class TradeService {
       }
       if (p.inventory.equippedSkin === ref && ownedCount(p, ref) === 0) p.inventory.equippedSkin = '';
       if (p.inventory.title === ref && ownedCount(p, ref) === 0) p.inventory.title = '';
+      /* And the V4c variant claims, on the same rule and in the same write.
+       * This is TIDINESS, not the guarantee: `variantSlotsFor` re-derives
+       * ownership at every join, so a claim this cleanup never ran on (a
+       * settlement from an older build, an operator revoke, a rollback) still
+       * resolves to the base weapon. Removing this line must not make a
+       * player fire a gun they traded away — which is why the read-time check
+       * has its own test with a claim this path could never have produced. */
+      if (ownedCount(p, ref) === 0) {
+        for (const [weapon, claimed] of Object.entries(p.inventory.variants)) {
+          if (claimed === ref) delete p.inventory.variants[weapon];
+        }
+      }
     }
   }
 

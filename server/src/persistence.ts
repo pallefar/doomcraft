@@ -210,6 +210,20 @@ export interface StoredInventory {
   /** Item ref, or ''. Wearing is a claim; the renderer checks the state. */
   equippedSkin: string;
   title: string;
+  /**
+   * V4c — the equipped WEAPON VARIANT per base weapon: `String(weaponId)` ->
+   * the owned item REF, absent meaning "the base gun".
+   *
+   * IT STORES THE REF AND NOT A SLOT INDEX, and that is the whole point. A
+   * slot index is meaningful only against ONE variant table; this profile
+   * outlives every table it will ever be read against, and two rooms pinned
+   * to different releases order their rows differently. So the durable thing
+   * is the identity of the token the player owns, and the slot is recomputed
+   * per room from the ordering that room will actually SEND
+   * (`server/src/variantClaims.ts`). A stored slot would hand the player the
+   * other gun with no error anywhere.
+   */
+  variants: Record<string, string>;
 }
 
 /**
@@ -364,6 +378,21 @@ export interface AppliedRewards {
 
 export interface PersistenceStore {
   load(deviceId: string): Promise<StoredProfile | null>;
+  /**
+   * The profile THIS PROCESS ALREADY HAS IN MEMORY, or null. Never touches a
+   * disk and never creates anything, so it is safe on a synchronous path.
+   *
+   * It exists for exactly one caller: the variant claim resolver, which runs
+   * inside `Room.onHello` — a synchronous frame, deliberately, because
+   * `spawnPlayer` fills the first magazine through `sim.statsFor` and a slot
+   * decided one line later hands a four-shell variant an eight-shell
+   * magazine. The websocket upgrade handler warms this with an `await` before
+   * the connection is ever made, so a miss means "no ticket, or a profile this
+   * host has never read" — which resolves to the base weapon, not to an error.
+   *
+   * A miss is therefore ORDINARY, and no caller may treat it as a fault.
+   */
+  peek(deviceId: string): StoredProfile | null;
   /** Load or create. Never returns null. */
   ensure(deviceId: string): Promise<StoredProfile>;
   save(profile: StoredProfile): Promise<void>;
@@ -443,7 +472,7 @@ export function createProfile(deviceId: string, nowMs = Date.now()): StoredProfi
 }
 
 function defaultInventory(): StoredInventory {
-  return { items: [], equippedSkin: '', title: '' };
+  return { items: [], equippedSkin: '', title: '', variants: {} };
 }
 function defaultChallenges(): StoredChallenges {
   return { day: '', week: '', counts: {}, done: [], owed: [] };
@@ -752,7 +781,38 @@ function sanitiseInventory(inv: AnyRecord): StoredInventory {
   }
   const refOrEmpty = (v: unknown): string =>
     (typeof v === 'string' && parseItemRef(v) !== null ? v : '');
-  return { items, equippedSkin: refOrEmpty(inv.equippedSkin), title: refOrEmpty(inv.title) };
+  return {
+    items,
+    equippedSkin: refOrEmpty(inv.equippedSkin),
+    title: refOrEmpty(inv.title),
+    variants: sanitiseVariantClaims(inv.variants),
+  };
+}
+
+/**
+ * The stored variant claims, read back off a disk this process does not own.
+ *
+ * Every key must be a canonical decimal weapon id in range and every value a
+ * parseable item ref — a claim that survives sanitising is still not TRUSTED
+ * (ownership, revocation and the room's own table are all re-checked at every
+ * join, `server/src/variantClaims.ts`); this is only about the SHAPE not being
+ * able to reach the rest of the server as something other than a string map.
+ * `'01'` and `'1.0'` are refused rather than coerced, because two keys that
+ * normalise to the same weapon would make "which claim wins" depend on object
+ * key order.
+ */
+function sanitiseVariantClaims(v: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (typeof v !== 'object' || v === null) return out;
+  for (const [key, value] of Object.entries(v as Record<string, unknown>)) {
+    if (isPrototypePollutingKey(key)) continue;
+    const id = Number(key);
+    if (!Number.isInteger(id) || id < 0 || id >= WEAPON_COUNT) continue;
+    if (String(id) !== key) continue;
+    if (typeof value !== 'string' || parseItemRef(value) === null) continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 function sanitiseModeration(mod: AnyRecord): StoredModeration {
@@ -1110,12 +1170,32 @@ export async function settleChallenges(
  * forever, which reads as a lost item.
  * ------------------------------------------------------------------------ */
 
-export type EquipSlot = 'skin' | 'title';
+/**
+ * A weapon-variant slot, addressed by the BASE WEAPON it is for and never by a
+ * table row: `variant:1` is "what the shotgun fires with". Which row of which
+ * table that becomes is a per-room question (docs/VARIANTS.md §3), and the
+ * profile has no business holding an answer to it.
+ */
+export type VariantEquipSlot = `variant:${number}`;
 
-const KIND_FOR_SLOT: Readonly<Record<EquipSlot, ItemKind>> = Object.freeze({
-  skin: ItemKind.SKIN,
-  title: ItemKind.TITLE,
-});
+export type EquipSlot = 'skin' | 'title' | VariantEquipSlot;
+
+/** The base weapon id a `variant:<id>` slot names, or null if it is not one. */
+export function variantSlotWeaponId(slot: string): number | null {
+  if (!slot.startsWith('variant:')) return null;
+  const rest = slot.slice('variant:'.length);
+  const id = Number(rest);
+  if (!Number.isInteger(id) || id < 0 || id >= WEAPON_COUNT) return null;
+  // Canonical spelling only: `variant:01` and `variant:1.0` would be a second
+  // name for one slot, and `applyEquip` keys the stored map by this number.
+  return String(id) === rest ? id : null;
+}
+
+function kindForSlot(slot: EquipSlot): ItemKind {
+  if (slot === 'skin') return ItemKind.SKIN;
+  if (slot === 'title') return ItemKind.TITLE;
+  return ItemKind.WEAPON_VARIANT;
+}
 
 export type EquipVerdict = { ok: true } | { ok: false; error: string };
 
@@ -1124,13 +1204,37 @@ export type EquipVerdict = { ok: true } | { ok: false; error: string };
  * `kindOf` resolves an owned ref to its kind — from the live items pack or the
  * pack version that granted it — and null means no installed pack knows the id,
  * in which case the claim is refused rather than guessed.
+ *
+ * `variantBaseOf` is the SECOND resolver, and it exists because a kind is not
+ * enough for a variant slot. `variant:0` is the pistol and `variant:1` is the
+ * shotgun; a kind-only check accepts a shotgun token for the pistol slot,
+ * answers the player 200, and then the arsenal resolves the pistol row and
+ * serves base pistol damage — a claim accepted at the door and silently
+ * ignored by the body, which is the worst failure this repo ranks (HANDOVER
+ * §0 rule 30). It follows `ref -> ItemDef.variantId -> VariantDef.base` and
+ * returns null when no installed variants pack names that row; the resolver is
+ * passed in, exactly as `kindOf` is, so this module still imports no pack
+ * registry and no variants module.
  */
 export function equipVerdict(
   profile: StoredProfile,
   slot: EquipSlot,
   ref: string,
   kindOf: (ref: string) => ItemKind | null,
+  variantBaseOf: (ref: string) => number | null = () => null,
 ): EquipVerdict {
+  /* AN UNRECOGNISED SLOT IS REFUSED BEFORE ANYTHING ELSE, including the
+   * always-allowed unequip. `EquipSlot`'s template-literal arm is
+   * `variant:${number}`, which the TYPE admits as `variant:1.5` and
+   * `variant:-1` — and for those `variantSlotWeaponId` answers null, so the
+   * base check below would be SKIPPED and `applyEquip` would then write
+   * nothing. That is a 200 for a claim that was never stored: told yes, given
+   * nothing, no error anywhere. The route only ever builds canonical slots;
+   * this is what makes that a property of the function rather than of its one
+   * caller. */
+  if (slot !== 'skin' && slot !== 'title' && variantSlotWeaponId(slot) === null) {
+    return { ok: false, error: `unknown equip slot "${slot}"` };
+  }
   if (ref === '') return { ok: true }; // unequip is always allowed
   if (parseItemRef(ref) === null) return { ok: false, error: 'not an item ref' };
   if (!profile.inventory.items.some((i) => i.ref === ref)) {
@@ -1141,8 +1245,18 @@ export function equipVerdict(
   }
   const kind = kindOf(ref);
   if (kind === null) return { ok: false, error: 'no installed pack defines this item' };
-  if (kind !== KIND_FOR_SLOT[slot]) {
+  if (kind !== kindForSlot(slot)) {
     return { ok: false, error: `a ${ITEM_KIND_NAMES[kind] ?? 'item'} cannot be equipped as a ${slot}` };
+  }
+  const weaponId = variantSlotWeaponId(slot);
+  if (weaponId !== null) {
+    const base = variantBaseOf(ref);
+    if (base === null) {
+      return { ok: false, error: 'no installed variants pack defines this variant' };
+    }
+    if (base !== weaponId) {
+      return { ok: false, error: `that variant is for weapon ${base}, not weapon ${weaponId}` };
+    }
   }
   return { ok: true };
 }
@@ -1153,6 +1267,15 @@ export function applyEquip(profile: StoredProfile, wants: ReadonlyMap<EquipSlot,
   if (skin !== undefined) profile.inventory.equippedSkin = skin;
   const title = wants.get('title');
   if (title !== undefined) profile.inventory.title = title;
+  for (const [slot, ref] of wants) {
+    const weaponId = variantSlotWeaponId(slot);
+    if (weaponId === null) continue;
+    // '' is the unequip, and it DELETES rather than storing an empty string:
+    // `variantClaims` iterates the map, and an empty value would be a claim
+    // shaped row that resolves to nothing on every join forever.
+    if (ref === '') delete profile.inventory.variants[String(weaponId)];
+    else profile.inventory.variants[String(weaponId)] = ref;
+  }
 }
 
 function clampInt(v: number, lo: number, hi: number): number {
@@ -1477,6 +1600,10 @@ export class MemoryStore implements PersistenceStore {
     return this.byDevice.get(deviceId) ?? null;
   }
 
+  peek(deviceId: string): StoredProfile | null {
+    return this.byDevice.get(deviceId) ?? null;
+  }
+
   async ensure(deviceId: string): Promise<StoredProfile> {
     let p = this.byDevice.get(deviceId);
     if (!p) {
@@ -1680,6 +1807,14 @@ export class JsonFileStore implements PersistenceStore {
     const cached = this.cache.get(deviceId);
     if (cached) return cached;
     return this.withLock(deviceId, () => this.loadLocked(deviceId));
+  }
+
+  /**
+   * The cache and nothing else — the same live object `update` mutates, so a
+   * claim read through it is never staler than the last settlement.
+   */
+  peek(deviceId: string): StoredProfile | null {
+    return this.cache.get(deviceId) ?? null;
   }
 
   /**

@@ -501,6 +501,7 @@ export class PackInventory {
     campaign: { version: number; episodes: number; fingerprint: number; digest: string }[];
     items: { version: number; count: number; fingerprint: number; digest: string }[];
     quests: { version: number; count: number; fingerprint: number; digest: string }[];
+    variants: { version: number; count: number; fingerprint: number; digest: string }[];
   } {
     const levels = this.levelsVersions().map((version) => {
       const record = this.recordFor(version);
@@ -548,7 +549,16 @@ export class PackInventory {
         digest: q?.pack.digest ?? '',
       };
     });
-    return { levels, campaign, items, quests };
+    const variants = this.variantsVersions().map((version) => {
+      const v = this.variantsAt(version);
+      return {
+        version,
+        count: v?.manifest.variants.length ?? 0,
+        fingerprint: v?.pack.fingerprint ?? 0,
+        digest: v?.pack.digest ?? '',
+      };
+    });
+    return { levels, campaign, items, quests, variants };
   }
 
   /**

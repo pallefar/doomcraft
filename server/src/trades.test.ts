@@ -489,4 +489,60 @@ describe('V4b: a weapon variant is tradable, and the supply rule must not break 
     const alfa = (await r.store.load('trader-alfa-0001'))!;
     expect(alfa.inventory.items.some((i) => i.ref === SLUG)).toBe(false);
   });
+
+  /*
+   * V4c — AND THE EQUIP CLAIM GOES WITH IT.
+   *
+   * `removeCopies` already clears `equippedSkin` and `title` when the last
+   * copy leaves; `inventory.variants` is the third claim on the same rule, and
+   * it sits inside the settlement's existing profile update, so it is neither
+   * a new write nor a new durability boundary.
+   *
+   * IT IS NOT THE GUARANTEE, and this test is deliberately not the only one.
+   * `variantSlotsFor` re-derives ownership at every join, so a claim this
+   * cleanup never ran on — a settlement from a build before today, an
+   * operator revoke, a rolled-back pack — still resolves to the base weapon.
+   * The read-time half is proven in `variantClaims.test.ts` against a claim
+   * whose copy simply is not there, which is an input this path cannot
+   * produce; if it were tested only here, deleting the read-time check would
+   * leave this green.
+   */
+  it('clears the equipped variant claim when the last copy is traded away', async () => {
+    const r = await rig();
+    await r.store.update('trader-alfa-0001', (p) => {
+      grantDrops(p, [SLUG], 'trade', 'seed', OLD_ENOUGH);
+      p.inventory.variants['1'] = SLUG;
+      p.inventory.equippedSkin = '';
+    });
+
+    const id = await activeTrade(r);
+    expect((await r.svc.offer('trader-alfa-0001', id, [SLUG], r.deps)).ok).toBe(true);
+    expect((await r.svc.offer('trader-bravo-001', id, [EMBER], r.deps)).ok).toBe(true);
+    await r.svc.confirm('trader-alfa-0001', id, r.deps);
+    const done = await r.svc.confirm('trader-bravo-001', id, r.deps);
+    if (!done.ok) throw new Error(done.error);
+
+    const alfa = (await r.store.load('trader-alfa-0001'))!;
+    expect(alfa.inventory.items.some((i) => i.ref === SLUG)).toBe(false);
+    expect(alfa.inventory.variants, 'a claim with zero copies behind it').toEqual({});
+  });
+
+  it('keeps the claim when a DUPLICATE is traded and a copy remains', async () => {
+    const r = await rig();
+    await r.store.update('trader-alfa-0001', (p) => {
+      grantDrops(p, [SLUG, SLUG], 'trade', 'seed', OLD_ENOUGH);
+      p.inventory.variants['1'] = SLUG;
+    });
+
+    const id = await activeTrade(r);
+    expect((await r.svc.offer('trader-alfa-0001', id, [SLUG], r.deps)).ok).toBe(true);
+    expect((await r.svc.offer('trader-bravo-001', id, [EMBER], r.deps)).ok).toBe(true);
+    await r.svc.confirm('trader-alfa-0001', id, r.deps);
+    const done = await r.svc.confirm('trader-bravo-001', id, r.deps);
+    if (!done.ok) throw new Error(done.error);
+
+    const alfa = (await r.store.load('trader-alfa-0001'))!;
+    expect(alfa.inventory.items.filter((i) => i.ref === SLUG)).toHaveLength(1);
+    expect(alfa.inventory.variants, 'they still own one — the claim stands').toEqual({ 1: SLUG });
+  });
 });

@@ -260,6 +260,28 @@ describe('PackInventory', () => {
   });
 
   /*
+   * V4c. `summary()` is what `/api/admin/release` publishes as
+   * `installed.detail`, and it is the ONLY route by which an operator can be
+   * told which variants version this host is holding. It listed levels,
+   * campaign, items and quests and not variants — so the one pack an operator
+   * cannot see is the one that changes the guns.
+   *
+   * The screen half is in `admin/console.test.ts`, which runs the real
+   * renderer: this key on its own draws nothing.
+   */
+  it('reports the installed variants version in summary(), beside every other data kind', () => {
+    const inv = new PackInventory({ packsRoot: packsRoot(false, true), log: () => {} });
+    const rows = inv.summary().variants;
+    expect(rows.map((r) => r.version)).toEqual(inv.variantsVersions());
+    const one = rows.find((r) => r.version === 1);
+    expect(one).toBeDefined();
+    expect(one!.count).toBe(inv.variantsAt(1)!.manifest.variants.length);
+    expect(one!.count).toBeGreaterThan(0);
+    expect(one!.digest).toBe(inv.variantsAt(1)!.pack.digest);
+    expect(one!.fingerprint).toBe(inv.variantsAt(1)!.pack.fingerprint);
+  });
+
+  /*
    * PACKSROOT PRECEDENCE. Written the way the failure would actually arrive:
    * the operator installs a variants@1 of their own and the bundled file must
    * not shadow it. Reverse the two branches in `variantsFileFor` and this
@@ -1028,7 +1050,14 @@ describe('a release\'s variants pack reaches the room that pinned it', () => {
     const src = readFileSync(join(repoRoot, 'server', 'src', 'index.ts'), 'utf8');
     expect(src, 'index.ts no longer resolves the release\'s variants pack')
       .toMatch(/inventory\.variantsAt\(variantsVersion\)/);
-    const from = src.indexOf('const room = new Room({');
+    // Anchored on the CALL, not on the binding: V4c had to annotate the
+    // binding (`const room: Room = ...`) because `variantClaims` closes over
+    // it, and this assertion is the thing that caught that — which is what it
+    // is for. The uniqueness check is what stops the looser anchor matching
+    // some other room somebody builds here later.
+    expect(src.match(/new Room\(\{/g), 'index.ts builds rooms in more than one place now')
+      .toHaveLength(1);
+    const from = src.indexOf('= new Room({');
     expect(from, 'the room factory moved').toBeGreaterThan(0);
     // The options object's own close, at its own indent — the inner arrow
     // callbacks close at deeper ones, so this really is the end of the call.

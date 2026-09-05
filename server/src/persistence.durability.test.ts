@@ -248,3 +248,45 @@ describe('close() is a real barrier', () => {
     expect(s.unflushed).toBe(1);
   });
 });
+
+/* ------------------------------------------------------------------------ *
+ * V4c — `peek` is the CACHE and nothing else, which is why the warm exists
+ *
+ * `Room.onHello` resolves the equipped variant synchronously (the first
+ * magazine is filled one line later, through the same seam), so the claim
+ * resolver cannot await. It reads `store.peek`, and this is the property that
+ * makes the websocket upgrade handler's `await store.load(ticket.profileKey)`
+ * load-bearing rather than decorative: a profile that is on disk and has not
+ * been read in THIS process peeks as null, and null is the base weapon.
+ *
+ * SAID PLAINLY, because it is the honest version: reverting that one await
+ * does NOT redden the end-to-end socket test in `equipRoutes.test.ts`. Two
+ * unrelated lines already warm the cache on the paths that test drives —
+ * `/api/equip`'s own `store.update`, and the DEVICE ticket route's ban check
+ * at `index.ts` `store.load(bannedKey)`. Neither runs on the ACCOUNT ticket
+ * path (`mintAccountTicket` returns before the ban check), and neither is
+ * anywhere near the code that depends on them. So the await stays, the
+ * dependency is stated here, and this is the test that fires the day somebody
+ * decides `peek` should fall back to a disk read.
+ * ------------------------------------------------------------------------ */
+describe('peek never reads a disk', () => {
+  it('misses a profile this process has not loaded, and hits after load()', async () => {
+    const rig = fakeFs({ [PATH]: richProfile() });
+    const s = store(rig.fs);
+
+    expect(s.peek(DEVICE), 'a cold cache must not invent a profile').toBeNull();
+
+    const loaded = await s.load(DEVICE);
+    expect(loaded, 'the profile really is on the fake volume').not.toBeNull();
+    expect(loaded!.economy.scrap).toBe(9_999);
+
+    // The very same object `update` mutates — not a copy, or a claim read
+    // through it could be one settlement stale.
+    expect(s.peek(DEVICE)).toBe(loaded);
+  });
+
+  it('misses a device with no file at all rather than throwing', () => {
+    const s = store(fakeFs().fs);
+    expect(s.peek('nobody')).toBeNull();
+  });
+});

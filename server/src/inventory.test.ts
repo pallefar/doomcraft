@@ -26,7 +26,9 @@ import {
   migrateProfile,
   serialiseProfile,
 } from './persistence.js';
+import { variantSlotWeaponId } from './persistence.js';
 import type { EquipSlot } from './persistence.js';
+import { WeaponId } from '@doomcraft/shared';
 import { buildSubmission } from './reward.js';
 import { ItemKind, itemStateFor, parseItemRef, parseItemsManifest } from '@doomcraft/shared/items';
 
@@ -57,7 +59,7 @@ describe('v4 -> v5', () => {
     expect(p.economy.scrap).toBe(860);
     expect(p.economy.lifetimeScrap).toBe(1200);
     expect(p.progress.xp).toBe(4200);
-    expect(p.inventory).toEqual({ items: [], equippedSkin: '', title: '' });
+    expect(p.inventory).toEqual({ items: [], equippedSkin: '', title: '', variants: {} });
     expect(p.moderation).toEqual({ banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] });
     expect(p.ageBand).toBe('unknown');
   });
@@ -247,6 +249,184 @@ describe('equipVerdict / applyEquip', () => {
     expect(equipVerdict(p, 'skin', SKIN, kindOf)).toEqual({ ok: true });
     expect(itemStateFor(SKIN, new Set<string>(), new Set<string>())).toBe('dormant');
     expect(itemStateFor(SKIN, new Set(['skin-rust-marine']), new Set<string>())).toBe('active');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * V4c — the variant slots at the equip door
+ * ------------------------------------------------------------------------ */
+
+describe('equipVerdict — a variant slot names a BASE WEAPON, not a table row', () => {
+  const SLUG = 'items@1:weapon_variant-shotgun-slug';
+  const SWIFT = 'items@1:weapon_variant-rocket-swift';
+  const SKIN = 'items@1:skin-rust-marine';
+  const kindOf = (ref: string): ItemKind | null => {
+    const parsed = parseItemRef(ref);
+    if (parsed === null) return null;
+    if (parsed.localId.startsWith('weapon_variant-')) return ItemKind.WEAPON_VARIANT;
+    return parsed.localId.startsWith('skin-') ? ItemKind.SKIN : null;
+  };
+  /* The real chain, shortened: ref -> ItemDef.variantId -> VariantDef.base.
+   * `content/variants.json` says shotgun-slug is base 1 (SHOTGUN) and
+   * rocket-swift is base 3 (ROCKET). */
+  const variantBaseOf = (ref: string): number | null => {
+    const parsed = parseItemRef(ref);
+    if (parsed === null) return null;
+    if (parsed.localId === 'weapon_variant-shotgun-slug') return WeaponId.SHOTGUN;
+    if (parsed.localId === 'weapon_variant-rocket-swift') return WeaponId.ROCKET;
+    return null;
+  };
+  const owner = (): ReturnType<typeof createProfile> => {
+    const p = createProfile('device-variant-equip');
+    grantDrops(p, [SLUG, SWIFT, SKIN], 'trade', 'seed', 1);
+    return p;
+  };
+
+  it('accepts a shotgun token for the shotgun slot and writes the REF, not a slot index', () => {
+    const p = owner();
+    expect(equipVerdict(p, 'variant:1', SLUG, kindOf, variantBaseOf)).toEqual({ ok: true });
+    applyEquip(p, new Map<EquipSlot, string>([['variant:1', SLUG]]));
+    expect(p.inventory.variants).toEqual({ 1: SLUG });
+    // Unequip DELETES the key. An empty string would be a claim-shaped row
+    // that resolves to nothing on every join for the life of the account.
+    applyEquip(p, new Map<EquipSlot, string>([['variant:1', '']]));
+    expect(p.inventory.variants).toEqual({});
+  });
+
+  /*
+   * THE DEFECT THE SECOND RESOLVER EXISTS FOR — and the assertion is the
+   * REFUSAL, not the absence of damage.
+   *
+   * The obvious extension of this route is "add the slots to the list and
+   * reuse equipVerdict". `equipVerdict` compares `kindOf(ref)` against the
+   * slot's kind and nothing else, and every weapon_variant token has the same
+   * KIND — so a shotgun token filed under `variant:0` (the pistol) is
+   * accepted, the player is answered 200, and the arsenal then resolves the
+   * PISTOL row and serves base pistol damage forever. Told yes, given
+   * nothing, with no error on any path.
+   *
+   * The two calls below are IDENTICAL except for the slot, and the kind is the
+   * same on both sides of both of them — so nothing a kind check can see
+   * separates them, and the only thing that refuses one is
+   * `VariantDef.base`. Delete that block and the second line goes green.
+   */
+  it('refuses a shotgun token for the pistol slot, and a kind check cannot tell them apart', () => {
+    const p = owner();
+    expect(kindOf(SLUG)).toBe(ItemKind.WEAPON_VARIANT);
+    expect(equipVerdict(p, 'variant:1', SLUG, kindOf, variantBaseOf)).toEqual({ ok: true });
+    const verdict = equipVerdict(p, 'variant:0', SLUG, kindOf, variantBaseOf);
+    expect(verdict.ok).toBe(false);
+    expect((verdict as { error: string }).error).toContain('weapon 1');
+  });
+
+  /*
+   * And the door FAILS CLOSED when the second resolver is not supplied at all,
+   * which is what a call site that adds the slots and forgets the resolver
+   * looks like. Loud and refusing beats quiet and wrong (HANDOVER §0 rule 30).
+   */
+  it('refuses every variant slot when no base resolver is supplied', () => {
+    const p = owner();
+    expect(equipVerdict(p, 'variant:1', SLUG, kindOf).ok).toBe(false);
+    // …and the cosmetic slots are untouched by any of it.
+    expect(equipVerdict(p, 'skin', SKIN, kindOf)).toEqual({ ok: true });
+  });
+
+  it('refuses a variant no installed pack defines, rather than storing a dead claim', () => {
+    const p = createProfile('device-variant-unknown');
+    const ORPHAN = 'items@1:weapon_variant-nobody-knows';
+    grantDrops(p, [ORPHAN], 'trade', 'seed', 1);
+    const verdict = equipVerdict(p, 'variant:1', ORPHAN, kindOf, variantBaseOf);
+    expect(verdict.ok).toBe(false);
+    expect((verdict as { error: string }).error).toContain('variants pack');
+  });
+
+  it('refuses a skin for a variant slot and a variant token for the skin slot', () => {
+    const p = owner();
+    expect(equipVerdict(p, 'variant:1', SKIN, kindOf, variantBaseOf).ok).toBe(false);
+    expect(equipVerdict(p, 'skin', SLUG, kindOf, variantBaseOf).ok).toBe(false);
+  });
+
+  it('refuses the unowned and the revoked in a variant slot too', () => {
+    const p = owner();
+    expect(equipVerdict(p, 'variant:1', 'items@1:weapon_variant-never-owned', kindOf, variantBaseOf).ok)
+      .toBe(false);
+    p.moderation.revokedItems.push({ ref: SLUG, ms: 2, reason: 'test' });
+    expect(equipVerdict(p, 'variant:1', SLUG, kindOf, variantBaseOf).ok).toBe(false);
+  });
+
+  /*
+   * `EquipSlot`'s variant arm is the TYPE `variant:${number}`, which admits
+   * `variant:1.5` and `variant:-1`. For those `variantSlotWeaponId` answers
+   * null — so without the slot guard the base check is skipped, the verdict is
+   * ok, and `applyEquip` then writes nothing: a 200 for a claim that was never
+   * stored. The route never builds one; the function refuses one anyway.
+   */
+  it('refuses a slot name that is in the TYPE but not in the vocabulary', () => {
+    const p = owner();
+    for (const slot of ['variant:1.5', 'variant:-1', 'variant:1e0'] as EquipSlot[]) {
+      const v = equipVerdict(p, slot, SLUG, kindOf, variantBaseOf);
+      expect(v.ok, slot).toBe(false);
+      expect((v as { error: string }).error).toContain('unknown equip slot');
+    }
+    applyEquip(p, new Map<EquipSlot, string>([['variant:1.5' as EquipSlot, SLUG]]));
+    expect(p.inventory.variants, 'and it would have written nothing anyway').toEqual({});
+  });
+
+  it('recognises only the canonical slot spelling', () => {
+    expect(variantSlotWeaponId('variant:1')).toBe(WeaponId.SHOTGUN);
+    expect(variantSlotWeaponId('variant:0')).toBe(0);
+    // `variant:01` and `variant:1.0` would be a SECOND name for one slot, and
+    // `applyEquip` keys the stored map by the number — two names, one key,
+    // and "which claim wins" would depend on object key order.
+    expect(variantSlotWeaponId('variant:01')).toBeNull();
+    expect(variantSlotWeaponId('variant:1.0')).toBeNull();
+    expect(variantSlotWeaponId('variant:-1')).toBeNull();
+    expect(variantSlotWeaponId('variant:999')).toBeNull();
+    expect(variantSlotWeaponId('variant:')).toBeNull();
+    expect(variantSlotWeaponId('skin')).toBeNull();
+  });
+});
+
+describe('the stored variant claims survive a disk round trip', () => {
+  const SLUG = 'items@1:weapon_variant-shotgun-slug';
+
+  it('carries a claim through migrateProfile / serialiseProfile', () => {
+    const p = createProfile('device-variant-disk');
+    grantDrops(p, [SLUG], 'trade', 'seed', 1);
+    p.inventory.variants[String(WeaponId.SHOTGUN)] = SLUG;
+    const back = migrateProfile(serialiseProfile(p), p.deviceId);
+    expect(back.inventory.variants).toEqual({ 1: SLUG });
+  });
+
+  it('refuses a shape the disk should never have held', () => {
+    const back = migrateProfile({
+      version: PERSIST_VERSION,
+      deviceId: 'device-variant-junk',
+      inventory: {
+        items: [],
+        equippedSkin: '',
+        title: '',
+        variants: {
+          1: SLUG,                       // kept
+          '01': SLUG,                    // a second name for weapon 1
+          '1.5': SLUG,                   // not an integer
+          '99': SLUG,                    // no such weapon
+          2: 'not-a-ref',                // not an item ref
+          3: 42,                         // not a string
+          __proto__: SLUG,               // not a weapon at all
+        },
+      },
+    }, 'device-variant-junk');
+    expect(back.inventory.variants).toEqual({ 1: SLUG });
+  });
+
+  it('a profile written before V4c reads back with no claims and no crash', () => {
+    const back = migrateProfile({
+      version: PERSIST_VERSION,
+      deviceId: 'device-pre-v4c',
+      inventory: { items: [], equippedSkin: '', title: '' },
+    }, 'device-pre-v4c');
+    expect(back.inventory.variants).toEqual({});
   });
 });
 

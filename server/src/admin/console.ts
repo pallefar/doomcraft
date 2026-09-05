@@ -499,6 +499,10 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
           <div class="card-head">campaign — data, versioned on disk</div>
           <div class="card-body tscroll" id="inv-campaign"></div>
         </div>
+        <div class="card">
+          <div class="card-head">data packs — items, quests and variants, versioned on disk</div>
+          <div class="card-body tscroll" id="inv-data"></div>
+        </div>
       </section>
 
       <section id="tab-review">
@@ -1468,7 +1472,8 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
 
     var lv = el('inv-levels');
     clear(lv);
-    var detail = (st.installed && st.installed.detail) || { levels: [], campaign: [] };
+    var detail = (st.installed && st.installed.detail)
+      || { levels: [], campaign: [], items: [], quests: [], variants: [] };
     for (var v = 0; v < detail.levels.length; v++) {
       var d = detail.levels[v];
       var line = make('div');
@@ -1492,6 +1497,29 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
         + ' · sha256 ' + (e.digest ? e.digest.slice(0, 12) + '…' : '—')));
     }
     if (detail.campaign.length === 0) cp.appendChild(make('div', 'empty', 'no campaign manifest installed'));
+
+    /* The DATA packs that carry a digest. The build-pack loop above skips them
+       by design (they have no rollback-by-redeploy story), and until V4c
+       nothing else drew them either — so an installed items, quests or
+       variants version was invisible on the one screen whose entire job is
+       saying what is installed. summary() gaining a key changes nothing a
+       person can see; this loop is the change. */
+    var dp = el('inv-data');
+    clear(dp);
+    var kinds = [['items', detail.items], ['quests', detail.quests], ['variants', detail.variants]];
+    var drew = 0;
+    for (var k = 0; k < kinds.length; k++) {
+      var label = kinds[k][0];
+      var list = kinds[k][1] || [];
+      for (var j = 0; j < list.length; j++) {
+        var dpk = list[j];
+        drew++;
+        dp.appendChild(make('div', null,
+          label + '@' + dpk.version + ' — ' + dpk.count + ' entries · ' + fp(dpk.fingerprint)
+          + ' · sha256 ' + (dpk.digest ? dpk.digest.slice(0, 12) + '…' : '—')));
+      }
+    }
+    if (drew === 0) dp.appendChild(make('div', 'empty', 'no data packs installed'));
   }
 
   function relFind(st, pred) {

@@ -410,6 +410,21 @@ export interface TrustPolicy {
   /** WRITE_* bits this row may commit. */
   readonly writes: number;
 
+  /**
+   * May a player's equipped WEAPON VARIANT reach the body in this row?
+   *
+   * docs/VARIANTS.md §7.3: variants are ON in Quest, Horde, Builder and the
+   * casual surfaces from V4, and OFF in the ranked-adjacent ones until a
+   * season rolls. It is a COLUMN and never an `if` — `trust.test.ts` fails the
+   * build on any line in the tree that pairs a `ModeId` literal with a variant
+   * word, which is the thing that keeps this honest.
+   *
+   * False means the room resolves every weapon to slot 0 for everyone. It does
+   * NOT mean the claim is refused or cleared: the profile keeps it and it
+   * lights back up in the next casual match, exactly as a dormant item does.
+   */
+  readonly variantsAllowed: boolean;
+
   /** Bodies the room accepts. Peer rows are capped at `PEER_MAX_PLAYERS`. */
   readonly maxPlayers: number;
 
@@ -441,6 +456,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.CLIENT_LOCAL,
     grants: REWARD_NONE,
     writes: WRITE_LOCAL_RECORD,
+    variantsAllowed: true,
     maxPlayers: 1,
     label: 'Offline · no rewards',
     playerNote: 'Runs entirely on your device. Your times and cleared levels are saved here, '
@@ -455,6 +471,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.PEER_HOSTED,
     grants: REWARD_NONE,
     writes: WRITE_LOCAL_RECORD,
+    variantsAllowed: true,
     maxPlayers: PEER_MAX_PLAYERS,
     label: 'Co-op · unranked · no rewards',
     playerNote: 'Hosted by one of the players, not by us. Play the campaign together — '
@@ -469,6 +486,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_CASUAL,
     writes: WRITE_ACCOUNT_RECORD,
+    variantsAllowed: true,
     maxPlayers: 4,
     label: 'Matchmade · rewards count',
     playerNote: 'Hosted by us and matchmade. XP, Scrap, drops and challenges all count.',
@@ -480,6 +498,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_ALL & ~REWARD_RANKED_RATING,
     writes: WRITE_ACCOUNT_RECORD,
+    variantsAllowed: false,
     maxPlayers: 4,
     label: 'Event · prizes',
     playerNote: 'A scheduled speedrun event, hosted by us. Times are official and prizes are real.',
@@ -494,6 +513,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.CLIENT_LOCAL,
     grants: REWARD_NONE,
     writes: WRITE_LOCAL_RECORD,
+    variantsAllowed: true,
     maxPlayers: 1,
     label: 'Offline · saved on this device',
     playerNote: 'This world lives on your device only. It will not appear in the online world list.',
@@ -506,6 +526,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_NONE,
     writes: WRITE_PERSISTENT_WORLD | WRITE_ACCOUNT_RECORD,
+    variantsAllowed: true,
     maxPlayers: 16,
     label: 'Invite only · world saved · no rewards',
     playerNote: 'Hosted by us, so the world is saved and your friends can come back to it. '
@@ -520,6 +541,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_XP | REWARD_CHALLENGE | REWARD_STATS | REWARD_TRADE_UNLOCK,
     writes: WRITE_PERSISTENT_WORLD | WRITE_ACCOUNT_RECORD,
+    variantsAllowed: true,
     maxPlayers: 16,
     label: 'Public world · limited rewards',
     playerNote: 'Hosted by us and open to anyone. Time played earns XP; building does not '
@@ -536,6 +558,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.CLIENT_LOCAL,
     grants: REWARD_NONE,
     writes: WRITE_LOCAL_RECORD,
+    variantsAllowed: true,
     maxPlayers: 1,
     label: 'Offline · no rewards',
     playerNote: 'Runs on your device. Your best wave is saved here; it does not count towards '
@@ -548,6 +571,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.PEER_HOSTED,
     grants: REWARD_NONE,
     writes: WRITE_LOCAL_RECORD,
+    variantsAllowed: true,
     maxPlayers: PEER_MAX_PLAYERS,
     label: 'Co-op · unranked · no rewards',
     playerNote: 'Hosted by one of the players. Waves survived here do not count towards XP, '
@@ -563,6 +587,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_CASUAL | REWARD_LEADERBOARD,
     writes: WRITE_ACCOUNT_RECORD,
+    variantsAllowed: true,
     maxPlayers: 4,
     label: 'Matchmade · rewards count',
     playerNote: 'Hosted by us and matchmade. Waves survived earn XP, Scrap, drops and a '
@@ -576,6 +601,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_ALL & ~REWARD_RANKED_RATING,
     writes: WRITE_ACCOUNT_RECORD,
+    variantsAllowed: false,
     maxPlayers: 4,
     label: 'Event · prizes',
     playerNote: 'A scheduled wave-survival event, hosted by us. Results are official and prizes '
@@ -590,6 +616,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.CLIENT_LOCAL,
     grants: REWARD_NONE,
     writes: WRITE_LOCAL_RECORD,
+    variantsAllowed: true,
     maxPlayers: 1,
     label: 'Offline vs bots · no rewards',
     playerNote: 'You and the bots, on your device. Nothing here counts.',
@@ -601,6 +628,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_NONE,
     writes: WRITE_NONE,
+    variantsAllowed: true,
     maxPlayers: MAX_PLAYERS,
     label: 'Private scrim · no rewards',
     playerNote: 'A private arena for you and your friends, hosted by us so nobody has a '
@@ -616,6 +644,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_CASUAL,
     writes: WRITE_ACCOUNT_RECORD,
+    variantsAllowed: true,
     maxPlayers: MAX_PLAYERS,
     label: 'Matchmade · rewards count',
     playerNote: 'Hosted by us and matchmade. XP, Scrap, drops and challenges all count.',
@@ -627,6 +656,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_CASUAL | REWARD_RANKED_RATING | REWARD_LEADERBOARD,
     writes: WRITE_ACCOUNT_RECORD,
+    variantsAllowed: false,
     maxPlayers: MAX_PLAYERS,
     label: 'Ranked · rating at stake',
     playerNote: 'Hosted by us, matchmade by rating. Everything counts, including your rank.',
@@ -638,6 +668,7 @@ export const TRUST_TABLE: readonly TrustPolicy[] = Object.freeze([
     topology: Topology.SERVER_AUTHORITATIVE,
     grants: REWARD_ALL,
     writes: WRITE_ACCOUNT_RECORD,
+    variantsAllowed: false,
     maxPlayers: MAX_PLAYERS,
     label: 'Tournament · prizes',
     playerNote: 'A scheduled tournament, hosted by us. Official results, real prizes.',
@@ -660,6 +691,7 @@ export const DENY_ALL: TrustPolicy = Object.freeze({
   topology: Topology.SERVER_AUTHORITATIVE,
   grants: REWARD_NONE,
   writes: WRITE_NONE,
+  variantsAllowed: false,
   maxPlayers: 1,
   label: 'Not offered',
   playerNote: 'This combination is not available.',
@@ -828,6 +860,15 @@ export const SERVER_OWNED_PROFILE_FIELDS: readonly string[] = Object.freeze([
   'favouriteWeapon', 'adsRemoved', 'entitlements', 'stats', 'items',
   'drops', 'rating', 'trophies', 'titles',
   'economy', 'accountId', 'accountSecret', '_unknown',
+  /* V4c. `inventory.variants` decides which GUN a player fires, and
+   * `POST /api/equip` is the door that validates one — ownership, revocation
+   * and `VariantDef.base`. `POST /api/profile` merges a client body into the
+   * profile and has no such check, so without this line the field is reachable
+   * through a second door that accepts a different set (HANDOVER 0 rule 29).
+   * The claim is still re-derived at every join, so this is defence in depth
+   * and not the guarantee — but a write that can only be wrong should be
+   * REFUSED, and refused loudly: it lands in the violation ring. */
+  'variants',
 ]);
 
 export function isClientOwnedProfileField(name: string): boolean {
