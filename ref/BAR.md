@@ -21,13 +21,25 @@ unsigned. `tools/wad2wav.mjs` does this.
 **Motion.** Playwright's own `recordVideo` does not capture an accelerated WebGL canvas — it writes
 a ~2 KB file with nothing in it. Use `tools/reccanvas.mjs` instead, which runs
 `canvas.captureStream(60)` + `MediaRecorder` inside the page and pulls the blob out as base64. That
-yields true 60 fps (`ref/voxiom/desktop-gameplay.webm`, 416 frames). Note it records the **canvas
-only** — voxiom's HUD is DOM, so it does not appear. That is useful: art and motion get judged
-without HUD, and the HUD gets judged from full-page screenshots. Turn a recording into something
+yields true 60 fps (`ref/voxiom/desktop-gameplay.webm`, 416 frames). It records the **canvas only**
+— but "voxiom's HUD is DOM, so it does not appear" is **only partly true, corrected 2026-09-05**:
+the **minimap and the crosshair are rendered INTO the canvas** and do appear in both recordings.
+Ammo, health, hotbar and chat are DOM and do not. Do not tell a critic the canvas has no HUD. Turn a recording into something
 reviewable with `node tools/strip.mjs <video> <out.png> 4 3 <startSec> <endSec>`.
 
 Headed Chrome + persistent profile is **required** — voxiom.io sits behind Cloudflare and
-headless gets a "Just a moment..." interstitial. The script already handles the two stacked
+headless gets a "Just a moment..." interstitial.
+
+**Two traps corrected 2026-09-05.** "Pointer lock ignores synthetic mouse" is **FALSE** for this
+site: a page-side probe counted 322 *trusted* `mousemove` events carrying 7343 px of `movementX`,
+and the camera panned 12-24 px/frame. The real trap is that **`keyboard.press('2')` does not switch
+hotbar slots** — the keydown arrives trusted, but the engine polls key STATE per frame and a
+press goes down-and-up inside one frame, so the first gunfight capture photographed a shovel five
+times. Hold the key ~220 ms, or send one mouse-wheel tick. `Escape` does not release pointer lock
+here, so there is no DOM fallback. Also: extracting frames with ffmpeg WITHOUT an explicit `fps=`
+resamples these MediaRecorder webms to 25 fps (their `avg_frame_rate` is `0/0`), silently dropping
+~55% of frames — which is enough to conclude there is no muzzle flash at all. `strip.mjs` sets
+`fps=` and is safe. The script already handles the two stacked
 consent CMPs (Quantcast + Google Funding Choices) and clicks the **Battle Royale** tile
 (clicking the text "Play" hits a heading, not a button).
 
@@ -87,11 +99,37 @@ UI floating on top. Not a static JPEG: it is the renderer running.
 Judged honestly from the captures, voxiom is **not** Doom. These are the openings:
 
 1. **No pace.** Movement is Minecraft-speed. Doom's whole feel is ~2× that, with no acceleration ramp.
-2. **No gunfeel.** Confirmed at 60 fps, not inferred: across 1.2 s of continuous mouselook in
-   `ref/voxiom/desktop-gameplay.webm` the held shovel does **not move one pixel** relative to the
-   camera. No sway, no bob, no kick, no muzzle flash, no screen shake, no hit spark. The viewmodel
-   is a static billboard. This is the single most winnable piece.
-3. **Dead crosshair.** Static plus. No spread feedback, no hitmarker.
+2. **~~No gunfeel.~~ CORRECTED 2026-09-05 — this was measured on a SHOVEL, and it is wrong for
+   firearms.** The original claim: "across 1.2 s of continuous mouselook the held shovel does not
+   move one pixel... no muzzle flash, no screen shake, no hit spark. The viewmodel is a static
+   billboard. This is the single most winnable piece." The shovel half is true. The generalisation
+   to a gun was never tested, and this project built a whole piece on it.
+
+   Re-captured with a rifle (`ref/voxiom/desktop-gunfight.webm` and
+   `desktop-gunfight-wall.webm`, Capture The Gems, which hands you an assault rifle at spawn — no
+   looting needed). What voxiom's rifle actually has, counted frame by frame:
+   **muzzle flash** (3 of 12 tiles; a flash lasts ~50-65 ms of a ~165-190 ms shot cycle, so it
+   cannot appear in every sampled frame), **ejected shell casings** (8 of 12),
+   **world-anchored impact decals** (9 of 12 in the wall clip), **per-shot recoil** and a
+   **reload animation** in which the weapon leaves the screen entirely.
+
+   What is still true, and is now the actual opening:
+   - **No sway and no mouselook lag.** With the camera panning ~18 px/frame the front sight moves
+     1 px in x and 2 px in y over 17 frames. Independently spot-checked: on still-camera pairs the
+     viewmodel's best alignment is dx=dy=0 with a residual of 0.66 against a 1-px-move equivalent
+     of 2.10, so the instrument could have seen a single pixel and did not.
+   - **No walk bob.** Walking without firing gives 2 px x and 8 px y of slow monotonic drift over
+     24 frames — drift, not oscillation.
+   - While FIRING the sight oscillates ~±5 px on the shot cadence and climbs 8-9 px across a burst.
+
+   So the piece is not "they have nothing". It is: **they have a competent gun and no sway, no bob,
+   and nothing at the point of impact beyond a flat decal.** Re-run any of this with
+   `node tools/viewmodel-motion.mjs <video> --from <s> --to <s>`, which prints the box's alignment
+   AND what a one-pixel move would score, because the first number means nothing without the second.
+3. **~~Dead crosshair.~~ ALSO A SHOVEL MEASUREMENT.** The shovel's plus is 23 px in all 416
+   frames — genuinely dead. The **rifle** crosshair measures 95-99 px at rest and 149-156 px while
+   firing, a +57% bloom, and every transition lines up with a declared fire window to within a
+   frame. What remains true: **no hitmarker.**
 4. **Flat lighting.** No AO, no fog, no contrast — the beach reads as one mass. Doom's readability comes from
    dark rooms and bright enemies.
 5. **Cold open is slow.** ~25 s from click to shooting, most of it matchmaking. A bot-filled instant start beats it.

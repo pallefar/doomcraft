@@ -1,0 +1,75 @@
+{
+  "mode": "Capture The Gems",
+  "slot": "Digit2",
+  "seconds": 22,
+  "pointerLock": true,
+  "mouselook": {
+    "mv": {
+      "n": 322,
+      "sumAbsX": 7343,
+      "sumAbsY": 1287,
+      "trusted": 322
+    },
+    "clicks": 7
+  },
+  "fireWindows": [
+    [
+      0.59,
+      1.55
+    ],
+    [
+      1.86,
+      3.02
+    ],
+    [
+      5.47,
+      6.68
+    ],
+    [
+      7.08,
+      8.51
+    ],
+    [
+      10.84,
+      11.78
+    ],
+    [
+      12.11,
+      13.62
+    ],
+    [
+      15.89,
+      16.93
+    ]
+  ],
+  "hudSamples": [
+    [
+      1.55,
+      "Press M for full map\nSoldier#476 joined Team Sapphire\nSoldier#492 joined Team Sapphire\nSoldier#229 left Team Sapphire\nWobblySeal.iSHz left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nSmileyChicken6767\n  \n  \n  \nSoldier#144\nSmileyChicken6767\n  \n  \n  \nWobblySeal.iSHz\nPress X to open inv"
+    ],
+    [
+      3.02,
+      "Press M for full map\nSoldier#476 joined Team Sapphire\nSoldier#492 joined Team Sapphire\nSoldier#229 left Team Sapphire\nWobblySeal.iSHz left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nSmileyChicken6767\n  \n  \n  \nSoldier#144\nSmileyChicken6767\n  \n  \n  \nWobblySeal.iSHz\nPress X to open inv"
+    ],
+    [
+      6.68,
+      "Press M for full map\nSoldier#476 joined Team Sapphire\nSoldier#492 joined Team Sapphire\nSoldier#229 left Team Sapphire\nWobblySeal.iSHz left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nSmileyChicken6767\n  \n  \n  \nSoldier#492\nPress X to open inventory\nAmmo: 24 / 139\n1\n2\n3\n45\n4\n5\n13\n11:04"
+    ],
+    [
+      8.51,
+      "Press M for full map\nSoldier#476 joined Team Sapphire\nSoldier#492 joined Team Sapphire\nSoldier#229 left Team Sapphire\nWobblySeal.iSHz left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nSmileyChicken6767\n  \n  \n  \nSoldier#492\nPress X to open inventory\nAmmo: 17 / 139\n1\n2\n3\n45\n4\n5\n13\n11:02"
+    ],
+    [
+      11.78,
+      "Press M for full map\nSoldier#476 joined Team Sapphire\nSoldier#492 joined Team Sapphire\nSoldier#229 left Team Sapphire\nWobblySeal.iSHz left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nPress X to open inventory\nAmmo: 25 / 126\n1\n2\n3\n45\n4\n5\n13\n10:59\n26\n1 kill = 1 point | 1 ruby/sapphire "
+    ],
+    [
+      13.62,
+      "Press M for full map\nSoldier#476 joined Team Sapphire\nSoldier#492 joined Team Sapphire\nSoldier#229 left Team Sapphire\nWobblySeal.iSHz left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nPress X to open inventory\nAmmo: 17 / 126\n1\n2\n3\n45\n4\n5\n13\n10:57\n26\n1 kill = 1 point | 1 ruby/sapphire "
+    ],
+    [
+      16.93,
+      "Press M for full map\nSoldier#476 joined Team Sapphire\nSoldier#492 joined Team Sapphire\nSoldier#229 left Team Sapphire\nWobblySeal.iSHz left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nSmileyChicken6767\n  \n  \n  \nSoldier#409\nPress X to open inventory\nAmmo: 24 / 113\n1\n2\n3\n45\n4\n5\n13\n10:54"
+    ]
+  ]
+}

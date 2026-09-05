@@ -1,0 +1,137 @@
+Doomcraft phase V4c, reviewed BEFORE a line is written. Refuse it if it is
+wrong.
+
+Output shape, as before:
+  * For each clause you judge BROKEN: a CONCRETE FAILURE — the exact input or
+    sequence, and the specific WRONG VALUE it produces (a number, a slot index,
+    a status code). "This could be a problem" is not an answer.
+  * A closing section headed CORRECT listing by number every clause you judge
+    correct as written.
+Anything stated as fact below was read out of the tree at commit 2111f94, but
+read it yourself and say so if it does not hold.
+
+================================================================================
+BACKGROUND
+================================================================================
+
+V4a put a variants pack on the wire. V4b (just shipped, 2111f94) added the
+OWNERSHIP TOKEN: `ItemKind.WEAPON_VARIANT = 5`, `ItemDef.variantId`, and a
+parser biconditional — `kind === WEAPON_VARIANT` iff
+`id === "weapon_variant-<variantId>"`. The token is inert: nothing equips it,
+and `grantDrops` refuses to MINT one (`TRANSFER_SOURCES` is an allow-list
+holding only 'trade'), so supply is zero.
+
+V4c makes a claim reach the body. The relevant code today:
+
+- `RoomOptions.variantClaims?: (conn: Connection) => Uint8Array`
+  (server/src/room.ts:204) exists from V3 and NOTHING supplies it.
+- It is called at server/src/room.ts:1196, inside
+  `onHello(conn, name, skin, caps)` (room.ts:1181), and its result goes
+  through `resolveVariantSlots(claims, caps, this.sim.arsenal.slotCount)`
+  BEFORE `sim.addPlayer`, deliberately: `spawnPlayer` fills the first magazine
+  through `sim.statsFor`, so a slot decided one line later would hand a
+  four-shell variant an eight-shell magazine.
+- `resolveVariantSlots` (room.ts:157) returns a `Uint8Array(WEAPON_COUNT)`;
+  per index it keeps `c` only when `Number.isInteger(c) && c > 0 && c < slotCount`,
+  else `BASE_SLOT`; and it returns all-base when `(caps & CAP_VARIANTS) === 0`.
+  It clamps by COUNT only. It cannot detect a claim computed against a
+  different table's ORDERING.
+- The room's ordering is `this.variantEntries = decodeRoomVariantTable(options.variants)`
+  (room.ts:509) — decoded from THE BYTES THE ROOM WILL SEND, not from the
+  manifest it parsed. Slot index N means `variantEntries[N]`.
+- In the upgrade handler (server/src/index.ts ~4111-4130) the ticket is
+  redeemed with `await graph.redeemTicket(...)`, and only inside
+  `wss.handleUpgrade(...)` is `const conn = room.join(...)` followed by
+  `conn.deviceId = ticket.profileKey`. HELLO — and therefore `onHello` and the
+  claim — arrives later.
+- `equipVerdict(profile, slot, ref, kindOf)` (server/src/persistence.ts) takes
+  `EquipSlot = 'skin' | 'title'` and compares `kindOf(ref)` against
+  `KIND_FOR_SLOT[slot]`. It learns an item's KIND and nothing else.
+- `StoredInventory` is `{ items, equippedSkin, title }`. There is no
+  `variants` field.
+- `shared/src/trust.test.ts:416` scans source lines for a `ModeId.` literal
+  near an economy word, with
+  `const economy = /rank|reward|grant|scrap|\bxp\b|entitle|payout|prize|leaderboard|drop/i;`
+  — there is NO `variant` term, so the protection docs/VARIANTS.md §4 claims
+  for mode-gating does not exist.
+- `PackInventory.summary()` and `/api/admin/release`'s `installed` block list
+  levels, campaign, items and quests — NOT variants. Verified against the live
+  origin: the response has no `variants` key.
+
+================================================================================
+THE PLAN — V4c, "the claim reaches the body"
+================================================================================
+
+ 1. `StoredInventory` gains `variants: Record<string, string>` — base weapon id
+    (as a decimal string key) -> the owned item REF that is equipped for it.
+    Storing the REF and not a slot index is the point: a slot index is only
+    meaningful against one table, and the stored profile outlives any table.
+
+ 2. `EquipSlot` gains variant slots, addressed as `variant:<weaponId>` rather
+    than `variant:<slotIndex>`. The slot names the BASE WEAPON the claim is
+    for; which row of which table that becomes is resolved per room.
+
+ 3. `equipVerdict` learns more than a kind. For a variant slot it must follow
+    `ref -> ItemDef.variantId -> VariantDef.base` and refuse when
+    `VariantDef.base !== weaponId`. Today it would return 200 for a shotgun
+    token submitted for the pistol slot, and the arsenal would then serve
+    pistol damage — a claim accepted at the door and silently ignored by the
+    body. The resolver is passed in, exactly as `kindOf` is, so
+    persistence.ts still imports no variants module.
+
+ 4. A new `variantClaims` implementation is supplied by the ROOM FACTORY (the
+    thing that already holds the pinned release and supplies `rollDrops`),
+    never by room.ts, which must not learn that a release tier exists.
+
+ 5. It resolves against the ROOM's table. For each base weapon the profile has
+    a claim for, it finds the index of that `variantId` in the ROOM's
+    `variantEntries` ordering — the same array the room encodes and sends —
+    and writes that index into the `Uint8Array`. It must NOT use
+    `releases.live()`: a room can be pinned to a different release than the
+    live one, and two tables that contain the same two variants in the
+    opposite order would grant a player the OTHER gun with no error anywhere.
+
+ 6. A claim naming a variant the room's table does not contain resolves to
+    `BASE_SLOT`, not to an error. The player fires the base weapon. This is the
+    same Rule-E reasoning the release tier already uses: refusing the ROOM is
+    worse than serving the base.
+
+ 7. The claim function reads `conn.deviceId`. That is safe because
+    `conn.deviceId = ticket.profileKey` is assigned immediately after
+    `room.join()` in the upgrade handler and HELLO cannot arrive before that.
+    A test asserts a claim resolver called during `onHello` sees the REDEEMED
+    profile key and not the pre-ticket value, so the ordering is pinned rather
+    than assumed.
+
+ 8. `POST /api/equip` accepts the new slots. The route already validates and
+    calls `equipVerdict` per slot; variant slots go through the same door with
+    no second implementation.
+
+ 9. Mode eligibility is a COLUMN on the trust table, never an `if` in a room.
+    Add `variant` to `trust.test.ts:416`'s economy regex so a `ModeId.` literal
+    near a variant word fails the build, and add the column the table needs.
+    Because "invariant" contains "variant", the regex term must be `\bvariant`
+    or it will match every line mentioning an invariant.
+
+10. `PackInventory.summary()` gains a `variants` key so the admin Inventory
+    screen can show the installed version, which by V4a always exists.
+
+11. Proof obligations, each proven RED with its own fix reverted, and what goes
+    red checked:
+    (a) a shotgun token submitted for the pistol slot is REFUSED, and the test
+        asserts the refusal rather than the absence of damage;
+    (b) two tables holding the same two variants in OPPOSITE order grant the
+        same player the SAME gun — the ordering test, which must fail if the
+        resolver is switched to `releases.live()`;
+    (c) a claim for a variant absent from the room's table yields BASE_SLOT and
+        the room still starts;
+    (d) a claim resolver sees the redeemed profile key in `onHello`;
+    (e) the trust scan names a planted `ModeId.DEATHMATCH`-near-variant line,
+        and does NOT fire on a line containing only the word "invariant".
+
+12. Out of scope for V4c: the killfeed and display names (V4d), any craft
+    recipe or grant path (V4e), and changing `TRANSFER_SOURCES`.
+
+================================================================================
+Which clauses are broken, with a concrete failure and a specific wrong value;
+then the CORRECT list. And name anything in the BACKGROUND that is wrong.

@@ -149,8 +149,8 @@
 
   <div class="phasestrip">
     <span class="lbl">Phase</span>
-    <span class="now">Gunfeel built and capturing; V4b building</span>
-    <span class="note">THE GAUNTLET IS RUNNING for the first time. Round 1 of GUNFEEL is built and the blind pair is being captured. The builder confirmed the code fact it was handed and overturned it in the right direction: the fatal hitmarker was not missing, it was CANCELLED — the client predicts the kill ring on the frame it fires, Hud.hitMarker was a plain assignment, and the server's flagless echo of the PREVIOUS shot repainted it white ~one RTT later, on every demon kill in the game. And a monster headshot was never COMPUTED, so the client drew a gold marker and a doubled damage number while the server applied single damage — a live predictor desync. 14 tests, each red-proved by reverting its own fix alone; suite 2640 up from 2626. Meanwhile V4b was refused by Codex three times running (12/16, then 3/6, then 1/3) and every finding reproduced here in both directions: a LIVE prototype-pollution defect in the items parser, and FIVE separate paths that mint inventory of which three would have handed out weapon variants on day one.</span>
+    <span class="now">The gunfeel premise was measured on the wrong weapon</span>
+    <span class="note">The gauntlet ran, and the first thing it produced was evidence against this project's own assumption. ref/BAR.md weakness #2 — &quot;no sway, no bob, no kick, no muzzle flash, no screen shake, no hit spark. The viewmodel is a static billboard. This is the single most winnable piece&quot; — was measured across 1.2 s of mouselook while the voxiom player held a SHOVEL. Re-captured with a rifle: the bar HAS a muzzle flash, ejects brass casings, and punches impact decals into the wall. Verified by looking at the twelve frames, not by reading a description of them. The first blind critic had already caught the shape of this on its own and disqualified its own verdict for it: &quot;B won a test the bar structurally could not sit.&quot; Round 2 was stopped rather than judged against a bar holding a shovel. The fight is now on QUALITY, not presence — and the critic's round-2 work order was already pointed the right way.</span>
   </div>
 
   <section>
@@ -187,7 +187,7 @@
         <div class="ix">04</div>
         <div>
           <div class="nm">The gauntlet — 0/23</div>
-          <div class="what">23 pieces, each judged blind against the real captured frames in ref/. GUNFEEL is in flight now — builder, capture steward and a blind critic, up to 4 rounds. Fair-A/B rules enforced: headed + prod build, matched viewport, and the neutral metrics files the critic reads (a default headless dev run reports ~120 fps median, an uncapped-vsync artifact this project was fooled by once).</div>
+          <div class="what">23 pieces, each judged blind against real captured frames. GUNFEEL round 1 is BUILT and was judged: the critic picked ours and then set contaminated:true, because it worked out which side was which from the content alone. Its reason is now HANDOVER rule 37 — a comparison only carries information where both sides could plausibly win. New bar captured: ref/voxiom/desktop-gunfight-wall.webm, a rifle fired at a wall, with the drive log recording how it was obtained.</div>
           
         </div>
         <div class="chip v-building">IN FLIGHT</div>
@@ -256,8 +256,8 @@
         <div class="piece is-building">
           <div>
             <div class="nm">Gunfeel</div>
-            <div class="note">Round 1 BUILT, capture in flight. Server: damageEntity carries real flags (DMG_FATAL, DMG_HEADSHOT from a real head-box test the client already predicted with, DMG_SPLASH) and the killfeed ORs in KILL_HEADSHOT. Client: the hitmarker is a monotone merge inside its own lifetime instead of an assignment, so a truthful echo can no longer cancel a predicted kill ring. Fx.hitConfirm finally reads the hits/pellets coverage its interface documented and nothing consumed.</div>
-            <div class="gap"><b>Biggest remaining gap</b>Awaiting the first blind verdict. Not fixed and named honestly: the Lost Soul has THREE sizes — spawned 0.9 m, client hit target 0.7 m, rendered 0.5 m — so you can hit it where nothing is drawn. That belongs to the enemies piece.</div>
+            <div class="note">Round 1 built and judged (verdict discarded, self-declared contaminated). Server: damageEntity carries real flags; a monster headshot is now COMPUTED, not just flagged — the client had been drawing a gold marker and a doubled damage number while the server applied single damage. Client: the hitmarker is a monotone merge, so a truthful echo of the PREVIOUS shot can no longer repaint a predicted kill ring white.</div>
+            <div class="gap"><b>Biggest remaining gap</b>The bar is not what BAR.md says it is. With a rifle it has muzzle flash, brass ejection and impact decals — the &quot;static billboard&quot; was a shovel. Round 2 work order stands: ZERO impact particles in 12 of our frames; every effect at the muzzle and nothing at the target; the decal is a flat asterisk with no rim; the slide never cycles while brass spawns from nowhere.</div>
           </div>
           <div class="rounds">1 round</div>
           <div class="chip v-building">BUILDING</div>
@@ -535,5 +535,5 @@
     </div>
   </section>
 
-  <footer>Updated 2026-09-05 16:35:02 UTC · exit condition is winning the blind comparison, not a round count</footer>
+  <footer>Updated 2026-09-05 17:18:37 UTC · exit condition is winning the blind comparison, not a round count</footer>
 </div>

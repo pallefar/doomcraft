@@ -1,0 +1,84 @@
+Doomcraft V4c, repair round. You judged clauses 1,2,4,6,7,8,11,12 CORRECT and
+3,5,9,10 BROKEN, and corrected three background claims. All four findings were
+reproduced here independently before this rewrite:
+
+  - `SessionArsenal.from` (shared/src/arsenal.ts:176) starts `slot = BASE_SLOT`
+    and increments BEFORE filling, so overlay i occupies slot i+1 and
+    `slotCount = slot + 1`. Slot N is `variantEntries[N-1]`. Confirmed.
+  - `POST /api/equip` iterates `['skin','title'] as const`
+    (server/src/index.ts:3112), so a `variant:*` key leaves `wants.size === 0`
+    and the route answers **400 "nothing to equip"**. The "returns 200" claim
+    came from a previous handover and I relayed it without executing it.
+    Confirmed false.
+  - `/\bvariant/i` does NOT match `ItemKind.WEAPON_VARIANT` — `_` is a regex
+    word character, so there is no boundary before `VARIANT`. It does match a
+    bare `variant` and does exclude `invariant`. Confirmed by execution.
+  - The admin Inventory renderer reads only `detail.levels` and
+    `detail.campaign`; the generic pack loop skips data packs carrying digests.
+
+Same output shape: BROKEN clauses with a concrete failure and a specific wrong
+value, then a CORRECT list by number.
+
+13. (repairs 3.) The defect being fixed is NOT an existing wrong 200. Today a
+    variant slot is simply unreachable: the route enumerates two literal slots
+    and answers 400. The real hazard is what the OBVIOUS extension introduces —
+    adding `variant:<weaponId>` to that list and reusing the kind-only
+    `equipVerdict` would accept ANY WEAPON_VARIANT token for ANY base weapon,
+    because `equipVerdict` compares only `kindOf(ref)` against
+    `KIND_FOR_SLOT[slot]`. A shotgun token accepted for the pistol slot then
+    resolves through the arsenal to the pistol row, so the player is told 200
+    and fires base pistol damage. V4c therefore extends the slot list AND
+    teaches `equipVerdict` to follow `ref -> ItemDef.variantId ->
+    VariantDef.base` and refuse when `base !== weaponId`, in the same change.
+    The regression test is that the kind-only version ACCEPTS the cross-base
+    claim, so it fails if someone later simplifies the check back.
+
+14. (repairs 5.) The claim resolver writes `rowIndex + 1`, never `rowIndex`.
+    With the shipped ordering `[shotgun-slug, rocket-swift]`, `shotgun-slug` is
+    row 0 and must become slot **1** (62 damage x 1 pellet); writing 0 means
+    BASE_SLOT and serves 11 x 7. `rocket-swift` is row 1 and must become slot
+    **2** (82 direct); writing 1 serves the OTHER variant. A test asserts the
+    resolved EffectiveWeapon's damage, not the slot number, so the assertion
+    survives a renumbering.
+
+15. (also repairs 5.) A stored claim is not current ownership, and it is
+    validated at READ time, every join, never trusted from the profile:
+    the ref must still be OWNED (a traded-away copy leaves
+    `inventory.variants` intact — `server/src/trades.ts:672` removes the item
+    and not the equip claim), must not be REVOKED, and its variantId must be
+    present in THIS room's table. Any of those failing yields BASE_SLOT and the
+    room still starts. Two regression tests: equip the sole token, trade it
+    away, join — slot 0, not 1; and revoke it — slot 0, not 1. Both must assert
+    the damage the arsenal actually serves.
+    QUESTION FOR YOU: is leaving the stale claim in the profile on trade the
+    right call, or should the trade clear it? Clearing it is a write on a path
+    that currently does not write there; leaving it makes read-time validation
+    load-bearing forever. Say which you would choose and what it costs.
+
+16. (repairs 9.) The trust scan must catch the CANONICAL SPELLING. The term is
+    not `\bvariant`; it must match `WEAPON_VARIANT`, `variantId`,
+    `variantClaims` and a bare `variant`, while NOT matching `invariant`. A
+    negative lookbehind for a letter — `(?<![a-z])variant` with the `i` flag —
+    admits `WEAPON_VARIANT` (preceded by `_`) and rejects `invariant`
+    (preceded by `n`). The test asserts all four positives and the one
+    negative, because a term that silently matches nothing is the sixth gate
+    this project has found reporting green while testing nothing.
+    Additionally: the existing scan tests ONE PHYSICAL LINE, so
+    `if (modeId === ModeId.DEATHMATCH) {` on one line and
+    `variantsAllowed = false;` on the next produces zero offenders. V4c widens
+    the scan to a small window of following lines and proves the multiline
+    case red.
+
+17. (repairs 10.) `PackInventory.summary()` gaining a `variants` key changes
+    NOTHING a person can see: the Inventory renderer
+    (server/src/admin/console.ts:1454) reads only `detail.levels` and
+    `detail.campaign`, and its generic pack loop skips data packs that carry a
+    digest. V4c changes the renderer and the Inventory markup too, and the test
+    feeds the renderer a response containing one installed variants version and
+    asserts a row for it appears — not that the summary field exists. Per
+    HANDOVER rule 12, `server/src/admin/console.ts` is two giant template
+    literals: no backticks anywhere in its embedded JS or prose, and no `${` in
+    static content.
+
+Which are broken, with a concrete failure and a specific wrong value; then the
+CORRECT list; then answer clause 15's question.
