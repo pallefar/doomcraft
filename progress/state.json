@@ -1,7 +1,7 @@
 {
-  "updated": "2026-09-05T15:00:00Z",
-  "phase": "V4 plan REFUSED by Codex — fixing what it found first",
-  "phaseNote": "Two commits shipped: the V1-V3 closeout (9f3b472) and the five shipped-code defects Codex found while refusing the V4 plan (d3528a1). Suite fully green — 107 files, 2622 passed, 3 skipped, no failures, 96.88s. release:verify PASS 17 checks. Next: deploy (binary THEN promote a replacement release, because weapons@2 orphans every stored weapons@1 silently), then V4 replanned against a verdict that broke nine of its eleven clauses.",
+  "updated": "2026-09-05T15:15:00Z",
+  "phase": "DEPLOYED · V4 replanning against a verdict that broke 9 of 11 clauses",
+  "phaseNote": "Both stages live and verified: Railway SUCCESS, /api/version reports weapons@2 (a pack version only this commit declares — better proof than any hash), data.writable true, and the live smoke gate passes 14/14 including the two V3 wire checks. Suite 107 files / 2622 passed / 3 skipped. Six new rules in HANDOVER §0. Next: V4 replanned against the verdict, then back to Codex before a line is built.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -391,6 +391,14 @@
     {
       "t": "15:00",
       "m": "ROUND TWO COMMITTED (d3528a1). Full suite genuinely green this time: 107 files, 2622 passed, 3 skipped, ZERO failures in 96.88s — which retroactively confirms the five earlier failures were the machine and not the code. The last builder found a hazard my own brief created: putting a display name into the fingerprint line means a name carrying a newline makes a one-variant manifest hash as a two-variant one, because the digest is inputs.join(newline). It closed the original hole without opening that one. Five of six briefs I wrote today contained a claim the builder correctly overturned — the line telling agents to report anything wrong in the brief is now the highest-yield sentence in the template."
+    },
+    {
+      "t": "15:10",
+      "m": "DEPLOYED AND VERIFIED. Railway SUCCESS; the origin reports weapons@2 — a pack version that exists only in this commit, which is stronger proof than build.id (which lies) or a bundle hash. Live smoke gate 14/14, including the two checks that are the only thing anywhere able to catch a deployed room factory that forgot its pinned content. TWO CORRECTIONS: the weapons@2 deploy hazard I called blocking all session did NOT apply — the live release is revision 0, the compiled-in builtin, so no stored release existed to orphan, and one curl would have settled it hours earlier. And the handover Vercel bundle-hash rule CANNOT PASS from this machine: I reproduced the build id correctly (it is in the served bundle) but Rollup hashes our own chunks differently on Linux than on arm64 macOS while the vendor chunk stays byte-identical. Replaced with a check that names the commit directly."
+    },
+    {
+      "t": "15:15",
+      "m": "THREE VERIFICATION METHODS MEASURED THE WRONG THING TODAY: a pellet test asserting a scalar set beside the loop rather than by it; ls | head -1 picking a bundle alphabetically instead of newest; and a bundle-hash rule that cannot reproduce across build platforms. Same shape each time — the instrument was never checked against a known answer. That is HANDOVER rule 28 turning out to have three more instances than the day it was written."
     }
   ],
   "bars": [
