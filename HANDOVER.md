@@ -203,6 +203,20 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
     hours earlier. The hazard stays documented: it bites the first time somebody
     promotes a stored release and then ships a build-pack bump.
 
+35. **NEW — and rule 34's own probe could not have told you.** `/api/version`
+    publishes `ReleaseService.live()`, and `live()` returns `hostFallback()` —
+    revision 0, `unsatisfied: []` — in BOTH of two very different worlds: no
+    stored release exists at all, and a stored release exists that this host
+    ALREADY cannot satisfy (`server/src/packs.ts:746`). Rule 34's conclusion
+    was right and its evidence was compatible with the exact failure it was
+    clearing. A post-fallback readout cannot separate "nothing configured"
+    from "configured and already broken" — hiding that difference is what a
+    fallback is FOR. The probe that settles it is `GET /api/admin/release`,
+    which returns the raw `document`: on the live origin today `history: []`,
+    `liveRevision: 0`, `pendingRevision: 0`, so the document is genuinely
+    empty. Ask of every probe which distinct states it maps onto the same
+    output, and whether the state you are trying to rule out is one of them.
+
 ## 1. What this session shipped (all pushed, green, deployed)
 
 | Commit | What |

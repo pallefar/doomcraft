@@ -149,8 +149,8 @@
 
   <div class="phasestrip">
     <span class="lbl">Phase</span>
-    <span class="now">V4a LIVE — the first variant content is on the wire</span>
-    <span class="note">The origin serves eight packs including variants@1, and the production wire carries shotgun-slug and rocket-swift, 293 bytes, decoded whole and cross-checked against the version the origin says it pins. Suite 107 files / 2626 passed / 3 skipped. Nine defects fixed in shipped code today, six of them found by putting plans to an adversary before writing code. V4b-V4e specified and unstarted; the gauntlet is still 0/23 with its harness verified.</span>
+    <span class="now">V4b under review; THE GAUNTLET IS RUNNING</span>
+    <span class="note">The gauntlet has a blind A/B in flight on GUNFEEL for the first time — headed, prod build, 1440x900, in an isolated git worktree so its builders cannot collide with V4. Setting it up found two apparatus defects: a blanket node_modules symlink resolved @doomcraft/shared back to the MAIN tree (the worktree would have compiled against the wrong source), and capture-ours reuses whatever already holds its port, so a capture could silently photograph the other tree. Both closed. V4b went to Codex as 16 numbered clauses and was REFUSED: 12 correct, 4 broken. Every finding reproduced here in both directions. It found a LIVE defect in shipped code — items kind/rarity lookups admit Object.prototype members, so kind:&quot;constructor&quot; parses clean, ItemDef.kind becomes a FUNCTION, and kind:&quot;constructor&quot; and kind:&quot;toString&quot; emit the identical fingerprint line: two different manifests, one digest. Same bug 8c6f196 fixed in variants, never fixed in items.</span>
   </div>
 
   <section>
@@ -183,14 +183,14 @@
         </div>
         <div class="chip v-pending">QUEUED</div>
       </div>
-      <div class="stage st-pending">
+      <div class="stage st-building">
         <div class="ix">04</div>
         <div>
           <div class="nm">The gauntlet — 0/23</div>
-          <div class="what">23 pieces, each judged blind against the real captured frames in ref/. Never had a blind A/B run.</div>
+          <div class="what">23 pieces, each judged blind against the real captured frames in ref/. GUNFEEL is in flight now — builder, capture steward and a blind critic, up to 4 rounds. Fair-A/B rules enforced: headed + prod build, matched viewport, and the neutral metrics files the critic reads (a default headless dev run reports ~120 fps median, an uncapped-vsync artifact this project was fooled by once).</div>
           
         </div>
-        <div class="chip v-pending">QUEUED</div>
+        <div class="chip v-building">IN FLIGHT</div>
       </div>
       <div class="stage st-pending">
         <div class="ix">05</div>
@@ -253,14 +253,14 @@
           <div class="rounds">0 rounds</div>
           <div class="chip v-pending">PENDING</div>
         </div>
-        <div class="piece is-pending">
+        <div class="piece is-building">
           <div>
             <div class="nm">Gunfeel</div>
-            <div class="note">Bar has no muzzle flash, no kick, no shake. Open goal.</div>
-            
+            <div class="note">IN FLIGHT — the first blind A/B this project has ever run. Bar has no muzzle flash, no kick, no shake. Verified code fact handed to the builder: sim.ts passes a literal 0 for flags on entity damage, so a monster kill never raises the fatal hitmarker.</div>
+            <div class="gap"><b>Biggest remaining gap</b>Not built yet.</div>
           </div>
           <div class="rounds">0 rounds</div>
-          <div class="chip v-pending">PENDING</div>
+          <div class="chip v-building">BUILDING</div>
         </div>
         <div class="piece is-pending">
           <div>
@@ -535,5 +535,5 @@
     </div>
   </section>
 
-  <footer>Updated 2026-09-05 17:15:00 UTC · exit condition is winning the blind comparison, not a round count</footer>
+  <footer>Updated 2026-09-05 16:07:59 UTC · exit condition is winning the blind comparison, not a round count</footer>
 </div>

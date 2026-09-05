@@ -1,0 +1,105 @@
+You reviewed the V4b plan for this repo already and refused it. You judged
+clauses 1,2,3,4,7,8,9,10,11,14,15,16 CORRECT and clauses 5,6,12,13 BROKEN, and
+you corrected six background claims. Those verdicts are accepted; every finding
+was reproduced independently in this tree before this rewrite.
+
+This is the REPAIR — six clauses only. Same output shape:
+
+  * For each clause you judge BROKEN, a CONCRETE FAILURE: the exact input or
+    sequence and the specific WRONG VALUE it produces.
+  * A closing section headed CORRECT listing by number every clause you judge
+    correct as written.
+
+Anything stated as fact below may be wrong. Read the code. Say so if it is.
+
+================================================================================
+WHAT WAS REPRODUCED SINCE YOUR REVIEW (so you need not re-derive it)
+================================================================================
+
+  - `{id:"a", kind:"constructor", rarity:"common", name:"A"}` parses with zero
+    errors; `typeof manifest.items[0].kind === "function"`; the line is
+    `a:undefined/common/0/-/-//A`. `kind:"toString"` produces the IDENTICAL
+    line, so two different manifests share one digest.
+  - `rollMatchDrops` returned a `weapon_variant` ref on 2000 of 4000 seeded
+    draws against a two-row manifest.
+  - The 434-byte row you gave parses with zero errors. My "254 is the maximum"
+    was wrong; it was one example.
+  - `parseChallengesManifest` accepts `name: "A\nB"` and emits the line
+    `daily.a:daily/kills/1/1/-/A\nB/G`. My claim that both sibling packs refuse
+    C0 controls was wrong; only `parseVariantsManifest` does.
+  - The LIVE origin (https://doomcraft-production.up.railway.app/api/version)
+    reports `release: {revision: 0, ordinal: 1, pending: null, unsatisfied: []}`
+    and `items@1` at digest `61be01e94291a5ef8a87bcf4d8d713910ab8e987d2f1e8e166818688f6c8b1fe`
+    — the same digest your draft fixture computed.
+
+================================================================================
+THE REPAIRED CLAUSES
+================================================================================
+
+17. (replaces the broken 5 and 6.) V4b changes both the CONTENT of
+    `content/items.json` (two new rows) and the SERIALIZATION of every item
+    line (the new `variantId` column). Either alone moves items@1's fingerprint
+    and digest, so they are not separable and no version bump avoids it:
+    `itemsAt(1)` recomputes both from the file with whatever code is running.
+
+    The plan therefore does NOT claim the change is compatible. It claims the
+    change strands nothing ON THIS HOST TODAY, and pins the mechanism:
+    (a) the live origin reports revision 0 with `pending: null` and
+        `unsatisfied: []`, so no stored release document records an items
+        digest that this change would invalidate;
+    (b) a regression test asserts the failure you demonstrated — a release
+        recorded against the OLD items digest makes `unsatisfied()` return
+        exactly `["items@1"]` — so the mechanism is asserted in the suite
+        rather than assumed in a comment;
+    (c) the deploy order is: ship the binary and the content together, since
+        both sides of the digest move in the same commit.
+
+18. The genuinely dangerous half of what you found is not the 409. A 409 is
+    loud. It is that `resolveFor()` returns revision **0** instead of the
+    pinned revision **2** with no error to the caller — a host quietly serving
+    different content than the release document names. V4b does NOT fix that:
+    it is a release-service change with its own blast radius, it is not needed
+    for the ownership token, and bundling it would put a second reason-to-fail
+    inside a phase whose whole point is being small enough to judge. It is
+    recorded as a separate finding with your reproduction attached.
+    QUESTION FOR YOU: is deferring it the wrong call — i.e. does any sequence
+    reachable in V4b itself make that silent fallback fire?
+
+19. `rollMatchDrops` (server/src/packs.ts) gains `ItemKind.WEAPON_VARIANT` to
+    the kinds it skips, beside TITLE and TROPHY. The regression test uses your
+    seeded draws: against a manifest containing `weapon_variant-shotgun-slug`,
+    `rand` yielding `[0, 0.6, 0.6]` returns
+    `["items@1:weapon_variant-shotgun-slug"]` on the unfixed code and must
+    return `[]`, or a non-variant ref, on the fixed code. The test is proven
+    red by reverting the one-line exclusion, and what goes red is checked to be
+    that assertion and not a different one.
+
+20. With clause 19 in place, variant supply in V4b is zero by three
+    independent mechanisms, each asserted separately rather than argued:
+    `CRAFTABLE_KINDS` has no WEAPON_VARIANT so no craft mints one;
+    `rollMatchDrops` skips the kind so no match drops one; and trading moves
+    existing copies without creating any. There is no other grant path in
+    V4b's scope. V4e adds the entry recipe that deliberately breaks this.
+
+21. (new — the live defect your review surfaced.) `KIND_BY_NAME` and
+    `RARITY_BY_NAME` are looked up with `MAP[str]`, which finds inherited
+    `Object.prototype` members, so `kind:"constructor"` yields a FUNCTION that
+    is not `undefined` and passes the guard. Both lookups move to
+    `Object.hasOwn(MAP, str) ? MAP[str] : undefined`, the same fix commit
+    `8c6f196` applied to `BANDS.toString` in the variants parser. Proven red
+    two ways: the manifest must be REFUSED, and the digest collision between
+    `kind:"constructor"` and `kind:"toString"` must be gone. This is a fix to
+    shipped code and it rides in V4b because V4b is already rewriting this
+    parser; it is called out in its own commit message.
+
+22. Clause 7's parse-time byte cap is doing more work than the original plan
+    credited it with: the true ceiling is 434 bytes, not 254, because `name`
+    and `text` are capped in UTF-16 CODE UNITS (`.slice(48)`, `.slice(24)`)
+    while the pack cap is in UTF-8 BYTES, so a CJK name costs three bytes per
+    unit. The cap must therefore be measured in UTF-8 bytes — the same
+    `utf8Bytes` helper `parseChallengesManifest` already uses — and NOT in
+    `.length`. A `.length` check would pass a 434-byte line as 96.
+
+================================================================================
+Broken clauses with a concrete failure and a specific wrong value; then the
+CORRECT list; then answer the question in clause 18.

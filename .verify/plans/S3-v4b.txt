@@ -1,0 +1,212 @@
+You are reviewing a PLAN before a line of it is written. Refuse it if it is
+wrong. This is a TypeScript monorepo: `shared/` is imported by both `client/`
+and `server/`.
+
+Answer in this shape:
+
+  * For each clause you judge BROKEN, give a CONCRETE FAILURE: the exact input
+    or sequence, and the specific WRONG VALUE it produces (a number, a string,
+    a status code). "This could be a problem" is not an answer.
+  * A closing section headed CORRECT listing, by number, every clause you judge
+    correct as written. A clean bill has to be a visible judgement.
+
+Anything in the BACKGROUND below may itself be wrong — it was written by
+reading the code, but read the code yourself and say so if a stated fact does
+not hold.
+
+================================================================================
+BACKGROUND — the code as it is today (commit 4e3743c)
+================================================================================
+
+DOOMCRAFT ships "packs": versioned content bundles. Two classes. A BUILD pack's
+fingerprint inputs are checked-in string literals compared against what the
+running binary recomputes. A DATA pack's inputs are computed from a JSON file on
+disk; there are no literals to bump. `items` is a DATA pack.
+
+shared/src/items.ts:
+
+  export enum ItemKind { SKIN=0, EMBLEM=1, TRAIL=2, TITLE=3, TROPHY=4 }
+  export const ITEM_KIND_NAMES = Object.freeze(['skin','emblem','trail','title','trophy']);
+  export enum ItemRarity { COMMON=0, UNCOMMON=1, RARE=2, EPIC=3, RELIC=4 }
+
+  interface ItemDef { id; kind; name; rarity; tradable; tint; emissive; text }
+
+  parseItemsManifest(text) — refuses (does not correct). Per entry it checks:
+    id === sanitiseContentId(id) and non-empty; no duplicate id;
+    kind in KIND_BY_NAME; rarity in RARITY_BY_NAME;
+    name = String(e.name).slice(0, MAX_ITEM_NAME=48), refuse if empty;
+    tradable = (e.tradable === true); refuse if tradable && (TITLE || TROPHY);
+    text = String(e.text).slice(0, MAX_TITLE_TEXT=24); refuse if TITLE && empty.
+    tint/emissive via colour(): array of 3 finite numbers in [0,4], else null.
+    Any error at all => manifest is null.
+
+  itemsFingerprintInputs(manifest) — one line per item, sorted by id:
+    `${id}:${kindName}/${rarityName}/${tradable?1:0}/${tint??'-'}/${emissive??'-'}/${text}/${name}`
+    tint/emissive render as `a,b,c`.
+
+server/src/packs.ts `itemsAt(version)`:
+    parse the file, inputs = itemsFingerprintInputs(manifest),
+    digest = sha256(inputs.join('\n')), pack = itemsPack(inputs, version).
+  So the DIGEST and the FINGERPRINT of an already-installed items version are
+  RECOMPUTED from the file on every load, using whatever the current code's
+  serialization format is.
+
+shared/src/packs.ts: MAX_PACK_INPUTS=512, MAX_PACK_INPUT_BYTES=160. The release
+gates call `checkPackInputs(draft.packs)` (server/src/packs.ts:1020), which
+refuses a pack whose any input line exceeds 160 bytes.
+
+shared/src/modes.ts: MAX_CONTENT_ID_LENGTH=48,
+CONTENT_ID_PATTERN=/^[a-z0-9][a-z0-9_-]{0,47}$/ — so an id may contain `_` and
+`-` but must begin alphanumeric.
+
+client/src/ui/loadoutModel.ts:
+  KIND_ORDER = [SKIN, TITLE, EMBLEM, TRAIL, TROPHY]
+  SECTION_TITLES / SLOT_FOR_KIND are Records keyed by ItemKind; SLOT_FOR_KIND
+  maps SKIN->'skin', TITLE->'title', the rest -> null.
+  guessKind(localId): head = localId.split('-')[0];
+    idx = ITEM_KIND_NAMES.indexOf(head); return idx >= 0 ? idx : ItemKind.SKIN.
+  A row whose kind has no section title falls back to the literal 'Items'; a row
+  whose kind is not in KIND_ORDER is DROPPED from the view entirely.
+
+server/src/craft.ts: CRAFTABLE_KINDS = {SKIN, EMBLEM, TRAIL}.
+server/src/packs.ts `rollMatchDrops`: iterates the whole items manifest and
+  skips ONLY `kind === TITLE || kind === TROPHY`; everything else is eligible to
+  drop, weighted by rarity.
+server/src/index.ts trade routes check `def.tradable`.
+
+Precedent set by the two sibling DATA packs (shared/src/variants.ts,
+shared/src/challenges.ts): each declares its own MAX_*_INPUT_BYTES mirroring
+MAX_PACK_INPUT_BYTES and REFUSES an over-long line AT PARSE TIME, and each
+refuses C0 control characters in its free-form display name, because the review
+digest is `inputs.join('\n')` and a newline inside a name forges the diff. Each
+puts its single free-form token LAST, on the stated argument that a free-form
+token is unambiguous only where it is terminal.
+
+MEASURED, not assumed (run with node):
+  - The longest line `itemsFingerprintInputs` can emit TODAY, with existing
+    kinds only, is 254 bytes: id 48 chars, rarity 'uncommon', tint and emissive
+    each three copies of String(1/3) ("0.3333333333333333"), text 24 chars,
+    name 48 chars. That is 94 bytes over MAX_PACK_INPUT_BYTES, and NOTHING in
+    parseItemsManifest refuses it.
+  - The realistic variant token line, with no new column at all, is 71 bytes:
+    `weapon_variant-shotgun-slug:weapon_variant/uncommon/1/-/-//Slug Shotgun`
+
+================================================================================
+THE PLAN — V4b, "the ownership token"
+================================================================================
+
+GOAL: a player can OWN a weapon variant as an inventory item. V4b adds the token
+and its serialization only. No equipping, no claim reaching a room, no crafting,
+no drops — those are V4c and V4e.
+
+ 1. Add `WEAPON_VARIANT = 5` to `ItemKind` and append the string
+    `'weapon_variant'` to `ITEM_KIND_NAMES` at index 5, and add
+    `weapon_variant: ItemKind.WEAPON_VARIANT` to `KIND_BY_NAME`. Appending
+    rather than inserting keeps every existing numeric kind value unchanged, so
+    no already-serialized item line changes its `kindName` token.
+
+ 2. Add `readonly variantId: string` to `ItemDef`. It is the id of a row in the
+    variants pack (e.g. `shotgun-slug`). It is `''` for every kind except
+    WEAPON_VARIANT.
+
+ 3. `parseItemsManifest` gains two coupled refusals:
+    (a) if kind === WEAPON_VARIANT and `variantId` is not a non-empty string
+        equal to `sanitiseContentId(variantId)`, refuse the manifest;
+    (b) if kind !== WEAPON_VARIANT and `variantId` is present and non-empty,
+        refuse the manifest — rather than silently dropping the field.
+    V4b does NOT check that the variantId names a row that exists in the live
+    variants pack: items.ts must not import variants.ts, and the two packs
+    version independently. That cross-pack check is a RELEASE GATE check and
+    belongs to V4c.
+
+ 4. `itemsFingerprintInputs` emits `variantId` as a new column placed
+    IMMEDIATELY AFTER `emissive` and BEFORE `text`:
+      `${id}:${kind}/${rarity}/${tradable}/${tint}/${emissive}/${variantId}/${text}/${name}`
+    It goes there, and not at the end, because `variantId` is a
+    `sanitiseContentId` slug and therefore cannot contain `/`, while `text` and
+    `name` are free-form and can. A new column may only be placed inside the
+    positional block.
+
+ 5. The column is emitted UNCONDITIONALLY — every item line gains `//` or
+    `/shotgun-slug/`. This changes the fingerprint and the sha256 digest of
+    every already-installed items version, because `itemsAt()` recomputes both
+    from the file on every load. That is accepted rather than avoided, on the
+    ground that the live release is `revision 0, ordinal 1` — the compiled-in
+    builtin — so no stored release document names an items digest today, and a
+    conditional-suffix encoding would make two different manifests (a
+    non-variant item, and a variant item whose variantId happens to be empty)
+    serialize identically.
+
+ 6. Because clause 5 moves the digest of items@1, and because `content/items.json`
+    is the bundled items@1 that ships with the binary, no version bump is
+    required: the same version number legitimately has a new digest when the
+    serialization format changes, and `unsatisfied()` compares the digest a
+    RELEASE DOCUMENT recorded against the digest the host computes now.
+
+ 7. Add to `parseItemsManifest` a parse-time byte cap mirroring the two sibling
+    packs: compute each item's fingerprint input line and refuse the manifest if
+    any exceeds `MAX_ITEM_INPUT_BYTES`, a new constant asserted equal to
+    `MAX_PACK_INPUT_BYTES`. This fixes the pre-existing 254-byte hole measured
+    above, in which an operator can author an items pack that parses clean,
+    installs, and is then refused by the release gate forever with no
+    author-time signal.
+
+ 8. Add to `parseItemsManifest` a C0-control refusal on `name` and on `text`,
+    mirroring `parseVariantsManifest`: refuse if
+    /[\u0000-\u001f\u007f]/ matches either. Without it a `name` containing `\n`
+    splits one item's line into two inside `inputs.join('\n')`, so a manifest
+    with N items can produce the identical digest to a manifest with N+1 items.
+
+ 9. Also close the adjacent ambiguity clause 8 does not: `text` and `name` are
+    BOTH free-form and BOTH trail the line, so `{text:"Alpha/Beta", name:"Gamma"}`
+    and `{text:"Alpha", name:"Beta/Gamma"}` serialize to the identical line and
+    therefore to the identical digest, while the loadout renders a different
+    item name. Fix it by refusing `/` in `text` — `text` is a display title, and
+    `name` stays the single terminal free-form token, matching the sibling packs.
+
+10. `client/src/ui/loadoutModel.ts`: add WEAPON_VARIANT to KIND_ORDER (last),
+    SECTION_TITLES ('Weapon Variants'), and SLOT_FOR_KIND (null — V4b grants no
+    equip slot; V4c adds it). Without the KIND_ORDER entry an owned variant
+    token renders in NO section at all and the player cannot see an item they
+    own.
+
+11. Token ids in `content/items.json` are of the form
+    `weapon_variant-<variantId>`, e.g. `weapon_variant-shotgun-slug`, so that
+    `guessKind` — which splits on `-` and takes head[0] — resolves a DORMANT
+    variant token to WEAPON_VARIANT rather than to the SKIN fallback.
+
+12. V4b adds two rows to `content/items.json`, one per row in
+    `content/variants.json`: `weapon_variant-shotgun-slug` (name "Slug Shotgun")
+    and `weapon_variant-rocket-swift` (name "Swift Rocket"), both
+    `rarity: "uncommon"` per docs/VARIANTS.md §7.2's uncommon floor, both
+    `tradable: true`.
+
+13. Clause 12 is safe with respect to supply: §7.2 says variants are
+    craft-only, and `CRAFTABLE_KINDS` does not contain WEAPON_VARIANT, so no
+    craft can produce one in V4b.
+
+14. Clause 12 is safe with respect to trading: server trade routes gate on
+    `def.tradable`, and a tradable variant is the intended policy, so no change
+    is needed there.
+
+15. Proof obligations. Each of these must be shown RED with its own fix
+    reverted, and what goes red must be checked:
+    (a) an items manifest with a WEAPON_VARIANT row and no variantId is refused;
+    (b) a non-variant row carrying a variantId is refused;
+    (c) a 161-byte line is refused at parse time and the message names
+        MAX_PACK_INPUT_BYTES;
+    (d) a name containing `\n` is refused, and the test asserts the digest
+        collision it prevents rather than only the refusal;
+    (e) the two-manifest `/` collision of clause 9 is refused;
+    (f) an owned `weapon_variant-*` ref that the live pack no longer defines
+        renders under 'Weapon Variants' and not under 'Skins'.
+
+16. Out of scope for V4b and explicitly NOT done: `/api/equip`,
+    `RoomOptions.variantClaims`, `equipVerdict`, the killfeed, any craft recipe,
+    `PackInventory.summary()`'s missing `variants` key, and the `trust.test.ts`
+    scan's missing `variant` term.
+
+================================================================================
+Now: which clauses are broken, with a concrete failure and a specific wrong
+value for each; then the CORRECT list. And name anything in the BACKGROUND that
+is factually wrong.
