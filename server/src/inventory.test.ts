@@ -47,7 +47,7 @@ describe('v4 -> v5', () => {
   it('migrates a real v4 profile: balance intact, inventory empty, band unknown', () => {
     const p = migrateProfile(V4_FIXTURE, 'device-fixture-v4', 1_755_100_000_000);
     expect(p.version).toBe(PERSIST_VERSION);
-    expect(PERSIST_VERSION).toBe(6);
+    expect(PERSIST_VERSION).toBe(7);
     expect(p.economy.scrap).toBe(860);
     expect(p.economy.lifetimeScrap).toBe(1200);
     expect(p.progress.xp).toBe(4200);
@@ -65,8 +65,14 @@ describe('v4 -> v5', () => {
       ageBand: 'unknown',
     };
     const p = migrateProfile(v5, 'device-fixture-v5', 1_755_100_000_000);
-    expect(p.version).toBe(6);
+    // Tracks the constant. A literal here says nothing about the migration and
+    // has to be edited on every bump, which is how a version pin stops meaning
+    // anything; `PERSIST_VERSION` is pinned once, deliberately, above.
+    expect(p.version).toBe(PERSIST_VERSION);
     expect(p.challenges).toEqual({ day: '', week: '', counts: {}, done: [], owed: [] });
+    // v7: a profile written before rewarded existed starts owing nothing and
+    // having taken nothing, so its first grant today pays the top of the ladder.
+    expect(p.adRewards).toEqual({ day: '', count: 0, lastMs: 0 });
     expect(p.economy.scrap).toBe(860);
     expect(p.economy.lifetimeScrap).toBe(1200);
   });

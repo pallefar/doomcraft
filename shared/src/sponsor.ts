@@ -53,6 +53,47 @@ export const SERVABLE_SURFACES: readonly SurfaceId[] = Object.freeze([
 /** The platform's own ceiling on interstitials per device per UTC day. */
 export const AD_INTERSTITIALS_PER_DAY = 4;
 
+/* -------------------------------------------------------------------------- *
+ * S11 rewarded — Gate 5 (docs/SPONSORS.md §4.5)
+ * -------------------------------------------------------------------------- */
+
+/** How long the player must actually be there. The server times this itself. */
+export const AD_REWARD_MIN_MS = 15_000;
+/** Grants per account per UTC day. */
+export const AD_REWARDS_PER_DAY = 4;
+/** Minimum gap between two grants. */
+export const AD_REWARD_MIN_GAP_MS = 180_000;
+/**
+ * Diminishing returns, ECONOMY.md's rule made concrete. Index = grants already
+ * taken today, so the first pays 40 and the fifth pays nothing.
+ */
+export const AD_REWARD_SCRAP_LADDER: readonly number[] = Object.freeze([40, 30, 20, 10]);
+/**
+ * Accounts with less than this much server-recorded lifetime play are paid
+ * ZERO. A fresh account that exists only to watch ads is the whole shape of
+ * rewarded-video fraud, and playtime is the cheapest thing to require.
+ */
+export const AD_REWARD_MIN_LIFETIME_SECONDS = 30 * 60;
+/** Heartbeat cadence, and the arrival window a real 2 s beat can land in. */
+export const AD_REWARD_BEAT_MS = 2_000;
+export const AD_REWARD_BEAT_MIN_MS = 1_600;
+export const AD_REWARD_BEAT_MAX_MS = 3_500;
+/** Fraction of beats that must report the tab visible AND focused. */
+export const AD_REWARD_FOCUS_RATIO = 0.8;
+
+/** Why a claim was refused. `ok` is the only paying answer. */
+export type RewardRefusal =
+  | 'ok'
+  | 'unknown-session'
+  | 'already-claimed'
+  | 'too-soon'
+  | 'too-few-beats'
+  | 'not-watched'
+  | 'daily-cap'
+  | 'gap'
+  | 'too-new'
+  | 'in-pvp';
+
 export interface Sponsor {
   id: string;                       // 'spn_' + 12 hex
   legalName: string;

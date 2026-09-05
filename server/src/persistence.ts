@@ -48,7 +48,7 @@ import { isPrototypePollutingKey } from '@doomcraft/shared/trust';
  * whitelist, so a migration step that adds a key the literal does not name is a
  * no-op with a version bump on it.
  */
-export const PERSIST_VERSION = 6;
+export const PERSIST_VERSION = 7;
 
 /** Hard ceiling on a stored balance. A bug, not a player, is what hits this. */
 export const MAX_SCRAP_BALANCE = 1_000_000_000;
@@ -164,6 +164,25 @@ export interface ChallengeOwed {
   readonly item: string | null;
 }
 
+/**
+ * Rewarded-ad grants, ON THE PROFILE because they are MONEY.
+ *
+ * The interstitial's frequency cap lives in memory with the rest of the ad
+ * cap machine, and that is right: it protects a player, and a restart
+ * forgiving the count errs towards showing FEWER ads. This one errs the other
+ * way — an in-memory grant counter is reset by every deploy, and this project
+ * deploys several times a day, so "four a day" would mean "four per deploy".
+ * Rule 20's precedent: money that must survive a restart goes on the profile.
+ */
+export interface StoredAdRewards {
+  /** UTC 'YYYY-MM-DD' the count belongs to. */
+  day: string;
+  /** Grants already taken today. Indexes the diminishing ladder. */
+  count: number;
+  /** When the last grant landed, for the minimum-gap rule. */
+  lastMs: number;
+}
+
 export interface StoredChallenges {
   /** UTC 'YYYY-MM-DD' the daily counters belong to. */
   day: string;
@@ -226,6 +245,7 @@ export interface StoredProfile {
   inventory: StoredInventory;
   moderation: StoredModeration;
   challenges: StoredChallenges;
+  adRewards: StoredAdRewards;
   ageBand: AgeBand;
   /**
    * THE DOWNGRADE GUARD. Top-level keys this build does not recognise, carried
@@ -254,7 +274,7 @@ export interface StoredProfile {
 export const KNOWN_PROFILE_KEYS: readonly string[] = Object.freeze([
   'version', 'deviceId', 'accountId', 'accountSecret', 'createdMs', 'updatedMs',
   'progress', 'settings', 'bindings', 'loadout', 'entitlements', 'stats',
-  'economy', 'inventory', 'moderation', 'challenges', 'ageBand', '_unknown',
+  'economy', 'inventory', 'moderation', 'challenges', 'adRewards', 'ageBand', '_unknown',
 ]);
 
 /**
@@ -415,6 +435,7 @@ export function createProfile(deviceId: string, nowMs = Date.now()): StoredProfi
     inventory: defaultInventory(),
     moderation: defaultModeration(),
     challenges: defaultChallenges(),
+    adRewards: defaultAdRewards(),
     ageBand: 'unknown',
   };
 }
@@ -424,6 +445,27 @@ function defaultInventory(): StoredInventory {
 }
 function defaultChallenges(): StoredChallenges {
   return { day: '', week: '', counts: {}, done: [], owed: [] };
+}
+function defaultAdRewards(): StoredAdRewards {
+  return { day: '', count: 0, lastMs: 0 };
+}
+
+/**
+ * Read back a reward record, refusing anything that would loosen a cap.
+ *
+ * A profile is bytes on a disk this process does not exclusively own, so a
+ * count is clamped and a future timestamp is discarded: `lastMs` in the future
+ * would make the minimum-gap check pass forever, which is the one direction
+ * that pays money.
+ */
+function sanitiseAdRewards(raw: unknown, nowMs: number): StoredAdRewards {
+  const r = asRecord(raw);
+  const lastMs = Math.max(0, num(r.lastMs, 0));
+  return {
+    day: str(r.day, '').slice(0, 10),
+    count: clampInt(num(r.count, 0), 0, 1_000),
+    lastMs: lastMs > nowMs ? 0 : lastMs,
+  };
 }
 function defaultModeration(): StoredModeration {
   return { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] };
@@ -606,6 +648,7 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
     inventory: sanitiseInventory(inv),
     moderation: sanitiseModeration(mod),
     challenges: sanitiseChallenges(chal),
+    adRewards: sanitiseAdRewards(raw.adRewards, Date.now()),
     ageBand: ageBandOf(raw.ageBand),
   };
 
