@@ -127,7 +127,7 @@ import { rawDays, readRollup, rolledDays, sweepAdLog } from './adsRollup.js';
 import type { AdDayRollup } from './adsRollup.js';
 import { AdService } from './ads.js';
 import { CreativeStore, IMAGE_MAX_BYTES } from './creatives.js';
-import { PHASE_ONE_SURFACES, type AdEventType, type SurfaceId } from '@doomcraft/shared/sponsor';
+import { AD_MODE_UNKNOWN, SERVABLE_SURFACES, type AdEventType, type SurfaceId } from '@doomcraft/shared/sponsor';
 import { PackKind } from '@doomcraft/shared/packs';
 import { flagOn } from '@doomcraft/shared/flags';
 import { utcDayKey, utcWeekKey } from '@doomcraft/shared/challenges';
@@ -2902,8 +2902,17 @@ async function handleApi(
     if (refuseCrossSiteWrite(req, res, cors)) return true;
     const body = (await readBody(req) ?? {}) as Record<string, unknown>;
     const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
-    const surfaces = (Array.isArray(body.surfaces) ? body.surfaces : [])
-      .filter((v): v is SurfaceId => typeof v === 'number' && (PHASE_ONE_SURFACES as readonly number[]).includes(v));
+    /* A surface this build cannot serve is REFUSED, not dropped.
+     *
+     * The filter used to silently discard SurfaceId.INTERSTITIAL and REWARDED
+     * before `AdService` ever saw them: no fill, no log row, no counter, and a
+     * 200 whose `fills` array simply lacked them. "Surfaces requested" was
+     * therefore not observable anywhere in the system, which is a poor thing to
+     * discover while trying to work out why a surface earns nothing. */
+    const asked = (Array.isArray(body.surfaces) ? body.surfaces : [])
+      .filter((v): v is SurfaceId => typeof v === 'number');
+    const surfaces = asked.filter((v) => (SERVABLE_SURFACES as readonly number[]).includes(v));
+    const refused = asked.filter((v) => !(SERVABLE_SURFACES as readonly number[]).includes(v));
     let adsRemoved = false;
     let ageBand: 'unknown' | 'u13' | '13-17' | '18plus' = 'unknown';
     if (isValidDeviceId(deviceId)) {
@@ -2917,7 +2926,9 @@ async function handleApi(
       deviceId,
       sessionId: typeof body.sessionId === 'string' ? body.sessionId.slice(0, 64) : '',
       surfaces,
-      mode: typeof body.mode === 'number' ? body.mode : 0,
+      // AD_MODE_UNKNOWN, never 0 — ModeId.QUEST IS 0, so a request with no
+      // declared mode must not be recorded as a Quest one.
+      mode: typeof body.mode === 'number' ? body.mode : AD_MODE_UNKNOWN,
       platform: body.platform === 'mobile' ? 'mobile' : 'desktop',
     }, {
       adsRemoved,
@@ -2927,6 +2938,7 @@ async function handleApi(
        * from a client-supplied field. */
       region: '',
     });
+    if (refused.length > 0) ads.refuseSurfaces(refused, body.mode, body.platform);
     sendJson(res, 200, { fills }, cors);
     return true;
   }

@@ -26,6 +26,7 @@
  */
 
 import { createHmac, randomBytes } from 'node:crypto';
+import { AD_INTERSTITIAL_MIN_INTERVAL_MS } from '@doomcraft/shared/constants';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -41,6 +42,7 @@ import {
   type Campaign,
   type Creative,
   type Sponsor,
+  AD_INTERSTITIALS_PER_DAY,
   AD_LOG_VERSION,
   AD_MODE_UNKNOWN,
 } from '@doomcraft/shared/sponsor';
@@ -175,6 +177,8 @@ export class AdService {
      * wrapped in a bare `catch {}` while the counter had already moved.
      */
     logWriteFailures: 0,
+    /** Surfaces asked for that this build cannot serve. Was unobservable. */
+    refusedSurfaces: 0,
   };
 
   /**
@@ -190,6 +194,22 @@ export class AdService {
 
   /** Groups one decision's skip rows with the fill it did or did not produce. */
   private decisionId = '';
+
+  /**
+   * Per-device interstitial pressure: `deviceHash` -> {day, count, lastMs}.
+   *
+   * The PLATFORM ceiling, applied across every campaign rather than per
+   * campaign — `FrequencyCap.perDayInterstitials` has always been documented as
+   * "over any campaign's own number" and has never been read by anything. A
+   * per-campaign cap cannot bound what a player experiences, because two
+   * campaigns each under their own cap still add up.
+   *
+   * In memory, like every other cap in this file, so a restart forgives the
+   * day's count. That is the conservative direction for a PLAYER-protecting cap
+   * and it keeps one cap machine rather than two. It would NOT be acceptable
+   * for a rewarded grant, which is money: those go on the profile (P2c).
+   */
+  private readonly interFreq = new Map<string, { day: string; count: number; lastMs: number }>();
 
   constructor(dataRoot: string, options: AdServiceOptions = {}) {
     this.root = dataRoot.replace(/\/+$/, '');
@@ -243,9 +263,36 @@ export class AdService {
     return out;
   }
 
+  /**
+   * Record surfaces this build cannot serve.
+   *
+   * Called by the route, which is where the filtering has to happen — the
+   * request never reaches `decide()`. Writing the row here keeps every fact
+   * about a decision in one log rather than splitting it across a log and a
+   * route that has nowhere to put it.
+   */
+  refuseSurfaces(surfaces: readonly number[], mode: unknown, platform: unknown): void {
+    const now = this.clock();
+    for (const surface of surfaces.slice(0, 8)) {
+      this.counters.refusedSurfaces++;
+      this.append({
+        ms: now, type: 'decide', surface,
+        note: `skip: surface ${surface} is not servable by this build`,
+        decisionId: '', mode: typeof mode === 'number' ? mode : AD_MODE_UNKNOWN,
+        platform: platform === 'mobile' ? 'mobile' : 'desktop',
+      });
+    }
+    this.flushRows();
+  }
+
   private decideOne(
     surface: SurfaceId, req: DecideRequest, ctx: DecideContext, deviceHash: string, now: number,
   ): AdFill | null {
+    /* S10's platform gates, before any campaign is considered: a refusal here is
+     * about the PLAYER, not about the inventory, so no campaign should be able
+     * to argue with it. The client also gates on deaths-since-last, which only
+     * it can know; these two are the ones a server can actually enforce. */
+    if (surface === SurfaceId.INTERSTITIAL && !this.interstitialAllowed(deviceHash, now, req)) return null;
     // 1-2. Direct-sold, one pass: live, in-window, targeted, capped, funded.
     const eligible: { campaign: Campaign; creative: Creative; assetUrl: string; weight: number }[] = [];
     for (const c of this.campaigns) {
@@ -339,6 +386,48 @@ export class AdService {
     return true;
   }
 
+  /**
+   * May this device be shown an interstitial right now?
+   *
+   * Counted on SERVE, not on impression: a player who was interrupted has been
+   * interrupted whether or not their client reported the render, and for a cap
+   * that exists to protect them, over-counting is the safe direction.
+   */
+  private interstitialAllowed(deviceHash: string, now: number, req: DecideRequest): boolean {
+    const day = utcDay(now);
+    const state = this.interFreq.get(deviceHash);
+    if (state === undefined || state.day !== day) return true;
+    if (state.count >= AD_INTERSTITIALS_PER_DAY) {
+      this.append({
+        ms: now, type: 'decide', surface: SurfaceId.INTERSTITIAL,
+        note: `skip: device is at the platform ceiling of ${AD_INTERSTITIALS_PER_DAY} interstitials today`,
+        decisionId: this.decisionId, mode: req.mode, platform: req.platform,
+      });
+      return false;
+    }
+    if (now - state.lastMs < AD_INTERSTITIAL_MIN_INTERVAL_MS) {
+      this.append({
+        ms: now, type: 'decide', surface: SurfaceId.INTERSTITIAL,
+        note: `skip: last interstitial was ${Math.round((now - state.lastMs) / 1000)}s ago, minimum is ${AD_INTERSTITIAL_MIN_INTERVAL_MS / 1000}s`,
+        decisionId: this.decisionId, mode: req.mode, platform: req.platform,
+      });
+      return false;
+    }
+    return true;
+  }
+
+  /** Record that this device was served an interstitial. */
+  private countInterstitial(deviceHash: string, now: number): void {
+    const day = utcDay(now);
+    const state = this.interFreq.get(deviceHash);
+    if (state === undefined || state.day !== day) {
+      this.interFreq.set(deviceHash, { day, count: 1, lastMs: now });
+      return;
+    }
+    state.count++;
+    state.lastMs = now;
+  }
+
   private rotate(creativeIds: string[], sessionId: string): Creative | null {
     if (creativeIds.length === 0) return null;
     const i = fnv(sessionId) % creativeIds.length;
@@ -363,6 +452,7 @@ export class AdService {
     };
     this.fills.set(nonce, record);
     this.counters.fills++;
+    if (surface === SurfaceId.INTERSTITIAL) this.countInterstitial(deviceHash, now);
 
     /* THE ROW THAT DID NOT EXIST. A successful decide used to write nothing at
      * all, so the log held only refusals and there was no denominator for

@@ -34,6 +34,25 @@ export const PHASE_ONE_SURFACES: readonly SurfaceId[] = Object.freeze([
   SurfaceId.MODE_TILE, SurfaceId.BOOT_LINE, SurfaceId.INTERMISSION_CARD,
 ]);
 
+/**
+ * The surfaces a decide request may ask for TODAY.
+ *
+ * Phase one plus S10, the between-match interstitial. Kept separate from
+ * `PHASE_ONE_SURFACES` rather than growing it, because that constant means
+ * something specific — DOM that already exists on screens where the renderer is
+ * idle — and the interstitial is not that.
+ *
+ * `REWARDED` is deliberately still absent: it needs the Gate 5 handshake and
+ * durable per-day grant caps, which are P2c. A surface that is asked for and
+ * not servable is REFUSED WITH A REASON, never dropped in silence.
+ */
+export const SERVABLE_SURFACES: readonly SurfaceId[] = Object.freeze([
+  ...PHASE_ONE_SURFACES, SurfaceId.INTERSTITIAL,
+]);
+
+/** The platform's own ceiling on interstitials per device per UTC day. */
+export const AD_INTERSTITIALS_PER_DAY = 4;
+
 export interface Sponsor {
   id: string;                       // 'spn_' + 12 hex
   legalName: string;

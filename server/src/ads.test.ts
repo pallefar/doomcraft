@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { AD_LOG_VERSION, SurfaceId, type Campaign, type Creative } from '@doomcraft/shared/sponsor';
+import { AD_INTERSTITIALS_PER_DAY, AD_LOG_VERSION, SurfaceId, type Campaign, type Creative } from '@doomcraft/shared/sponsor';
 
 import { AdService } from './ads.js';
 
@@ -540,5 +540,89 @@ describe('viewable, non-viewable and undetermined are three different answers', 
     expect(ads.counters.viewable).toBe(0);
     expect(ads.counters.nonViewable).toBe(0);
     expect(ads.counters.undetermined).toBe(1);
+  });
+});
+
+/**
+ * S10's platform gates.
+ *
+ * `FrequencyCap.perDayInterstitials` has been typed, defaulted to 4 and
+ * documented as "PLATFORM ceiling ... over any campaign's own number" since the
+ * type was written, and read by absolutely nothing. These are the gates a
+ * SERVER can enforce; the client also gates on deaths-since-last, which only it
+ * can know.
+ */
+describe('the between-match interstitial is rationed', () => {
+  function interBooking(): { campaigns: Campaign[]; creatives: Creative[] } {
+    const b = textCampaign();
+    b.campaigns[0].placements = [{
+      surface: SurfaceId.INTERSTITIAL, creativeIds: ['crv_text1'], weight: 50, floorMicrosCpm: 0,
+    }];
+    return b;
+  }
+  const INTER = { ...REQ, surfaces: [SurfaceId.INTERSTITIAL] };
+
+  it('serves one, then refuses until the minimum interval has passed', () => {
+    const clock = { now: T0 };
+    const { ads } = service(interBooking(), clock);
+
+    expect(ads.decide(INTER, CTX), 'the first interstitial was refused').toHaveLength(1);
+    clock.now += 60_000; // well under the 180s floor
+    expect(ads.decide(INTER, CTX), 'a second interstitial came too soon').toHaveLength(0);
+    clock.now += 130_000; // now past 180s from the first
+    expect(ads.decide(INTER, CTX)).toHaveLength(1);
+  });
+
+  /**
+   * RED WITHOUT THE FIX: delete the `interstitialAllowed` call in `decideOne`.
+   * The ceiling that has never been enforced goes back to never being enforced.
+   */
+  it('stops at the platform ceiling of four per device per day', () => {
+    const clock = { now: T0 };
+    const { ads } = service(interBooking(), clock);
+
+    let served = 0;
+    for (let i = 0; i < 10; i++) {
+      served += ads.decide(INTER, CTX).length;
+      clock.now += 200_000; // always past the interval, so only the cap can bite
+    }
+    expect(served, 'the platform ceiling did not hold').toBe(AD_INTERSTITIALS_PER_DAY);
+  });
+
+  it('forgives the count on a new UTC day', () => {
+    const clock = { now: T0 };
+    const { ads } = service(interBooking(), clock);
+    for (let i = 0; i < 6; i++) { ads.decide(INTER, CTX); clock.now += 200_000; }
+
+    /* +23h, not +24h: T0 is 12:00 UTC so this is genuinely the next UTC day,
+     * and it stays inside the fixture campaign's window (endMs is T0 + 24h
+     * exactly, and `now >= endMs` ends it). */
+    clock.now = T0 + 23 * 60 * 60 * 1000;
+    expect(ads.decide(INTER, CTX), 'the daily count did not roll over').toHaveLength(1);
+  });
+
+  it('counts the refusal in the log, with the reason', () => {
+    const clock = { now: T0 };
+    const { ads, root } = service(interBooking(), clock);
+    ads.decide(INTER, CTX);
+    clock.now += 1_000;
+    ads.decide(INTER, CTX);
+
+    expect(logText(root)).toContain('minimum is 180s');
+  });
+
+  /**
+   * The decide route used to discard an unservable surface before AdService saw
+   * it: no fill, no row, no counter, and a 200 whose fills array simply lacked
+   * it. "Surfaces requested" was observable nowhere.
+   */
+  it('records a surface it cannot serve instead of dropping it silently', () => {
+    const clock = { now: T0 };
+    const { ads, root } = service(textCampaign(), clock);
+
+    ads.refuseSurfaces([SurfaceId.REWARDED], 3, 'mobile');
+
+    expect(ads.counters.refusedSurfaces).toBe(1);
+    expect(logText(root)).toContain('is not servable by this build');
   });
 });
