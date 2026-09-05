@@ -301,6 +301,38 @@ being silently wrong.
     implementations and asserts SET EQUALITY, not a subset.
   - Still out of scope: floor pickups (§3's `EF_SPAWN`) and any rarity above
     uncommon.
+- **V4f — the equip button.** V4c landed the server half of the variant slot
+  and only that half: `EquipSlot`, `variantSlotWeaponId` and `equipVerdict`'s
+  `ref -> ItemDef.variantId -> VariantDef.base` walk were live, while
+  `loadoutModel.ts` still mapped `WEAPON_VARIANT` to a null slot. A player
+  could craft a token (V4e) and had no way to wear it. What it took:
+  - **`GET /api/variants`**, mirroring `/api/items`: `{version, variants:
+    [{id, base, name}]}`, and `{version: 0, variants: []}` when no pack is
+    live. The tab cannot compute the slot without it — `/api/items` carries
+    `variantId` and no base — and the in-room `S2C.VARIANT_TABLE` is out of
+    reach because the Loadout tab is a MENU surface. It publishes strictly less
+    than that wire message already gives any CAP_VARIANTS client.
+  - **The slot is the ITEM's, not the KIND's.** `SLOT_FOR_KIND` has no
+    `WEAPON_VARIANT` entry, deliberately: one constant there hands every token
+    the same gun, and `variant:0` for a shotgun token is answered "that variant
+    is for weapon 1, not weapon 0". Each row computes `variant:<base>` from the
+    `/api/variants` map, and a token the map does not name gets NO action
+    rather than a button that always 400s.
+  - **Equipped-ness is a REF comparison.** `inventory.variants` is keyed by the
+    base weapon and valued by the owned ref; comparing on the variant id or the
+    localId lights every copy the player holds, including refs from a different
+    items version that the server equips separately.
+  - **Two doors were dropping the claim map.** The profile decoder in
+    `loadoutTab.ts` never carried `inventory.variants`, so no row could read as
+    Equipped; and the 200 branch of `equip()` rebuilt the inventory from
+    `equippedSkin` and `title` alone, so a SUCCESSFUL variant equip repainted
+    from stale claims and the button flipped straight back to "Equip".
+    `POST /api/equip` had been answering with the whole map since V4c.
+  - `server/src/equipAgreement.test.ts` runs both real implementations and
+    compares (ref, slot) PAIRS. A set of slot NAMES does not discriminate: a
+    build that swaps the two bundled tokens produces the identical set
+    `{skin, title, variant:1, variant:3}` while the server answers the first
+    click 400.
 
 Each sub-phase goes to the review as its own numbered clauses before it is
 built. V4a's are in `.verify/plans/S3-v4a.txt`.

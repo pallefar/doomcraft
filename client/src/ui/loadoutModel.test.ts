@@ -17,10 +17,13 @@ import {
   fallbackName,
   renderedLoadoutStrings,
   swatchCss,
+  wireVariantClaims,
   type LoadoutInputs,
   type WireItemsPack,
+  type WireVariantsPack,
 } from '@/ui/loadoutModel';
 import { ITEM_KIND_NAMES, ItemKind, parseItemsManifest } from '@shared/items';
+import { readFileSync } from 'node:fs';
 
 const RUST = 'items@1:skin-rust-marine';
 const HAZARD = 'items@1:skin-void-hazard';
@@ -51,11 +54,13 @@ function inputsOf(patch: Partial<LoadoutInputs> = {}): LoadoutInputs {
       ],
       equippedSkin: '',
       title: '',
+      variants: {},
     },
     revoked: [HAZARD],
     scrap: 860,
     lifetimeScrap: 1200,
     pack: PACK,
+    variants: null,
     reserved: {},
     scrapVisible: true,
     busyRef: '',
@@ -142,7 +147,7 @@ describe('the balance and the honest sentences', () => {
     expect(buildLoadoutView(inputsOf({ phase: 'loading' })).line).toContain('Loading');
     expect(buildLoadoutView(inputsOf({ phase: 'offline' })).line).toContain('No server');
     expect(buildLoadoutView(inputsOf({ phase: 'noProfile' })).line).toContain('finish an online match');
-    const empty = inputsOf({ inventory: { items: [], equippedSkin: '', title: '' } });
+    const empty = inputsOf({ inventory: { items: [], equippedSkin: '', title: '', variants: {} } });
     expect(buildLoadoutView(empty).sections).toEqual([]);
     expect(buildLoadoutView(empty).line).toContain('No items yet');
   });
@@ -156,9 +161,31 @@ describe('the balance and the honest sentences', () => {
           { ref: RUST, ms: Number.NaN, source: 'drop' },
           { ref: 'junk-not-a-ref', ms: 1, source: 'drop' },
           { ref: '', ms: 1, source: 'drop' },
+          { ref: 'items@1:weapon_variant-shotgun-slug', ms: 2, source: 'grant' },
         ],
         equippedSkin: '',
         title: '',
+        /* Junk keys: none of these is a canonical decimal weapon id, so none
+         * may light Equipped on anything. */
+        variants: { '01': RUST, '1.0': RUST, x: RUST } as unknown as Record<string, string>,
+      },
+      /* A hostile variants pack. `slot` is posted as a JSON KEY to /api/equip
+       * and `variant:${base}` is built from THIS number, so a NaN, a fraction
+       * or a missing field must not be able to become `variant:NaN`. */
+      pack: {
+        version: 1,
+        items: parseItemsManifest(JSON.stringify({
+          items: [{
+            id: 'weapon_variant-shotgun-slug', kind: 'weapon_variant', name: 'Slug Shotgun',
+            rarity: 'uncommon', tradable: true, variantId: 'shotgun-slug',
+          }],
+        })).manifest!.items,
+      },
+      variants: {
+        version: 1,
+        variants: [
+          { id: 'shotgun-slug', base: Number.NaN, name: 'Slug Shotgun' },
+        ],
       },
     });
     for (const view of [buildLoadoutView(hostile), buildLoadoutView(inputsOf())]) {
@@ -190,7 +217,7 @@ describe('the trade-up affordance', () => {
       { ref: RUST, ms: 11, source: 'drop' },
       { ref: RUST, ms: 12, source: 'drop' },
     ],
-    equippedSkin: '', title: '',
+    equippedSkin: '', title: '', variants: {},
   };
 
   it('offers targets only at 3+ copies, ACTIVE, craftable kind, one rarity up', () => {
@@ -204,7 +231,7 @@ describe('the trade-up affordance', () => {
     expect(rowFor(two, RUST)?.craftTargets).toEqual([]);
     // A title never crafts, whatever the copy count.
     const titles = inputsOf({
-      inventory: { items: [1, 2, 3].map((i) => ({ ref: TITLE, ms: i, source: 'prize' })), equippedSkin: '', title: '' },
+      inventory: { items: [1, 2, 3].map((i) => ({ ref: TITLE, ms: i, source: 'prize' })), equippedSkin: '', title: '', variants: {} },
     });
     expect(rowFor(titles, TITLE)?.craftTargets).toEqual([]);
     // Dormant source: no affordance even with copies.
@@ -273,7 +300,7 @@ describe('V4b: the Weapon Variants section', () => {
     const v = buildLoadoutView(inputsOf({
       pack: VARIANT_PACK,
       revoked: [],
-      inventory: { items: [{ ref: OWNED, ms: 1, source: 'grant' }], equippedSkin: '', title: '' },
+      inventory: { items: [{ ref: OWNED, ms: 1, source: 'grant' }], equippedSkin: '', title: '', variants: {} },
     }));
     const titles = v.sections.map((s) => s.title);
     expect(titles).toContain('Weapon Variants');
@@ -281,8 +308,12 @@ describe('V4b: the Weapon Variants section', () => {
     expect(row.name).toBe('Slug Shotgun');
     expect(row.state).toBe('active');
     expect(row.kindLabel).toBe('weapon_variant');
-    // No slot on either side yet: `equipVerdict` knows only 'skin' and
-    // 'title', so an Equip button here would be a button that always 400s.
+    /* No slot, because this case hands the model NO variants pack at all
+     * (`inputsOf` defaults `variants: null`). From V4f the slot exists, but it
+     * is `variant:<base weapon>` and the base lives in the VARIANTS pack — so
+     * with nothing to resolve `shotgun-slug` against, the honest answer is
+     * still no action rather than a guessed one. The V4f block below is where
+     * the map is present and the button appears. */
     expect(row.slot).toBeNull();
     expect(row.action).toBeNull();
     // And no craft target — CRAFTABLE_KINDS does not carry the kind.
@@ -293,7 +324,7 @@ describe('V4b: the Weapon Variants section', () => {
     const v = buildLoadoutView(inputsOf({
       pack: { version: 2, items: [] },
       revoked: [],
-      inventory: { items: [{ ref: OWNED, ms: 1, source: 'grant' }], equippedSkin: '', title: '' },
+      inventory: { items: [{ ref: OWNED, ms: 1, source: 'grant' }], equippedSkin: '', title: '', variants: {} },
     }));
     expect(v.sections.map((s) => s.title)).toEqual(['Weapon Variants']);
     const row = v.sections[0].rows[0];
@@ -314,11 +345,253 @@ describe('V4b: the Weapon Variants section', () => {
         revoked: [],
         inventory: {
           items: [{ ref: `items@1:${localId}`, ms: 1, source: 'grant' }],
-          equippedSkin: '', title: '',
+          equippedSkin: '', title: '', variants: {},
         },
       }));
       expect(v.sections.length, `kind ${kind} (${ITEM_KIND_NAMES[kind]}) renders in no section`).toBe(1);
       expect(v.sections[0].title, `kind ${kind}`).not.toBe('Items');
     }
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * V4f — THE EQUIP BUTTON. A player can craft a variant token (V4e) and could
+ * not equip it: V4c landed only the server half of the slot.
+ *
+ * Every case below names the input on which the DEFECTIVE and the CORRECT
+ * implementations produce DIFFERENT values (§0 rule 38), because the obvious
+ * input for two of them does not discriminate at all — see each test.
+ * ------------------------------------------------------------------------ */
+
+describe('V4f: a weapon-variant token gets the slot its BASE WEAPON names', () => {
+  /** Both bundled tokens, so a wrong-base defect has somewhere to land. */
+  const VARIANT_PACK: WireItemsPack = {
+    version: 1,
+    items: parseItemsManifest(JSON.stringify({
+      items: [
+        {
+          id: 'weapon_variant-shotgun-slug', kind: 'weapon_variant', name: 'Slug Shotgun',
+          rarity: 'uncommon', tradable: true, variantId: 'shotgun-slug',
+        },
+        {
+          id: 'weapon_variant-rocket-swift', kind: 'weapon_variant', name: 'Swift Rocket',
+          rarity: 'uncommon', tradable: true, variantId: 'rocket-swift',
+        },
+      ],
+    })).manifest!.items,
+  };
+
+  /** `GET /api/variants` as the bundled pack answers it: base 1 and base 3. */
+  const VARIANTS: WireVariantsPack = {
+    version: 1,
+    variants: [
+      { id: 'shotgun-slug', base: 1, name: 'Slug Shotgun' },
+      { id: 'rocket-swift', base: 3, name: 'Swift Rocket' },
+    ],
+  };
+
+  const SLUG = 'items@1:weapon_variant-shotgun-slug';
+  const SLUG_V2 = 'items@2:weapon_variant-shotgun-slug';
+  const SWIFT = 'items@1:weapon_variant-rocket-swift';
+
+  function variantInputs(patch: Partial<LoadoutInputs> = {}): LoadoutInputs {
+    return inputsOf({
+      pack: VARIANT_PACK,
+      variants: VARIANTS,
+      revoked: [],
+      inventory: {
+        items: [{ ref: SLUG, ms: 1, source: 'grant' }],
+        equippedSkin: '', title: '', variants: {},
+      },
+      ...patch,
+    });
+  }
+
+  it('(a) an owned Slug Shotgun offers Equip into variant:1 — the SLOT STRING, not merely an action', () => {
+    /*
+     * DISCRIMINATION. Asserting only "an action exists" passes on a build that
+     * puts a constant in SLOT_FOR_KIND: `variant:0` produces an enabled button
+     * too, and `equipVerdict` answers it "that variant is for weapon 1, not
+     * weapon 0". The slot STRING is what separates the two.
+     * Defective (V4e, no client half): slot null, action null.
+     * Defective (a kind constant):     slot 'variant:0', action 'equip'.
+     */
+    const row = rowFor(variantInputs(), SLUG);
+    expect(row).not.toBeNull();
+    expect(row?.slot).toBe('variant:1');
+    expect(row?.action).toBe('equip');
+    // And the OTHER bundled token is a different gun, from the same map.
+    const both = variantInputs({
+      inventory: {
+        items: [{ ref: SLUG, ms: 1, source: 'grant' }, { ref: SWIFT, ms: 2, source: 'grant' }],
+        equippedSkin: '', title: '', variants: {},
+      },
+    });
+    expect(rowFor(both, SWIFT)?.slot).toBe('variant:3');
+  });
+
+  it('(b) an ACTIVE token the variants pack does not name renders, with NO action', () => {
+    /*
+     * DISCRIMINATION, and the obvious input fails it. A DORMANT unmapped token
+     * gives `action === null` in BOTH implementations, because `state !==
+     * 'active'` already suppresses the action — so the row proves nothing
+     * about the map lookup. This token is ACTIVE (the items pack defines it)
+     * and its `variantId` is absent from the variants map, which is a real
+     * state: an items pack shipped against a variants pack that has since been
+     * re-cut. `equipVerdict` answers "no installed variants pack defines this
+     * variant", so an enabled button here is a 400 the player did not ask for.
+     * Correct:   slot null, action null, ROW PRESENT.
+     * Defective (no guard on the lookup): slot 'variant:undefined',
+     *   action 'equip' — a button that posts a slot routing to nothing.
+     */
+    const noSwift: WireVariantsPack = {
+      version: 2,
+      variants: [{ id: 'shotgun-slug', base: 1, name: 'Slug Shotgun' }],
+    };
+    const v = buildLoadoutView(variantInputs({
+      variants: noSwift,
+      inventory: {
+        items: [{ ref: SWIFT, ms: 1, source: 'grant' }],
+        equippedSkin: '', title: '', variants: {},
+      },
+    }));
+    const row = v.sections.flatMap((sec) => sec.rows).find((r) => r.ref === SWIFT);
+    // PRESENT — hiding an owned item reads as loss, so this is not a row count.
+    expect(row, 'the row vanished; an owned item must always render').toBeDefined();
+    expect(row?.state).toBe('active');
+    expect(row?.slot).toBeNull();
+    expect(row?.action).toBeNull();
+    // The mapped token in the same view still gets its button, so the whole
+    // map did not simply fail to load.
+    expect(rowFor(variantInputs({ variants: noSwift }), SLUG)?.slot).toBe('variant:1');
+  });
+
+  it('(clause 7) a DORMANT token still renders and still offers nothing', () => {
+    const v = buildLoadoutView(variantInputs({ pack: { version: 9, items: [] } }));
+    const row = v.sections.flatMap((sec) => sec.rows).find((r) => r.ref === SLUG);
+    expect(row?.state).toBe('dormant');
+    expect(row?.slot).toBeNull();
+    expect(row?.action).toBeNull();
+  });
+
+  it('(d) Equipped lights for the stored REF alone, not for every copy of the variant', () => {
+    /*
+     * DISCRIMINATION, and the obvious input fails it. "Two copies, one
+     * equipped" does NOT work: `buildLoadoutView` dedups by ref, so two copies
+     * of `items@1:…-shotgun-slug` collapse into ONE row with `copies: 2`, and a
+     * defective localId comparison and the correct ref comparison both answer
+     * `[true]`. Two DISTINCT VERSIONED REFS of the same variant are two rows —
+     * a real state, since a re-cut items pack mints `items@2:` refs while the
+     * old ones stay owned and active — and `applyEquip` stores exactly one of
+     * them.
+     * Correct:   [false, true] — only the ref in `inventory.variants['1']`.
+     * Defective (compare by localId or by variantId): [true, true], and the
+     *   player is shown two guns equipped in one slot.
+     */
+    const v = buildLoadoutView(variantInputs({
+      inventory: {
+        items: [{ ref: SLUG, ms: 1, source: 'grant' }, { ref: SLUG_V2, ms: 2, source: 'craft' }],
+        equippedSkin: '', title: '',
+        variants: { 1: SLUG_V2 },
+      },
+    }));
+    const rows = v.sections.flatMap((sec) => sec.rows).filter((r) => r.ref === SLUG || r.ref === SLUG_V2);
+    expect(rows.map((r) => r.ref)).toEqual([SLUG, SLUG_V2]);
+    expect(rows.map((r) => r.equipped)).toEqual([false, true]);
+    // And the actions follow: one to claim, one to release (clause 6).
+    expect(rows.map((r) => r.action)).toEqual(['equip', 'unequip']);
+    expect(rows.map((r) => r.slot)).toEqual(['variant:1', 'variant:1']);
+  });
+
+  it('a claim under a NON-canonical key equips nothing — `01` is not slot 1', () => {
+    /*
+     * `variantSlotWeaponId` refuses `variant:01`, and `sanitiseVariantClaims`
+     * refuses the key, so a profile that somehow carries one names no slot.
+     * Reading it as slot 1 would show Equipped on an item the game will not
+     * wear — the "told yes, given nothing" failure this repo ranks worst.
+     */
+    const v = buildLoadoutView(variantInputs({
+      inventory: {
+        items: [{ ref: SLUG, ms: 1, source: 'grant' }],
+        equippedSkin: '', title: '',
+        variants: { '01': SLUG } as unknown as Record<string, string>,
+      },
+    }));
+    const row = v.sections.flatMap((sec) => sec.rows).find((r) => r.ref === SLUG);
+    expect(row?.equipped).toBe(false);
+    expect(row?.action).toBe('equip');
+  });
+
+  it('SLOT_FOR_KIND carries no entry for WEAPON_VARIANT — the slot is the ITEM’s, not the kind’s', () => {
+    /*
+     * Clause 4, asserted as SOURCE because the table is module-private. Two
+     * variant tokens with two different bases in one view is the behavioural
+     * half: a kind-keyed constant cannot produce two different slots.
+     */
+    const both = variantInputs({
+      inventory: {
+        items: [{ ref: SLUG, ms: 1, source: 'grant' }, { ref: SWIFT, ms: 2, source: 'grant' }],
+        equippedSkin: '', title: '', variants: {},
+      },
+    });
+    const rows = buildLoadoutView(both).sections.flatMap((sec) => sec.rows);
+    const slots = rows.filter((r) => r.kindLabel === 'weapon_variant').map((r) => r.slot).sort();
+    expect(slots).toEqual(['variant:1', 'variant:3']);
+    const src = readFileSync(new URL('./loadoutModel.ts', import.meta.url), 'utf8');
+    const table = /const SLOT_FOR_KIND[^;]*;/s.exec(src)?.[0] ?? '';
+    expect(table, 'SLOT_FOR_KIND not found — the assertion below would be vacuous').toContain('ItemKind.SKIN');
+    expect(table).not.toContain('WEAPON_VARIANT');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * V4f — the two doors that carry the claim map, and the tab's use of them
+ * ------------------------------------------------------------------------ */
+
+describe('V4f: the claim map survives BOTH server answers', () => {
+  it('wireVariantClaims keeps string values and refuses everything else', () => {
+    expect(wireVariantClaims({ 1: 'items@1:weapon_variant-shotgun-slug' }))
+      .toEqual({ 1: 'items@1:weapon_variant-shotgun-slug' });
+    // Absent, null and non-objects are an empty map, never a throw: this runs
+    // on whatever a server (or a proxy) actually answered.
+    expect(wireVariantClaims(undefined)).toEqual({});
+    expect(wireVariantClaims(null)).toEqual({});
+    expect(wireVariantClaims('nope')).toEqual({});
+    expect(wireVariantClaims([1, 2])).toEqual({});
+    // A non-string value is dropped rather than coerced — `'3'` as a slot ref
+    // would be a claim on an item that cannot exist.
+    expect(wireVariantClaims({ 1: 3, 2: null, 3: 'items@1:x' })).toEqual({ 3: 'items@1:x' });
+  });
+
+  it('loadoutTab decodes it on BOTH the profile read and the equip answer', () => {
+    /*
+     * A SOURCE ratchet, in `wiring.test.ts`'s idiom, and it is here because the
+     * failure it guards is a WIRING failure that no model test can see: the
+     * model was correct and the tab handed it `{}`.
+     *
+     * Two distinct bugs, one per call site, both live on the tree V4f started
+     * from. `fetchProfile` built its `WireInventory` from `equippedSkin` and
+     * `title` only, so `inventory.variants` was always empty and no variant row
+     * could EVER read as Equipped. And the 200 branch of `equip()` rebuilt the
+     * inventory from `equippedSkin` and `title` only, so a SUCCESSFUL variant
+     * equip repainted from the stale claims it had just replaced and the button
+     * flipped back to "Equip" until the next full refresh — while the server
+     * had stored the claim. `POST /api/equip` has answered with the whole map
+     * since V4c; only this side was throwing it away.
+     */
+    const src = readFileSync(new URL('./loadoutTab.ts', import.meta.url), 'utf8');
+    const profileDecode = /private async fetchProfile[\s\S]*?\n  \}/.exec(src)?.[0] ?? '';
+    expect(profileDecode, 'fetchProfile not found — the assertion below would be vacuous')
+      .toContain('equippedSkin');
+    expect(profileDecode).toContain('wireVariantClaims(');
+
+    const equipSend = /private async equip[\s\S]*?\n  \}/.exec(src)?.[0] ?? '';
+    expect(equipSend, 'equip() not found — the assertion below would be vacuous')
+      .toContain('/api/equip');
+    expect(equipSend).toContain('wireVariantClaims(');
+
+    // And the tab actually asks the server for the variants pack at all.
+    expect(src).toContain('/api/variants');
+    expect(src).toContain('variants: this.variants');
   });
 });

@@ -196,7 +196,7 @@ export class TradeTab {
     }).profile;
     this.inventory = prof?.inventory !== undefined && Array.isArray(prof.inventory.items)
       ? prof.inventory
-      : profileRes.status === 404 ? { items: [], equippedSkin: '', title: '' } : null;
+      : profileRes.status === 404 ? { items: [], equippedSkin: '', title: '', variants: {} } : null;
     this.revoked = (prof?.moderation?.revokedItems ?? [])
       .map((r) => typeof r.ref === 'string' ? r.ref : '').filter((r) => r.length > 0);
     const rawPack = packRes as unknown as { status: number; version?: number; items?: WireItemsPack['items'] };

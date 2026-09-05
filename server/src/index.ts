@@ -3127,6 +3127,37 @@ async function handleApi(
     return true;
   }
 
+  /*
+   * V4f — the LIVE variants pack, id -> base weapon, for a MENU surface.
+   *
+   * The Loadout tab has to name the equip slot of a weapon-variant token, and
+   * that slot is `variant:<base weapon>`. The base lives in the VARIANTS pack:
+   * `/api/items` carries `ItemDef.variantId` and nothing else, so without this
+   * the client can only guess — and a wrong guess is a claim the server
+   * accepts for the wrong gun or refuses with a 400 the player never asked
+   * for. In a ROOM the same fact already rides the wire (`S2C.VARIANT_TABLE`
+   * carries id, base AND all sixteen effective values to any CAP_VARIANTS
+   * client); the menu is not in a room, which is the only reason this exists.
+   *
+   * It answers strictly LESS than that wire message — id, base, name, never
+   * `over` — so it opens no surface the game did not already publish. Public
+   * and cacheable exactly like /api/items: nothing about the caller is read.
+   *
+   * NO PACK LIVE ANSWERS 200 WITH AN EMPTY LIST, never 404. A menu must not
+   * fail because content is absent, and `/api/items` has answered
+   * `{version: 0, items: []}` in that state since the day it shipped.
+   */
+  if (path === '/api/variants' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const live = releases.live();
+    const decl = live.packs.find((pk) => pk.kind === PackKind.VARIANTS);
+    const installed = decl === undefined ? null : inventory.variantsAt(decl.version);
+    sendJson(res, 200, {
+      version: decl?.version ?? 0,
+      variants: (installed?.manifest.variants ?? []).map((v) => ({ id: v.id, base: v.base, name: v.name })),
+    }, cors);
+    return true;
+  }
+
   /* --- equipping (docs/ECONOMY.md "Items") ------------------------------- *
    * The claim half of the ownership rule: `equippedSkin`/`title` are stored
    * claims, and every surface that WEARS an item re-derives its state through

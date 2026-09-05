@@ -17,12 +17,14 @@
 import {
   buildLoadoutView,
   economyTabsFor,
+  wireVariantClaims,
   type EconomyTabId,
   type LoadoutInputs,
   type LoadoutRow,
   type LoadoutSlot,
   type WireInventory,
   type WireItemsPack,
+  type WireVariantsPack,
 } from '@/ui/loadoutModel';
 
 export interface LoadoutTabOptions {
@@ -174,6 +176,8 @@ export class LoadoutTab {
   private flash = '';
   private inputs: LoadoutInputs;
   private pack: WireItemsPack | null = null;
+  /** V4f — `/api/variants`; null until it answers, and null if it never does. */
+  private variants: WireVariantsPack | null = null;
   private profile: ProfileAnswer | null = null;
 
   constructor(opts: LoadoutTabOptions) {
@@ -199,14 +203,16 @@ export class LoadoutTab {
     this.inputs = this.buildInputs('loading');
     this.paint();
     const device = this.opts.deviceId();
-    const [profile, pack] = await Promise.all([
+    const [profile, pack, variants] = await Promise.all([
       this.fetchProfile(device),
       this.fetchPack(),
+      this.fetchVariants(),
       probeServerFlags(this.opts.serverBase, device),
     ]);
     if (this.destroyed) return;
     this.profile = profile;
     this.pack = pack;
+    this.variants = variants;
     const phase = profile.status === 200 ? 'ready'
       : profile.status === 404 ? 'noProfile' : 'offline';
     this.inputs = this.buildInputs(phase);
@@ -224,6 +230,7 @@ export class LoadoutTab {
       scrap: p?.scrap ?? 0,
       lifetimeScrap: p?.lifetimeScrap ?? 0,
       pack: this.pack,
+      variants: this.variants,
       reserved: p?.reserved ?? {},
       scrapVisible: this.opts.product() && this.scrapFlagOn,
       busyRef: this.busyRef,
@@ -240,7 +247,7 @@ export class LoadoutTab {
       if (!res.ok) return { status: 0, inventory: null, revoked: [], scrap: 0, lifetimeScrap: 0, reserved: {} };
       const body = await res.json() as {
         profile?: {
-          inventory?: WireInventory;
+          inventory?: Partial<WireInventory>;
           economy?: { scrap?: number; lifetimeScrap?: number };
           moderation?: { revokedItems?: Array<{ ref?: string }> };
         };
@@ -251,8 +258,17 @@ export class LoadoutTab {
       return {
         status: 200,
         inventory: inv !== undefined && Array.isArray(inv.items)
-          ? { items: inv.items, equippedSkin: String(inv.equippedSkin ?? ''), title: String(inv.title ?? '') }
-          : { items: [], equippedSkin: '', title: '' },
+          ? {
+            items: inv.items,
+            equippedSkin: String(inv.equippedSkin ?? ''),
+            title: String(inv.title ?? ''),
+            /* V4f. The decoder DROPPED this field, so `inventory.variants` was
+             * `{}` no matter what the profile said and no variant row could
+             * ever read as Equipped. `variantClaimsOf` in the model launders
+             * the keys and values; this only has to carry it across. */
+            variants: wireVariantClaims(inv.variants),
+          }
+          : { items: [], equippedSkin: '', title: '', variants: {} },
         revoked: (prof?.moderation?.revokedItems ?? [])
           .map((r) => typeof r.ref === 'string' ? r.ref : '')
           .filter((r) => r.length > 0),
@@ -262,6 +278,24 @@ export class LoadoutTab {
       };
     } catch {
       return { status: 0, inventory: null, revoked: [], scrap: 0, lifetimeScrap: 0, reserved: {} };
+    }
+  }
+
+  /**
+   * `GET /api/variants`. A null answer is NOT an empty pack: the model treats
+   * null as "cannot name the slot" and offers no equip action, which is the
+   * honest thing to do when the fetch failed. An answer of
+   * `{version: 0, variants: []}` is the server saying no pack is live.
+   */
+  private async fetchVariants(): Promise<WireVariantsPack | null> {
+    try {
+      const res = await fetch(`${this.opts.serverBase}/api/variants`);
+      if (!res.ok) return null;
+      const body = await res.json() as { version?: number; variants?: WireVariantsPack['variants'] };
+      if (!Array.isArray(body.variants)) return null;
+      return { version: typeof body.version === 'number' ? body.version : 0, variants: body.variants };
+    } catch {
+      return null;
     }
   }
 
@@ -284,7 +318,10 @@ export class LoadoutTab {
     this.inputs = this.buildInputs('ready');
     this.paint();
     let status = 0;
-    let answer: { inventory?: { equippedSkin?: string; title?: string }; error?: string } = {};
+    let answer: {
+      inventory?: { equippedSkin?: string; title?: string; variants?: unknown };
+      error?: string;
+    } = {};
     try {
       const res = await fetch(`${this.opts.serverBase}/api/equip`, {
         method: 'POST',
@@ -301,6 +338,11 @@ export class LoadoutTab {
         ...this.profile.inventory,
         equippedSkin: String(answer.inventory.equippedSkin ?? ''),
         title: String(answer.inventory.title ?? ''),
+        /* V4f. `POST /api/equip` has answered with the whole claim map since
+         * V4c and this reconciliation dropped it, so a successful variant
+         * equip repainted from STALE claims: the button flipped back to
+         * "Equip" until the next full refresh. */
+        variants: wireVariantClaims(answer.inventory.variants),
       };
     } else {
       this.error = status === 0 ? 'No server answered.' : answer.error ?? `Refused (${status}).`;

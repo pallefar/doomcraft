@@ -114,7 +114,8 @@ reason. A rule the parser holds cannot be forgotten by a caller.
 
 | Verb | Where | What it does |
 |---|---|---|
-| `POST /api/equip` | `server/src/index.ts`, `equipVerdict`/`applyEquip` in `server/src/persistence.ts` | Sets the `skin` and `title` slots. Both claims land or neither does — validation and write share one `store.update` callback, so a concurrent settlement cannot un-own an item between the check and the claim, and a refusal on the second slot does not leave the first written |
+| `POST /api/equip` | `server/src/index.ts`, `equipVerdict`/`applyEquip` in `server/src/persistence.ts` | Sets the `skin` and `title` slots, plus one `variant:<baseWeaponId>` slot per weapon (V4c). A variant slot names the BASE WEAPON and stores the owned REF, never a table row — which row of which table that becomes is decided per room. Both claims land or neither does — validation and write share one `store.update` callback, so a concurrent settlement cannot un-own an item between the check and the claim, and a refusal on the second slot does not leave the first written |
+| `GET /api/variants` | `server/src/index.ts` | The live variants pack as `{version, variants: [{id, base, name}]}`, or `{version: 0, variants: []}` when none is live. Public and unflagged like `/api/items`; the Loadout tab needs it to name a weapon-variant token's equip slot, because the base weapon is not on the `ItemDef` (V4f) |
 | `POST /api/craft` | `server/src/craft.ts` | Three duplicate copies of one item plus a Scrap fee become the item the player **chose**: same kind, exactly one rarity up. Fee by TARGET rarity — Uncommon 50, Rare 150, Epic 400, Relic 1000. There is no Common target: nothing crafts down |
 
 Equipping stores a **claim**, not a state. `inventory.equippedSkin` and `inventory.title` are
@@ -397,7 +398,7 @@ button, so a static build with no server shows no strip rather than three tabs t
 
 | Tab | Flag | Where |
 |---|---|---|
-| Loadout — balances, and every owned item in sections by kind (Skins, Titles, Emblems, Trails, Trophies), equipping through `POST /api/equip` and crafting through `POST /api/craft` | `economy_items` | `client/src/ui/loadoutTab.ts` |
+| Loadout — balances, and every owned item in sections by kind (Skins, Titles, Emblems, Trails, Trophies, Weapon Variants), equipping through `POST /api/equip` and crafting through `POST /api/craft` | `economy_items` | `client/src/ui/loadoutTab.ts` |
 | Trade — the escrow table, both offers, both confirms | `economy_trading` | `client/src/ui/tradeTab.ts` |
 | Competitions — running seasons and tournaments, standings, Enter, **and the Challenges board** | `economy_competitions` | `client/src/ui/competitionsTab.ts` |
 | Store — spend Scrap | — | **not built** |
