@@ -483,8 +483,18 @@ export class WeaponRuntime {
    * over a fixed array is both allocation-free and faster than a Map.
    */
   private readonly tallyId = new Uint16Array(MAX_PELLETS);
-  private readonly tallyDmg = new Float32Array(MAX_PELLETS);
-  private readonly tallyHp = new Float32Array(MAX_PELLETS);
+  /**
+   * FLOAT64, and the reason is a kill marker that lied.
+   *
+   * These were Float32Arrays. Seven shotgun pellets of 100/7 accumulate in
+   * float32 to EXACTLY 100 against a 100-health target, so `resolveKills` drew
+   * a kill — while the server, subtracting the same seven doubles from double
+   * health, left the target alive on 0.00000095367431640625. `totalDamage` on
+   * the report was right all along at 99.99999904632568; only this separately
+   * narrowed accumulator was wrong, which is why nothing else caught it.
+   */
+  private readonly tallyDmg = new Float64Array(MAX_PELLETS);
+  private readonly tallyHp = new Float64Array(MAX_PELLETS);
   private tallyCount = 0;
 
   fx: WeaponFx | null = null;
@@ -513,6 +523,22 @@ export class WeaponRuntime {
   /* -------------------------------------------------------------------- *
    * Loadout
    * -------------------------------------------------------------------- */
+
+  /**
+   * A NEW CONNECTION, WHICH IS A NEW BODY — not a respawn.
+   *
+   * `PlayerEntity.reset()` zeroes the server's `shotSeq` when a pooled body is
+   * allocated to a player, and NOT on respawn. The client keeps its runtime
+   * across a session change (`game.ts enterSession`: "the two rooms are
+   * different simulations with different player ids"), so without this the
+   * client carried its old counter into a body that had started again at zero
+   * and every cone from then on was seeded from a different number on the two
+   * sides. Called at the same lifecycle moment the server's reset happens, and
+   * deliberately NOT from `resetLoadout`, which a respawn also runs.
+   */
+  beginSession(): void {
+    this.shotSeq = 0;
+  }
 
   /** Fresh spawn: full mags on owned weapons, starting reserves. */
   resetLoadout(mask: number = STARTING_WEAPON_MASK): void {
@@ -628,6 +654,18 @@ export class WeaponRuntime {
     if (weaponId === this.current && this.switchPhase === SWITCH_NONE) return false;
     if (this.pending === weaponId) return false;
     this.pending = weaponId;
+    /*
+     * THE COOLING RULE IS THE SERVER'S: a switch resets the cone.
+     *
+     * `sim.ts` keeps ONE `heatSpread` and zeroes it the moment a slot command
+     * changes weapon. The client keeps heat PER WEAPON and kept it across a
+     * switch, so switching away from a bloomed gun and back gave a first shot
+     * the client predicted through a 0.036 rad cone and the server resolved
+     * through 0.010. The authoritative side wins, and it is also the kinder
+     * rule: a swap costs 200-600 ms of switch time, and paying that should
+     * hand you an accurate first shot rather than the bloom you left behind.
+     */
+    this.heat[weaponId] = 0;
     this.reloading = false;
     this.reloadRemainingMs = 0;
     this.switchPhase = SWITCH_OUT;

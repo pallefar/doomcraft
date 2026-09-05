@@ -779,6 +779,9 @@ export class Game {
     const state = await this.session.start(target);
     if (this.disposed || epoch !== this.sessionEpoch) return state.kind;
     this.switching = false;
+    // A new session is a new body with a new player id, so the shot counter
+    // starts again exactly as the server's does. See WeaponRuntime.beginSession.
+    this.weapons.beginSession();
     this.net.setAutoReconnect(this.session.wantsAutoReconnect);
     this.armRemoteWatchdog();
     this.net.connect();

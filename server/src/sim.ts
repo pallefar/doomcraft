@@ -512,6 +512,11 @@ export class PlayerEntity implements MoveState {
       if (ownsWeapon(this.weaponMask, i)) this.mag[i] = getWeapon(i).magSize;
     }
     this.hadInputThisTick = false;
+    // A POOLED BODY MUST NOT INHERIT THE LAST OCCUPANT'S SHOT COUNTER. It did,
+    // so a recycled body carried on at seq 41 while the new player's fresh
+    // client runtime started at 0 — and every cone from then on was seeded
+    // from a different number on the two sides.
+    this.shotSeq = 0;
     this.heatSpread = 0; this.nextFireMs = 0; this.switchEndMs = 0;
     this.reloading = false; this.reloadEndMs = 0; this.spinUpMs = 0;
     this.firing = false; this.firePressed = false;
@@ -1029,7 +1034,25 @@ export class Simulation {
       p.mag[weapon]--;
     }
 
-    p.nextFireMs = now + fireIntervalMsOf(def);
+    /*
+     * `now + interval`, and NOT the client's carry-the-overshoot rule.
+     *
+     * The two schedule on different clocks — a 20 ms server tick against a
+     * frame loop — so shot TIMES cannot be made to agree by matching a
+     * formula, and trying made it worse: carrying `now - p.nextFireMs` forward
+     * is only an overshoot while the trigger is held, and after an idle period
+     * that difference is stale, which let a pistol fire its second round 17 ms
+     * after its first. The client's own accumulator is bounded because its
+     * cooldown stops decrementing at zero; the server has no equivalent bound
+     * without carrying a second piece of per-player state.
+     *
+     * What IS made to agree is the CONTENT of shot N — its cone, its seed and
+     * its pellets — which is what `agreement.test.ts` asserts. The residual is
+     * that the client may be up to one shot ahead or behind, and the server is
+     * authoritative about which shots happened. See HANDOVER §6.
+     */
+    const interval = fireIntervalMsOf(def);
+    p.nextFireMs = now + interval;
     p.shotSeq = nextShotSeq(p.shotSeq);
 
     /* THE CONE IS READ BEFORE THE SHOT BLOOMS IT.
