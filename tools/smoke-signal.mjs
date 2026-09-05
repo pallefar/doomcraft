@@ -93,12 +93,45 @@ try {
   await sleep(150);
   check('a wrong code is refused', scanMsgs[0]?.t === 'error' && scanMsgs[0].code === 'no-such-room');
 
-  /* --- the game socket is untouched ------------------------------------- */
-  const game = await open('/ws'); sockets.push(game);
-  let gameBytes = 0;
-  game.on('message', (d) => { gameBytes += d.length; });
-  await sleep(400);
-  check('the game socket still serves the world', gameBytes > 0, `${gameBytes} bytes`);
+  /* --- the game socket is untouched -------------------------------------
+   *
+   * A CONNECTION IS NOT A JOIN. This check used to open /ws, wait 400 ms and
+   * assert that bytes had arrived — and it had been failing on every server
+   * this repo has built for as long as anyone looked, because the server
+   * deliberately says NOTHING until it hears a HELLO (see the reaper comment
+   * at the /ws upgrade in server/src/index.ts: a room somebody is walking into
+   * still has humanCount 0 for a few hundred milliseconds). So the check could
+   * not pass, and a deploy gate that cannot pass is worth exactly as much as
+   * one that cannot fail.
+   *
+   * It says HELLO now, using the frozen golden vector from
+   * shared/src/version.test.ts — so a protocol change that moves that vector
+   * moves this too, rather than leaving the tool quietly speaking a dialect
+   * the server has stopped understanding.
+   */
+  const HELLO = Buffer.from('0103064d6172696e650411009999a0000100', 'hex');
+
+  async function bytesAfter(send) {
+    const ws = await open('/ws'); sockets.push(ws);
+    let n = 0;
+    ws.on('message', (d) => { n += d.length; });
+    if (send !== null) ws.send(send);
+    await sleep(send === null ? 400 : 1200);
+    return n;
+  }
+
+  check('a socket that has not said HELLO is told nothing',
+    (await bytesAfter(null)) === 0);
+  // The negative control, and the reason the positive one below means
+  // anything. Without it "the world arrived" is satisfied by a server that
+  // sprays at any inbound byte, and the check would be measuring the socket
+  // rather than the protocol. One junk byte gets nothing.
+  check('a socket that says something unintelligible is told nothing',
+    (await bytesAfter(Buffer.from([0xff]))) === 0);
+
+  const worldBytes = await bytesAfter(HELLO);
+  check('the game socket serves the world to a client that says HELLO',
+    worldBytes > 0, `${worldBytes} bytes`);
 
   /* --- and nothing else upgrades ---------------------------------------- */
   let refused = false;
