@@ -268,15 +268,35 @@ THE PROOFS
   ADDS answers; `curl /api/version | jq .data` → `{"writable": true}`.
 - **WHEN THE BUILD ADDS NO ROUTE** — a refactor, a fix — rule 17 leaves you with
   nothing to probe, and `build.id` is a lie (it is a Railway env var and was
-  reading `b453e8b` for a tree whose HEAD was `e950dc4`). Use the SERVED BUNDLE'S
-  CONTENT HASH instead: `curl -s <origin>/ | grep -o 'a/index-[A-Za-z0-9_-]*\.js'`
-  must equal the `dist/a/index-*.js` your own `vite build` just produced. Vite
-  hashes by content, so it is falsifiable and it cannot be faked by a redeploy of
-  the old build. Both deploys today were verified this way.
+  reading `b453e8b` for a tree whose HEAD was `e950dc4`; on 2026-09-05 it still
+  read `b453e8b` for a tree at `6529e82`). Use the SERVED BUNDLE'S CONTENT HASH
+  instead: `curl -s <origin>/ | grep -o 'a/index-[A-Za-z0-9_-]*\.js'` must equal
+  the `dist/a/index-*.js` your own `vite build` just produced. Vite hashes by
+  content, so it is falsifiable and it cannot be faked by a redeploy of the old
+  build.
+- **CORRECTION 2026-09-05 — that rule as written CANNOT PASS ON VERCEL.**
+  `client/vite.config.ts` defines `__DC_BUILD_ID__` from
+  `DOOMCRAFT_BUILD_ID ?? VERCEL_GIT_COMMIT_SHA.slice(0,12) ?? 'dev'`, so the
+  build id is IN the bundle and a Vercel build can never hash-match a plain
+  local one. Reproduce the define and it matches exactly:
+
+      DOOMCRAFT_BUILD_ID=$(git rev-parse HEAD | cut -c1-12) \
+        npx vite build --config client/vite.config.ts
+
+  Railway builds in Docker with neither variable set, so it falls to `'dev'`
+  and a plain `npm run build` DOES match it. Both were verified this way today
+  — Vercel `index-1hTZaGmG.js`, Railway `index-Bc3PgK_D.js`, each equal to the
+  local build made with the same define.
 - **Flag changes**: update the Railway env `DOOMCRAFT_FLAGS` with the FULL
   document (rule 14). Currently forces the five economy flags.
   `sponsor_interstitial` / `sponsor_rewarded` are deliberately OFF — flipping
   them is the user's launch call, not an engineering gate.
+- **`node tools/smoke-signal.mjs wss://<origin>` is a LIVE gate and it runs
+  against production.** It now includes the V3 wire: a HELLO with
+  `CAP_VARIANTS` must be answered with opcode 13, and one without it must not
+  be. That is the only check anywhere that can see a deployed binary whose room
+  factory forgot to pass its pinned variants manifest. Proven able to fail by
+  clearing the bit in the tool's own HELLO.
 - Proof harnesses: `tools/shot-challenges.mjs` (the board, with the wire read
   back), `shot-loadout.mjs`, `shot-trade.mjs`, `shot-competitions.mjs`,
   `shot-share.mjs`, `shot-tutorial.mjs`, `shot-console.mjs <tab>`.

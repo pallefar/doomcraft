@@ -133,6 +133,39 @@ try {
   check('the game socket serves the world to a client that says HELLO',
     worldBytes > 0, `${worldBytes} bytes`);
 
+  /* --- the room tells a capable client which variant table it pinned ----
+   *
+   * V3. This is the only place the wire is checked against a REAL deployed
+   * origin, and it is worth a live check because the failure it catches is a
+   * production-only one: a binary whose room factory never passes the pinned
+   * variants manifest serves an empty table forever with the entire suite
+   * green. `server/src/releases.test.ts` guards the source line; this guards
+   * the running server.
+   *
+   * The HELLO is the frozen vector with ONE bit changed — caps 0x0011 ->
+   * 0x0031, adding `CAP_VARIANTS` (1 << 5) — so if the golden moves, this
+   * moves with it. And the negative control is the interlock itself: without
+   * the bit the server must say nothing about variants at all, because a
+   * client that cannot decode the message has already had every claim
+   * resolved to the base.
+   */
+  const HELLO_VARIANTS = Buffer.from('0103064d6172696e650431009999a0000100', 'hex');
+  const S2C_VARIANT_TABLE = 13;
+
+  async function sawVariantTable(hello) {
+    const ws = await open('/ws'); sockets.push(ws);
+    let seen = false;
+    ws.on('message', (d) => { if (d.length > 0 && d[0] === S2C_VARIANT_TABLE) seen = true; });
+    ws.send(hello);
+    await sleep(1200);
+    return seen;
+  }
+
+  check('a client that sets CAP_VARIANTS is told the room\'s variant table',
+    await sawVariantTable(HELLO_VARIANTS));
+  check('a client that does not is told nothing it could not decode',
+    !(await sawVariantTable(HELLO)));
+
   /* --- and nothing else upgrades ---------------------------------------- */
   let refused = false;
   try { sockets.push(await open('/anything-else')); } catch { refused = true; }
