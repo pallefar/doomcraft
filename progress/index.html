@@ -149,8 +149,8 @@
 
   <div class="phasestrip">
     <span class="lbl">Phase</span>
-    <span class="now">V4 ARC COMPLETE — V4a through V4e shipped</span>
-    <span class="note">All five V4 sub-phases are committed. A variants pack reaches a room (V4a), a player can own the token (V4b), equip it and fire it (V4c), see it named in the killfeed (V4d), and now acquire one at the craft bench (V4e). The gauntlet is 1/23 with gunfeel won blind and uncontaminated. Reviewing V4e also fixed a LIVE bug — the craft UI offered crafts the server refused, because craftTargetsFor took raw copy counts with no escrow reservations and no Scrap balance — and deleted a latent trap that V4e itself would have made live: the craft route answered 200 with a receipt for an item it never delivered. TWO REAL DEFECTS FOUND AND LEFT OPEN, both named rather than quietly carried: a pack version above 65535 silently disables EVERY item grant (itemsVersions accepts any integer, parseItemRef caps at 0xffff, so drops, challenge items, prizes and craft output all vanish with no error); and a crafted variant still has NO EQUIP BUTTON, because V4c landed the server half of the variant slot and not the client half.</span>
+    <span class="now">V4 COMPLETE AND LIVE (a-f) — back to the gauntlet</span>
+    <span class="note">Every V4 phase is deployed and verified by probing behaviour only the new build emits: items@1 digest 5849d24f for V4b, installed.detail.variants for V4c, wire message 14 for V4d, and GET /api/variants answering application/json for V4f. A player can now craft a weapon variant, equip it, fire it, and see it named when they kill with it. V4f alone fixed TWO live bugs between the claim and the screen — the profile decoder dropped inventory.variants so no row could read Equipped, and a SUCCESSFUL equip repainted from the claims it had just replaced so the button flipped straight back. Rule 38 paid a fourth time: three of five obligations failed the discrimination check, and the sharpest miss was the reviewer's — reverting the whole /api/variants endpoint returns 200 HTML from the SPA fallback, so a status-only assertion PASSES against a deleted endpoint.</span>
   </div>
 
   <section>
@@ -168,7 +168,7 @@
       <div class="stage st-done">
         <div class="ix">02</div>
         <div>
-          <div class="nm">V4 — now five sub-phases</div>
+          <div class="nm">V4 — complete (a through f), live</div>
           <div class="what">Split after the review refused it as one phase. V4a: the pack reaches a room (content/variants.json, the content/ fallback, the gate emitting kind 7) — no ownership, every player still at slot 0. V4b: the ownership token. V4c: the claim reaches the body. V4d: display truth — the killfeed cannot tell two shotgun variants apart. V4e: acquisition, which as specified leaves variant supply at zero forever.</div>
           <div class="detail">V4a-V4e all committed. V4a-V4c live and verified on production; V4d and V4e awaiting deploy. The arc took three adversarial review rounds on V4b, two on V4c, one clean pass on V4d and two on V4e — and the reviews found a live prototype-pollution defect in the items parser, five inventory mint doors, a craft UI that offered what the server refused, and a slot off-by-one that was in MY OWN PLAN and would have served the base weapon silently.</div>
         </div>
@@ -535,5 +535,5 @@
     </div>
   </section>
 
-  <footer>Updated 2026-09-05 19:53:44 UTC · exit condition is winning the blind comparison, not a round count</footer>
+  <footer>Updated 2026-09-05 20:35:39 UTC · exit condition is winning the blind comparison, not a round count</footer>
 </div>
