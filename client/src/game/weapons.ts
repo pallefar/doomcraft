@@ -24,14 +24,18 @@ import {
   MAX_PLAYERS, MAX_ENTITIES,
 } from '@shared/constants';
 import {
-  WEAPONS, WeaponId, FireKind, AmmoType, AMMO_TYPE_COUNT, AMMO_MAX, AMMO_START,
-  WEAPON_COUNT, WEAPON_KIND, WEAPON_AMMO, WEAPON_MAG_SIZE,
-  WEAPON_FIRE_INTERVAL_MS, WEAPON_PELLETS, WEAPON_DAMAGE,
-  getWeapon, isAutomatic, ammoTypeOf,
-  damageAtDistance, currentSpread, applyShotSpread, recoverSpread, spreadFraction,
-  knockbackImpulse, ownsWeapon, grantWeapon, nextWeapon,
+  WeaponId, FireKind, AmmoType, AMMO_TYPE_COUNT, AMMO_MAX, AMMO_START,
+  WEAPON_COUNT, WEAPON_AMMO,
+  getWeapon, ammoTypeOf,
+  ownsWeapon, grantWeapon, nextWeapon,
   STARTING_WEAPON_MASK, DEFAULT_WEAPON, weaponFromSlot,
 } from '@shared/weapons';
+import {
+  applyShotSpreadOf, BASE_ARSENAL, BASE_SLOT, createVariantSlots, currentSpreadOf,
+  damageAtDistanceOf, fireIntervalMsOf, isAutomaticOf, knockbackImpulseOf,
+  recoverSpreadOf, spreadFractionOf,
+  type EffectiveWeapon, type SessionArsenal, type VariantSlots,
+} from '@shared/arsenal';
 import { BLOCK_SOLID, blockHardness } from '@shared/blocks';
 import {
   coneSpread, rayAABB, createVoxelHit, hash2i, Rng, clampf,
@@ -395,6 +399,21 @@ export const SWITCH_IN = 2;
  * ------------------------------------------------------------------------ */
 
 export class WeaponRuntime {
+  /**
+   * The stats this session fires with — VARIANTS.md §2's seam, the client half.
+   * Handed in by whoever built the session: a room passes the arsenal it
+   * resolved from its pinned release, and the local Worker passes the compiled
+   * one, exactly as it builds rooms from BUILTIN_CONTENT_HASH today.
+   */
+  readonly arsenal: SessionArsenal;
+  /**
+   * This player's equipped variant slot per weapon. All zeros in phase V1.
+   * The MIRROR of `PlayerEntity.variantSlots` on the server — these two are a
+   * lockstep pair like every other number on this path, and a divergence here
+   * is a divergence in where the pellets went.
+   */
+  readonly variantSlots: VariantSlots = createVariantSlots();
+
   /** Bitmask of owned weapons. */
   owned = STARTING_WEAPON_MASK;
   /** Weapon in hand. During a switch this stays the OLD one until SWITCH_IN. */
@@ -468,11 +487,23 @@ export class WeaponRuntime {
   camera: CameraFeedback | null = null;
   projectiles: ProjectileSpawner | null = null;
 
-  constructor(fx?: WeaponFx, camera?: CameraFeedback, projectiles?: ProjectileSpawner) {
+  constructor(
+    fx?: WeaponFx, camera?: CameraFeedback, projectiles?: ProjectileSpawner,
+    arsenal: SessionArsenal = BASE_ARSENAL,
+  ) {
     this.fx = fx ?? null;
     this.camera = camera ?? null;
     this.projectiles = projectiles ?? null;
+    this.arsenal = arsenal;
     this.resetLoadout(STARTING_WEAPON_MASK);
+  }
+
+  /**
+   * The stats this player fires `weaponId` with. One lookup, one place — the
+   * client mirror of `Simulation.statsFor`.
+   */
+  stats(weaponId: number = this.current): EffectiveWeapon {
+    return this.arsenal.statsFor(weaponId, this.variantSlots[weaponId] ?? BASE_SLOT);
   }
 
   /* -------------------------------------------------------------------- *
@@ -483,8 +514,9 @@ export class WeaponRuntime {
   resetLoadout(mask: number = STARTING_WEAPON_MASK): void {
     this.owned = mask;
     for (let i = 0; i < WEAPON_COUNT; i++) {
-      this.mag[i] = ownsWeapon(mask, i) ? WEAPON_MAG_SIZE[i] : 0;
-      this.heat[i] = WEAPONS[i].spread;
+      const w = this.stats(i);
+      this.mag[i] = ownsWeapon(mask, i) ? w.hot.magSize : 0;
+      this.heat[i] = w.spread;
     }
     for (let a = 0; a < AMMO_TYPE_COUNT; a++) this.reserve[a] = AMMO_START[a];
     this.current = ownsWeapon(mask, DEFAULT_WEAPON) ? DEFAULT_WEAPON : firstOwned(mask);
@@ -504,7 +536,7 @@ export class WeaponRuntime {
     const had = ownsWeapon(this.owned, weaponId);
     this.owned = grantWeapon(this.owned, weaponId);
     if (!had) {
-      this.mag[weaponId] = WEAPON_MAG_SIZE[weaponId];
+      this.mag[weaponId] = this.stats(weaponId).hot.magSize;
       if (withAmmo) this.addAmmo(ammoTypeOf(weaponId), AMMO_START[ammoTypeOf(weaponId)] >> 1);
     }
   }
@@ -527,7 +559,7 @@ export class WeaponRuntime {
     return t === AmmoType.NONE ? Infinity : this.reserve[t];
   }
   /** 0..1 of the HEAT alone. Prefer `liveSpreadFraction` for the crosshair. */
-  get spreadFraction(): number { return spreadFraction(this.current, this.heat[this.current]); }
+  get spreadFraction(): number { return spreadFractionOf(this.stats(), this.heat[this.current]); }
 
   /** 0..1 accumulated trauma. Read by the HUD and by tests. */
   get traumaLevel(): number { return this.trauma; }
@@ -548,7 +580,7 @@ export class WeaponRuntime {
   }
   /** Live cone half-angle in radians, including airborne and crouch modifiers. */
   liveSpread(airborne: boolean, crouched: boolean): number {
-    return currentSpread(this.current, this.heat[this.current], airborne, crouched);
+    return currentSpreadOf(this.stats(), this.heat[this.current], airborne, crouched);
   }
 
   /**
@@ -569,11 +601,11 @@ export class WeaponRuntime {
    * to the widest (max heat, airborne), so the ends of the scale never move.
    */
   liveSpreadFraction(airborne: boolean, crouched: boolean): number {
-    const d = getWeapon(this.current);
+    const d = this.stats();
     const floor = d.spread * d.spreadCrouchScale;
     const ceil = d.spreadMax + d.spreadAir;
     if (ceil <= floor) return 0;
-    const live = currentSpread(this.current, this.heat[this.current], airborne, crouched);
+    const live = currentSpreadOf(this.stats(), this.heat[this.current], airborne, crouched);
     return clampf((live - floor) / (ceil - floor), 0, 1);
   }
   /** True when the trigger would produce a shot right now. */
@@ -595,6 +627,9 @@ export class WeaponRuntime {
     this.reloading = false;
     this.reloadRemainingMs = 0;
     this.switchPhase = SWITCH_OUT;
+    // Switch times are FEEL fields and deliberately outside the variant
+    // whitelist (VARIANTS.md §1.2), so these read the archetype — as
+    // `sim.ts` does, because the two must not drift.
     this.switchRemainingMs = getWeapon(this.current).switchOutMs;
     this.spin = 0;
     if (this.fx?.switchStart) this.fx.switchStart(this.current, weaponId, this.switchRemainingMs);
@@ -619,7 +654,7 @@ export class WeaponRuntime {
 
   startReload(): boolean {
     const id = this.current;
-    const def = getWeapon(id);
+    const def = this.stats(id);
     if (def.magSize <= 0) return false;
     if (this.reloading || this.switchPhase !== SWITCH_NONE) return false;
     if (this.mag[id] >= def.magSize) return false;
@@ -643,7 +678,7 @@ export class WeaponRuntime {
 
   private finishReloadStep(): void {
     const id = this.current;
-    const def = getWeapon(id);
+    const def = this.stats(id);
     const type = def.ammo;
     if (type === AmmoType.NONE) { this.reloading = false; return; }
 
@@ -694,7 +729,7 @@ export class WeaponRuntime {
           this.current = to;
           this.pending = -1;
           this.switchPhase = SWITCH_IN;
-          this.switchRemainingMs = getWeapon(to).switchInMs;
+          this.switchRemainingMs = getWeapon(to).switchInMs;   // feel field; see switchTo
         } else {
           this.switchPhase = SWITCH_NONE;
           this.switchRemainingMs = 0;
@@ -714,7 +749,7 @@ export class WeaponRuntime {
     if (this.cooldownMs > 0) this.cooldownMs -= dtMs;
 
     const id = this.current;
-    const def = getWeapon(id);
+    const def = this.stats(id);
 
     /* --- spin-up --- */
     if (def.spinUpMs > 0) {
@@ -751,7 +786,7 @@ export class WeaponRuntime {
      * where the pellets went.
      */
     if (!ctx.firing || this.reloading || this.switchPhase !== SWITCH_NONE) {
-      this.heat[id] = recoverSpread(id, this.heat[id], dt);
+      this.heat[id] = recoverSpreadOf(def, this.heat[id], dt);
     }
 
     /* --- trauma bleed-off ---
@@ -780,7 +815,7 @@ export class WeaponRuntime {
     // A shell-by-shell reload yields to the trigger.
     if (this.reloading && this.reloadShellMode && this.mag[id] > 0) this.cancelReload();
 
-    const auto = isAutomatic(id);
+    const auto = isAutomaticOf(def);
     if (!auto && this.triggerHeld) return 0;
 
     // Fire every interval that elapsed, so high rpm is frame-rate independent.
@@ -788,12 +823,16 @@ export class WeaponRuntime {
     while (this.canFireNow(ctx) && guard++ < 8) {
       this.fireOnce(ctx);
       shots++;
-      this.cooldownMs += WEAPON_FIRE_INTERVAL_MS[this.current];
-      if (!isAutomatic(this.current)) break;
+      // `this.current` rather than `id`: `fireOnce` can switch nothing, but
+      // reading the held weapon here is what the pre-seam code did and the
+      // golden holds it to that.
+      const held = this.stats();
+      this.cooldownMs += fireIntervalMsOf(held);
+      if (!isAutomaticOf(held)) break;
     }
     this.triggerHeld = true;
 
-    if (shots === 0 && this.ready && this.mag[id] === 0 && getWeapon(id).magSize > 0) {
+    if (shots === 0 && this.ready && this.mag[id] === 0 && def.magSize > 0) {
       if (this.fx?.dryFire) this.fx.dryFire(id);
       // Empty gun auto-reloads, which is what a Doom player expects.
       this.startReload();
@@ -807,7 +846,7 @@ export class WeaponRuntime {
     if (this.reloading) return false;
     if (this.cooldownMs > 0) return false;
     const id = this.current;
-    const def = getWeapon(id);
+    const def = this.stats(id);
     if (def.spinUpMs > 0 && this.spin < 1) return false;
     if (def.magSize > 0 && this.mag[id] <= 0) return false;
     if (!ctx.firing) return false;
@@ -824,7 +863,7 @@ export class WeaponRuntime {
    */
   fireOnce(ctx: FireContext): ShotReport {
     const id = this.current;
-    const def = getWeapon(id);
+    const def = this.stats(id);
     const seq = ++this.shotSeq;
 
     if (def.magSize > 0 && this.mag[id] > 0) this.mag[id]--;
@@ -843,17 +882,17 @@ export class WeaponRuntime {
     report.bestDistance = 0;
     this.tallyCount = 0;
 
-    const spread = currentSpread(id, this.heat[id], ctx.airborne, ctx.crouched);
+    const spread = currentSpreadOf(def, this.heat[id], ctx.airborne, ctx.crouched);
 
-    switch (WEAPON_KIND[id] as FireKind) {
-      case FireKind.HITSCAN: this.fireHitscan(ctx, def.id, spread, seq, report); break;
-      case FireKind.PROJECTILE: this.fireProjectile(ctx, def.id, spread, seq, report); break;
-      case FireKind.MELEE: this.fireMelee(ctx, def.id, report); break;
+    switch (def.hot.kind as FireKind) {
+      case FireKind.HITSCAN: this.fireHitscan(ctx, def, spread, seq, report); break;
+      case FireKind.PROJECTILE: this.fireProjectile(ctx, def, spread, seq, report); break;
+      case FireKind.MELEE: this.fireMelee(ctx, def, report); break;
     }
 
-    this.heat[id] = applyShotSpread(id, this.heat[id]);
+    this.heat[id] = applyShotSpreadOf(def, this.heat[id]);
     this.resolveKills(report);
-    this.emitFeedback(ctx, id, report);
+    this.emitFeedback(ctx, def, report);
     return report;
   }
 
@@ -907,8 +946,8 @@ export class WeaponRuntime {
     r.bestDistance = distance;
   }
 
-  private emitFeedback(ctx: FireContext, id: number, report: ShotReport): void {
-    const def = getWeapon(id);
+  private emitFeedback(ctx: FireContext, def: EffectiveWeapon, report: ShotReport): void {
+    const id = def.id;
     const fx = this.fx;
     if (fx) {
       if (fx.fire) fx.fire(id, report.shotSeq);
@@ -980,9 +1019,10 @@ export class WeaponRuntime {
   /* --- hitscan --- */
 
   private fireHitscan(
-    ctx: FireContext, id: number, spread: number, seq: number, report: ShotReport,
+    ctx: FireContext, def: EffectiveWeapon, spread: number, seq: number, report: ShotReport,
   ): void {
-    const pellets = WEAPON_PELLETS[id] > MAX_PELLETS ? MAX_PELLETS : WEAPON_PELLETS[id];
+    const id = def.id;
+    const pellets = def.hot.pellets > MAX_PELLETS ? MAX_PELLETS : def.hot.pellets;
     report.pellets = pellets;
     const dir = this.dir;
     const world = ctx.world;
@@ -1018,8 +1058,8 @@ export class WeaponRuntime {
       if (bodyDist >= 0 && bodyDist <= wallDist) {
         const dist = bodyDist;
         const head = scratchHeadshot;
-        const base = damageAtDistance(id, dist);
-        const dmg = head ? base * getWeapon(id).headshotMultiplier : base;
+        const base = damageAtDistanceOf(def, dist);
+        const dmg = head ? base * def.headshotMultiplier : base;
         report.kind[p] = head ? HIT_HEAD : HIT_BODY;
         report.targetId[p] = scratchTargetId;
         report.damage[p] = dmg;
@@ -1034,7 +1074,7 @@ export class WeaponRuntime {
         report.connected = true;
         this.tally(scratchTargetId, dmg, scratchTargetHealth);
         this.noteBestHit(dmg, hx, hy, hz, -dir[0], -dir[1], -dir[2], dist);
-        if (this.fx?.tracer) this.fx.tracer(id, ctx.ox, ctx.oy, ctx.oz, hx, hy, hz, getWeapon(id).projectileColor);
+        if (this.fx?.tracer) this.fx.tracer(id, ctx.ox, ctx.oy, ctx.oz, hx, hy, hz, def.projectileColor);
         if (this.fx?.fleshImpact) {
           this.fx.fleshImpact(hx, hy, hz, -dir[0], -dir[1], -dir[2], scratchTargetId, head, id);
         }
@@ -1047,7 +1087,7 @@ export class WeaponRuntime {
         const hy = ctx.oy + dir[1] * wallDist;
         const hz = ctx.oz + dir[2] * wallDist;
         report.hitX[p] = hx; report.hitY[p] = hy; report.hitZ[p] = hz;
-        if (this.fx?.tracer) this.fx.tracer(id, ctx.ox, ctx.oy, ctx.oz, hx, hy, hz, getWeapon(id).projectileColor);
+        if (this.fx?.tracer) this.fx.tracer(id, ctx.ox, ctx.oy, ctx.oz, hx, hy, hz, def.projectileColor);
         if (this.fx?.impact) this.fx.impact(hx, hy, hz, wnx, wny, wnz, wallBlock, id);
       } else {
         report.kind[p] = HIT_NONE;
@@ -1058,7 +1098,7 @@ export class WeaponRuntime {
         const hy = ctx.oy + dir[1] * HITSCAN_MAX_DISTANCE;
         const hz = ctx.oz + dir[2] * HITSCAN_MAX_DISTANCE;
         report.hitX[p] = hx; report.hitY[p] = hy; report.hitZ[p] = hz;
-        if (this.fx?.tracer) this.fx.tracer(id, ctx.ox, ctx.oy, ctx.oz, hx, hy, hz, getWeapon(id).projectileColor);
+        if (this.fx?.tracer) this.fx.tracer(id, ctx.ox, ctx.oy, ctx.oz, hx, hy, hz, def.projectileColor);
       }
     }
   }
@@ -1116,8 +1156,9 @@ export class WeaponRuntime {
   /* --- projectile --- */
 
   private fireProjectile(
-    ctx: FireContext, id: number, spread: number, seq: number, report: ShotReport,
+    ctx: FireContext, def: EffectiveWeapon, spread: number, seq: number, report: ShotReport,
   ): void {
+    const id = def.id;
     report.pellets = 1;
     const dir = this.dir;
     if (spread > 0) {
@@ -1131,7 +1172,6 @@ export class WeaponRuntime {
     report.dirZ[0] = dir[2];
     report.kind[0] = HIT_NONE;
 
-    const def = getWeapon(id);
     // Spawn slightly ahead of the eye so the projectile is not born inside the
     // wall you are hugging.
     const off = 0.35;
@@ -1146,13 +1186,13 @@ export class WeaponRuntime {
 
   /* --- melee --- */
 
-  private fireMelee(ctx: FireContext, id: number, report: ShotReport): void {
+  private fireMelee(ctx: FireContext, def: EffectiveWeapon, report: ShotReport): void {
+    const id = def.id;
     report.pellets = 1;
     report.dirX[0] = ctx.dx;
     report.dirY[0] = ctx.dy;
     report.dirZ[0] = ctx.dz;
 
-    const def = getWeapon(id);
     const range = def.meleeRange;
     const dist = this.traceTargets(ctx, ctx.dx, ctx.dy, ctx.dz, range);
     if (dist < 0) {
@@ -1166,7 +1206,7 @@ export class WeaponRuntime {
        *
        * It is presentation only: no damage is scored, `connected` stays false,
        * and the hit marker still does not fire — a wall is not a kill. */
-      if (this.worldStrike(ctx, id, range, report)) return;
+      if (this.worldStrike(ctx, def, range, report)) return;
       report.kind[0] = HIT_NONE;
       report.distance[0] = range;
       if (this.fx?.meleeMiss) this.fx.meleeMiss(id);
@@ -1174,7 +1214,7 @@ export class WeaponRuntime {
     }
 
     const head = scratchHeadshot;
-    const base = damageAtDistance(id, dist);
+    const base = damageAtDistanceOf(def, dist);
     const dmg = head ? base * def.headshotMultiplier : base;
     report.kind[0] = head ? HIT_HEAD : HIT_BODY;
     report.targetId[0] = scratchTargetId;
@@ -1204,8 +1244,9 @@ export class WeaponRuntime {
    * a player what a surface is made of without a single word of UI.
    */
   private worldStrike(
-    ctx: FireContext, id: number, range: number, report: ShotReport,
+    ctx: FireContext, def: EffectiveWeapon, range: number, report: ShotReport,
   ): boolean {
+    const id = def.id;
     const world = ctx.world;
     if (world === null) return false;
     if (!world.raycast(
@@ -1225,7 +1266,7 @@ export class WeaponRuntime {
     if (this.fx?.blockStrike) {
       const hardness = blockHardness(this.hit.block);
       const power = clampf(
-        (WEAPON_DAMAGE[id] * MELEE_TERRAIN_BITE) / (hardness > 0.1 ? hardness : 0.1),
+        (def.hot.damage * MELEE_TERRAIN_BITE) / (hardness > 0.1 ? hardness : 0.1),
         0.16, 1,
       );
       this.fx.blockStrike(
@@ -1242,7 +1283,7 @@ export class WeaponRuntime {
 
   /** Impulse the last shot should impart to its victim, in m/s. */
   knockbackFor(report: ShotReport): number {
-    return knockbackImpulse(report.weaponId, report.totalDamage);
+    return knockbackImpulseOf(this.stats(report.weaponId), report.totalDamage);
   }
 }
 

@@ -40,6 +40,7 @@
  * separate change with its own argument and its own moved golden.
  */
 
+import { clamp } from './constants.ts';
 import {
   WEAPON_COUNT, WeaponId, WEAPONS, type WeaponDef,
 } from './weapons.ts';
@@ -298,6 +299,12 @@ export function applyShotSpreadOf(w: EffectiveWeapon, heatSpread: number): numbe
 export function recoverSpreadOf(w: EffectiveWeapon, heatSpread: number, dt: number): number {
   const s = heatSpread - w.spreadRecovery * dt;
   return s < w.spread ? w.spread : s;
+}
+
+/** 0..1 for the dynamic crosshair: how far the cone has opened toward its ceiling. */
+export function spreadFractionOf(w: EffectiveWeapon, heatSpread: number): number {
+  if (w.spreadMax <= w.spread) return 0;
+  return clamp((heatSpread - w.spread) / (w.spreadMax - w.spread), 0, 1);
 }
 
 /** Milliseconds between shots — the float32 the module's hot table holds. */

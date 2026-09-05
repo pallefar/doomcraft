@@ -360,9 +360,21 @@ function voxelWorldFor(world: ServerWorld): WeaponWorld {
   };
 }
 
-export function recordClient(arena: Arena, weapons?: readonly number[]): string[] {
+export interface ClientTrackOptions {
+  /** Which weapon segments to run. Defaults to all seven. */
+  readonly weapons?: readonly number[];
+  /** The session's arsenal. Defaults to the compiled one. */
+  readonly arsenal?: SessionArsenal;
+  /** The player's equipped variant slot, on every weapon. Defaults to base. */
+  readonly variantSlot?: number;
+}
+
+export function recordClient(arena: Arena, opts: ClientTrackOptions = {}): string[] {
   const lines: string[] = [];
-  const rt = new WeaponRuntime();
+  const rt = new WeaponRuntime(undefined, undefined, undefined, opts.arsenal ?? BASE_ARSENAL);
+  // Before resetLoadout, for the same reason the server sets it before the
+  // spawn: the loadout fills magazines and cone floors through the arsenal.
+  rt.variantSlots.fill(opts.variantSlot ?? BASE_SLOT);
   rt.resetLoadout(ALL_WEAPON_MASK);
 
   const ctx = createFireContext();
@@ -376,7 +388,7 @@ export function recordClient(arena: Arena, weapons?: readonly number[]): string[
   const targets = createHitTargets();
   const dt = TICK_MS / 1000;
 
-  for (const seg of script(weapons)) {
+  for (const seg of script(opts.weapons)) {
     rt.switchTo(seg.weapon);
     for (const b of seg.beats) {
       for (let t = 0; t < b.ticks; t++) {
@@ -475,7 +487,7 @@ export function record(): string {
   parts.push('## track: client far');
   parts.push(...recordClient(far));
   parts.push('## track: client near (chainsaw)');
-  parts.push(...recordClient(near, melee));
+  parts.push(...recordClient(near, { weapons: melee }));
   return parts.join('\n') + '\n';
 }
 
@@ -543,4 +555,10 @@ function note(into: Set<number>, line: string): void {
 export function recordServerWith(arsenal: SessionArsenal, variantSlot: number): string {
   const arena = buildArena(7);
   return recordServer(arena, { immortalVictim: true, arsenal, variantSlot }).join('\n');
+}
+
+/** The client half of the same lever. */
+export function recordClientWith(arsenal: SessionArsenal, variantSlot: number): string {
+  const arena = buildArena(7);
+  return recordClient(arena, { arsenal, variantSlot }).join('\n');
 }

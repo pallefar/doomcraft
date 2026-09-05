@@ -30,9 +30,11 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 
 import { BASE_ARSENAL, BASE_SLOT, SessionArsenal } from '@shared/arsenal';
-import { WEAPON_COUNT, WEAPON_DAMAGE, WEAPONS, WeaponId, type WeaponDef } from '@shared/weapons';
+import {
+  damageAtDistance, WEAPON_COUNT, WEAPON_DAMAGE, WEAPONS, WeaponId, type WeaponDef,
+} from '@shared/weapons';
 
-import { record, recordServerWith, stats } from './lockstep.harness';
+import { record, recordClientWith, recordServerWith, stats } from './lockstep.harness';
 
 /** sha256 of the uncompressed recording, first 16 hex. */
 const GOLDEN_DIGEST = '305e47ad09d5b10f';
@@ -111,18 +113,17 @@ describe('lockstep determinism', () => {
  * the weapon numbers would stay green through exactly the refactor it exists
  * to catch.
  *
- * THE LEVER CHANGED WITH V1c, AND THE CHANGE IS THE POINT. Before the seam,
+ * THE LEVER CHANGED WITH THE SEAM, AND THE CHANGE IS THE POINT. Before V1c,
  * poking `WEAPON_DAMAGE[PISTOL]` moved both tracks, because both predictors
- * read the module tables. The server now reads its room's arsenal, which
+ * read the module tables. Both now read their session's arsenal, which
  * snapshots the compiled table once and never looks at it again — so a
- * module-table poke SHOULD leave the server track alone, and the honest proof
- * is to change the numbers where the session actually reads them: hand the
- * room a pinned table that differs, equip the claim, and watch the shots move.
- * That exercises the per-player `variantSlots` path too, which a compiled-only
- * recording never touches.
+ * module-table poke SHOULD leave both tracks alone, and that is now asserted
+ * as the positive statement "the seam is live on both predictors".
  *
- * The client track still reads the module tables. V1d moves it, and moves
- * these assertions with it.
+ * The honest lever is to change the numbers where the session reads them: hand
+ * the session a pinned table that differs, equip the claim, and watch the
+ * shots move. That exercises the per-player `variantSlots` path on both sides
+ * too, which a compiled-only recording never touches.
  * ------------------------------------------------------------------------ */
 
 function withPerturbed(table: { [i: number]: number }, index: number, delta: number): string {
@@ -135,54 +136,74 @@ function withPerturbed(table: { [i: number]: number }, index: number, delta: num
   }
 }
 
-function tracks(text: string): { server: string; client: string } {
-  const at = text.indexOf('## track: client far');
-  return { server: text.slice(0, at), client: text.slice(at) };
-}
-
-/** The same far server track the golden opens with, under the compiled table. */
+/** The same far tracks the golden opens with, under the compiled table. */
 const serverBaseline = recordServerWith(BASE_ARSENAL, BASE_SLOT);
+const clientBaseline = recordClientWith(BASE_ARSENAL, BASE_SLOT);
 
-function serverUnder(over: Partial<WeaponDef>, base: number): string {
-  return recordServerWith(SessionArsenal.from([{ id: 'probe', base, over }]), 1);
+function under(over: Partial<WeaponDef>, base: number): { server: string; client: string } {
+  const arsenal = SessionArsenal.from([{ id: 'probe', base, over }]);
+  return { server: recordServerWith(arsenal, 1), client: recordClientWith(arsenal, 1) };
 }
 
 describe('the gate can fail', () => {
-  it('an equipped variant that does nothing changes nothing', () => {
-    // The other half of rule 2: if ANY equipped claim moved the recording, the
+  it('an equipped variant that does nothing changes nothing, on either predictor', () => {
+    // The other half of rule 2: if ANY equipped claim moved a recording, the
     // three cases below would be measuring the plumbing rather than the
-    // numbers. An empty override must be invisible.
-    expect(serverUnder({}, WeaponId.PISTOL)).toBe(serverBaseline);
+    // numbers. An empty override must be invisible on both sides.
+    const t = under({}, WeaponId.PISTOL);
+    expect(t.server).toBe(serverBaseline);
+    expect(t.client).toBe(clientBaseline);
   });
 
-  it('moves when the room\'s pistol does one more point of damage', () => {
-    expect(serverUnder({ damage: WEAPONS[WeaponId.PISTOL].damage + 1 }, WeaponId.PISTOL))
-      .not.toBe(serverBaseline);
+  it('moves both predictors when the room\'s pistol does one more point of damage', () => {
+    const t = under({ damage: WEAPONS[WeaponId.PISTOL].damage + 1 }, WeaponId.PISTOL);
+    expect(t.server).not.toBe(serverBaseline);
+    expect(t.client).not.toBe(clientBaseline);
   });
 
-  it('moves when the room\'s chaingun cycles faster', () => {
-    expect(serverUnder({ rpm: WEAPONS[WeaponId.CHAINGUN].rpm + 20 }, WeaponId.CHAINGUN))
-      .not.toBe(serverBaseline);
+  it('moves both predictors when the room\'s chaingun cycles faster', () => {
+    const t = under({ rpm: WEAPONS[WeaponId.CHAINGUN].rpm + 20 }, WeaponId.CHAINGUN);
+    expect(t.server).not.toBe(serverBaseline);
+    expect(t.client).not.toBe(clientBaseline);
   });
 
-  it('moves on a splash radius change of one centimetre', () => {
+  it('moves the server on a splash radius change of one centimetre', () => {
     // 4.4 -> 4.41 is invisible in play and unmistakable here. This is the
     // field the seam was most likely to get wrong: `splashDamageAtOf` reads
     // the float32 radius and sim.ts's detonate loop reads the double three
-    // lines away, and the seam has to keep both.
-    expect(serverUnder({ splashRadius: 4.41 }, WeaponId.ROCKET)).not.toBe(serverBaseline);
+    // lines away, and the seam has to keep both. The CLIENT does not resolve
+    // splash at all — the server owns detonation — so only the server moves.
+    const t = under({ splashRadius: 4.41 }, WeaponId.ROCKET);
+    expect(t.server).not.toBe(serverBaseline);
+    expect(t.client).toBe(clientBaseline);
   });
 
-  it('still moves the CLIENT track when a module table moves', () => {
-    // Until V1d the client predictor reads the module tables directly, so this
-    // is what proves the client half of the recording is watching anything.
-    const t = tracks(withPerturbed(WEAPON_DAMAGE, WeaponId.PISTOL, 1));
-    expect(t.client).not.toBe(tracks(recording).client);
+  it('moves the client on a spread change the server never sees a shot of', () => {
+    // The client predicts its own cone from its own table. A shotgun cone that
+    // opens further is a client-side number first.
+    const t = under({ spread: 0.2, spreadMax: 0.4 }, WeaponId.SHOTGUN);
+    expect(t.client).not.toBe(clientBaseline);
   });
 
-  it('leaves the SERVER track alone when a module table moves — the seam is live', () => {
-    const t = tracks(withPerturbed(WEAPON_DAMAGE, WeaponId.PISTOL, 1));
-    expect(t.server).toBe(tracks(recording).server);
+  it('leaves BOTH tracks alone when a module table moves — the seam is live', () => {
+    // Not a weaker assertion than the old one, a different and stronger one:
+    // it says the predictors have actually stopped reading the compiled table
+    // at fire time. `restores every table it perturbed` below is what keeps
+    // this from passing because the poke silently failed.
+    const t = withPerturbed(WEAPON_DAMAGE, WeaponId.PISTOL, 1);
+    expect(t).toBe(recording);
+  });
+
+  it('the poke really did move the number it poked', () => {
+    // Rule 2 again, one level down: the assertion above is only meaningful if
+    // WEAPON_DAMAGE is still mutable and still the thing the OLD code read.
+    const was = WEAPON_DAMAGE[WeaponId.PISTOL];
+    WEAPON_DAMAGE[WeaponId.PISTOL] = was + 1;
+    try {
+      expect(damageAtDistance(WeaponId.PISTOL, 0)).toBe(was + 1);
+    } finally {
+      WEAPON_DAMAGE[WeaponId.PISTOL] = was;
+    }
   });
 
   it('restores every table it perturbed', () => {

@@ -11,12 +11,12 @@ import {
   applyShotSpreadOf, BASE_ARSENAL, BASE_SLOT, createVariantSlots,
   currentSpreadOf, damageAtDistanceOf, damageFalloffScaleOf, fireIntervalMsOf,
   isAutomaticOf, knockbackImpulseOf, recoverSpreadOf, SessionArsenal,
-  splashDamageAtOf, type WeaponOverlay,
+  splashDamageAtOf, spreadFractionOf, type WeaponOverlay,
 } from './arsenal.ts';
 import {
   applyShotSpread, currentSpread, damageAtDistance, damageFalloffScale,
   fireIntervalMs, getWeapon, isAutomatic, knockbackImpulse, recoverSpread,
-  splashDamageAt, WEAPON_AMMO, WEAPON_AUTOMATIC, WEAPON_COUNT, WEAPON_DAMAGE,
+  splashDamageAt, spreadFraction, WEAPON_AMMO, WEAPON_AUTOMATIC, WEAPON_COUNT, WEAPON_DAMAGE,
   WEAPON_FIRE_INTERVAL_MS, WEAPON_KIND, WEAPON_MAG_SIZE, WEAPON_PELLETS,
   WEAPON_PROJECTILE_SPEED, WEAPON_SPLASH_DAMAGE, WEAPON_SPLASH_RADIUS,
   WEAPONS, WeaponId,
@@ -141,6 +141,7 @@ describe('the arsenal-taking functions agree with the id-taking ones', () => {
           }
         }
         expect(applyShotSpreadOf(w, h)).toBe(applyShotSpread(id, h));
+        expect(spreadFractionOf(w, h)).toBe(spreadFraction(id, h));
         for (const dt of [0, 1 / 60, 0.02, 0.25]) {
           expect(recoverSpreadOf(w, h, dt)).toBe(recoverSpread(id, h, dt));
         }

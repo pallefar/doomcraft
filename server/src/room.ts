@@ -407,6 +407,13 @@ export class Room implements NetHost {
     this.eagerWorld = options.eagerWorld ?? true;
 
     this.world = new ServerWorld(this.seed);
+    // THE V4 SEAM POINT. A room already resolves a release per
+    // `roomInstanceId`, and the bucket is room-keyed precisely so two content
+    // tables can never meet in one match (docs/VARIANTS.md §3). When a
+    // variants pack exists, its parsed table becomes a `SessionArsenal` HERE
+    // and nothing downstream changes — every reader on the firing path already
+    // goes through `sim.statsFor`. Until then the default is the compiled
+    // arsenal, which is also what the local Worker gets with no fetches at all.
     this.sim = new Simulation(this.world, this.seed);
     this.allWeaponsAtBoot = options.allWeapons === true;
     if (this.allWeaponsAtBoot) this.sim.defaultWeaponMask = ALL_WEAPON_MASK;
