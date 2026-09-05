@@ -1,14 +1,24 @@
 # Doomcraft — handover: where it stands, and what is left
 
-Written 2026-09-05 (second session of the day). This one did the VARIANTS arc's
-phase V1 end to end — the `SessionArsenal` seam, both predictors moved onto it,
-and a byte-compared lockstep golden proving the refactor changed nothing — and
-then, on the strength of an adversarial review of the V2 PLAN, fixed three
-things that were wrong before any of it started. The largest: **the two
-predictors have never agreed about where pellets go**, by up to 10.2 degrees on
-a shotgun. Previous handovers are in git history at `b77d907`, `56b23c5`,
-`108efa5`, `9da410b`, `bfdc647`, `557c7b6`, `ee0991c`. §0 is restated because it
-keeps earning it — rules 25–28 are new and all four cost real time today.
+Written 2026-09-05 (FOURTH session of the day). This one **closed the V4 arc
+end to end (a through f)** and **finally ran the gauntlet, which is now 1/23**.
+
+The two headline facts are uncomfortable and both are about instruments rather
+than code. First: the gauntlet's very first output was evidence that this
+project's own foundational document was wrong — `ref/BAR.md` had called gunfeel
+"the single most winnable piece" on the strength of a clip in which the bar was
+holding a SHOVEL. With a rifle the bar has muzzle flash, brass ejection, impact
+decals, per-shot recoil, a reload animation and a crosshair that blooms 57%. Two
+blind verdicts were correctly thrown away before one could stand. Second: almost
+every defect worth finding this session was inside something meant to CATCH
+defects — a probe that could not distinguish the state it was clearing, a
+byte-cap example both candidate caps reject, a regex that cannot match the
+identifier it guards, a proof obligation that passes with the bug live, and a
+fairness disclosure that de-anonymised the blind it was protecting.
+
+Previous handovers are in git history at `b77d907`, `56b23c5`, `108efa5`,
+`9da410b`, `bfdc647`, `557c7b6`, `ee0991c`. §0 is restated because it keeps
+earning it — **rules 35-38 are new and 38 changes how you write tests.**
 
 **Live:**
 - **https://doomcraft-production.up.railway.app** — the Node origin: game, rooms,
@@ -44,7 +54,9 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
    mistakes every time it is applied: this session TWO of the new tests passed
    with their own fix removed and had to be rewritten (see rules 21 and 22).
 3. **Measure, don't eyeball.**
-4. **The bar is real and fetchable** (`ref/`). The gauntlet is still **0/23**.
+4. **The bar is real and fetchable** (`ref/`) — AND IT WAS WRONG ABOUT ITSELF
+   until 2026-09-05; see rule 37. The gauntlet is **1/23**: gunfeel won a blind,
+   uncontaminated A/B, and HUD is piece two.
 5. **`shared/src/flags.ts` NUL bytes are FIXED** (escapes now) — plain `grep`
    works on it again. rg is still NOT installed on this machine.
 6. **Simulated-failure tests must pick platform-identical failure inputs.**
@@ -283,6 +295,13 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
 
 | Commit | What |
 |---|---|
+| `2111f94` | **V4b — the ownership token, and the five doors that mint an inventory.** `ItemKind.WEAPON_VARIANT = 5`, `ItemDef.variantId`, and a parser BICONDITIONAL making the id prefix a rule rather than a convention. It also fixed a LIVE defect that was the bug `8c6f196` fixed in variants and never fixed in items: the kind/rarity lookups admitted `Object.prototype` members, so `kind:"constructor"` parsed with zero errors, `ItemDef.kind` became a FUNCTION, and `constructor` and `toString` emitted the IDENTICAL fingerprint line — two manifests, one digest. Five paths mint an inventory and three would have handed out variants on day one; the fix is mint-vs-transfer, not a blanket refusal, because trade settlement goes through the same chokepoint. |
+| `4bec466` | **BAR.md corrected — the bar has a gun.** Re-captured in Capture The Gems, which hands you a rifle at spawn. `tools/capture-ref-gunfight.mjs` and `tools/viewmodel-motion.mjs` are new; the latter exists because the obvious instruments lie — a plain frame-difference scored 3.3× for the shovel and 3.25× for the rifle, identical, because both boxes contain panning background. |
+| `8a61206` | **V4c — the claim reaches the body.** 23 red proofs, one honestly reported as STAYING GREEN. My own plan contained the slot off-by-one it existed to prevent, and my proposed trust-scan guard (`/\bvariant/i`) could never have matched `WEAPON_VARIANT`. The builder then overturned the repair with two verified false positives and found that `ModeId.RANKED*` self-matches the economy regex. |
+| `7109306` | **THE GAUNTLET SCORES ITS FIRST POINT — gunfeel, blind and uncontaminated.** Our shot lights the room; the bar's does not. Verified independently: per-tile left-region mean luminance swings +36.2% across our twelve frames, phase-locked to the shot cadence, against +1.6% for the bar, whose wall is flat to within one luminance level. |
+| `2f47842` | **V4d — the killfeed names the gun that fired.** A 9th KILL byte plus `S2C.VARIANT_NAMES = 14`. The plan passed review 10/10 and one of its obligations was VACUOUS — the origin of rule 38. |
+| `4a45544` | **V4e — the entry recipe.** §7.2 was circular: a variant craft needs three variants and supply was zero. Also fixed a LIVE bug (the craft UI offered what the server refused, because `craftTargetsFor` took raw copies with no escrow and no balance) and deleted a latent trap (`crafted = landed[0]?.ref ?? v.plan.targetRef` reported an item never delivered). |
+| `baebe22` | **V4f — the equip button.** V4c had landed only the server half. `GET /api/variants` mirrors `/api/items`. Two more live bugs between the claim and the screen: the profile decoder dropped `inventory.variants`, and a SUCCESSFUL equip repainted from the claims it had just replaced so the button flipped straight back. |
 | `a120c24` | **The three VARIANTS §7 decisions, asked and written down.** DPS-dominant budget (0.50 dps / 0.20 range / 0.15 splash / 0.15 handling) at ±12%, an uncommon craft-only rarity floor, and variants table-gated OUT of ranked-adjacent modes. Plus the observation the user's own preview surfaced: a weighted sum at ±12% admits an "everything up 10%" variant, so §6's no-straight-upgrades rule needs a SECOND refusal — strict dominance — which is now part of the decision. |
 | `7de757c` | **V1a — the lockstep determinism harness and its golden, minted pre-refactor.** Both shipping predictors, one script, two arenas, the same `ServerWorld` and the same shared `raycastVoxels`. Three things it took: the trigger has to be PULSED (a held trigger fires a semi-auto exactly once, so the first script recorded four pistol shots against four hundred chaingun ones); the chainsaw needs its OWN arena (2.6 m reach, so at seven metres the whole melee path went unwatched — and running all seven weapons at two metres instead recorded a rocket detonating in the shooter's face); and a respawn puts the victim on top of the shooter under a shield `resolveMelee` refuses. |
 | `dd28363` | **V1b — `SessionArsenal`, with the two representations kept APART.** `weapons.ts` holds every weapon twice — doubles in `WEAPONS[i]`, narrowed values in the derived hot tables — and the narrowing is lossy for six of them (rocket splashRadius 4.4 → 4.400000095367432, and 60000/rpm for four weapons). The shipping code reads BOTH, three lines apart. `EffectiveWeapon` therefore carries the def's doubles AND a `hot` record, and unifying them is a separate change with its own argument. The test caught a bare range check letting `1.5` index a hole in the table. |
