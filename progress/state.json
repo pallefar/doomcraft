@@ -1,7 +1,7 @@
 {
-  "updated": "2026-09-05T17:22:29Z",
-  "phase": "The gunfeel premise was measured on the wrong weapon",
-  "phaseNote": "The gauntlet ran, and the first thing it produced was evidence against this project's own assumption. ref/BAR.md weakness #2 — \"no sway, no bob, no kick, no muzzle flash, no screen shake, no hit spark. The viewmodel is a static billboard. This is the single most winnable piece\" — was measured across 1.2 s of mouselook while the voxiom player held a SHOVEL. Re-captured with a rifle: the bar HAS a muzzle flash, ejects brass casings, and punches impact decals into the wall. Verified by looking at the twelve frames, not by reading a description of them. The first blind critic had already caught the shape of this on its own and disqualified its own verdict for it: \"B won a test the bar structurally could not sit.\" Round 2 was stopped rather than judged against a bar holding a shovel. The fight is now on QUALITY, not presence — and the critic's round-2 work order was already pointed the right way.",
+  "updated": "2026-09-05T17:53:17Z",
+  "phase": "GUNFEEL WON — the gauntlet is 1/23",
+  "phaseNote": "The first uncontaminated blind verdict in this project's history, and ours won it. The decisive measurement is palette-independent because each side is compared only to ITS OWN baseline: our shot LIGHTS THE ROOM and the bar's does not. Verified independently — per-tile mean luminance of a far-left region swings +36.2% across our twelve frames, oscillating in phase with the shot cadence, against +1.6% for the bar, whose wall is flat to within one luminance level through twelve frames of sustained fire. Wall damage accumulates on our side across three lighting-matched pairs (5->21, 35->50, 14->42->62 px) and is zero at both ends on the bar's. Two earlier verdicts on this piece were correctly thrown away: the first because the bar clip had a SHOVEL in it, the second because my own honesty note named architecture and mapped the labels. Both are now rules. V4c also shipped: the claim reaches the body.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -65,10 +65,10 @@
     {
       "id": "gunfeel",
       "name": "Gunfeel",
-      "rounds": 1,
-      "verdict": "building",
-      "gap": "The bar is not what BAR.md says it is. With a rifle it has muzzle flash, brass ejection and impact decals — the \"static billboard\" was a shovel. Round 2 work order stands: ZERO impact particles in 12 of our frames; every effect at the muzzle and nothing at the target; the decal is a flat asterisk with no rim; the slide never cycles while brass spawns from nowhere.",
-      "note": "Round 1 built and judged (verdict discarded, self-declared contaminated). Server: damageEntity carries real flags; a monster headshot is now COMPUTED, not just flagged — the client had been drawing a gold marker and a doubled damage number while the server applied single damage. Client: the hitmarker is a monotone merge, so a truthful echo of the PREVIOUS shot can no longer repaint a predicted kill ring white."
+      "rounds": 3,
+      "verdict": "won",
+      "gap": "Next work order, from the winner's own weakest point: we have NO LIGHT AT THE POINT OF IMPACT — only at the muzzle. The impact area brightens 3.7-4.3x only because the WHOLE wall brightens from the muzzle flash; on the frame the round lands, the wall gains a crater completely silently. Emit an additive spark at the raycast hit point on the same frame as the flash: a 12-20 px core reaching 255 with a 30-40 px falloff plus 4-8 chip particles along the surface normal, ~80 ms. Acceptance: peak-over-local-wall inside a 40 px radius of the hit must exceed 8x on the impact frame and fall under 4.5x within two frames. Secondary: our muzzle core is 822 px hard-clipped at exactly 255 in an 83x34 bbox — 29% pure white — so it reads as a pasted white ball. Pull the clipped area under 150 px and put an amber-to-orange gradient in the falloff.",
+      "note": "WON, blind, uncontaminated. Our shot lights the room (+36.2% vs +1.6%), the wall accumulates damage through the burst, and decals persist at stable coordinates. The bar's muzzle flash never out-lights the surface it is lighting (peak 204-217 against a wall peak of 224). It took three attempts to get a comparison worth judging."
     },
     {
       "id": "enemies",
@@ -458,9 +458,9 @@
     },
     {
       "id": "s4",
-      "name": "The gauntlet — 0/23",
+      "name": "The gauntlet — 1/23",
       "state": "building",
-      "what": "23 pieces, each judged blind against real captured frames. GUNFEEL round 1 is BUILT and was judged: the critic picked ours and then set contaminated:true, because it worked out which side was which from the content alone. Its reason is now HANDOVER rule 37 — a comparison only carries information where both sides could plausibly win. New bar captured: ref/voxiom/desktop-gunfight-wall.webm, a rifle fired at a wall, with the drive log recording how it was obtained.",
+      "what": "23 pieces, judged blind against real captured frames. GUNFEEL IS WON — the first clean verdict the project has ever had. Getting there took correcting the bar itself (BAR.md called gunfeel \"the single most winnable piece\" from a clip where the bar held a SHOVEL; with a rifle it has muzzle flash, brass, decals, recoil and a 57% crosshair bloom) and closing a leak in the blinding protocol where the fairness disclosure named architecture and mapped the labels.",
       "detail": ""
     },
     {
