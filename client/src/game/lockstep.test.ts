@@ -5,9 +5,18 @@
  * shipping predictors, at two ranges, and writes down every number they derive
  * from the weapon tables. This file pins that recording to a checked-in golden.
  *
- * The golden was minted at ee0991c, BEFORE `SessionArsenal` existed. Every
- * phase of VARIANTS.md §5 has to leave it byte-identical until a variant is
- * actually installed, which is the whole claim V1 makes.
+ * The golden was FIRST minted at ee0991c, before `SessionArsenal` existed, and
+ * V1a–V1d left it byte-identical through the entire seam refactor — which was
+ * the whole claim V1 made.
+ *
+ * IT MOVED ONCE, DELIBERATELY, and this is the record of why: the two
+ * predictors had never agreed on where pellets go (see `agreement.test.ts`),
+ * and fixing that changed which pellets land. 305e47ad09d5b10f ->
+ * 78bf6a5406648098. The recording gained kills and lost damage rows, and the
+ * pistol and shotgun started finishing people they never used to, because the
+ * server had been resolving every shot through a cone one `spreadPerShot`
+ * wider than the table specifies. A recording that did not move would have
+ * meant the fix did nothing.
  *
  * The recording is ~2 MB of numbers, so the file is gzipped — but the digest of
  * the UNCOMPRESSED text is also asserted inline, right below, because a binary
@@ -37,7 +46,7 @@ import {
 import { record, recordClientWith, recordServerWith, stats } from './lockstep.harness';
 
 /** sha256 of the uncompressed recording, first 16 hex. */
-const GOLDEN_DIGEST = '305e47ad09d5b10f';
+const GOLDEN_DIGEST = '78bf6a5406648098';
 
 const GOLDEN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lockstep.golden.txt.gz');
 

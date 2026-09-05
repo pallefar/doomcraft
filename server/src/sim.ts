@@ -81,6 +81,8 @@ import {
   getWeapon,
   grantWeapon,
   hash3i,
+  nextShotSeq,
+  shotSeed,
   isGrounded,
   moveAABB,
   moveTowards,
@@ -1028,11 +1030,20 @@ export class Simulation {
     }
 
     p.nextFireMs = now + fireIntervalMsOf(def);
+    p.shotSeq = nextShotSeq(p.shotSeq);
+
+    /* THE CONE IS READ BEFORE THE SHOT BLOOMS IT.
+     *
+     * This used to bloom first and read after, so the server resolved every
+     * shot through a cone one `spreadPerShot` wider than the one the client
+     * had predicted — the first shot of a burst included. Measured on the
+     * shotgun that was 8.9 degrees of disagreement on shot one alone.
+     * client/src/game/weapons.ts reads then blooms, and it is the one that is
+     * right: the first shot of a burst is the accurate one, which is what
+     * every shooter this is modelled on does.
+     */
+    const spread = currentSpreadOf(def, p.heatSpread, !p.onGround, p.crouching);
     p.heatSpread = applyShotSpreadOf(def, p.heatSpread);
-    p.shotSeq = (p.shotSeq + 1) & 0xffff;
-    // Spread is reproducible from (player, shot) so a client that wants to draw
-    // its own tracers gets the same pattern the server resolved.
-    this.rng.reseed(hash3i(p.id, p.shotSeq, this.seed, 0x9e3779b1));
 
     // Firing cancels spawn protection: you cannot shoot from behind the shield.
     if (p.spawnProtectUntilMs > now) p.spawnProtectUntilMs = now;
@@ -1043,9 +1054,15 @@ export class Simulation {
 
     switch (def.kind) {
       case FireKind.HITSCAN: {
-        const spread = currentSpreadOf(def, p.heatSpread, !p.onGround, p.crouching);
         for (let i = 0; i < def.pellets; i++) {
           anglesToForward(SCRATCH_DIR, 0, p.yaw, p.pitch);
+          // PER PELLET, from (owner, shot, pellet) and nothing else. The old
+          // scheme reseeded ONCE per shot from `hash3i(id, seq, this.seed, …)`
+          // and then walked one stream two draws at a time — which the client
+          // cannot reproduce at all, because `this.seed` is the ROOM seed and
+          // the pattern depends on pellet order. Same seed, same order, same
+          // draws as client/src/game/weapons.ts fireHitscan.
+          this.rng.reseed(shotSeed(p.id, p.shotSeq, i));
           if (spread > 0) {
             coneSpread(SCRATCH_DIR, 0, SCRATCH_DIR[0], SCRATCH_DIR[1], SCRATCH_DIR[2], spread, this.rng.next(), this.rng.next());
           }
@@ -1055,6 +1072,15 @@ export class Simulation {
       }
       case FireKind.PROJECTILE: {
         anglesToForward(SCRATCH_DIR, 0, p.yaw, p.pitch);
+        // The client spreads its predicted bolt and the server did not, so
+        // every plasma shot (the one projectile weapon with a cone: spread
+        // 0.014, +0.0016 per shot) left the barrel along a different vector on
+        // the two sides. Pellet 0, same seed, same draws as the client's
+        // fireProjectile.
+        this.rng.reseed(shotSeed(p.id, p.shotSeq, 0));
+        if (spread > 0) {
+          coneSpread(SCRATCH_DIR, 0, SCRATCH_DIR[0], SCRATCH_DIR[1], SCRATCH_DIR[2], spread, this.rng.next(), this.rng.next());
+        }
         this.spawnProjectile(
           p.id, weapon, p.variantSlots[weapon] ?? BASE_SLOT,
           ex + SCRATCH_DIR[0] * 0.5, ey + SCRATCH_DIR[1] * 0.5, ez + SCRATCH_DIR[2] * 0.5,

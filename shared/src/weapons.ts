@@ -14,6 +14,7 @@
  */
 
 import { clamp } from './constants.ts';
+import { hash2i } from './math.ts';
 
 /* ------------------------------------------------------------------------ *
  * Ids
@@ -451,6 +452,35 @@ export function spreadFraction(id: number, heatSpread: number): number {
   const d = WEAPONS[id];
   if (!d || d.spreadMax <= d.spread) return 0;
   return clamp((heatSpread - d.spread) / (d.spreadMax - d.spread), 0, 1);
+}
+
+/* ------------------------------------------------------------------------ *
+ * The shot
+ * ------------------------------------------------------------------------ */
+
+/**
+ * SHOT SEQUENCE NUMBERS WRAP AT 16 BITS, ON BOTH SIDES.
+ *
+ * The server has always masked (`p.shotSeq = (p.shotSeq + 1) & 0xffff`) and
+ * the client counted without a bound, so the two agreed for the first 65 535
+ * shots of a session and then seeded every cone differently forever. Both go
+ * through this now so there is one rule rather than two that happen to match.
+ */
+export function nextShotSeq(seq: number): number {
+  return (seq + 1) & 0xffff;
+}
+
+/**
+ * The seed for ONE pellet of one shot.
+ *
+ * This is the sync contract. Both predictors derive every pellet from
+ * (ownerId, shotSeq, pellet) and nothing else — no room seed, no stream
+ * position — so any pellet of any shot can be regenerated independently, by
+ * either side, in any order. It lives here rather than in either predictor
+ * because a copy on each side is two rules, and two rules drift.
+ */
+export function shotSeed(ownerId: number, shotSeq: number, pellet: number): number {
+  return hash2i((ownerId << 16) | (pellet & 0xffff), shotSeq, 0x5c07);
 }
 
 /* ------------------------------------------------------------------------ *

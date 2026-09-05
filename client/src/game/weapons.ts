@@ -29,6 +29,7 @@ import {
   getWeapon, ammoTypeOf,
   ownsWeapon, grantWeapon, nextWeapon,
   STARTING_WEAPON_MASK, DEFAULT_WEAPON, weaponFromSlot,
+  nextShotSeq, shotSeed,
 } from '@shared/weapons';
 import {
   applyShotSpreadOf, BASE_ARSENAL, BASE_SLOT, createVariantSlots, currentSpreadOf,
@@ -348,13 +349,8 @@ export function createShotReport(): ShotReport {
   };
 }
 
-/**
- * Seed for one pellet. Both sides derive it the same way, so the server can
- * regenerate the client's cone from (ownerId, shotSeq) alone.
- */
-export function shotSeed(ownerId: number, shotSeq: number, pellet: number): number {
-  return hash2i((ownerId << 16) | (pellet & 0xffff), shotSeq, 0x5c07);
-}
+/** Re-exported so existing importers keep one name for one contract. */
+export { shotSeed };
 
 /* ------------------------------------------------------------------------ *
  * Fire context
@@ -425,8 +421,16 @@ export class WeaponRuntime {
   readonly mag = new Uint16Array(WEAPON_COUNT);
   /** Reserve rounds, per AmmoType. */
   readonly reserve = new Uint16Array(AMMO_TYPE_COUNT);
-  /** Accumulated cone, per weapon. Read by the dynamic crosshair. */
-  readonly heat = new Float32Array(WEAPON_COUNT);
+  /**
+   * Accumulated cone, per weapon. Read by the dynamic crosshair.
+   *
+   * FLOAT64, and it matters. This was a Float32Array, and the server's
+   * `PlayerEntity.heatSpread` is a plain double — so every shot after the
+   * first was predicted through a cone narrowed to float32 and resolved
+   * through one that was not. Seven numbers; there was never anything to save
+   * here, and the authoritative side is the one to match.
+   */
+  readonly heat = new Float64Array(WEAPON_COUNT);
 
   /** Chaingun barrel spin, 0..1. */
   spin = 0;
@@ -864,7 +868,7 @@ export class WeaponRuntime {
   fireOnce(ctx: FireContext): ShotReport {
     const id = this.current;
     const def = this.stats(id);
-    const seq = ++this.shotSeq;
+    const seq = this.shotSeq = nextShotSeq(this.shotSeq);
 
     if (def.magSize > 0 && this.mag[id] > 0) this.mag[id]--;
 
