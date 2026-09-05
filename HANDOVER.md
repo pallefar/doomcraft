@@ -217,6 +217,45 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
     empty. Ask of every probe which distinct states it maps onto the same
     output, and whether the state you are trying to rule out is one of them.
 
+36. **NEW — an effect that is both PREDICTED and ECHOED must MERGE, not
+    assign.** The brief said `sim.ts` passes a literal 0 for flags on entity
+    damage, "so a monster kill never shows the fatal hitmarker". True, and
+    understated in a way that would have produced a wrong fix. The client
+    PREDICTS the kill ring on the frame it fires, and `Hud.hitMarker` was a
+    plain assignment — so the server's flagless echo of the PREVIOUS shot
+    landed ~one RTT later and repainted it white, about 60 ms into a 460 ms
+    ring, on every demon kill in the game. The marker was not missing, it was
+    CANCELLED. Fixing only the server's flags leaves the identical class live
+    for shotguns: one predicted 70-damage marker against seven 10-damage pellet
+    echoes, which shrinks the marker's heft to a graze. The fix is a merge with
+    a monotone order inside the effect's own lifetime — plain < headshot <
+    kill, damage takes the max, a re-raise never shortens — and a clean slate
+    when the timer expires, so the latch is a window and not a mode. "The
+    server is authoritative" does not mean "the server's later message should
+    overwrite" when the two messages describe DIFFERENT events. In the same
+    pass: a monster headshot was never COMPUTED, so the client drew a gold
+    marker AND a doubled damage number while the server applied single damage.
+    **The code for this lives on the `gauntlet` branch, not on `main`** — it is
+    the gunfeel piece's round-1 build and merges when that piece wins its blind
+    A/B. The rule is what generalises; the diff is not on main yet.
+
+37. **NEW — a comparison only carries information where BOTH SIDES COULD
+    PLAUSIBLY WIN, and the bar has to be able to exhibit the thing under
+    test.** The first blind A/B this project ever ran picked ours for gunfeel
+    and then set `contaminated: true`, because the critic worked out which side
+    was which from the content alone. Its sentence is the rule:
+    **"B won a test the bar structurally could not sit."** It measured the
+    reference clip — background pan of 1 px per sampled frame against ours at
+    8-29 px, a player holding a SHOVEL, zero muzzle flashes and zero decals in
+    twelve frames — for the question "which shot feels like it hit something".
+    The bar had no shot. Winning that proves nothing about the build; it is a
+    fact about the capture. `ref/voxiom/desktop-gameplay.webm` is still the
+    right bar for movement and art and the wrong one for gunfeel;
+    `ref/voxiom/desktop-gunfight.webm` was captured to replace it, with
+    `desktop-gunfight-drive.json` recording how it was driven so the next
+    person can tell what it can and cannot answer. Before trusting any A/B, ask
+    what the BAR's frames actually contain for the specific question.
+
 ## 1. What this session shipped (all pushed, green, deployed)
 
 | Commit | What |
