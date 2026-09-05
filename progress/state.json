@@ -1,7 +1,7 @@
 {
-  "updated": "2026-09-05T20:35:39Z",
-  "phase": "V4 COMPLETE AND LIVE (a-f) — back to the gauntlet",
-  "phaseNote": "Every V4 phase is deployed and verified by probing behaviour only the new build emits: items@1 digest 5849d24f for V4b, installed.detail.variants for V4c, wire message 14 for V4d, and GET /api/variants answering application/json for V4f. A player can now craft a weapon variant, equip it, fire it, and see it named when they kill with it. V4f alone fixed TWO live bugs between the claim and the screen — the profile decoder dropped inventory.variants so no row could read Equipped, and a SUCCESSFUL equip repainted from the claims it had just replaced so the button flipped straight back. Rule 38 paid a fourth time: three of five obligations failed the discrimination check, and the sharpest miss was the reviewer's — reverting the whole /api/variants endpoint returns 200 HTML from the SPA fallback, so a status-only assertion PASSES against a deleted endpoint.",
+  "updated": "2026-09-05T20:49:39Z",
+  "phase": "THE GAUNTLET IS 2/23 — gunfeel and HUD both won blind",
+  "phaseNote": "HUD won uncontaminated, on measurement rather than impression. Our ammo readout is 56 px digits at 16.06:1 contrast on an opaque panel; the bar's is ~11 px floating on the world at a worst case of 1.58:1. Our health value is 23 px at 3.90:1 with a real outline (15.2% dark pixels); the bar's is 12 px at 1.94:1, which fails WCAG large-text, with ZERO outline pixels. The bar's crosshair is a 100x100 px box with no ink at all in the centre 9x9 — 6.9% of screen width with no aim reference — against our 38x38. And on the piece's own question, \"without cluttering the centre\", the bar carries five instructional strings in four corners PLUS a 325x33 px two-line rules block sitting on the screen centreline. BAR.md had said the bar's HUD was \"corners only, centre is clean\". Correcting the reference before judging is the only reason this verdict means anything.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -105,10 +105,10 @@
     {
       "id": "hud",
       "name": "HUD",
-      "rounds": 0,
-      "verdict": "pending",
-      "gap": "Not built yet.",
-      "note": "Corners only, centre clean. Beat the bar's dead crosshair."
+      "rounds": 1,
+      "verdict": "won",
+      "gap": "Next work order, from our own weakest point: the match-state line is the SMALLEST text carrying real state in either image — \"YOU 0 / 30\" at 10 px cap height, \"7:51\" and \"PLAYERS 6\" at 14 px, one flat monochrome bar, no colour coding, and no statement of what 30 means. Raise the personal score and its target to >=22 px cap, colour-separate the two numbers from the timer with distinct fills rather than amber-on-grey text, and add a one-line objective string so the target number explains itself. The bar does this half better and we should take it.",
+      "note": "WON, blind, uncontaminated, on the first round with no build — this judged our CURRENT HUD cold. Ammo 56 px at 16.06:1 on a panel vs ~11 px floating at 1.58:1 worst case; health 23 px at 3.90:1 with an outline vs 12 px at 1.94:1 with none; crosshair 38x38 vs a 100x100 box empty in the middle; one consolidated key-hint line vs five strings plus a rules block on the centreline."
     },
     {
       "id": "menus",
@@ -458,9 +458,9 @@
     },
     {
       "id": "s4",
-      "name": "The gauntlet — 1/23",
+      "name": "The gauntlet — 2/23",
       "state": "building",
-      "what": "23 pieces, judged blind against real captured frames. GUNFEEL IS WON — the first clean verdict the project has ever had. Getting there took correcting the bar itself (BAR.md called gunfeel \"the single most winnable piece\" from a clip where the bar held a SHOVEL; with a rifle it has muzzle flash, brass, decals, recoil and a 57% crosshair bloom) and closing a leak in the blinding protocol where the fairness disclosure named architecture and mapped the labels.",
+      "what": "23 pieces, judged blind against real captured frames. GUNFEEL and HUD both WON. Four verdicts were produced to get two: two were correctly discarded, once because the bar clip had a SHOVEL in it and once because my own fairness note named architecture and mapped the labels. HUD was chosen as piece two deliberately — it is a STILL comparison, so the asymmetry that handicaps every motion piece (our HUD cannot reach a canvas recording) does not apply.",
       "detail": ""
     },
     {
