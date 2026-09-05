@@ -150,6 +150,8 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
 | `e950dc4` | **V1d — the client predictor too. V1 closes.** `rt.stats(weaponId)` is the mirror of `sim.statsFor`. The failure proof became symmetric: an empty override changes nothing on either side, +1 pistol damage and +20 chaingun rpm move both, a one-centimetre splash radius moves only the server, a wider cone moves only the client. **The golden still did not move.** Verified in the real app — muzzle flash, tracer, an open dynamic crosshair, 13/20 magazine pips. |
 | `949512f` | **A deploy gate that could not pass** (rule 25). And the first fix for it was ALSO wrong — it went green with the HELLO truncated to nonsense — so it now carries a negative control: one junk byte must be told nothing. |
 | `1b7af11` | **Two live bugs the V2 plan review found in shipped code.** `parseItemsManifest('null')` threw a TypeError past every caller instead of refusing (the `root.items` access sits outside the try; `parseChallengesManifest` had it identically). And `HordeDirector.equipStart` refilled magazines from the compiled table on the JOIN path, after `spawnPlayer` had filled them through the arsenal — so a shotgun variant that pays for its damage with a smaller magazine would enter Horde holding the base's eight shells. Proven red at "expected 8 to be 4". |
+| `b3902e0` | **V2a — the variant schema.** Three refusals: whitelist+bands, the ±12% budget, and strict dominance. PER-ARCHETYPE AXES, per the user's decision: an axis is scored only where it is LIVE, so nothing is 0/0, and an override of a field that archetype's firing path never reads is REFUSED rather than priced at zero. Two bands were doing balance work and refusing the document's own §1 slug shotgun — `damage` is now a wide rail with the real bound on the PAYLOAD (damage × pellets), and the cone rails go to a tenth. Proven red five ways. |
+| `883d875` | **V2b — `PackKind.VARIANTS = 7`, its inventory branch, and BOTH gates.** `runReleaseVerify()` and `ReleaseService.runGate()` are separate implementations and the review found a candidate naming kind 7 gating GREEN through the second; reverting the new block reproduces it word for word. The inventory branch is only visible in the POSITIVE direction (the fallthrough already reports an unhandled kind), and the test says so at length. Rule 2 caught the wiring one level up: the check's own tests called it directly, so removing it from the gate's list left them all green. |
 | `fc01475` | **THE BIG ONE: the two predictors now agree about where pellets go.** Five separate causes, each proven red alone — the cone was read AFTER the shot bloomed it (0.53° on a shotgun); the seeding schemes were unrelated and the server's used the ROOM seed the client never receives (6.6°); the server did not spread projectiles at all (0.75°, plasma only); the client's accumulated cone was float32 against the server's double (8.3e-9); and the shot counter wrapped on one side only (65 536 shots in, every cone diverges). `agreement.test.ts` is the assertion the golden never was, and the golden moved DELIBERATELY: 135 damage rows → 102, 10 kills → 14, and the pistol and shotgun now finish people they never used to. |
 
 ## 2. Architecture delta
@@ -184,7 +186,32 @@ THE PROOFS
 
 ## 3. What is left — decided order
 
-1. **V2 of the variants arc, and its plan needs rewriting before it is built.**
+0. **V2 IS DONE and the binary is LIVE** (`b3902e0`, `883d875`, deployed
+   2026-09-05). That matters beyond "a stage finished": the pack kind's own
+   rule is that the variants-aware BINARY must be live before any release names
+   kind 7, or a host that predates it silently serves the previous release. It
+   is. `release:verify` is 16 checks now and reports
+   `variants.validate — no variants manifest installed`.
+
+   **V3 is the wire** (a new S2C opcode carrying the room's pinned table, a
+   golden vector for it, and a mixed-version harness), then **V4 is the first
+   content** — `content/variants.json`, `ItemKind.WEAPON_VARIANT` tokens, the
+   equip claim, the craft recipe, and the two-browser bar. Two things V4 owes
+   that V2 deliberately did not build:
+
+   - **the admin console cannot see variants.** `PackInventory`'s summary maps
+     items and quests into the packs screen and variants is not in it, so an
+     operator has no way to look at installed versions. Harmless while no
+     content exists; not harmless the day it does.
+   - **the display readers still answer for the archetype.**
+     `maxBurstDamage`, `currentAmmoType` and `headshotScale` in
+     client/src/game/weapons.ts take a weapon id, so the HUD and killfeed will
+     show base numbers for an equipped variant. They cannot be wrong until a
+     variant exists.
+
+1. ~~**V2 of the variants arc, and its plan needs rewriting before it is built.**~~
+   DONE — kept below because the review findings it records are still the
+   reason the code looks the way it does.
    The plan was put to Codex as twelve numbered clauses before a line was
    written, exactly as the standing rule says, and it came back with enough to
    block. §6 carries the findings; the two the user has already ruled on are
