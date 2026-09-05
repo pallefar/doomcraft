@@ -1,7 +1,7 @@
 {
-  "updated": "2026-09-05T13:50:00Z",
-  "phase": "V1-V3 CLOSED · V4 is the first variant content",
-  "phaseNote": "Stage 1 committed: the pellet ceiling on both sides, carveSphere bounded by its loop ranges, reserveMax deleted, the weapons ratchet widened 13 -> 38 fields (weapons@2), the horde shop tested, both release gates checking their declared input lines and byte caps, the variant wire refusing what the parser refuses, and every magazine fill reading the session arsenal. 2592 tests pass; release:verify PASS 17 checks. Next: V4 — content/variants.json, ItemKind.WEAPON_VARIANT, the equip claim into a live room, and a killfeed that can tell two shotgun variants apart.",
+  "updated": "2026-09-05T15:00:00Z",
+  "phase": "V4 plan REFUSED by Codex — fixing what it found first",
+  "phaseNote": "Two commits shipped: the V1-V3 closeout (9f3b472) and the five shipped-code defects Codex found while refusing the V4 plan (d3528a1). Suite fully green — 107 files, 2622 passed, 3 skipped, no failures, 96.88s. release:verify PASS 17 checks. Next: deploy (binary THEN promote a replacement release, because weapons@2 orphans every stored weapons@1 silently), then V4 replanned against a verdict that broke nine of its eleven clauses.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -375,6 +375,22 @@
     {
       "t": "13:50",
       "m": "STAGE 1 COMMITTED (9f3b472). Also fixed a doc comment that claimed sandbox and the tutorial call Room.grantAllWeapons — grep finds no caller of that METHOD outside tests; the sandbox hits are plan.grantAllWeapons, a different mechanism. The builder checked my framing instead of inheriting it, which is the third false claim caught in prose today."
+    },
+    {
+      "t": "14:05",
+      "m": "CODEX ON V4: \"I would not approve V4 as written.\" Nine of eleven clauses broken. It also found a REGRESSION in the stage I had committed an hour earlier: the parser tolerates EPS=1e-9 on a band floor and the negative rail I added to the decoder that morning refuses exactly, so a manifest with spreadPerShot -1e-10 parses clean, gates GREEN, and leaves a real Room with 0 variant rows. A published pack serving nothing, with no error anywhere. Reproduced all four measurements here before believing it."
+    },
+    {
+      "t": "14:31",
+      "m": "THE TWO DOORS NOW AGREE BY CONSTRUCTION. Not by adding the same check twice — the three archetype-free rules run as a contiguous PREFIX in the decoder order, because two lists agree by construction only when one is literally the prefix of the other. The invariant sweep is 7616 probes; on the old code it named 108 manifests the parser blessed and the wire refused. Two corrections to my brief: \"a value must survive its own narrowing\" is FALSE for the f32 fields (f32(4.4) is 4.400000095367432 and arsenal.ts documents six such lossy pairs as shipped behaviour, so equality would refuse the compiled table itself), and rpm:-0 slips past every negative check because -0 < 0 is false. Also moved the Room end-to-end test out of shared/ — it was pulling eleven server modules into shared's build."
+    },
+    {
+      "t": "14:40",
+      "m": "TWO MORE SHIPPED DEFECTS CLOSED. damageEntity wrote the weapon the killer was HOLDING at the moment of death rather than the one that fired — rocket in flight, switch to chainsaw, demon dies, feed says chainsaw. The builder found a second instance my brief had explicitly ruled out: melee is wrong SYNCHRONOUSLY, because a punch fires as tryFire(p, CHAINSAW) while you hold something else. And an invalid NEWEST data pack vanished before the gate could refuse it: installedPacks omits a kind whose newest version fails to parse, so a broken variants@2 made the gate return ok with no variants row at all, silently losing the good v1 too. Campaign, items and quests shared the hole; levels structurally did not."
+    },
+    {
+      "t": "15:00",
+      "m": "ROUND TWO COMMITTED (d3528a1). Full suite genuinely green this time: 107 files, 2622 passed, 3 skipped, ZERO failures in 96.88s — which retroactively confirms the five earlier failures were the machine and not the code. The last builder found a hazard my own brief created: putting a display name into the fingerprint line means a name carrying a newline makes a one-variant manifest hash as a two-variant one, because the digest is inputs.join(newline). It closed the original hole without opening that one. Five of six briefs I wrote today contained a claim the builder correctly overturned — the line telling agents to report anything wrong in the brief is now the highest-yield sentence in the template."
     }
   ],
   "bars": [
@@ -407,7 +423,7 @@
       "name": "V4 — the first variant content",
       "state": "building",
       "what": "content/variants.json, ItemKind.WEAPON_VARIANT tokens, the equip claim into RoomOptions.variantClaims, the craft recipe, the two-browser bar. Plus the admin console variants row, the three archetype-answering display readers, and a killfeed that can tell two shotgun variants apart.",
-      "detail": ""
+      "detail": "Codex broke 9 of 11 clauses. FOUR of its findings were in shipped code, not in the plan — all five now fixed and committed as d3528a1. The plan itself is not yet rewritten; nothing of V4 gets built until it is and until Codex has seen the rewrite."
     },
     {
       "id": "s3",
