@@ -16,23 +16,16 @@ redirect. **Sponsors phase 2 is the next arc.**
    the balance did not, on every deploy. §6 now lists only what is deliberately
    still open; the reconnect grace window is the one real piece of work in it.
 
-1. Sponsors phase 2, CONTINUED — P2a is done, do not rebuild it. The log is
-   instrumented (`served` at mint, `nonce`/`v`/`mode`/`platform`/`decisionId` on
-   every row, write failures counted), day-sharded, aggregated into durable
-   per-day rollups, pruned only where an aggregate exists, and rendered by
-   `GET /api/admin/ads` and the console's Delivery tab — with every unsupported
-   metric printing an em-dash AND ITS REASON. Commits d42374b, 2c08f9e, f11e8d4,
-   9bb7e74, 74b5bcb, 2c4d498. What is left:
-   - P2b: S10 interstitial. The decide filter drops SurfaceId.INTERSTITIAL and
-     REWARDED BEFORE AdService sees them, so the drop is invisible in the log and
-     in the counters; `FrequencyCap.perDayInterstitials` is dead code; and
-     `#ad-overlay` has no `pointer-events: none`, so an open overlay swallows all
-     input. Design that out rather than discovering it.
-   - P2c: S11 rewarded + the Gate 5 handshake. Durable per-day grant caps go ON
-     THE PROFILE (§0 rule 20), never in memory.
-   READ §6 FIRST: Codex found real defects in the existing ad path that P2b will
-   otherwise inherit — above all that the client can measure one fill's pixels
-   under another fill's nonce, which corrupts what the log records.
+1. SPONSORS PHASE 2 IS DONE — do not rebuild it. P2a (instrumented log, daily
+   aggregates, retention gated on aggregation, the honest Delivery report),
+   P2b (S10 interstitial) and P2c (S11 rewarded, Gate 5, grant caps on the
+   PROFILE at PERSIST_VERSION 7) all shipped, deployed and verified in
+   production. Commits d42374b, 2c08f9e, f11e8d4, 9bb7e74, 74b5bcb, 2c4d498,
+   d6c74ed, 2e2780c, 136620f, 7bd0274, baf2d3c, eb212df, 3dae9b2, fde6758.
+   Two loose ends finish the arc and are in §3: no screenshot harness for the
+   rewarded overlay, and no Basic Training drill for either sponsor surface
+   (the admin half shipped as Guides 9). Everything else left in sponsors is the
+   THIRD-PARTY half and needs the accounts in §5.
 
 2. Then the variants arc V1–V5 per docs/VARIANTS.md §5: V1 SessionArsenal seam
    (byte-identical determinism proof) → V2 schema + pack + power-budget. STOP

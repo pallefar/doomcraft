@@ -22,8 +22,11 @@ instrumented, aggregated, retained, and rendered as an honest delivery report.
   **github.com/pallefar/doomcraft** — `main`.
 - Owner seat claimed and durable: creds in `~/youtube/doomcraft-owner-credentials.txt`.
 - CI: `tsc -b` + `vitest run` + `release:verify` on every push; all pushes green.
-  Suite: **99 files / 2383 tests + 3 deliberate skips**. `release:verify` runs 15
+  Suite: **100 files / 2409 tests + 3 deliberate skips**. `release:verify` runs 15
   checks and emits 7 packs.
+- **S11 rewarded is BUILT** (flag `sponsor_rewarded`, defaultOn:false). Gate 5
+  runs server-side: `/api/sponsor/reward/{start,beat,claim}`. Grant caps are ON
+  THE PROFILE (PERSIST_VERSION 7) so a deploy cannot hand out a fresh four.
 - **The S10 between-match interstitial is BUILT** (flag `sponsor_interstitial`,
   defaultOn:false — flipping it in production is the user's launch call). Fires
   after EVERY mode. Proof harness: `tools/shot-interstitial.mjs`.
@@ -140,6 +143,10 @@ in the test body so the proof is cheap to repeat.
 | `2e2780c` | **P2b (server): the interstitial is admitted, and rationed.** `SERVABLE_SURFACES` = phase one + S10; `perDayInterstitials` — typed, defaulted and read by nothing since it was written — is now a real platform ceiling across ALL campaigns (two campaigns each under their own cap still add up), plus the 180 s interval, both refused with the reason in the log. Counted on SERVE, not impression. A surface this build cannot serve is refused and counted instead of dropped in silence. |
 | `136620f` | **P2b (client): the interstitial, and a skip a keyboard can actually press.** THREE defects the screenshot harness found and no unit test could: the skip starts disabled so `focus()` left the keyboard on nothing; the game binds keys globally and SWALLOWED Enter, so the focused high-contrast skip could not be operated at all; and "Skip (14s)" reads as "wait 14 seconds to skip" — the AADC's named pattern, described in words even though the control was live. |
 | `7bd0274` | **The site promises the reporting we actually ship.** "reported to you line by line" was false — the report is daily aggregates, and the in-world half is phase 3. |
+| `baf2d3c` | **P2c (1/n): Gate 5's rules, and caps that survive a deploy.** PERSIST_VERSION 6→7, `DECLARED_PERSIST_VERSION` bumped in the same commit as the gate demands. The server's own clock, one beat per 2s in a [1.6s, 3.5s] ARRIVAL window (which is what defeats a burst faking elapsed time), four fifths visible+focused, 4/day 180s apart 40/30/20/10, zero under 30min lifetime play, zero in PvP, Scrap never XP. The ad-free player is paid without a session — and the CAP checks sit before the WATCH checks so they are still capped, or the purchase becomes a scrap tap. |
+| `eb212df` | **P2c (2/n): the handshake over the wire.** `settleAdReward` mirrors `settleChallenges` — journal idempotency first, row appended inside the same locked section. PvP is read from the ROOM TABLE, never the request. The session is marked spent only after the grant is durable. R38 is why the ownership tests exist: removing the device check from `RewardSessions.get` broke nothing, so a leaked reward id was a claim on another player's watch. |
+| `3dae9b2` | **P2c (3/n): the rewarded watch and its button.** On the QUEST intermission (`#ui`, clickable); deathmatch gets none (`#hud` is pointer-events:none). HOUSE is accepted here unlike the interstitial — the reward is the GRANT, not the ad. Cancel is never disabled: requiring the full watch to be PAID is fine, requiring it to be endured is not. |
+| `fde6758` | **Guides 9 — how to run the sponsor surfaces.** The standing tutorial directive. States which cap survives a deploy and which does not, and the ad-free rule. |
 | `96d067a` | **A store that cannot write now says so.** `JsonFileStore.degraded` was set in four places and read in none. `/api/version`'s `data` gains `degraded`, `unflushed`, `quarantined`, `lostWrites`. |
 
 ## 2. Architecture delta
@@ -167,25 +174,24 @@ studio:     POST /api/admin/studio/quests (+ /validate)   mints quests@<n+1>
 
 ## 3. What is left — decided order
 
-**Three items are now DONE.** §6's unverified findings (all six were true),
-**sponsors P2a** (the log instrumented, aggregated, retained and rendered) and
-**P2b** (the S10 interstitial, server and client). The queue starts at P2c.
+**SPONSORS PHASE 2 IS DONE** to the limit of what is unblocked — P2a (the log
+instrumented, aggregated, retained and rendered), P2b (the S10 interstitial) and
+P2c (S11 rewarded + Gate 5) — as is §6's list of unverified findings, all six of
+which were true. **The queue starts at the variants arc, which needs three
+answers from you before V2.**
 
 1. **Sponsors phase 2, continued.**
    - ~~P2a-0 / P2a-1 / P2b~~ — SHIPPED.
-   - **P2c — S11 rewarded + the Gate 5 handshake.** Durable per-day grant caps
-     belong ON THE PROFILE (rule 20's precedent), never in memory — this is
-     money, unlike the interstitial's player-protecting cap, which is in memory
-     with the rest of the cap machine. `SurfaceId.REWARDED` is still absent from
-     `SERVABLE_SURFACES` on purpose; adding it is P2c's first line. The Gate 5
-     spec is `docs/SPONSORS.md:1063` and the caps are at :1075. Ad-free players
-     must still see the button and be paid instantly ("included with your
-     purchase — no video required"), or the $4.99 purchase makes them strictly
-     worse off. There is no video ingest and none is needed: rewarded ships on
-     display creatives plus the Gate 5 timer.
-   - Also worth folding in: the interstitial has NO Guides card and no Basic
-     Training drill yet, and the standing tutorial directive asks for one when a
-     player-facing system ships.
+   - ~~P2c — S11 rewarded + Gate 5~~ — SHIPPED (server, client, guide).
+     **What is NOT done and should finish the arc:** there is no screenshot
+     harness for the rewarded overlay (S10's is `tools/shot-interstitial.mjs`
+     and the rewarded one should measure the same three things — focus, the
+     cancel control, and that a completed watch actually pays); and there is no
+     Basic Training drill for either sponsor surface, which is the PLAYER half
+     of the standing tutorial directive. The admin half shipped as Guides 9.
+   - Sponsors is otherwise done to the limit of what is unblocked: everything
+     remaining is the THIRD-PARTY half, which needs the ad-network/CMP accounts
+     in §5.
 
 2. **The variants arc, V1–V5** (`docs/VARIANTS.md` §5). **Three §7 decisions
    wait on the user before V2** (power-budget weights, variant rarity floor,
@@ -242,6 +248,9 @@ head this list are FIXED (`d6c74ed`), and the false site claim with them
   often. That is the conservative direction for a cap that protects a PLAYER,
   and it keeps one cap machine rather than two. It is NOT acceptable for a
   rewarded grant, which is money — see P2c in §3.
+- **No screenshot harness for the rewarded overlay, and no Basic Training drill
+  for either sponsor surface.** Both are named in §3; the second is the player
+  half of the standing tutorial directive and the admin half already shipped.
 - **A reconnecting player still loses their post-reconnect earnings.** The false
   fraud violation is fixed; the value loss is not. A dropped socket settles the
   player immediately (right — a rage-quitter must not go unpaid), and the ledger
