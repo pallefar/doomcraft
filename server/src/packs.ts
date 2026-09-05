@@ -42,6 +42,7 @@ import {
   packSetHash,
   questsPack,
   releaseAt,
+  variantsPack,
   resolveRelease,
   type GateCheck,
   type GateReport,
@@ -66,6 +67,11 @@ import {
   parseChallengesManifest,
   type ChallengesManifest,
 } from '@doomcraft/shared/challenges';
+import {
+  parseVariantsManifest,
+  variantsFingerprintInputs,
+  type VariantsManifest,
+} from '@doomcraft/shared/variants';
 
 import {
   DEFAULT_EPISODES_FILE,
@@ -187,6 +193,47 @@ export class PackInventory {
     if (parsed.manifest === null) return null;
     const inputs = itemsFingerprintInputs(parsed.manifest);
     const base = itemsPack(inputs, version);
+    const digest = createHash('sha256').update(inputs.join('\n'), 'utf8').digest('hex');
+    return { pack: { ...base, digest }, manifest: parsed.manifest };
+  }
+
+  /**
+   * No fallback file, deliberately. V2 ships the BINARY that understands
+   * variants and no content: `variantsVersions()` is empty until a pack is
+   * installed, which is exactly the "optional manifest" state the gate check
+   * is written for, and it is the state the deploy order requires — the
+   * variants-aware binary must be live BEFORE the first release names kind 7,
+   * or a host that predates it silently serves the previous release (Rule E).
+   */
+  variantsFileFor(version: number): string | null {
+    if (this.packsRoot !== null) {
+      const file = join(this.packsRoot, 'variants', String(version), 'variants.json');
+      if (existsSync(file)) return file;
+    }
+    return null;
+  }
+
+  variantsVersions(): number[] {
+    const out = new Set<number>();
+    if (this.packsRoot !== null) {
+      const root = join(this.packsRoot, 'variants');
+      if (existsSync(root)) {
+        for (const name of readdirSync(root)) {
+          const v = Number(name);
+          if (Number.isInteger(v) && v >= 1 && this.variantsFileFor(v) !== null) out.add(v);
+        }
+      }
+    }
+    return [...out].sort((a, b) => a - b);
+  }
+
+  variantsAt(version: number): { pack: PackVersion; manifest: VariantsManifest } | null {
+    const file = this.variantsFileFor(version);
+    if (file === null) return null;
+    const parsed = parseVariantsManifest(readFileSync(file, 'utf8'));
+    if (parsed.manifest === null) return null;
+    const inputs = variantsFingerprintInputs(parsed.manifest);
+    const base = variantsPack(inputs, version);
     const digest = createHash('sha256').update(inputs.join('\n'), 'utf8').digest('hex');
     return { pack: { ...base, digest }, manifest: parsed.manifest };
   }
@@ -469,6 +516,11 @@ export class PackInventory {
         if (installed === null || (p.digest.length > 0 && installed.pack.digest !== p.digest)) out.push(p.label);
         continue;
       }
+      if (p.kind === PackKind.VARIANTS) {
+        const installed = this.variantsAt(p.version);
+        if (installed === null || (p.digest.length > 0 && installed.pack.digest !== p.digest)) out.push(p.label);
+        continue;
+      }
       // A data kind with no branch above is PERMANENTLY unsatisfiable —
       // every release naming it silently Rule-E-falls-back forever. Adding a
       // pack kind means adding its branch here FIRST (the S4 lesson).
@@ -504,6 +556,7 @@ export interface DraftPicks {
   campaign?: number;
   items?: number;
   quests?: number;
+  variants?: number;
   note?: string;
 }
 
@@ -684,6 +737,7 @@ export class ReleaseService {
         [PackKind.CAMPAIGN, picks.campaign, (v) => this.inventory.campaignAt(v)?.pack ?? null],
         [PackKind.ITEMS, picks.items, (v) => this.inventory.itemsAt(v)?.pack ?? null],
         [PackKind.QUESTS, picks.quests, (v) => this.inventory.questsAt(v)?.pack ?? null],
+        [PackKind.VARIANTS, picks.variants, (v) => this.inventory.variantsAt(v)?.pack ?? null],
       ];
       for (const [kind, want, resolve] of pickOf) {
         if (want === undefined) continue;
@@ -914,6 +968,53 @@ export class ReleaseService {
         if (campaignDecl.digest.length > 0 && installed.pack.digest !== campaignDecl.digest) {
           checks.push({ id: 'packs.installed', ok: false, detail: `${campaignDecl.label}: digest mismatch` });
         }
+      }
+    }
+
+    /*
+     * variants.validate / packs.installed / variants.dormanted.
+     *
+     * THIS BLOCK, NOT ONLY THE ONE IN gate.ts. `runReleaseVerify()` and this
+     * method are two different implementations of "the gate": the first is
+     * what `npm run release:verify` and CI run over the TREE, and this one is
+     * what the admin console runs over a DRAFT. A check added to gate.ts is
+     * not added here, and a review found a candidate naming kind 7 gating
+     * GREEN through this path and then falling back at serve time.
+     */
+    const variantsDecl = draft.packs.find((p) => p.kind === PackKind.VARIANTS);
+    if (variantsDecl !== undefined) {
+      const installed = this.inventory.variantsAt(variantsDecl.version);
+      if (installed === null) {
+        checks.push({
+          id: 'packs.installed',
+          ok: false,
+          detail: `${variantsDecl.label} is not installed on this host (or its manifest does not parse)`,
+        });
+      } else {
+        if (variantsDecl.digest.length > 0 && installed.pack.digest !== variantsDecl.digest) {
+          checks.push({ id: 'packs.installed', ok: false, detail: `${variantsDecl.label}: digest mismatch` });
+        }
+        checks.push({ id: 'variants.validate', ok: true, detail: `${installed.manifest.variants.length} variant(s) parse, band and budget` });
+
+        // The same forward-publish hazard items has, with a milder landing:
+        // a removed variant's owned copies go dormant AND the room resolves
+        // the equipped claim to the BASE weapon, so the player keeps firing —
+        // just not the gun they bought. Counted, never refused.
+        const baseDecl = base.packs.find((p) => p.kind === PackKind.VARIANTS);
+        const baseInstalled = baseDecl === undefined ? null : this.inventory.variantsAt(baseDecl.version);
+        const now = new Set(installed.manifest.variants.map((v) => v.id));
+        const gone = baseInstalled === null
+          ? []
+          : baseInstalled.manifest.variants.map((v) => v.id).filter((id) => !now.has(id));
+        checks.push({
+          id: 'variants.dormanted',
+          ok: true,
+          detail: gone.length === 0
+            ? ''
+            : `${gone.length} variant id(s) from ${baseDecl?.label} are absent from ${variantsDecl.label} — `
+              + `every owned copy goes dormant and its holder falls back to the base weapon: `
+              + `${gone.slice(0, 8).join(', ')}${gone.length > 8 ? '…' : ''}`,
+        });
       }
     }
 

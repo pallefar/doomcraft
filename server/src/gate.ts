@@ -36,6 +36,7 @@ import {
   type ChallengesManifest,
 } from '@doomcraft/shared/challenges';
 import { sanitiseContentId } from '@doomcraft/shared/modes';
+import { parseVariantsManifest } from '@doomcraft/shared/variants';
 import {
   BUILTIN_FLAG_ORDER,
   itemsPack,
@@ -335,6 +336,28 @@ export function checkItemsValidate(text: string | null): GateCheck {
 }
 
 /**
+ * `variants.validate` — the variants manifest parses, and every band, budget
+ * and dominance refusal is surfaced verbatim. Optional-manifest shape, like
+ * items and quests: no manifest installed is a PASS, because V2 ships the
+ * binary that understands kind 7 and no content at all.
+ *
+ * NOTE that this is only HALF the gate. `ReleaseService.runGate` in
+ * server/src/packs.ts is a separate implementation that runs over a DRAFT in
+ * the admin console and does not see anything exported from here; its variants
+ * block is the other half, and both are needed.
+ *
+ * Input that makes it fail: a variant outside a band, one that is better than
+ * its base on every axis, a fractional pellet count, or an override of a field
+ * that archetype's firing path never reads.
+ */
+export function checkVariantsValidate(text: string | null): GateCheck {
+  if (text === null) return { id: 'variants.validate', ok: true, detail: 'no variants manifest installed — nothing to check' };
+  const parsed = parseVariantsManifest(text);
+  if (parsed.manifest !== null) return ok('variants.validate');
+  return fail('variants.validate', parsed.errors.join('; '));
+}
+
+/**
  * `quests.validate` — the challenges manifest parses and every refusal the
  * parser can make is surfaced verbatim. Input that makes it fail: a def over
  * the scrap cap, a duplicate id, a period the id contradicts.
@@ -460,6 +483,7 @@ export interface VerifyOptions {
   episodesFile?: string;
   itemsFile?: string;
   questsFile?: string;
+  variantsFile?: string;
   declaredPacks?: readonly PackVersion[];
   declaredProtocol?: number;
   declaredFlagOrder?: readonly string[];
@@ -497,6 +521,11 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
   const itemsFile = options.itemsFile ?? DEFAULT_ITEMS_FILE;
   const itemsText = existsSync(itemsFile) ? readFileSync(itemsFile, 'utf8') : null;
   const parsedItems = itemsText === null ? null : parseItemsManifest(itemsText).manifest;
+  // No DEFAULT_VARIANTS_FILE: V2 ships no content, so this is null until a
+  // caller points at one, and the check passes by design.
+  const variantsFile = options.variantsFile ?? '';
+  const variantsText = variantsFile !== '' && existsSync(variantsFile)
+    ? readFileSync(variantsFile, 'utf8') : null;
   const questsFile = options.questsFile ?? DEFAULT_QUESTS_FILE;
   const questsText = existsSync(questsFile) ? readFileSync(questsFile, 'utf8') : null;
   const parsedQuests = questsText === null ? null : parseChallengesManifest(questsText).manifest;
@@ -509,6 +538,7 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
     checkLevelsCanonical(files),
     checkCampaignRefs(manifest, installedIds),
     checkItemsValidate(itemsText),
+    checkVariantsValidate(variantsText),
     checkQuestsValidate(questsText),
     checkQuestsRefs(parsedQuests, parsedItems),
     checkProtocolStable(options.declaredProtocol),

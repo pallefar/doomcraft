@@ -101,6 +101,13 @@ describe('the builtin release', () => {
     expect(PACKS[PackKind.QUESTS]?.cls).toBe('data');
     expect((PACKS[PackKind.QUESTS]?.blastRadius ?? '')).toContain('profile');
     expect(PackKind.ITEMS).toBe(6);
+    expect(PackKind.VARIANTS).toBe(7);
+    expect(PACKS[PackKind.VARIANTS]?.cls).toBe('data');
+    // The blast radius has to say the two things an operator can get wrong:
+    // that a removed variant falls its holders back to the base weapon, and
+    // that the binary must ship before the release (Rule E).
+    expect(PACKS[PackKind.VARIANTS]?.blastRadius ?? '').toContain('dormant');
+    expect(PACKS[PackKind.VARIANTS]?.blastRadius ?? '').toContain('Rule E');
     expect(PACKS[PackKind.ITEMS]?.cls).toBe('data');
     expect((PACKS[PackKind.ITEMS]?.blastRadius ?? '')).toContain('dormant');
   });

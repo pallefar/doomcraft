@@ -38,13 +38,30 @@ function tempDir(prefix: string): string {
 
 /** A DOOMCRAFT_PACKS root with levels@1 (the shipped campaign) and, when
  *  `secondVersion`, a levels@2 that differs in one byte. Campaign@1 too. */
-function packsRoot(secondVersion = false): string {
+/** A real, parseable variants manifest — the doc's own two V4 rows. */
+const VARIANTS_JSON = JSON.stringify({
+  variants: [
+    {
+      id: 'shotgun-slug', base: 1, name: 'Slug Shotgun',
+      over: { pellets: 1, damage: 62, spread: 0.012, spreadMax: 0.03, falloffEnd: 44, rpm: 42 },
+    },
+    { id: 'pistol-burst', base: 0, name: 'Burst Pistol', over: { rpm: 620, damage: 12 } },
+  ],
+});
+
+function installVariants(root: string, version = 1, body = VARIANTS_JSON): void {
+  mkdirSync(join(root, 'variants', String(version)), { recursive: true });
+  writeFileSync(join(root, 'variants', String(version), 'variants.json'), body, 'utf8');
+}
+
+function packsRoot(secondVersion = false, withVariants = false): string {
   const root = tempDir('dc-packs-');
   cpSync(CONTENT_LEVELS, join(root, 'levels', '1'), { recursive: true });
   mkdirSync(join(root, 'campaign', '1'), { recursive: true });
   cpSync(EPISODES, join(root, 'campaign', '1', 'episodes.json'));
   mkdirSync(join(root, 'items', '1'), { recursive: true });
   cpSync(join(repoRoot, 'content', 'items.json'), join(root, 'items', '1', 'items.json'));
+  if (withVariants) installVariants(root);
   if (secondVersion) {
     cpSync(CONTENT_LEVELS, join(root, 'levels', '2'), { recursive: true });
     const f = join(root, 'levels', '2', 'e1m1-hangar.json');
@@ -139,6 +156,111 @@ describe('PackInventory', () => {
     expect(inv.unsatisfied(release([quests]))).toEqual([]);
     expect(inv.unsatisfied(release([questsGhost]))).toEqual(['quests@9']);
     expect(inv.unsatisfied(release([questsTampered]))).toEqual(['quests@1']);
+  });
+
+  it('satisfies an INSTALLED variants pack — the only way its branch is visible', () => {
+    /*
+     * Read this before changing it. The fallthrough at the bottom of
+     * `unsatisfied()` already pushes any kind with no branch, so a
+     * NOT-installed variants pack reads as unsatisfied with or without the
+     * branch — an assertion on that case cannot fail and would be rule 2 in a
+     * disguise. The branch is only observable in the positive direction: an
+     * installed pack must come back SATISFIED. Delete the branch and this line
+     * goes red, which is exactly the S4 lesson the fallthrough's own comment
+     * records.
+     */
+    const root = packsRoot(false, true);
+    const inv = new PackInventory({ packsRoot: root, log: () => {} });
+    const variants = inv.variantsAt(1)!.pack;
+    expect(variants.label).toBe('variants@1');
+    const release = (packs: Release['packs'][number][]): Release => ({
+      revision: 1, state: 'live', ordinal: 2, rolloutBp: 10000, baseRevision: 0,
+      gate: null, createdMs: 0, publishedMs: 0, note: '', packs,
+    } as Release);
+    expect(inv.unsatisfied(release([variants]))).toEqual([]);
+    expect(inv.unsatisfied(release([{ ...variants, version: 9, label: 'variants@9' }]))).toEqual(['variants@9']);
+    expect(inv.unsatisfied(release([{ ...variants, digest: 'f'.repeat(64) }]))).toEqual(['variants@1']);
+  });
+
+  it('refuses to install a variants manifest the schema rejects', () => {
+    // A straight upgrade — better on every axis, worse on none.
+    const root = packsRoot();
+    installVariants(root, 1, JSON.stringify({
+      variants: [{ id: 'cheat', base: 0, name: 'Cheat', over: { damage: 40 } }],
+    }));
+    const inv = new PackInventory({ packsRoot: root, log: () => {} });
+    // `variantsAt` is the load-bearing one: null means it can never be drafted
+    // and can never gate green. `variantsVersions` still LISTS it, exactly as
+    // `itemsVersions` lists an items version whose manifest does not parse —
+    // the directory is on disk and the operator should see that it is there
+    // and unusable, rather than have it vanish.
+    expect(inv.variantsAt(1)).toBeNull();
+    expect(inv.variantsVersions()).toEqual([1]);
+    expect(inv.itemsVersions().length, 'the same shape items has').toBeGreaterThan(0);
+  });
+
+  it('has no variants until one is installed — V2 ships the binary, not content', () => {
+    const inv = new PackInventory({ packsRoot: packsRoot(), log: () => {} });
+    expect(inv.variantsVersions()).toEqual([]);
+    expect(inv.variantsAt(1)).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The PRODUCTION gate, which is not the same code as gate.ts
+ * ------------------------------------------------------------------------ */
+
+describe('the production gate and pack kind 7', () => {
+  it('REFUSES a draft whose variants pack is gone by the time the gate runs', async () => {
+    /*
+     * The finding this test exists for: `runReleaseVerify()` in gate.ts and
+     * `ReleaseService.runGate()` in packs.ts are two separate implementations,
+     * and a check added to the first is not added to the second. Before the
+     * variants block existed in runGate, a candidate naming kind 7 gated GREEN
+     * and then fell back at serve time — a green review and the wrong game.
+     *
+     * Drafted while installed, then removed from disk before the gate runs,
+     * which is the realistic shape: a draft names a version and the gate is
+     * the thing that re-reads the host.
+     */
+    const root = packsRoot(false, true);
+    const { svc } = service(root);
+    let doc = svc.document();
+    expect((await svc.createDraft(doc.revision, { variants: 1 })).ok).toBe(true);
+
+    rmSync(join(root, 'variants', '1'), { recursive: true });
+
+    doc = svc.document();
+    const gated = await svc.gateDraft(doc.revision);
+    expect(gated.ok).toBe(true);
+    const report = gated.ok ? gated.release?.gate : null;
+    expect(report?.ok, 'the production gate must not pass an uninstallable kind 7').toBe(false);
+    expect(JSON.stringify(report?.checks)).toContain('variants@1 is not installed on this host');
+  });
+
+  it('passes a draft naming a variants pack it DOES have, and says how many parsed', async () => {
+    const root = packsRoot(false, true);
+    const { svc } = service(root);
+    const doc = svc.document();
+    expect((await svc.createDraft(doc.revision, { variants: 1 })).ok).toBe(true);
+    const drafted = svc.document();
+    const draft = drafted.history.find((r) => r.state === 'draft');
+    expect(draft?.packs.some((p) => p.label === 'variants@1')).toBe(true);
+
+    const gated = await svc.gateDraft(drafted.revision);
+    const report = gated.ok ? gated.release?.gate : null;
+    expect(report?.ok, JSON.stringify(report?.checks)).toBe(true);
+    const json = JSON.stringify(report?.checks);
+    expect(json).toContain('variants.validate');
+    expect(json).toContain('2 variant(s) parse, band and budget');
+  });
+
+  it('refuses to DRAFT a variants version this host does not have', async () => {
+    const { svc } = service(packsRoot());
+    const doc = svc.document();
+    const r = await svc.createDraft(doc.revision, { variants: 9 });
+    expect(r.ok).toBe(false);
+    expect(r.ok === false ? r.error : '').toContain('variants@9 is not installed on this host');
   });
 });
 

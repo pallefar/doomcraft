@@ -32,6 +32,7 @@ import {
   checkQuestsValidate,
   checkSavesSchema,
   parseEpisodesManifest,
+  checkVariantsValidate,
   runReleaseVerify,
   scanLevelDir,
 } from './gate.js';
@@ -291,7 +292,7 @@ describe('runReleaseVerify over the shipped tree', () => {
     for (const required of [
       'packs.declared.core', 'packs.declared.weapons', 'packs.declared.characters',
       'packs.installed', 'packs.unique', 'levels.validate', 'levels.canonical',
-      'campaign.refs', 'quests.validate', 'quests.refs',
+      'campaign.refs', 'quests.validate', 'quests.refs', 'variants.validate',
       'protocol.stable', 'flags.order', 'saves.schema', 'gate.nonempty',
     ]) expect(ids).toContain(required);
     // The pack set is the three build packs plus the four data packs, digests on.
@@ -416,3 +417,70 @@ function fnvBytes(bytes: Uint8Array): number {
   }
   return h >>> 0;
 }
+
+/* ------------------------------------------------------------------------ *
+ * variants.validate — the TREE side of the gate
+ *
+ * The other side is `ReleaseService.runGate` in server/src/packs.ts, which is
+ * a separate implementation over a DRAFT and does not see anything exported
+ * from gate.ts. Both are needed and both are tested; see
+ * server/src/releases.test.ts for the draft side.
+ * ------------------------------------------------------------------------ */
+
+describe('variants.validate', () => {
+  it('passes when no variants manifest is installed', () => {
+    // V2 ships the BINARY that understands kind 7 and no content, which is
+    // also the deploy order the pack requires.
+    const c = checkVariantsValidate(null);
+    expect(c.ok).toBe(true);
+    expect(c.detail).toContain('nothing to check');
+  });
+
+  it('passes a real manifest', () => {
+    const c = checkVariantsValidate(JSON.stringify({
+      variants: [{ id: 'pistol-burst', base: 0, name: 'Burst Pistol', over: { rpm: 620, damage: 12 } }],
+    }));
+    expect(c.ok, c.detail).toBe(true);
+  });
+
+  it('IS WIRED INTO runReleaseVerify, not merely exported', () => {
+    /*
+     * Rule 2, one level up. The three cases above call `checkVariantsValidate`
+     * directly, so deleting its line from `runReleaseVerify`'s check list left
+     * every one of them green — the CHECK was proven and its WIRING was not.
+     * These two go through the real entry point.
+     */
+    const dir = mkdtempSync(join(tmpdir(), 'dc-variants-'));
+    const good = join(dir, 'ok.json');
+    writeFileSync(good, JSON.stringify({
+      variants: [{ id: 'pistol-burst', base: 0, name: 'Burst Pistol', over: { rpm: 620, damage: 12 } }],
+    }), 'utf8');
+    const bad = join(dir, 'bad.json');
+    writeFileSync(bad, JSON.stringify({
+      variants: [{ id: 'cheat', base: 0, name: 'Cheat', over: { damage: 40 } }],
+    }), 'utf8');
+
+    const okRun = runReleaseVerify({ variantsFile: good });
+    expect(okRun.report.checks.find((c) => c.id === 'variants.validate')?.ok).toBe(true);
+
+    const badRun = runReleaseVerify({ variantsFile: bad });
+    const check = badRun.report.checks.find((c) => c.id === 'variants.validate');
+    expect(check, 'variants.validate never reached the report').toBeDefined();
+    expect(check?.ok).toBe(false);
+    expect(badRun.report.ok, 'a refused variant must fail the whole gate').toBe(false);
+  });
+
+  it('surfaces the parser\'s refusal verbatim', () => {
+    const straightUpgrade = checkVariantsValidate(JSON.stringify({
+      variants: [{ id: 'cheat', base: 0, name: 'Cheat', over: { damage: 40 } }],
+    }));
+    expect(straightUpgrade.ok).toBe(false);
+    expect(straightUpgrade.detail).toMatch(/power budget|every axis/);
+
+    const hazard = checkVariantsValidate(JSON.stringify({
+      variants: [{ id: 'crater', base: 3, name: 'Crater', over: { terrainDamage: 1e20 } }],
+    }));
+    expect(hazard.ok).toBe(false);
+    expect(hazard.detail).toContain('terrainDamage');
+  });
+});

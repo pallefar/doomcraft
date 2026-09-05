@@ -35,6 +35,8 @@ export enum PackKind {
   QUESTS = 5,
   /** Producer: shared/src/items.ts + content/items.json. Ownership rule: docs/PACKS.md §7. */
   ITEMS = 6,
+  /** Producer: shared/src/variants.ts. Weapon stat overlays — docs/VARIANTS.md. */
+  VARIANTS = 7,
 }
 
 /** 'build' = compiled into the bundle. 'data' = files the server loads at runtime. */
@@ -88,6 +90,16 @@ export const PACKS: Readonly<Partial<Record<PackKind, PackDef>>> = Object.freeze
       + 'the destructive direction: every owned copy goes dormant at the next read, silently, with '
       + 'no profile write to notice — the gate counts them (items.dormanted) and the Review screen '
       + 'renders the count.',
+  },
+  [PackKind.VARIANTS]: {
+    kind: PackKind.VARIANTS, key: 'variants', cls: 'data',
+    blastRadius: 'What every weapon variant DOES — the numbers both predictors fire with. A room '
+      + 'pins one table for its whole life, so a re-cut never changes a match in progress; it lands '
+      + 'on the next ROOM. REMOVING a variant is the destructive direction: every owned copy goes '
+      + 'dormant at the next read and the room resolves the equipped claim to the BASE weapon, so '
+      + 'a player keeps firing, just not the gun they bought. The binary must ship BEFORE the first '
+      + 'release naming this kind: a host that predates it cannot satisfy the pack and silently '
+      + 'serves the previous release (Rule E).',
   },
 });
 
@@ -474,6 +486,23 @@ export function questsPack(inputs: readonly string[], version = 1): PackVersion 
     inputs: Object.freeze([...inputs]),
     digest: '',
     label: `quests@${version}`,
+  });
+}
+
+/**
+ * The variants pack: weapon stat overlays, from a variants manifest's canonical
+ * input lines (one per variant, id-sorted — shared/src/variants.ts). Digest is
+ * filled by the server inventory and the verify tool, same as items and quests.
+ */
+export function variantsPack(inputs: readonly string[], version = 1): PackVersion {
+  return Object.freeze({
+    kind: PackKind.VARIANTS,
+    key: 'variants',
+    version,
+    fingerprint: fingerprint(inputs.join('|')),
+    inputs: Object.freeze([...inputs]),
+    digest: '',
+    label: `variants@${version}`,
   });
 }
 
