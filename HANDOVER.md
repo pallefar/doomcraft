@@ -152,6 +152,8 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
 | `1b7af11` | **Two live bugs the V2 plan review found in shipped code.** `parseItemsManifest('null')` threw a TypeError past every caller instead of refusing (the `root.items` access sits outside the try; `parseChallengesManifest` had it identically). And `HordeDirector.equipStart` refilled magazines from the compiled table on the JOIN path, after `spawnPlayer` had filled them through the arsenal — so a shotgun variant that pays for its damage with a smaller magazine would enter Horde holding the base's eight shells. Proven red at "expected 8 to be 4". |
 | `b3902e0` | **V2a — the variant schema.** Three refusals: whitelist+bands, the ±12% budget, and strict dominance. PER-ARCHETYPE AXES, per the user's decision: an axis is scored only where it is LIVE, so nothing is 0/0, and an override of a field that archetype's firing path never reads is REFUSED rather than priced at zero. Two bands were doing balance work and refusing the document's own §1 slug shotgun — `damage` is now a wide rail with the real bound on the PAYLOAD (damage × pellets), and the cone rails go to a tenth. Proven red five ways. |
 | `883d875` | **V2b — `PackKind.VARIANTS = 7`, its inventory branch, and BOTH gates.** `runReleaseVerify()` and `ReleaseService.runGate()` are separate implementations and the review found a candidate naming kind 7 gating GREEN through the second; reverting the new block reproduces it word for word. The inventory branch is only visible in the POSITIVE direction (the fallthrough already reports an unhandled kind), and the test says so at length. Rule 2 caught the wiring one level up: the check's own tests called it directly, so removing it from the gate's list left them all green. |
+| `8c6f196` | **Three defects in V2, found reviewing the V3 PLAN against it.** An inherited property (`over: {"toString": 1}`) threw a TypeError out of BOTH validation paths, because `BANDS.toString` finds Object.prototype's method and is not undefined — `Object.hasOwn` now. `terrainDamage` was banded but charged by no axis, so 2.6 m -> 3.9 m of carve radius cost nothing; it is off the whitelist entirely (16 fields), which also removes the `carveSphere` hazard rather than banding it. And the PRODUCTION draft route dropped `picks.variants` while every service-level test passed — the same lesson one commit later — with `installedPacks()` omitting it too, so a routine draft would have silently dropped a live variants pack. |
+| `c1a426b` | **Three more predictor disagreements fixed; the fourth named as unfixable.** A Float32Array damage tally drew kill markers for 99.99999904632568 damage. A weapon switch cleared the cone on the server and not the client (0.036 vs 0.010 rad). A pooled body inherited the last occupant's `shotSeq`. The fourth — the two schedule shots on DIFFERENT CLOCKS — cannot be reconciled by matching a formula, and trying made it worse. See §6. |
 | `fc01475` | **THE BIG ONE: the two predictors now agree about where pellets go.** Five separate causes, each proven red alone — the cone was read AFTER the shot bloomed it (0.53° on a shotgun); the seeding schemes were unrelated and the server's used the ROOM seed the client never receives (6.6°); the server did not spread projectiles at all (0.75°, plasma only); the client's accumulated cone was float32 against the server's double (8.3e-9); and the shot counter wrapped on one side only (65 536 shots in, every cone diverges). `agreement.test.ts` is the assertion the golden never was, and the golden moved DELIBERATELY: 135 damage rows → 102, 10 kills → 14, and the pistol and shotgun now finish people they never used to. |
 
 ## 2. Architecture delta
@@ -291,6 +293,28 @@ $100 · a Mac with Xcode · GTA mode has no obtainable bar.
 Findings this session produced and chose NOT to act on, so none is mistaken for
 oversight.
 
+**THE SHOT CLOCKS DIVERGE, AND THE CONE SEED RIDES ON THEM. Read this before
+V3 or V4 promises anything about prediction.**
+
+The server schedules on a 20 ms tick (`nextFireMs = now + interval`); the
+client accumulates into a per-frame cooldown. Neither is wrong and they cannot
+be made to agree by matching a formula — porting the client's carry-the-
+overshoot rule to the server let a pistol fire its second round 17 ms after its
+first, because that difference is only an overshoot while the trigger is held.
+
+Measured: over a 40-tick burst the client fires three rounds where the server
+fires four. The consequence is bigger than one shot, because the cone seed is
+`shotSeed(ownerId, shotSeq, pellet)` — once the counts differ, every later shot
+is seeded differently on the two sides. **The bit-identical cone proof in
+`agreement.test.ts` holds FOR A GIVEN SHOT NUMBER; the numbers themselves
+drift.** `compareShots` therefore compares per BURST, checks the magazine by
+RATE and the sequence by BOUND, and says so where it asserts.
+
+Closing it means the server telling the client which shot number it actually
+resolved — wire work, and the obvious candidate to fold into V3's new message.
+Until then the server is authoritative and the client's tracer pattern is
+cosmetic after the first divergence.
+
 **From the V2 plan review (Codex, before any code was written).** Every one
 below was independently reproduced here before being written down — rule 23.
 
@@ -300,6 +324,11 @@ below was independently reproduced here before being written down — rule 23.
   whitelist, a variant can pay budget for a field that changes nothing while
   moving the pack fingerprint — the console diff would advertise a reserve-cap
   change that never happens. Either drop it from the whitelist or make it real.
+- **`variantSlots` is delivered by nothing.** V3 sends the room's TABLE; the
+  per-player equipped CLAIM has no carrier, so both sides sit at slot 0. The
+  user's decision of 2026-09-05 is that V3 delivers it too — the server-resolved
+  per-weapon slot map rides the same message — so V4 adds ownership rather than
+  ownership plus a handoff.
 - **The server has no pellet clamp.** `client/src/game/weapons.ts` clamps to
   `MAX_PELLETS` (16); `sim.ts` loops `i < def.pellets` with no bound. Nothing
   can reach it today (max is 7) and V2's band contains it — but the band is
