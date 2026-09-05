@@ -29,6 +29,7 @@ import * as THREE from 'three';
 import {
   PLAYER_HALF_WIDTH, PLAYER_HEIGHT,
   PLAYER_EYE_HEIGHT, PLAYER_EYE_HEIGHT_CROUCH,
+  MONSTER_HEAD_MIN_Y_FRAC, MONSTER_HEAD_HALF_WIDTH_FRAC,
   RENDER_DISTANCE_CHUNKS_DESKTOP, RENDER_DISTANCE_CHUNKS_MOBILE,
   MAX_FRAME_DT, InputAction, REACH_BREAK, REACH_PLACE,
   GameMode, CHUNK_SIZE_X, CHUNK_SIZE_Z, chunkKey, blockToChunk,
@@ -1390,8 +1391,11 @@ export class Game {
         // same. `hud.hitMarker` treats the third argument as optional.
         if (this.settings.hitMarkers) this.hud.hitMarker(headshot, killed, damage);
       },
-      hitConfirm: (x, y, z, nx, ny, nz, damage, headshot, killed): void => {
-        this.fx.hitConfirm(x, y, z, nx, ny, nz, damage, headshot, killed);
+      hitConfirm: (x, y, z, nx, ny, nz, damage, headshot, killed, hits, pellets): void => {
+        // `hits`/`pellets` forwarded, not dropped: they are how the effects
+        // layer tells a whole shotgun burst apart from a single clipping
+        // pellet, which range falloff can push to the same damage number.
+        this.fx.hitConfirm(x, y, z, nx, ny, nz, damage, headshot, killed, hits, pellets);
         // A kill is a different jolt, not a bigger one — see Viewmodel.hitConfirm.
         this.viewmodel.hitConfirm(killed ? 1 : clampf(0.22 + damage / 90, 0, 1), killed);
       },
@@ -2084,7 +2088,8 @@ export class Game {
       if (look === undefined) continue;
       pushEntityTarget(
         t, e.id, e.x, e.y, e.z, look.halfW, look.height,
-        look.height * 0.78, look.halfW * 0.7, true, 254, e.health,
+        look.height * MONSTER_HEAD_MIN_Y_FRAC, look.halfW * MONSTER_HEAD_HALF_WIDTH_FRAC,
+        true, 254, e.health,
       );
     }
     return t;

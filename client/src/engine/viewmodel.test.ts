@@ -508,7 +508,8 @@ const dist = (a: Px, b: Px): number => Math.hypot(a.x - b.x, a.y - b.y);
 
 /** Fire a settled weapon and record the first `frames` frames, in pixels. */
 function shotFilm(weapon: number, frames: number, handed: 'right' | 'left' = 'right'): {
-  body: Px[]; muzzle: Px[]; slide: Px[]; rest: { body: Px; muzzle: Px; slide: Px };
+  body: Px[]; muzzle: Px[]; slide: Px[]; flash: number[];
+  rest: { body: Px; muzzle: Px; slide: Px };
 } {
   const vm = new Viewmodel({ fov: 68, handed });
   vm.setWeapon(weapon, true);
@@ -526,13 +527,18 @@ function shotFilm(weapon: number, frames: number, handed: 'right' | 'left' = 'ri
 
   const rest = grab();
   const body: Px[] = [], muzzle: Px[] = [], slide: Px[] = [];
+  // The flash is recorded frame by frame because the round-2 defect below is a
+  // relationship BETWEEN two channels — where the slide is on the frames the
+  // flash is lit — and neither channel alone can show it.
+  const flash: number[] = [];
   vm.fire(weapon);
   for (let f = 0; f < frames; f++) {
     vm.update(FRAME, input);
     const g = grab();
     body.push(g.body); muzzle.push(g.muzzle); slide.push(g.slide);
+    flash.push(vm.muzzleFlash);
   }
-  return { body, muzzle, slide, rest };
+  return { body, muzzle, slide, flash, rest };
 }
 
 describe('the shot moves the gun, in pixels, on the frames that are lit', () => {
@@ -584,16 +590,56 @@ describe('the shot moves the gun, in pixels, on the frames that are lit', () => 
     expect(left.body[1].x - left.rest.body.x).toBeLessThan(-4);
   });
 
-  it('the slide runs a real two-frame cycle instead of a slow bleed', () => {
-    /* The old curve put the slide at 37, 34, 29, 22, 12 px across five frames:
-     * always moving, never by more than five pixels between adjacent frames,
-     * which in a sampled contact sheet is indistinguishable from a slide that
-     * never moved at all. A slide is a snap. */
-    const f = shotFilm(WeaponId.PISTOL, 6);
-    const back = f.slide.map((p) => dist(p, f.rest.slide));
-    expect(back[0]).toBeGreaterThan(25);
-    expect(back[0] - back[2]).toBeGreaterThan(15);
-    expect(back[4]).toBeLessThan(6);
+  it('the slide is HARD BACK on every frame the muzzle flash is lit', () => {
+    /* ROUND 2's defect, and the reason this replaced an assertion about
+     * adjacent frames differing by 15 px.
+     *
+     * That older assertion was satisfied by a slide fully back for ONE frame
+     * and 95 % home by the second — which is what shipped, and what a blind
+     * review reported as "the slide never cycles on either firing frame (the
+     * ejection port stays shut while brass spawns from nowhere)". The review
+     * was right and the test was green, because the test never asked WHEN the
+     * slide was back relative to the only frames a viewer can see the gun on.
+     * A 15 ms hold under a 45 ms flash is a cycle that happens in the dark.
+     *
+     * So the assertion is now the relationship: while the flash is lit the
+     * slide is at its stop, full stop. It still has to snap home afterwards —
+     * a slide welded open would pass the first half and fails the last two. */
+    const f = shotFilm(WeaponId.PISTOL, 10);
+    /* Measured as the slide's offset FROM THE BODY, against the same offset at
+     * rest. That is literally how far the ejection port is open, and it is the
+     * only form of the measurement that is not contaminated by the whole-gun
+     * recoil: absolute slide pixels peak two frames after the trigger because
+     * the entire weapon is travelling, which would let a slide that never
+     * opened score its highest number on a frame the flash had already left. */
+    const back = f.slide.map((p, i) => Math.hypot(
+      (p.x - f.body[i].x) - (f.rest.slide.x - f.rest.body.x),
+      (p.y - f.body[i].y) - (f.rest.slide.y - f.rest.body.y),
+    ));
+    const lit = f.flash.map((v) => v > 0.02);
+
+    // NON-VACUITY: if the flash were dark on every frame the loop below would
+    // assert nothing at all and this would be a test that cannot fail.
+    expect(lit.filter(Boolean).length, 'frames with the flash lit')
+      .toBeGreaterThanOrEqual(2);
+
+    const peak = Math.max(...back);
+    expect(peak, 'the slide travels at all').toBeGreaterThan(30);
+    for (let i = 0; i < back.length; i++) {
+      if (lit[i]) {
+        expect(back[i], `frame ${i} is lit, so the port must be open`)
+          .toBeGreaterThan(peak * 0.99);
+      }
+    }
+
+    // It goes home, and it goes home as a SNAP: a slow bleed back into battery
+    // reads as a static prop on a sampled sheet, which is what round 1 shipped.
+    expect(back[back.length - 1], 'back in battery by the end').toBeLessThan(6);
+    let biggest = 0;
+    for (let i = 1; i < back.length; i++) {
+      biggest = Math.max(biggest, Math.abs(back[i] - back[i - 1]));
+    }
+    expect(biggest, 'one adjacent pair carries the return').toBeGreaterThan(15);
   });
 
   it('every weapon in the rack has mass, and the heavy ones have more', () => {

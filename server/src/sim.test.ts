@@ -17,6 +17,9 @@ import {
   type DamageEvent,
   EntityType,
   GameMode,
+  DMG_FATAL,
+  DMG_HEADSHOT,
+  KILL_HEADSHOT,
   KILL_MELEE,
   type KillEvent,
   PLAYER_HEIGHT,
@@ -787,6 +790,152 @@ describe('doom mechanics', () => {
     expect(hits.length).toBeGreaterThan(0);
     for (const h of hits) expect(h.weaponId).toBe(WeaponId.ROCKET);
     room.stop();
+  });
+
+  /* ---------------------------------------------------------------- *
+   * THE HIT MARKER'S TWO BITS
+   *
+   * `Game.onDamage` drives the crosshair's hit marker from exactly two bits of
+   * the damage event — `DMG_FATAL` picks the red kill ring and `DMG_HEADSHOT`
+   * the gold one — and `damageEntity` pushed a LITERAL 0 into that argument.
+   * So on the wire a demon could not be killed and could not be shot in the
+   * head: every hit on every monster in the game reported the same plain,
+   * flagless hit, and the attacker's own client had to guess.
+   *
+   * Worse than "no marker": the client PREDICTS both bits on the frame it
+   * fires, so the flagless echo arriving a round trip later repainted the red
+   * ring back out to white. The bits are read off the decoded packet the
+   * attacker's socket actually received, because that is the only surface the
+   * marker can see.
+   * ---------------------------------------------------------------- */
+
+  /**
+   * One pistol round into one demon standing on the ground at 2.5 m, and the
+   * DAMAGE packet the shooter got back.
+   *
+   * `height` is the axis, and it is the honest one: a monster's head band is a
+   * FRACTION of its own body (MONSTER_HEAD_MIN_Y_FRAC .. 1.0), so the level
+   * eye ray at 1.62 m enters a 1.9 m demon's skull and a 2.6 m demon's chest
+   * with nothing moved, nothing floated and nothing aimed differently.
+   * `health` is the other axis: whether that one round is fatal.
+   */
+  interface DemonShot {
+    readonly hits: DamageEvent[];
+    readonly kills: KillEvent[];
+    /** Kills the SERVER scored the shooter, read off the player, not the wire. */
+    readonly scored: number;
+  }
+
+  function shootDemon(seed: number, height: number, health: number): DemonShot {
+    const room = makeRoom(seed);
+    const client = join(room, 'Marksman');
+    const spot = findFlatSpot(room);
+    placeAt(client.player, spot);                  // yaw 0 faces -Z
+    for (let i = 0; i < 20; i++) room.step();
+    placeAt(client.player, spot);
+
+    const demon = room.sim.spawnEntity(
+      EntityType.IMP, spot.x, spot.y, spot.z - 2.5, health, 0.4, height, false,
+    );
+    expect(demon).toBeGreaterThanOrEqual(0);
+
+    const p = client.player;
+    p.weaponMask = 0xff;
+    p.weapon = WeaponId.PISTOL;
+    p.mag[WeaponId.PISTOL] = 15;
+    p.nextFireMs = 0;
+    p.spawnProtectUntilMs = 0;
+    p.pitch = 0;
+    expect(room.sim.tryFire(p, WeaponId.PISTOL), 'the shot has to leave the barrel').toBe(true);
+    for (let i = 0; i < 3; i++) room.step();
+
+    // victimId 0 is entity damage; attackerId is us, which excludes the
+    // demon's own swings back.
+    const hits = client.socket.packets
+      .filter((pk) => pk[0] === S2C.DAMAGE)
+      .map((pk) => decodeDamage(new PacketReader(pk), createDamageEvent()))
+      .filter((e) => e.victimId === 0 && e.attackerId === p.id);
+    const kills = client.socket.packets
+      .filter((pk) => pk[0] === S2C.KILL)
+      .map((pk) => decodeKill(new PacketReader(pk), createKillEvent()))
+      .filter((e) => e.victimId === 0);
+    const scored = p.kills;
+    room.stop();
+    // The premise, asserted rather than assumed: an arena where the round
+    // clipped a rock would make every flag assertion below vacuously true.
+    expect(hits.length, 'the round must have hit the demon').toBe(1);
+    return { hits, kills, scored };
+  }
+
+  /* Both demons stand on the same floor as the shooter, whose eye is at
+   * PLAYER_EYE_HEIGHT = 1.62. A 1.9 m demon's head band is 0.78 * 1.9 = 1.482
+   * up to 1.9, so the level ray enters it 14 cm above the chin and 28 cm below
+   * the crown. A 2.6 m demon's band starts at 2.028 — 41 cm ABOVE the same
+   * ray, which lands in its chest. Both margins are more than an order of
+   * magnitude wider than the pistol's 0.01 rad cone spans at 2.5 m (2.5 cm),
+   * so neither case can flip on a seed. */
+  const HEAD_HEIGHT = 1.9;
+  const BODY_HEIGHT = 2.6;
+
+  it('flags a demon HEADSHOT on the wire, and doubles the damage with it', () => {
+    /*
+     * The client has always predicted this: `Game.refillTargets` pushes every
+     * demon with a head box at MONSTER_HEAD_*_FRAC and `traceTargets` tests it
+     * before the body, so a skull shot drew a GOLD marker and a doubled number
+     * on the shooter's screen. The server wrote `headshot = false` the instant
+     * a monster won the ray and applied single damage. The prediction was not
+     * early, it was WRONG, and the echo said so half a round trip later.
+     *
+     * NON-VACUITY: the same weapon, the same range, the same level ray, and
+     * the only difference is how tall the demon is — which is exactly what
+     * decides where its head band sits. One number cannot satisfy both.
+     */
+    const head = shootDemon(4242, HEAD_HEIGHT, 5000).hits;
+    const body = shootDemon(4242, BODY_HEIGHT, 5000).hits;
+
+    expect(body[0].flags & DMG_HEADSHOT, 'a chest shot is not a headshot').toBe(0);
+    expect(head[0].flags & DMG_HEADSHOT, 'the skull shot must carry the bit').toBe(DMG_HEADSHOT);
+    expect(body[0].amount, 'the chest shot has to have done something').toBeGreaterThan(0);
+    expect(head[0].amount, 'HEADSHOT_MULTIPLIER is 2.0 and the range is identical')
+      .toBe(body[0].amount * 2);
+  });
+
+  it('flags the killing round on a demon FATAL, which is the kill marker', () => {
+    /*
+     * NON-VACUITY: identical shot, identical geometry, identical range — only
+     * the demon's health differs, and DMG_FATAL is asserted present in one and
+     * absent in the other. A rule that always sets the bit and a rule that
+     * never sets it both fail.
+     */
+    const survived = shootDemon(31337, BODY_HEIGHT, 5000);
+    const killed = shootDemon(31337, BODY_HEIGHT, 5);
+
+    expect(survived.scored, 'the demon walked away from that').toBe(0);
+    expect(killed.scored, 'the round has to have actually killed it').toBe(1);
+    expect(survived.hits[0].flags & DMG_FATAL, 'a survivor is not a kill').toBe(0);
+    expect(killed.hits[0].flags & DMG_FATAL, 'the round that killed it must say so').toBe(DMG_FATAL);
+    expect(killed.hits[0].healthAfter, 'a dead demon is on zero').toBe(0);
+  });
+
+  it('carries the headshot into the demon KILL event, as a player kill does', () => {
+    /*
+     * `killPlayer` has always ORed KILL_HEADSHOT in from the damage flags; the
+     * entity branch derived its flags from the weapon alone, so the same skull
+     * shot drew one glyph in the killfeed for a player and another for a demon.
+     *
+     * NON-VACUITY: the chest-height demon is killed by the same weapon at the
+     * same range in the same arena and must NOT carry the bit.
+     */
+    const head = shootDemon(4242, HEAD_HEIGHT, 5);
+    const body = shootDemon(4242, BODY_HEIGHT, 5);
+
+    expect(head.scored, 'the skull shot has to have killed it').toBe(1);
+    expect(body.scored, 'the chest shot has to have killed it too').toBe(1);
+    expect(head.kills.length).toBe(1);
+    expect(body.kills.length).toBe(1);
+    expect(body.kills[0].flags & KILL_HEADSHOT, 'a chest kill is not a headshot kill').toBe(0);
+    expect(head.kills[0].flags & KILL_HEADSHOT, 'the killfeed glyph reads this bit')
+      .toBe(KILL_HEADSHOT);
   });
 
   it('marks a chainsawed demon as a MELEE kill, exactly as a chainsawed player', () => {

@@ -117,15 +117,23 @@ export interface WeaponFx {
     nx: number, ny: number, nz: number,
     damage: number, headshot: boolean, killed: boolean,
     /**
-     * How much of the shot landed and how far away it landed.
+     * How much of the shot landed, and how far away it landed.
      *
-     * A shotgun that puts one pellet of seven into a demon at 30 m and one that
-     * puts all seven into it at 2 m carry the same `killed === false` and very
-     * different `damage`, but damage alone cannot separate "I clipped it" from
-     * "I am too far away for this gun" — the first should feel like a miss you
-     * got away with and the second should feel like a solid hit that the range
-     * falloff ate. `hits/pellets` is the coverage and `distance` is the excuse,
-     * and the effects layer needs both to grade the burst honestly.
+     * `hits/pellets` is the COVERAGE, and it is the half that grades the burst:
+     * damage alone cannot separate a shotgun that clipped a demon with one
+     * pellet of seven from one that put all seven into it at a range where
+     * falloff took both to the same number, and those are opposite events for
+     * "did that shot land". `Fx.hitConfirm` reads it and lets full coverage
+     * raise the grade — never lower it, because a pellet that landed did take
+     * damage off the target.
+     *
+     * `distance` is the RANGE the heaviest pellet travelled. It is reported
+     * because the shot knows it and a consumer would otherwise have to
+     * recompute it from the two points; the shipped effects layer does not
+     * currently grade on it — screen size is already solved against the CAMERA
+     * (`Fx.metresPerPixel`), which is the distance that decides how many pixels
+     * an effect gets, and it is not this one. Say what a reader can rely on:
+     * this is data, not a promise that something reacts to it.
      */
     hits?: number, pellets?: number, distance?: number,
   ): void;

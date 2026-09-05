@@ -26,15 +26,18 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { PLAYER_EYE_HEIGHT } from '@shared/constants';
+import {
+  PLAYER_EYE_HEIGHT,
+  MONSTER_HEAD_MIN_Y_FRAC, MONSTER_HEAD_HALF_WIDTH_FRAC,
+} from '@shared/constants';
 import { anglesToForward } from '@shared/math';
 import { ALL_WEAPON_MASK, FireKind, MAX_PELLETS, WEAPON_COUNT, WEAPONS, WeaponId } from '@shared/weapons';
 import { BASE_ARSENAL, BASE_SLOT, SessionArsenal, type SessionArsenal as Arsenal } from '@shared/arsenal';
 import {
-  BTN_FIRE, createInputCommand,
+  BTN_FIRE, DMG_HEADSHOT, EntityType, createInputCommand,
 } from '@shared/protocol';
 import { MAX_HEALTH as FULL_HEALTH } from '@shared/constants';
-import { createHitTargets, pushPlayerTarget } from './weapons';
+import { createHitTargets, pushEntityTarget, pushPlayerTarget } from './weapons';
 
 import { Simulation } from '@doomcraft/server/src/sim.js';
 import { ServerWorld } from '@doomcraft/server/src/world.js';
@@ -725,5 +728,121 @@ describe('the pellet ceiling holds on both sides', () => {
     expect(server, 'the server read the double where the client read the uint8').toBe(4);
     expect(client).toBe(4);
     expect(server).toBe(client);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * A DEMON'S SKULL, ON BOTH SIDES
+ *
+ * The client has predicted monster headshots since `refillTargets` existed: it
+ * pushes every demon with a head box and `traceTargets` tests that box before
+ * the body, so a skull shot drew a GOLD hit marker and a doubled damage number
+ * on the frame the trigger went down. The server's hitscan wrote
+ * `headshot = false` the instant a monster won the ray.
+ *
+ * That is not a marker arriving late, it is a marker that was WRONG and then
+ * contradicted: the authoritative echo landed a round trip later carrying no
+ * DMG_HEADSHOT and half the damage. This file exists to catch exactly that
+ * class of disagreement, so the case belongs here and not beside either half.
+ * ------------------------------------------------------------------------ */
+
+describe('the two predictors agree about a demon head box', () => {
+  const DEMON_HALF_W = 0.4;
+  /* Both demons stand on the shooter's own floor. The eye is 1.62 up; a 1.9 m
+   * demon's head band runs 0.78 * 1.9 = 1.482 to 1.9 and the level ray goes
+   * through it, while a 2.6 m demon's band starts at 2.028 and the same ray
+   * lands in its chest. Nothing is aimed differently between the two. */
+  const HEAD_HEIGHT = 1.9;
+  const BODY_HEIGHT = 2.6;
+  const REACH = 2.5;
+
+  /** What the SERVER did, read off the damage event the shot produced. */
+  function serverShot(height: number): { headshot: boolean; amount: number } {
+    const world = flatWorld();
+    const sim = new Simulation(world, SEED);
+    sim.lagCompensation = false;
+    sim.fallDamageEnabled = false;
+    sim.hazardsEnabled = false;
+    sim.defaultWeaponMask = ALL_WEAPON_MASK;
+
+    const y = 200;
+    sim.spawnAnchor = { x: 0.5, y, z: 0.5, yaw: 0 };
+    const shooter = sim.addPlayer(OWNER, 'A', 0, false, new Uint8Array(WEAPON_COUNT).fill(1));
+    sim.spawnPlayer(shooter);
+    shooter.yaw = 0; shooter.pitch = 0;
+    shooter.heatSpread = 0;
+    shooter.shotSeq = 0;
+    shooter.nextFireMs = 0;
+    shooter.spawnProtectUntilMs = 0;
+    shooter.onGround = true;
+
+    const aim = new Float64Array(3);
+    anglesToForward(aim, 0, 0, 0);
+    const slot = sim.spawnEntity(
+      EntityType.IMP,
+      0.5 + aim[0] * REACH, shooter.pos[1], 0.5 + aim[2] * REACH,
+      100000, DEMON_HALF_W, height, false,
+    );
+    expect(slot, 'the demon has to exist').toBeGreaterThanOrEqual(0);
+
+    expect(sim.tryFire(shooter, WeaponId.PISTOL), 'the server fired').toBe(true);
+    // victimId 0 is how entity damage is written; one round, one event.
+    expect(sim.damageCount, 'the round must have hit the demon').toBe(1);
+    const e = sim.damageEvents[0];
+    expect(e.victimId, 'this has to be the ENTITY event').toBe(0);
+    return { headshot: (e.flags & DMG_HEADSHOT) !== 0, amount: e.amount };
+  }
+
+  /** What the CLIENT predicted, off its own report for the same shot. */
+  function clientShot(height: number): { headshot: boolean; amount: number } {
+    const rt = new WeaponRuntime();
+    rt.resetLoadout(ALL_WEAPON_MASK);
+    rt.current = WeaponId.PISTOL;
+    rt.heat[WeaponId.PISTOL] = 0;
+    rt.shotSeq = 0;
+
+    const aim = new Float64Array(3);
+    anglesToForward(aim, 0, 0, 0);
+    const targets = createHitTargets();
+    pushEntityTarget(
+      targets, 900,
+      0.5 + aim[0] * REACH, 200, 0.5 + aim[2] * REACH,
+      DEMON_HALF_W, height,
+      height * MONSTER_HEAD_MIN_Y_FRAC, DEMON_HALF_W * MONSTER_HEAD_HALF_WIDTH_FRAC,
+      true, 254, 100000,
+    );
+
+    const ctx = createFireContext();
+    ctx.ownerId = OWNER;
+    ctx.ox = 0.5; ctx.oy = 200 + PLAYER_EYE_HEIGHT; ctx.oz = 0.5;
+    ctx.dx = aim[0]; ctx.dy = aim[1]; ctx.dz = aim[2];
+    ctx.world = null;
+    ctx.targets = targets;
+
+    const report = rt.fireOnce(ctx);
+    expect(report.hits, 'the round must have hit the demon').toBe(1);
+    return { headshot: report.headshots === 1, amount: Math.round(report.totalDamage) };
+  }
+
+  it('both call the same round a headshot, and both double it', () => {
+    const s = serverShot(HEAD_HEIGHT);
+    const c = clientShot(HEAD_HEIGHT);
+    expect(c.headshot, 'the client has always predicted this').toBe(true);
+    expect(s.headshot, 'and the server wrote headshot = false').toBe(true);
+    expect(s.amount).toBe(c.amount);
+  });
+
+  it('both call the same round a body shot when the head band is above it', () => {
+    /*
+     * NON-VACUITY for the case above: a rule that flags every monster hit as a
+     * headshot passes it and fails this one, and the amounts separate as well
+     * — a chest shot must be half a skull shot at the same range.
+     */
+    const s = serverShot(BODY_HEIGHT);
+    const c = clientShot(BODY_HEIGHT);
+    expect(c.headshot).toBe(false);
+    expect(s.headshot).toBe(false);
+    expect(s.amount).toBe(c.amount);
+    expect(serverShot(HEAD_HEIGHT).amount, 'HEADSHOT_MULTIPLIER is 2.0').toBe(s.amount * 2);
   });
 });

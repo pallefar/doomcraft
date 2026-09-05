@@ -476,7 +476,12 @@ const SHAPE_PISTOL: WeaponShape = {
     ...gripHand(0, -0.082, 0.086, 0.24, 0.126),
   ],
   parts: [
-    { role: Role.SLIDE, boxes: PISTOL_SLIDE, travel: 0.055 },
+    /* 73 mm — 30 % of the slide's own 244 mm length, up from 55 mm.
+     * A slide that opens by a fifth of itself leaves an ejection port narrower
+     * than the casing coming out of it; the brass was appearing beside a gun
+     * that had not visibly opened. Thirty per cent is the real figure for a
+     * short-recoil pistol and it puts the port wider than the round. */
+    { role: Role.SLIDE, boxes: PISTOL_SLIDE, travel: 0.073 },
     { role: Role.MAG, boxes: PISTOL_MAG, travel: 0.22 },
   ],
   muzzle: [0, 0.030, -0.244],
@@ -1586,22 +1591,44 @@ function feltKick(v: number, ref: number, exp: number): number {
 
 /**
  * Slide / bolt travel across the mechanical cycle, 1 = hard against the stop.
- * `cycle` runs 1 at the shot down to 0.
+ * `cycle` runs 1 at the shot down to 0; `cycleSeconds` is how long that takes.
  *
- * The old curve was `cycle^0.55`, a slow linear-ish bleed that put the slide at
- * 37, 34, 29, 22, 12 px over five frames: never in the same place twice, but
- * never more than 5 px apart either, which in a sampled contact sheet is
- * indistinguishable from a slide that never moved. A real slide is a SNAP —
- * hard back inside a frame, held one, then thrown home. This gives 37, 9, 0 px:
- * a 27 px change between adjacent frames, which is a cycle you cannot miss and
- * cannot mistake for a static prop.
+ * ROUND 2, and the reason the hold is now measured in MILLISECONDS.
+ *
+ * Round 1's curve was `cycle^0.55`, a slow bleed that put the slide at 37, 34,
+ * 29, 22, 12 px over five frames — never in the same place twice, never more
+ * than 5 px apart either, which in a sampled contact sheet is indistinguishable
+ * from a slide that never moved. Round 2 replaced it with a snap: fully back
+ * for `SLIDE_BACK_FRAC` of the cycle, then thrown home over `SLIDE_HOME_FRAC`.
+ *
+ * That fixed the bleed and introduced a worse problem, which a blind review
+ * then reported as "the slide never cycles on either firing frame (the ejection
+ * port stays shut while brass spawns from nowhere)". The arithmetic:
+ *
+ *   pistol fire interval    142.9 ms   (420 rpm)
+ *   mechanical cycle        88.6 ms    (interval x 0.62, clamped)
+ *   old hold, 0.17 of that  15.1 ms    — ONE frame at 60 Hz
+ *   muzzle flash            45.0 ms    — three frames
+ *
+ * The slide was fully back for a third of the time the flash was lit, and by
+ * the second lit frame it was already 95 % home. **Every frame bright enough to
+ * see the gun in showed the slide shut**, which is precisely a gun that fires
+ * without cycling, and it is not something a fraction of a variable-length
+ * cycle can fix: the flash is a fixed number of milliseconds and the cycle is
+ * not. So the hold is a duration — 52 ms, longer than the longest flash it has
+ * to cover — capped at a fraction of the cycle so a 700 rpm chaingun does not
+ * end up with its bolt back more often than forward.
  */
-const SLIDE_BACK_FRAC = 0.17;
+const SLIDE_HOLD_S = 0.052;
+const SLIDE_HOLD_MAX_FRAC = 0.60;
 const SLIDE_HOME_FRAC = 0.40;
-function slideTravel(cycle: number): number {
+function slideTravel(cycle: number, cycleSeconds: number): number {
   const u = 1 - cycle;
-  if (u <= SLIDE_BACK_FRAC) return 1;
-  const r = clamp((u - SLIDE_BACK_FRAC) / SLIDE_HOME_FRAC, 0, 1);
+  const hold = Math.min(SLIDE_HOLD_S / Math.max(cycleSeconds, 1e-3), SLIDE_HOLD_MAX_FRAC);
+  if (u <= hold) return 1;
+  // Whatever is left of the cycle after the hold, up to the nominal return.
+  const span = Math.max(Math.min(SLIDE_HOME_FRAC, 1 - hold), 1e-3);
+  const r = clamp((u - hold) / span, 0, 1);
   // Fast off the stop, decelerating into battery.
   return (1 - r) * (1 - r);
 }
@@ -2493,7 +2520,7 @@ export class Viewmodel implements OverlayPass {
 
     /* --- part transforms ------------------------------------------------ */
     const scale = scaleOf(shape);
-    const fireCycle = slideTravel(this.cycle);
+    const fireCycle = slideTravel(this.cycle, 1 / Math.max(this.cycleRate, 1e-3));
     for (let i = 0; i < this.activeParts.length && i < MAX_PARTS; i++) {
       const part = this.activeParts[i];
       const pivot = this.partPivots[i];

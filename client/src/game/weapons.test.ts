@@ -35,7 +35,7 @@ function recordingCamera(): CameraFeedback & { shakes: number[]; punches: number
 
 interface FxLog {
   markers: { damage: number; headshot: boolean; killed: boolean; hits: number }[];
-  confirms: { killed: boolean }[];
+  confirms: { killed: boolean; damage: number; hits: number; pellets: number }[];
   muzzles: number;
   tracers: number;
   impacts: number;
@@ -60,8 +60,8 @@ function recordingFx(): WeaponFx & { log: FxLog } {
     hitMarker(damage, headshot, killed, hits): void {
       log.markers.push({ damage, headshot, killed, hits: hits ?? 0 });
     },
-    hitConfirm(_x, _y, _z, _nx, _ny, _nz, _damage, _headshot, killed): void {
-      log.confirms.push({ killed });
+    hitConfirm(_x, _y, _z, _nx, _ny, _nz, damage, _headshot, killed, hits, pellets): void {
+      log.confirms.push({ killed, damage, hits: hits ?? -1, pellets: pellets ?? -1 });
     },
   };
 }
@@ -582,5 +582,42 @@ describe('a kill is louder than the burst that produced it', () => {
     // Exactly one shake: the weapon's. A connecting chaingun burst must not
     // become one continuous rumble with no room left for the kill.
     expect(cam.shakes.length).toBe(1);
+  });
+});
+
+describe('the shot report hands its COVERAGE to the effects layer', () => {
+  /*
+   * `Fx.hitConfirm` grades a burst on how much of it landed — that is the only
+   * input that separates a shotgun that put all seven pellets into a demon at
+   * range from one that clipped it with a single pellet, because falloff can
+   * take both to the same damage number. The grade is worthless if the runtime
+   * does not report the pair, and reporting it is this file's job.
+   *
+   * Read off the CONFIRM call, not off the report: the report is the runtime
+   * agreeing with itself, and the confirm is what a consumer receives.
+   */
+  it('reports hits and pellets on the confirm, not just on the report', () => {
+    const fx = recordingFx();
+    const w = new WeaponRuntime(fx);
+    w.grant(WeaponId.SHOTGUN);
+    w.current = WeaponId.SHOTGUN;
+    const t = createHitTargets();
+    // 2 m: the shotgun's 0.09 rad cone lands every pellet inside the body box,
+    // so `hits` must equal `pellets` and a short count is a real regression
+    // rather than a stray pellet.
+    pushPlayerTarget(t, 42, 0, 0, -2, true, 7, 1e6);
+    const c = ctxAt(0, true);
+    c.targets = t;
+    const report = w.fireOnce(c);
+
+    expect(report.pellets, 'the shotgun has to be firing a burst at all')
+      .toBeGreaterThan(1);
+    expect(fx.log.confirms.length, 'one confirm per shot').toBe(1);
+    expect(fx.log.confirms[0].hits, 'the confirm was handed the landed count')
+      .toBe(report.hits);
+    expect(fx.log.confirms[0].pellets, 'and the burst size to measure it against')
+      .toBe(report.pellets);
+    expect(fx.log.confirms[0].hits, 'every pellet lands at 2 m, or this proves nothing')
+      .toBe(report.pellets);
   });
 });

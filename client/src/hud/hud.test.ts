@@ -28,6 +28,8 @@ import {
   weaponGlyph, WEAPON_GLYPH_FALLBACK, foveaHealthFrac,
   RAIL_MAX_CELLS, railSpecs, railStringCount, type RailCellSpec,
   HUD_CSS, economySurfacesOn, awardText,
+  createHitMarkerState, raiseHitMarker, hitMarkerRank,
+  HIT_MARKER_S, HIT_MARKER_KILL_S,
 } from './hud';
 import { FLAG_ORDER, defaultFlagBits } from '@shared/flags';
 import {
@@ -724,5 +726,114 @@ describe('the one-line award string', () => {
   it('never prints a negative or a fraction', () => {
     expect(awardText(-50, -3)).toBe('');
     expect(awardText(120.6, 13.4)).toBe('+121 XP · +13 SCRAP');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * THE HIT MARKER, WHICH ONE SHOT REPORTS TWICE
+ *
+ * `WeaponRuntime` raises a PREDICTED marker on the frame the trigger goes
+ * down — that is what makes it read as instant rather than a round trip late —
+ * and the server's authoritative DAMAGE event for the same shot arrives up to
+ * a round trip afterwards and raises it AGAIN. A shotgun is worse still: the
+ * client predicts one marker carrying the whole blast and the server sends one
+ * event per pellet.
+ *
+ * The marker used to be an assignment, so the later, weaker report always won.
+ * These cases are the arithmetic of the merge that replaced it.
+ * ------------------------------------------------------------------------ */
+
+describe('the hit marker merges two reports of one shot', () => {
+  it('is not repainted plain white by the echo of the shot before it', () => {
+    /*
+     * The exact sequence a chaingun produces at any real ping: shot N-1 lands,
+     * shot N kills and the client predicts the red ring, and THEN the server's
+     * echo of shot N-1 arrives carrying no kill. Under assignment the ring the
+     * player had earned survived about 60 ms of its 460 and then turned white —
+     * and for every demon in the game the echo could not do anything else,
+     * because the server sent a literal 0 in the flags of an entity's damage
+     * event.
+     */
+    const m = createHitMarkerState();
+    raiseHitMarker(m, false, true, 40);          // the kill, predicted
+    expect(m.kill).toBe(true);
+    expect(m.t).toBeCloseTo(HIT_MARKER_KILL_S, 10);
+
+    m.t -= 0.06;                                  // 60 ms of round trip
+    raiseHitMarker(m, false, false, 12);          // the late echo of the shot before
+
+    expect(m.kill, 'a plain hit may not take a kill back').toBe(true);
+    expect(m.t, 'nor may it shorten the ring it did not earn')
+      .toBeCloseTo(HIT_MARKER_KILL_S - 0.06, 10);
+    expect(m.dmg, 'nor shrink it').toBe(40);
+  });
+
+  it('does not shrink a shotgun blast to the heft of one pellet', () => {
+    /*
+     * The client predicts ONE marker for 70 damage; the server confirms it as
+     * seven separate 10-damage pellet events. `heft` is `dmg / 60`, so under
+     * assignment a point-blank super shotgun ended up drawn at the size of a
+     * graze.
+     */
+    const m = createHitMarkerState();
+    raiseHitMarker(m, false, false, 70);
+    for (let i = 0; i < 7; i++) raiseHitMarker(m, false, false, 10);
+    expect(m.dmg).toBe(70);
+  });
+
+  it('still lets a kill UPGRADE a marker that is already up', () => {
+    const m = createHitMarkerState();
+    raiseHitMarker(m, false, false, 10);
+    expect(m.t).toBeCloseTo(HIT_MARKER_S, 10);
+    m.t -= 0.1;
+    raiseHitMarker(m, false, true, 55);
+    expect(m.kill).toBe(true);
+    expect(m.dmg).toBe(55);
+    expect(m.t, 'a kill re-raises to the full kill span').toBeCloseTo(HIT_MARKER_KILL_S, 10);
+  });
+
+  it('ranks plain below headshot below kill, and never falls down the ladder', () => {
+    expect(hitMarkerRank(false, false)).toBe(0);
+    expect(hitMarkerRank(true, false)).toBe(1);
+    expect(hitMarkerRank(false, true)).toBe(2);
+    expect(hitMarkerRank(true, true)).toBe(2);
+
+    const m = createHitMarkerState();
+    raiseHitMarker(m, true, false, 30);
+    raiseHitMarker(m, false, false, 30);
+    expect(m.head, 'a body echo may not take a headshot back').toBe(true);
+    raiseHitMarker(m, false, true, 30);
+    expect(m.kill).toBe(true);
+  });
+
+  it('is a WINDOW and not a mode: once the marker is gone the next hit starts clean', () => {
+    /*
+     * The latch has to expire, or one kill would paint every hit for the rest
+     * of the match red. `t` reaching 0 is the whole reset.
+     */
+    const m = createHitMarkerState();
+    raiseHitMarker(m, true, true, 90);
+    m.t = 0;                                      // the marker faded out
+    raiseHitMarker(m, false, false, 8);
+    expect(m.kill).toBe(false);
+    expect(m.head).toBe(false);
+    expect(m.dmg).toBe(8);
+    expect(m.t).toBeCloseTo(HIT_MARKER_S, 10);
+  });
+
+  it('refreshes a plain marker that is nearly out, without ever shortening one', () => {
+    const m = createHitMarkerState();
+    raiseHitMarker(m, false, false, 10);
+    m.t = 0.05;
+    raiseHitMarker(m, false, false, 10);
+    expect(m.t, 'a fresh hit re-raises a fading marker').toBeCloseTo(HIT_MARKER_S, 10);
+
+    /* And never past the span the draw code divides by: `t / span` is the
+       fade, so a marker holding more life than its own span would draw at
+       alpha > 1 and hold there. Ten re-raises in a row cannot accumulate. */
+    raiseHitMarker(m, false, true, 10);
+    for (let i = 0; i < 10; i++) raiseHitMarker(m, false, true, 10);
+    expect(m.t, 'a re-raise refreshes to the span, it does not add to it')
+      .toBeCloseTo(HIT_MARKER_KILL_S, 10);
   });
 });

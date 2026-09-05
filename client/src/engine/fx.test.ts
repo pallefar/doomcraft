@@ -18,7 +18,7 @@
 
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { Fx } from './fx';
+import { Fx, decalRim } from './fx';
 import type { VoxelMaterials } from './material';
 import { WeaponId, getWeapon } from '@shared/weapons';
 import { BlockId, Face, blockFaceColor, blockFaceShaded } from '@shared/blocks';
@@ -316,6 +316,45 @@ describe('a connect reads louder than a miss', () => {
     // the shot that hit it. That is exactly backwards for this piece.
     const body = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 40, false, false));
     expect(body).toBeGreaterThan(0);
+  });
+
+  it('grades a WHOLE shotgun burst above a single clipping pellet of the same damage', () => {
+    /*
+     * The case `WeaponFx.hitConfirm` has documented since it was written and
+     * that nothing implemented: seven pellets into a demon at a range where
+     * falloff has taken the total down to what ONE close pellet does. Damage is
+     * identical by construction — it is the same argument — so a grade computed
+     * from damage alone gives the identical light, and "I put the whole blast
+     * into it" reads exactly like "I clipped it". `hits/pellets` is the only
+     * input that can separate them.
+     *
+     * NON-VACUITY, and the trap this nearly walked into: the third call is the
+     * same damage with NO coverage reported — every call site that existed
+     * before this landed, and every single-projectile weapon, which has no
+     * coverage to report because one pellet always lands 1 of 1. It must grade
+     * on damage exactly as it always did. The first draft defaulted a missing
+     * count to FULL coverage and pinned every pistol graze at the solid-hit
+     * floor; the existing "a hit is louder than a graze" case caught it, which
+     * is the only reason this assertion is here rather than a comment.
+     */
+    const whole = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 18, false, false, 7, 7));
+    const clipped = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 18, false, false, 1, 7));
+    const legacy = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 18, false, false));
+
+    expect(whole, 'the whole burst has to read louder than the clip')
+      .toBeGreaterThan(clipped);
+    expect(clipped, 'a clip grades on the damage it did, as it always has')
+      .toBeCloseTo(legacy, 10);
+  });
+
+  it('never lets coverage QUIET a pellet that landed hard', () => {
+    /*
+     * One pellet of seven that rolled 80 damage took 80 off the target, and the
+     * hit read must say so. Coverage raises the floor; it is not a multiplier.
+     */
+    const clipHard = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 80, false, false, 1, 7));
+    const solidSame = litBy((fx) => fx.hitConfirm(0, 1.6, -6, 0, 0, 1, 80, false, false, 7, 7));
+    expect(clipHard).toBeCloseTo(solidSame, 10);
   });
 
   it('a kill is louder than a hit, and a hit louder than a graze', () => {
@@ -773,5 +812,238 @@ describe('a streak costs the same screen time whatever it hit', () => {
     const far = lifeSeconds(220);
     expect(far).toBeLessThan(near * 2.5);
     expect(far).toBeLessThan(0.2);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * ROUND 2 — THE BURST AT THE TARGET
+ * ------------------------------------------------------------------------ *
+ *
+ * The blind review that lost round 2, verbatim:
+ *
+ *   "B puts every effect at the muzzle and nothing at the target: across 12
+ *    frames sampled at 4 fps over a window containing at least two fired
+ *    shots, ZERO frames contain an impact particle — the only contact
+ *    evidence is a flat ~6 px dark asterisk decal with no rim ... which at
+ *    range reads as a dirt speck rather than a bullet hole."
+ *
+ * Every case below fails on the code that review was run against. That is the
+ * bar for putting them here: `fx.test.ts` was 44 green tests while the thing
+ * they were guarding was the single worst-rated part of the piece, because all
+ * 44 asserted that an effect was SPAWNED and none asserted that it could still
+ * be seen a quarter of a second later, which is the only interval the
+ * instrument doing the judging can sample.
+ */
+
+describe('the contact point survives being looked at', () => {
+  /**
+   * The critic's instrument, reproduced: step the clock at 60 Hz and read the
+   * pools only every 250 ms, the way `tools/strip.mjs` samples a recording at
+   * 4 fps. `shots` fire on separate sample intervals, as they did in the window
+   * that was judged.
+   */
+  function sampledAt4Fps(
+    fx: Fx, camera: THREE.PerspectiveCamera,
+    fire: (fx: Fx, shot: number) => void,
+    shots: number,
+  ): { debris: number; sparks: number }[] {
+    const out: { debris: number; sparks: number }[] = [];
+    let shot = 0;
+    for (let s = 0; s < shots * 2; s++) {
+      if (s % 2 === 0) fire(fx, shot++);
+      for (let f = 0; f < 15; f++) fx.update(FRAME, camera);   // 250 ms
+      out.push({ debris: fx.stats.debris, sparks: fx.stats.sparks });
+    }
+    return out;
+  }
+
+  it('a 4 fps sample of a two-shot window is not empty of impact particles', () => {
+    /* THE MEASUREMENT THAT LOST THE ROUND. Three chips living 0.25-0.55 s and
+     * eight sparks living 0.14-0.38 s put an EXPECTED 1.5 chips on the frame a
+     * quarter of a second after the shot — one or two dark 2 px squares, which
+     * is what "ZERO frames contain an impact particle" looks like from the
+     * outside when the particles are technically there.
+     *
+     * Eight chips at 0.30-0.60 s put all eight on that frame. The assertion is
+     * on the SAMPLE, not on the spawn, because the spawn was never the bug. */
+    const { fx, camera } = makeFx();
+    fx.update(FRAME, camera);
+    const frames = sampledAt4Fps(
+      fx, camera,
+      (f, shot) => f.impact(shot * 3, 1.6, -6, 0, 0, 1, 0x8b8d92, 1, BlockId.STONE),
+      2,
+    );
+    // The frame a quarter-second after each shot must carry a countable spray,
+    // not one survivor. Six of eight is comfortably inside the life spread and
+    // more than double what the old burst could deliver at its best.
+    expect(frames[0].debris, 'first shot, 250 ms later').toBeGreaterThanOrEqual(6);
+    expect(frames[2].debris, 'second shot, 250 ms later').toBeGreaterThanOrEqual(6);
+    // ...and it must clear, or the arena silts up with permanent gravel.
+    expect(frames[1].debris).toBeLessThan(frames[0].debris);
+  });
+
+  it('the chips are the colour of the FACE that was hit, not the block index', () => {
+    /* The game hands `impact` a MINIMAP colour — the block's flat top albedo,
+     * 0.545 for stone — because that is what the call site had to hand. Five of
+     * a cube's six faces are darker than that, so chips carrying it are
+     * brighter than the wall they supposedly came off and read as foreign
+     * geometry. `blockBreak` has shaded per face for a round; the bullet burst
+     * was still spraying the flat one at 0.8x, i.e. 0.436.
+     *
+     * The +Z face of stone as the mesher paints it is 0.337. That is the number
+     * a chip off it has to be near, and the two candidates are 29 % apart, so
+     * this cannot pass by accident on either. */
+    const { fx, camera } = makeFx();
+    fx.update(FRAME, camera);
+    const minimapish = blockFaceColor(BlockId.STONE, Face.PY);
+    fx.impact(0, 1.6, -6, 0, 0, 1, minimapish, 1, BlockId.STONE);
+    fx.update(FRAME, camera);
+
+    const n = fx.stats.debris;
+    expect(n).toBe(8);
+    const [r, g, b] = meanColor(instanceColors(fx, 'fx-debris'), n);
+    const facePZ = ((blockFaceShaded(BlockId.STONE, Face.PZ) >>> 16) & 0xff) / 255;
+    const rawTop = ((minimapish >>> 16) & 0xff) / 255;
+
+    expect(r).toBeGreaterThan(facePZ * 0.88);
+    expect(r).toBeLessThan(facePZ * 1.14);
+    // And explicitly NOT the old value, which sat 29 % above the face.
+    expect(r).toBeLessThan(rawTop * 0.72);
+    // Stone is grey and must stay grey through the shade jitter.
+    expect(Math.abs(r - g)).toBeLessThan(0.05);
+    expect(Math.abs(b - g)).toBeLessThan(0.05);
+  });
+
+  it('fans the chips across the face by the 0.2-0.4 units it claims to', () => {
+    /* THE SPREAD, checked as a distance on the surface rather than as a
+     * velocity, because a distance is the thing a picture can be measured for
+     * and m/s is not.
+     *
+     * The old ejection was "+2 along the normal, plus (rand-0.5)*3 sideways" —
+     * a lateral speed of at most 1.5 m/s per axis, i.e. under 0.14 world units
+     * of travel by the end of the burst, and typically half that. Eight chips
+     * leaving the same square centimetre and separating by a tenth of a unit
+     * are one smudge, not a spray, which is the other half of why the burst
+     * could not be seen at range.
+     *
+     * Measured on a FLOOR hit on purpose: the tangent plane is then x/z, so
+     * gravity cannot contaminate the lateral number. Drag (0.6/s) costs about
+     * 3 % over the burst, which the bounds absorb. */
+    const { fx, camera } = makeFx();
+    fx.update(FRAME, camera);
+    fx.impact(0, 1.6, -6, 0, 1, 0, 0x8b8d92, 1, BlockId.STONE);
+
+    // Step exactly the burst window the constants are written in terms of.
+    for (let f = 0; f < 6; f++) fx.update(FRAME, camera);   // 100 ms
+
+    let buf: Float32Array | null = null;
+    for (const child of fx.group.children) {
+      const mesh = child as THREE.Mesh;
+      if ((mesh.material as THREE.Material).name !== 'fx-debris') continue;
+      buf = (mesh.geometry.getAttribute('iPos') as THREE.BufferAttribute).array as Float32Array;
+    }
+    if (buf === null) throw new Error('no debris pool');
+
+    const n = fx.stats.debris;
+    expect(n).toBe(8);
+    let above = 0;
+    for (let i = 0; i < n; i++) {
+      const lateral = Math.hypot(buf[i * 3] - 0, buf[i * 3 + 2] + 6);
+      // Every chip is out on the fan, none of them still at the hole.
+      expect(lateral, `chip ${i} lateral travel`).toBeGreaterThan(0.17);
+      expect(lateral, `chip ${i} lateral travel`).toBeLessThan(0.55);
+      // And every chip has left the surface along its normal.
+      if (buf[i * 3 + 1] > 1.6) above++;
+    }
+    expect(above, 'every chip is above the floor it came off').toBe(n);
+  });
+
+  it('a CEILING hit throws its chips down, not up into the block', () => {
+    /* The chips carry a small upward toss so they arc rather than travelling
+     * in straight lines, and a toss is exactly the term that can quietly
+     * overpower the normal on the one surface nobody screenshots. If it ever
+     * does, the spray is happening INSIDE the ceiling and the hit has no
+     * particles again — the same symptom as the round-2 gap, from the opposite
+     * cause. */
+    const { fx, camera } = makeFx();
+    fx.update(FRAME, camera);
+    fx.impact(0, 1.6, -6, 0, -1, 0, 0x8b8d92, 1, BlockId.STONE);
+    for (let f = 0; f < 6; f++) fx.update(FRAME, camera);
+
+    let buf: Float32Array | null = null;
+    for (const child of fx.group.children) {
+      const mesh = child as THREE.Mesh;
+      if ((mesh.material as THREE.Material).name !== 'fx-debris') continue;
+      buf = (mesh.geometry.getAttribute('iPos') as THREE.BufferAttribute).array as Float32Array;
+    }
+    if (buf === null) throw new Error('no debris pool');
+
+    const n = fx.stats.debris;
+    expect(n).toBe(8);
+    for (let i = 0; i < n; i++) {
+      expect(buf[i * 3 + 1], `chip ${i} left the ceiling`).toBeLessThan(1.6);
+    }
+  });
+
+  it('the bullet hole has a rim BRIGHTER than the block it is punched in', () => {
+    /* The "no rim ... reads as a dirt speck" half, followed end to end.
+     *
+     * The shader had a chipped rim in it the whole time and it was never once
+     * brighter than the wall: the mark is stored at 0.21 of the surface and the
+     * rim was `vColor * 2.0 + 0.15`, i.e. 0.42x the surface plus a floor. On
+     * stone's +Z face (0.337) that is 0.29 — a DARKER ring around a dark blot.
+     *
+     * The three steps are asserted separately so a failure says which one
+     * moved: the surface the mark came from, the fraction it is stored at, and
+     * the value the shader reads back out of it. `decalRim.value` is fed by the
+     * same two constants the fragment source is interpolated from, so this
+     * cannot pass while the shader paints something else. */
+    const { fx, camera } = makeFx();
+    fx.update(FRAME, camera);
+    fx.impact(0, 1.6, -6, 0, 0, 1, blockFaceColor(BlockId.STONE, Face.PY), 1, BlockId.STONE);
+    fx.update(FRAME, camera);
+
+    expect(fx.stats.decals).toBe(1);
+    const mark = instanceColors(fx, 'fx-decals')[0];
+    const surface = ((blockFaceShaded(BlockId.STONE, Face.PZ) >>> 16) & 0xff) / 255;
+
+    // 1. the mark is a fraction of the struck FACE, not of the minimap colour
+    expect(mark / surface).toBeCloseTo(decalRim.shade, 2);
+    // 2. it is a dark pit
+    expect(mark).toBeLessThan(surface * 0.5);
+    // 3. and the lip the shader draws around it is brighter than the wall
+    expect(decalRim.value(mark)).toBeGreaterThan(surface * 1.25);
+    // The old constants gave 0.42 * surface + 0.15, which for every surface
+    // above 0.26 is darker than the surface. Pin the direction, not the number.
+    expect(mark * 2.0 + 0.15).toBeLessThan(surface);
+  });
+
+  it('the impact light is still at FULL intensity four frames on', () => {
+    /* 0.11 s at a 0.35 hold is 38 ms of full brightness. By frame four the
+     * light that is supposed to tell you where the round landed is at 0.37 of
+     * itself, and by frame seven it is gone — so on any sample slower than
+     * 26 Hz it is simply never in the picture. Eighty milliseconds of hold
+     * spans five frames. */
+    const { fx, camera } = makeFx();
+    const rec = lightSink();
+    fx.setLightSink(rec.sink);
+    fx.update(FRAME, camera);
+    fx.impact(0, 1.6, -6, 0, 0, 1, 0x8b8d92, 1, BlockId.STONE);
+
+    const at: number[] = [];
+    for (let f = 0; f < 10; f++) {
+      fx.update(FRAME, camera);
+      const frame = rec.frames[rec.frames.length - 1];
+      at.push(frame.length > 0 ? frame[0].intensity : 0);
+    }
+    expect(at[0]).toBeGreaterThan(0);
+    // Frames 1..4 (16-67 ms) are inside the hold and must be indistinguishable
+    // from the first: a light that is already fading on the frame it appears is
+    // a light nobody sees.
+    for (let f = 1; f < 4; f++) {
+      expect(at[f], `frame ${f} still full`).toBeCloseTo(at[0], 6);
+    }
+    // And it still ends. A held light that never goes out is a lamp.
+    expect(at[9]).toBe(0);
   });
 });

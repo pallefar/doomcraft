@@ -219,6 +219,56 @@ void main() {
  * three floats of position, three of normal and one size — no matrices, no
  * Object3D, one instanced draw for the whole wall.
  */
+
+/**
+ * THE BULLET HOLE'S THREE NUMBERS, and the only place they agree.
+ *
+ * A bullet mark is stored as a FRACTION of the surface it was punched into —
+ * `DECAL_MARK_SHADE` — so `Fx.impact` never has to know what the shader will do
+ * with it, and the shader never has to be told what the surface was. That one
+ * convention is what lets the rim be specified where a viewer can check it:
+ * `DECAL_RIM_TARGET` is the rim's brightness **relative to the surface value
+ * around it**, so 1.30 means "the broken lip is 30 % brighter than the block",
+ * which is what freshly fractured material actually does and what makes the
+ * mark read as a HOLE rather than as a speck of dirt.
+ *
+ * The measured failure it replaces: the rim was `vColor * 2.0 + 0.15` over a
+ * mark stored at 0.21 of the surface, i.e. 0.42x the surface plus a floor —
+ * DARKER than the wall it sat on at every surface value above 0.26. There was a
+ * rim in the shader and there was no rim in the picture, and a blind critic
+ * reported the result verbatim: "a flat ~6 px dark asterisk decal with no rim,
+ * which at range reads as a dirt speck rather than a bullet hole."
+ *
+ * `DECAL_RIM_GAIN` is the multiplier the shader applies, and it is DERIVED
+ * rather than typed: change either number above and the rim stays where it was
+ * declared to be. It is interpolated into the fragment source, which is why
+ * these three sit above the shader instead of with the other decal constants.
+ */
+const DECAL_MARK_SHADE = 0.21;
+const DECAL_RIM_TARGET = 1.30;
+const DECAL_RIM_GAIN = DECAL_RIM_TARGET / DECAL_MARK_SHADE;
+/** Floor so the rim survives on a near-black surface, where any gain is ~0. */
+const DECAL_RIM_FLOOR = 0.055;
+
+/**
+ * The rim contract, exported so it can be MEASURED instead of eyeballed.
+ *
+ * `value(mark)` is what the fragment shader paints the lip at, given the mark
+ * channel `Fx.decal` was handed — and it is the same two constants the shader
+ * source is interpolated from, a few lines below, so the two cannot drift.
+ * Combined with `shade` (which `Fx.impact` divides the surface by to get the
+ * mark) a test can start from a surface value, follow it through the mark that
+ * is actually stored in the instance buffer, and assert what comes out the
+ * other end is brighter than the surface it went in as. That round trip is the
+ * whole claim, and until it existed the shader had a rim in it that was darker
+ * than every wall in the game.
+ */
+export const decalRim = {
+  shade: DECAL_MARK_SHADE,
+  target: DECAL_RIM_TARGET,
+  value(mark: number): number { return mark * DECAL_RIM_GAIN + DECAL_RIM_FLOOR; },
+};
+
 const DECAL_VERT = /* glsl */ `
 precision highp float;
 uniform mat4 modelViewMatrix;
@@ -271,11 +321,22 @@ void main() {
   // harmonics of the angle push the rim in and out by a fifth of the radius,
   // and because the seed differs per decal no two marks are the same shape.
   float edge = 0.74 + 0.20 * sin(a * 3.0 + seed) * sin(a * 5.0 + seed * 2.3);
-  float m = 1.0 - smoothstep(edge * 0.52, edge, r);
+  /* A scorch FADES OUT at its boundary; a bullet hole has an EDGE.
+   *
+   * The old mask ramped alpha away from 0.52 of the radius for both, so a
+   * bullet mark was a soft blot with half its area under 50 % opacity — there
+   * was no boundary for a rim to sit on even once the rim was bright enough to
+   * see. 'chip' (the impact variant) keeps the mark solid to 0.84 of its radius
+   * so the last sixth is a crisp lip; the explosion crater keeps the old soft
+   * ramp, which is right for soot. */
+  float soft = mix(0.52, 0.84, chip);
+  float m = 1.0 - smoothstep(edge * soft, edge, r);
   if (m <= 0.004) discard;
-  // Darkest in the middle, which is what both a scorch and a wet splat do.
+  // Darkest in the middle, which is what both a scorch and a wet splat do —
+  // and, for the impact variant, what makes the middle read as depth against
+  // the bright lip below.
   float core = 1.0 - smoothstep(0.0, edge * 0.8, r);
-  vec3 c = vColor * (1.0 - 0.45 * core);
+  vec3 c = vColor * (1.0 - (0.45 + 0.14 * chip) * core);
 
   /* THE CHIPPED RIM — the reason a bullet hole is visible on a DARK wall.
    *
@@ -291,10 +352,27 @@ void main() {
    * it lands below the wall and simply widens the hole. Either way the mark
    * has a light edge or a dark centre against its background, and usually
    * both, so it can never disappear the way a single-tone blot can.
+   *
+   * TWO THINGS CHANGED, and both were measured rather than felt.
+   *
+   * The GAIN. vColor * 2.0 + 0.15, over a mark stored at 0.21 of the surface,
+   * is 0.42x the surface — darker than the wall on every surface brighter than
+   * 0.26, which is most of an arena. The ring existed and was never once
+   * brighter than the block it was drawn on. It is now ${DECAL_RIM_GAIN} —
+   * derived from DECAL_MARK_SHADE so the lip lands at ${DECAL_RIM_TARGET} of
+   * the surface value whatever the mark is stored at.
+   *
+   * The PLACE. The old band peaked at 0.74 of the radius, a third of the way
+   * in from the boundary, under the part of the mask that was already fading —
+   * a bright smudge in the middle of a blot, not a lip around a hole. It now
+   * peaks at 0.90, inside the crisp edge the 'chip' mask leaves, so what you
+   * see is a dark pit with a broken-material ring at its mouth. At the 7 px
+   * floor Fx.decal enforces that ring is about one pixel wide, which is
+   * exactly the width asked for and, at close range, scales with the mark.
    */
-  float rim = smoothstep(edge * 0.42, edge * 0.74, r)
-            * (1.0 - smoothstep(edge * 0.74, edge * 0.99, r));
-  c = mix(c, vColor * 2.0 + 0.15, rim * 0.9 * chip);
+  float rim = smoothstep(edge * 0.72, edge * 0.90, r)
+            * (1.0 - smoothstep(edge * 0.90, edge, r));
+  c = mix(c, vColor * ${DECAL_RIM_GAIN.toFixed(4)} + ${DECAL_RIM_FLOOR.toFixed(4)}, rim * chip);
   fragColor = vec4(c, m * vAlpha);
 }
 `;
@@ -600,8 +678,69 @@ const TRACER_MAX_FLIGHT_S = 0.09;
  * flame — but it gets the same treatment for the same reason: 90 ms with the
  * fade starting at zero is a light nobody sees.
  */
-const IMPACT_LIGHT_S = 0.11;
-const IMPACT_LIGHT_HOLD = 0.35;
+/**
+ * What a burst that landed WHOLE is worth on the 0..1 hit grade, before its
+ * damage is even looked at. Below 1 deliberately: full coverage is a solid
+ * connect, not a kill, and the kill branch has to stay the loudest thing in
+ * the file.
+ */
+const COVERAGE_HEFT = 0.85;
+
+/**
+ * THE IMPACT LIGHT, and why the hold moved.
+ *
+ * 0.11 s at a 0.35 hold is 38 ms at full intensity — two frames, and only two
+ * frames if the shot happens to land on a frame boundary. A light that is out
+ * before the muzzle flash it belongs to has finished cannot be what tells you
+ * where the round went, and on a contact sheet sampled at anything under 26 Hz
+ * it is simply never present. Held for 80 ms it spans five frames at 60 Hz and
+ * survives a 12.5 Hz sample about one time in three, which is the difference
+ * between "the wall lit up" being a thing that happened and a thing that can
+ * be seen to have happened.
+ *
+ * The cost is one light slot for 45 ms longer. There are twelve, they are
+ * ranked by contribution at the camera, and the shader work is unchanged.
+ */
+const IMPACT_LIGHT_S = 0.115;
+const IMPACT_LIGHT_HOLD = 0.70;
+
+/**
+ * THE CONTACT BURST — the numbers the whole round-2 gap is written in.
+ *
+ * Measured failure, blind review of a 12-frame sheet at 4 fps over a window
+ * containing at least two fired shots: "ZERO frames contain an impact
+ * particle — the only contact evidence is a flat ~6 px dark asterisk decal."
+ *
+ * The burst existed. It was three chips at a 2 px floor and a 105 ms core, and
+ * three 2 px chips are not a burst — they are three specks the size of the
+ * noise in the image. The fix is quantity, size and DURATION, in that order:
+ * eight chips is a spray you can count, and a chip that is still in the air a
+ * third of a second later is one a sampled frame can catch.
+ *
+ * `IMPACT_CHIP_SPREAD_MIN/MAX` are world units of LATERAL travel by the end of
+ * the burst, which is how a spread is actually read on screen — a velocity in
+ * m/s is not something anyone can check against a picture. The tangential
+ * speed is derived from them and `IMPACT_BURST_S`, so tuning the look does not
+ * silently retune the timing.
+ */
+const IMPACT_CHIPS = 8;
+const IMPACT_BURST_S = 0.09;
+const IMPACT_CHIP_SPREAD_MIN = 0.20;
+const IMPACT_CHIP_SPREAD_MAX = 0.40;
+/** Chip lifetime, min and span. Long enough to outlive the flash by 4x. */
+const IMPACT_CHIP_LIFE_S = 0.30;
+const IMPACT_CHIP_LIFE_SPAN = 0.30;
+/**
+ * The white-hot spark at the contact point: two frames at 60 Hz, 0.15 world
+ * units, additive, essentially white. It is the "now" cue — the frame where
+ * the round arrives — and it is deliberately the shortest thing in the burst
+ * so it cannot be mistaken for the flash, which is 45-200 ms depending on the
+ * weapon. Capped at a fraction of the FRAME so a point-blank hit is a bright
+ * spark rather than a white sheet over the thing you just shot.
+ */
+const IMPACT_FLARE_S = 0.034;
+const IMPACT_FLARE_SIZE = 0.15;
+const IMPACT_FLARE_MAX_FRAC = 0.055;
 
 /**
  * Trauma banked by `addShake`, per metre of the amplitude it was given, plus a
@@ -1238,7 +1377,12 @@ export class Fx {
     }
 
     const mpp = this.metresPerPixel(x, y, z);
-    const s = this.floorPx(mpp, size, 5, 4);
+    /* Seven pixels, up from five. A mark with a rim needs room for the rim: at
+     * a 5 px diameter the outer tenth of the radius the lip lives in is a
+     * quarter of a pixel and resolves to nothing, so the far-away bullet hole
+     * fell back to being the flat dark speck the rim exists to prevent. Seven
+     * gives the lip its pixel and still reads as a hole, not a sticker. */
+    const s = this.floorPx(mpp, size, 7, 4);
     // 15 mm of clearance, plus a slice of the decal's own size: a big scorch on
     // a rough voxel face needs more standoff than a bullet hole.
     const lift = 0.015 + s * 0.02;
@@ -1512,43 +1656,99 @@ export class Fx {
   }
 
   /**
-   * A bullet hit a surface.
+   * A bullet hit a surface — THE BURST AT THE POINT OF CONTACT.
    *
-   * Three layers, and each one answers a different part of "did that hit?":
+   * This is the effect round 2 was lost on, and the review that lost it is
+   * quoted in full because every number below answers a clause of it:
    *
-   *  1. A **core flash** — one additive puck at the point of impact, sized with
-   *     a pixel floor so it survives 40 m. Without it a hit at range is a dozen
-   *     sub-pixel dots and the frame does not visibly change, which is exactly
-   *     the bar's failure.
-   *  2. **Sparks that inherit the surface**, not a fixed orange. Hot things go
-   *     white in the middle, but the corona of a strike carries the material's
-   *     own hue: red brick throws red-orange, grass throws yellow-green, ice
-   *     throws white-blue. Mixing the surface colour into the spark is what
-   *     makes the impact read as coming off THAT wall.
-   *  3. **Chips** in the surface colour, which bounce.
+   *   "B puts every effect at the muzzle and nothing at the target: across 12
+   *    frames sampled at 4 fps over a window containing at least two fired
+   *    shots, ZERO frames contain an impact particle — the only contact
+   *    evidence is a flat ~6 px dark asterisk decal with no rim, no dust, no
+   *    debris and no light, which at range reads as a dirt speck rather than a
+   *    bullet hole."
    *
-   * The bounce light is tinted the same way, so the flash you see on the wall
-   * beside you is the colour of the thing you just shot.
+   * The trap in that sentence is that every one of those things was already
+   * being spawned. The bug was never "no impact particle exists"; it was that
+   * the whole burst was smaller than the image noise and shorter than the
+   * sample interval. Three chips at a 2 px floor, a 105 ms core, a 38 ms light:
+   * add those up and the expected number of catchable particles on a 250 ms
+   * sample is under one. **An effect that cannot be sampled is an effect that
+   * does not exist**, and the fix is quantity, size and duration — not a new
+   * kind of sprite.
+   *
+   * Six layers now, from shortest to longest, all anchored at the CONTACT
+   * POINT and all tinted from the struck face rather than from a fixed orange:
+   *
+   *  1. **The flare** — 2 frames, 0.15 world units, additive, white-hot. The
+   *     "now" cue: the single frame where the round arrives. Capped as a
+   *     fraction of the frame so point blank is a spark and not a sheet.
+   *  2. **The core**, 105 ms, the surface pushed most of the way to white.
+   *  3. **The corona**, 220 ms, the surface's UNDILUTED hue — the layer that
+   *     answers "what did I just hit". One per blast, not one per pellet.
+   *  4. **Dust**, ~300 ms, lifted off the face along its normal. The review
+   *     named dust explicitly and there was none: sparks are not dust, they
+   *     are hot and they are gone.
+   *  5. **Eight chips**, 300-600 ms, ejected ALONG THE NORMAL with gravity and
+   *     a 0.2-0.4 world-unit fan, in the shaded colour of the face they came
+   *     off. This is the layer a 4 fps sample actually catches: eight chips
+   *     living ~450 ms average against a 250 ms interval is roughly five chips
+   *     visible on the frame after the shot and two on the frame after that.
+   *  6. **The mark**, 7.5 s, with a rim at 1.3x the surface value — see
+   *     DECAL_RIM_TARGET. That is the "reads as a dirt speck" half.
+   *
+   * Plus a point light held 80 ms (IMPACT_LIGHT_S), because a strike that does
+   * not relight the wall beside it is a sprite drawn over the wall.
    */
   impact(
     x: number, y: number, z: number,
     nx: number, ny: number, nz: number,
     color: number, intensity = 1, blockId = -1,
   ): void {
+    const nl = Math.hypot(nx, ny, nz);
+    // A degenerate normal used to reach every layer below as NaN velocities and
+    // a NaN decal orientation; the decal guarded itself and nothing else did.
+    const ux = nl > 1e-4 ? nx / nl : 0;
+    const uy = nl > 1e-4 ? ny / nl : 1;
+    const uz = nl > 1e-4 ? nz / nl : 0;
+    const face = faceFromNormal(ux, uy, uz);
+
     /* A round into a wall does not only leave a mark, it takes a bite. When the
      * caller knows WHICH block was struck, the face cracks a little further —
      * so nine rounds into one wall visibly degrade it instead of stencilling
      * nine identical stickers on an undamaged surface. */
     if (blockId >= 0) {
-      const face = faceFromNormal(nx, ny, nz);
       this.crack(
-        Math.floor(x - nx * 0.5), Math.floor(y - ny * 0.5), Math.floor(z - nz * 0.5),
+        Math.floor(x - ux * 0.5), Math.floor(y - uy * 0.5), Math.floor(z - uz * 0.5),
         face, blockId, 0.07 + 0.09 * intensity,
       );
     }
+
     const r = ((color >>> 16) & 0xff) / 255;
     const g = ((color >>> 8) & 0xff) / 255;
     const b = (color & 0xff) / 255;
+
+    /* THE STRUCK FACE AS THE MESHER DRAWS IT.
+     *
+     * `color` is whatever the caller had to hand, and from the game it is the
+     * MINIMAP colour — a block's flat top albedo, which is brighter than five
+     * of its six faces and is not the value on screen anywhere the player is
+     * looking. Chips carrying it read as foreign geometry rather than as this
+     * wall coming apart; `blockBreak` learned that a round ago and shades its
+     * chips per face, and the bullet burst was still using the flat one.
+     *
+     * With `blockId` in hand the burst uses `blockFaceShaded` for the face that
+     * was actually hit, which is the literal pixel value the round landed on.
+     * Without it — a caller that only knows a colour — it falls back, so no
+     * call site loses anything. */
+    let fr = r, fg = g, fb = b;
+    if (blockId >= 0) {
+      const shaded = blockFaceShaded(blockId, face);
+      fr = ((shaded >>> 16) & 0xff) / 255;
+      fg = ((shaded >>> 8) & 0xff) / 255;
+      fb = (shaded & 0xff) / 255;
+    }
+
     const mpp = this.metresPerPixel(x, y, z);
 
     // The strike colour: the surface pushed toward incandescent. `SPARK_HEAT`
@@ -1559,61 +1759,119 @@ export class Fx {
     const sg = g * (1 - SPARK_HEAT) + 0.84 * SPARK_HEAT;
     const sb = b * (1 - SPARK_HEAT) + 0.42 * SPARK_HEAT;
 
+    /* An orthonormal pair spanning the struck FACE, so the chip fan and the
+     * dust are scattered across the surface rather than through it. Same
+     * conditioning trick the decal vertex shader uses: pick the axis the
+     * normal is furthest from. */
+    const hx = Math.abs(uy) > 0.86 ? 1 : 0;
+    const hy = Math.abs(uy) > 0.86 ? 0 : 1;
+    const t0x = hy * uz - 0 * uy, t0y = 0 * ux - hx * uz, t0z = hx * uy - hy * ux;
+    const t0l = Math.hypot(t0x, t0y, t0z) || 1;
+    const ax = t0x / t0l, ay = t0y / t0l, az = t0z / t0l;
+    const bx = uy * az - uz * ay, by = uz * ax - ux * az, bz = ux * ay - uy * ax;
+
     /* Does this pellet OWN the blast?
      *
      * A shotgun puts seven pellets into the same square metre on the same
-     * frame. The two layers sized to be seen from across the arena — the
-     * coloured corona and the point light — must be spawned once for that
-     * blast and not seven times: seven overlapping additive discs at point
+     * frame. The three layers sized to be seen from across the arena — the
+     * coloured corona, the dust and the point light — must be spawned once for
+     * that blast and not seven times: seven overlapping additive discs at point
      * blank are a white sheet rather than an impact, and seven point lights in
      * one place cost seven times the shader work to evict every other light in
-     * the scene for a single blown-out patch. The per-pellet layers (hot core,
-     * sparks, chips, mark) still run for every pellet, because those are what
-     * make a blast read as a PATTERN rather than as one big hit. */
+     * the scene for a single blown-out patch. The per-pellet layers (flare,
+     * core, sparks, chips, mark) still run for every pellet, because those are
+     * what make a blast read as a PATTERN rather than as one big hit. */
     const owns = this.claimImpactLight(x, y, z);
 
-    /* 1a — the CORONA, in the surface's own colour.
+    /* 1 — THE FLARE. Two frames, white-hot, additive, 0.15 world units.
+     *
+     * The layer the work order asked for by name, and the one thing in the
+     * burst allowed to be brief: it is the arrival, not the aftermath. Capped
+     * with `capFrac` rather than a metre limit because a ceiling in metres
+     * ships one picture on a desktop and a different one on a phone. */
+    this.spawnSpark(
+      x + ux * 0.02, y + uy * 0.02, z + uz * 0.02,
+      ux * 0.25, uy * 0.25, uz * 0.25,
+      IMPACT_FLARE_S,
+      this.capFrac(
+        mpp,
+        this.floorPx(mpp, IMPACT_FLARE_SIZE * (0.72 + 0.28 * intensity), 22, 6),
+        IMPACT_FLARE_MAX_FRAC,
+      ),
+      this.floorPx(mpp, 0.035, 5, 6),
+      1.0, 0.97, 0.90, 1, 1, 3, 0,
+    );
+
+    /* 2 — the CORONA, in the surface's own colour.
      *
      * The core below is nearly white by construction, because that is what a
      * strike looks like at the point of contact — and a white dot on a wall is
-     * a white dot on any wall. So a wider, dimmer, slightly longer-lived disc
-     * goes UNDER it carrying the material's undiluted hue. That is the layer
-     * that answers "what did I just hit": red brick throws a red-orange bloom,
-     * grass a yellow-green one, ice a blue one, and the two together read as a
-     * hot core inside a coloured flare rather than as a generic sprite.
+     * a white dot on any wall. So a wider, dimmer, longer-lived disc goes UNDER
+     * it carrying the material's undiluted hue. That is the layer that answers
+     * "what did I just hit": red brick throws a red-orange bloom, grass a
+     * yellow-green one, ice a blue one, and the two together read as a hot core
+     * inside a coloured flare rather than as a generic sprite.
      *
-     * It is spawned first so it sorts behind the core in the same additive
-     * pass, and it is cheap: one instance in a pool of 512.
+     * Its life went from 150 ms to 220 ms for one reason: 150 ms cannot be
+     * sampled at 4 fps and 220 ms can, one time in four.
      */
     if (owns) {
       this.spawnSpark(
-        x + nx * 0.025, y + ny * 0.025, z + nz * 0.025,
-        nx * 0.35, ny * 0.35, nz * 0.35,
-        0.10 + 0.05 * intensity,
-        this.floorPx(mpp, 0.17 * intensity, 17, 6), this.floorPx(mpp, 0.03, 3, 6),
+        x + ux * 0.025, y + uy * 0.025, z + uz * 0.025,
+        ux * 0.35, uy * 0.35, uz * 0.35,
+        0.16 + 0.06 * intensity,
+        this.floorPx(mpp, 0.17 * intensity, 17, 6), this.floorPx(mpp, 0.05, 4, 6),
         r * 0.86 + 0.14, g * 0.86 + 0.14, b * 0.86 + 0.14, 0.55, 0.15, 5, 0,
       );
     }
 
-    /* 1b — core flash */
+    /* 3 — core flash */
     this.spawnSpark(
-      x + nx * 0.03, y + ny * 0.03, z + nz * 0.03,
-      nx * 0.6, ny * 0.6, nz * 0.6,
+      x + ux * 0.03, y + uy * 0.03, z + uz * 0.03,
+      ux * 0.6, uy * 0.6, uz * 0.6,
       0.075 + 0.03 * intensity,
       this.floorPx(mpp, 0.10 * intensity, 12, 6), this.floorPx(mpp, 0.02, 2, 6),
       sr * 0.45 + 0.55, sg * 0.45 + 0.55, sb * 0.45 + 0.55, 1, 1, 4, 0,
     );
 
-    /* 2 — sparks, in the strike colour */
+    /* 4 — DUST off the face.
+     *
+     * "no dust" was one of the four things the review counted and it was the
+     * only one that was literally true: the burst had sparks, which are hot,
+     * bright and gone in a tenth of a second, and nothing that hangs. Two
+     * puffs, in the face's own colour, growing as they rise, at a third alpha
+     * so they brighten the wall without erasing the mark landing underneath.
+     * One per blast, for the same reason the corona is. */
+    if (owns) {
+      for (let i = 0; i < 2; i++) {
+        const ang = Math.random() * TAU;
+        const jr = 0.05 + Math.random() * 0.09;
+        const jx = (ax * Math.cos(ang) + bx * Math.sin(ang)) * jr;
+        const jy = (ay * Math.cos(ang) + by * Math.sin(ang)) * jr;
+        const jz = (az * Math.cos(ang) + bz * Math.sin(ang)) * jr;
+        this.spawnSpark(
+          x + ux * 0.05 + jx, y + uy * 0.05 + jy, z + uz * 0.05 + jz,
+          ux * (0.5 + Math.random() * 0.9) + jx * 3,
+          uy * (0.5 + Math.random() * 0.9) + jy * 3 + 0.5,
+          uz * (0.5 + Math.random() * 0.9) + jz * 3,
+          0.22 + Math.random() * 0.12,
+          this.floorPx(mpp, 0.06, 5, 5), this.floorPx(mpp, 0.20 * intensity, 14, 6),
+          fr * 1.15 + 0.06, fg * 1.15 + 0.06, fb * 1.15 + 0.06,
+          0.30, 0.0, 2.4, 1.0,
+        );
+      }
+    }
+
+    /* 5 — sparks, in the strike colour */
     const n = Math.round(3 + 5 * intensity);
     const sparkSize = this.floorPx(mpp, 0.05 * intensity, 2.4, 7);
     for (let i = 0; i < n; i++) {
-      const sx = nx + (Math.random() - 0.5) * 1.5;
-      const sy = ny + (Math.random() - 0.5) * 1.5 + 0.4;
-      const sz = nz + (Math.random() - 0.5) * 1.5;
+      const sx = ux + (Math.random() - 0.5) * 1.5;
+      const sy = uy + (Math.random() - 0.5) * 1.5 + 0.4;
+      const sz = uz + (Math.random() - 0.5) * 1.5;
       const sp = (3 + Math.random() * 7) * intensity;
       this.spawnSpark(
-        x + nx * 0.04, y + ny * 0.04, z + nz * 0.04,
+        x + ux * 0.04, y + uy * 0.04, z + uz * 0.04,
         sx * sp, sy * sp, sz * sp,
         0.14 + Math.random() * 0.24,
         sparkSize, 0.008,
@@ -1621,31 +1879,63 @@ export class Fx {
       );
     }
 
-    /* 3 — chips of the material itself */
-    const chipSize = this.floorPx(mpp, 0.055, 2, 5);
-    for (let i = 0; i < 3; i++) {
+    /* 6 — EIGHT CHIPS of the material itself.
+     *
+     * The load-bearing layer, and the one the review was counting when it said
+     * zero. Three of these used to be spawned, at a 2 px floor, straight up out
+     * of the wall with a random lateral wobble; three 2 px squares at 20 m are
+     * three pixels of noise. Eight of them at a 3.2 px floor, thrown ALONG the
+     * normal on a measured fan and falling under gravity, is a spray with a
+     * shape — and the shape is what says the round came out of the wall rather
+     * than being drawn on top of it.
+     *
+     * The fan: `IMPACT_CHIP_SPREAD_MIN/MAX` are world units of lateral travel
+     * by the end of `IMPACT_BURST_S`, so the tangential speed is derived and
+     * the spread stays what it says it is when the burst time changes. The
+     * angles are stratified (i/N of a turn plus a jitter) rather than uniform
+     * random, because eight uniform samples clump badly often enough to be
+     * seen — a clumped chip fan reads as one big chip.
+     *
+     * They bounce (`bounce = 1`), so chips off a floor hit skitter instead of
+     * sinking through it. */
+    const chipSize = this.floorPx(mpp, 0.055 + 0.02 * intensity, 3.2, 5);
+    const fan = IMPACT_CHIP_SPREAD_MAX - IMPACT_CHIP_SPREAD_MIN;
+    for (let i = 0; i < IMPACT_CHIPS; i++) {
+      const ang = (i / IMPACT_CHIPS) * TAU + Math.random() * 0.7;
+      const lat = (IMPACT_CHIP_SPREAD_MIN + Math.random() * fan) / IMPACT_BURST_S;
+      const ca = Math.cos(ang) * lat, sa = Math.sin(ang) * lat;
+      // Out of the wall fast enough to clear it before gravity wins.
+      const out = (2.8 + Math.random() * 3.4) * (0.7 + 0.3 * intensity);
+      // +/- 12 %: the width of real facet-to-facet variation in one material.
+      const shade = 0.88 + Math.random() * 0.26;
       this.spawnDebris(
-        x + nx * 0.05, y + ny * 0.05, z + nz * 0.05,
-        (Math.random() - 0.5) * 3 + nx * 2,
-        Math.random() * 2.4 + ny * 2,
-        (Math.random() - 0.5) * 3 + nz * 2,
-        0.25 + Math.random() * 0.3,
-        chipSize, chipSize * 0.36,
-        r * 0.8, g * 0.8, b * 0.8, 1, 0.4, 20, 1,
+        x + ux * 0.04 + (ax * ca + bx * sa) * 0.006,
+        y + uy * 0.04 + (ay * ca + by * sa) * 0.006,
+        z + uz * 0.04 + (az * ca + bz * sa) * 0.006,
+        ux * out + ax * ca + bx * sa,
+        uy * out + ay * ca + by * sa + 1.1,
+        uz * out + az * ca + bz * sa,
+        IMPACT_CHIP_LIFE_S + Math.random() * IMPACT_CHIP_LIFE_SPAN,
+        chipSize, chipSize * 0.42,
+        fr * shade, fg * shade, fb * shade, 1, 0.25, 20, 1,
       );
     }
 
-    /* 4 — the mark that stays.
+    /* 7 — the mark that stays.
      *
-     * Everything above is gone in a fifth of a second. This is the part you can
-     * still see when you walk up to the wall, and it is the difference between
-     * "something flickered" and "I put nine rounds THERE". It is the surface's
-     * own colour taken down to a fifth, so a bullet hole in sandstone is a
-     * brown bruise and one in ice is a blue one — never a generic black dot. */
+     * Everything above is gone in half a second. This is the part you can still
+     * see when you walk up to the wall, and it is the difference between
+     * "something flickered" and "I put nine rounds THERE". It is the struck
+     * face's own value taken down to `DECAL_MARK_SHADE`, so a bullet hole in
+     * sandstone is a brown bruise and one in ice is a blue one — never a
+     * generic black dot — and the shader reads that same fraction back to put
+     * the broken lip at 1.3x the surface. See DECAL_RIM_TARGET: the review
+     * called this mark "a dirt speck", and a dirt speck is exactly what a dark
+     * blot with no lip is. */
     this.decal(
-      x, y, z, nx, ny, nz,
+      x, y, z, ux, uy, uz,
       0.20 + 0.10 * intensity,
-      packRgb(r * 0.22, g * 0.20, b * 0.19),
+      packRgb(fr * DECAL_MARK_SHADE, fg * DECAL_MARK_SHADE, fb * DECAL_MARK_SHADE),
       0.62,
       DECAL_LIFE_S,
       true,
@@ -1653,7 +1943,7 @@ export class Fx {
 
     if (owns) {
       this.addLight(
-        x + nx * 0.2, y + ny * 0.2, z + nz * 0.2,
+        x + ux * 0.2, y + uy * 0.2, z + uz * 0.2,
         sr * 0.55 + 0.45, sg * 0.55 + 0.45, sb * 0.55 + 0.45,
         3.4, 1.0 * intensity, IMPACT_LIGHT_S, IMPACT_LIGHT_HOLD,
       );
@@ -1937,8 +2227,33 @@ export class Fx {
     x: number, y: number, z: number,
     nx: number, ny: number, nz: number,
     damage: number, headshot: boolean, killed: boolean,
+    hits = 0, pellets = 0,
   ): void {
-    const s = clamp(damage / 90, 0.22, 1);
+    /* HOW MUCH OF THE SHOT LANDED, which damage alone cannot tell you.
+     *
+     * `WeaponFx.hitConfirm` has documented this pair since it was written and
+     * nothing read it — not this method, which took nine arguments, and not
+     * the adapter in `Game`, which dropped them at the call. So the whole grade
+     * came off `damage`, and a shotgun burst that put ALL SEVEN pellets into a
+     * demon at range read exactly as quietly as one that clipped it with a
+     * single pellet, because falloff had taken both to the same number. Those
+     * are opposite events for the one question this piece answers.
+     *
+     * Coverage may only ever RAISE the reading, and only a MULTI-PELLET shot
+     * has any to report. A pellet that landed took damage off the target and
+     * has earned its own heft, so a lucky clip is not quieted down to a graze;
+     * what changes is that a whole burst can no longer be reported as a graze
+     * by arithmetic. A single-projectile weapon carries no coverage
+     * information — one pellet always lands 1 of 1 — and neither does a caller
+     * that passes nothing, so both grade on damage exactly as they did before
+     * this argument existed. Reading a lone bullet as "full coverage" would
+     * pin every pistol graze at the solid-hit floor, which is the opposite of
+     * the separation this is for.
+     */
+    const coverage = pellets > 1 && hits > 0 ? clamp(hits / pellets, 0, 1) : 0;
+    const heft = clamp(damage / 90, 0.22, 1);
+    const boost = coverage * COVERAGE_HEFT;
+    const s = clamp(heft > boost ? heft : boost, 0.22, 1);
     const mpp = this.metresPerPixel(x, y, z);
 
     // The pop: white for a hit, gold for a headshot, and blown out on a kill.

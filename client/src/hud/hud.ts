@@ -387,6 +387,82 @@ export function critVignette(hp: number, t: number): number {
   return base + amp * (0.5 - 0.5 * Math.cos(t * w));
 }
 
+/* ------------------------------------------------------------------------ *
+ * Hit marker
+ * ------------------------------------------------------------------------ */
+
+/** Seconds a plain / headshot marker stays up. */
+export const HIT_MARKER_S = 0.28;
+/** Seconds a KILL marker stays up — deliberately longer; it is the payoff. */
+export const HIT_MARKER_KILL_S = 0.46;
+
+/**
+ * The crosshair's hit marker, as data, so the merge rule below can be tested
+ * without a DOM.
+ */
+export interface HitMarkerState {
+  /** Seconds of life left. 0 means nothing is on screen. */
+  t: number;
+  head: boolean;
+  kill: boolean;
+  /** Heaviest damage reported into this marker while it has been up. */
+  dmg: number;
+}
+
+export function createHitMarkerState(): HitMarkerState {
+  return { t: 0, head: false, kill: false, dmg: 0 };
+}
+
+/** plain 0 < headshot 1 < kill 2. A marker never falls down this ladder. */
+export function hitMarkerRank(head: boolean, kill: boolean): number {
+  return kill ? 2 : head ? 1 : 0;
+}
+
+/**
+ * Raise a hit into the marker — the ONE place the marker is written.
+ *
+ * ONE SHOT PRODUCES TWO REPORTS, and that is the whole reason this is a merge
+ * and not an assignment. `WeaponRuntime` fires a predicted marker on the frame
+ * the trigger went down (that is what makes the marker feel instant instead of
+ * a round trip late), and the server's authoritative DAMAGE event for the same
+ * shot arrives up to a round trip afterwards and reports it again. A shotgun
+ * makes it worse: the client predicts ONE marker carrying the whole blast's
+ * damage and the server sends one event PER PELLET.
+ *
+ * Assignment loses every one of those races:
+ *
+ *  - A kill predicted on this frame was repainted plain white by the echo of
+ *    the shot BEFORE it, ~one RTT later — the red kill ring flickered and then
+ *    stopped being a kill ring. That was the shipped behaviour for every demon
+ *    in the game, because the server sent a literal 0 in the flags of an
+ *    entity's damage event and so no echo ever said "fatal" either.
+ *  - A 70-damage shotgun marker shrank to the heft of a single 10-damage
+ *    pellet as the pellet echoes landed.
+ *
+ * So: while a marker is still on screen it can only be UPGRADED. Damage takes
+ * the maximum, the kill and headshot bits are sticky for the life of the
+ * marker, and a re-raise never shortens what is already showing. Once `t`
+ * reaches 0 the next hit starts clean — the latch is a marker-length window,
+ * not a mode.
+ */
+export function raiseHitMarker(
+  m: HitMarkerState, headshot: boolean, killed: boolean, damage: number,
+): void {
+  if (m.t <= 0) {
+    m.t = killed ? HIT_MARKER_KILL_S : HIT_MARKER_S;
+    m.head = headshot;
+    m.kill = killed;
+    m.dmg = damage;
+    return;
+  }
+  if (damage > m.dmg) m.dmg = damage;
+  if (hitMarkerRank(headshot, killed) < hitMarkerRank(m.head, m.kill)) return;
+  m.head = headshot || m.head;
+  m.kill = killed || m.kill;
+  const span = m.kill ? HIT_MARKER_KILL_S : HIT_MARKER_S;
+  if (span > m.t) m.t = span;
+}
+
 /** Half-gap in CSS pixels between the crosshair arms, for a given cone. */
 export function crosshairGapFor(style: CrosshairStyle, spread: number): number {
   if (style === 'dot') return 0;
@@ -1517,10 +1593,7 @@ export class Hud {
 
   /* animation clocks */
   private mapTimer = 0;
-  private hitMarkerT = 0;
-  private hitMarkerHead = false;
-  private hitMarkerKill = false;
-  private hitMarkerDmg = 0;
+  private readonly hm: HitMarkerState = createHitMarkerState();
   private hurtT = 0;
   private vigT = 0;
   private ghostHp = 1;
@@ -1998,10 +2071,7 @@ export class Hud {
    * same; it is optional so older callers keep working.
    */
   hitMarker(headshot: boolean, killed: boolean, damage = 0): void {
-    this.hitMarkerT = killed ? 0.46 : 0.28;
-    this.hitMarkerHead = headshot;
-    this.hitMarkerKill = killed;
-    this.hitMarkerDmg = damage;
+    raiseHitMarker(this.hm, headshot, killed, damage);
     this.cHmQ = -1;
   }
 
@@ -2311,9 +2381,9 @@ export class Hud {
     this.renderThreatRing(s.camYaw);
 
     /* --- crosshair ------------------------------------------------------ */
-    if (this.hitMarkerT > 0) {
-      this.hitMarkerT -= dt;
-      if (this.hitMarkerT < 0) this.hitMarkerT = 0;
+    if (this.hm.t > 0) {
+      this.hm.t -= dt;
+      if (this.hm.t < 0) this.hm.t = 0;
     }
     const gap = crosshairGapFor(this.crosshairStyle, s.spread);
     /* The ammo state the crosshair carries is the ammo state you can act on:
@@ -2321,7 +2391,7 @@ export class Hud {
        are answered where the eye already is, so ammo is never hunted for. */
     const aim = s.reloading || !this.weaponUi ? AMMO_TIER_OK : ammoTier(s.mag, magSize);
     const gapQ = Math.round(gap * 2);
-    const hmQ = this.hitMarkerT > 0 ? Math.ceil(this.hitMarkerT * 60) : 0;
+    const hmQ = this.hm.t > 0 ? Math.ceil(this.hm.t * 60) : 0;
     const rlQ = s.reloading ? Math.round(Math.max(0, Math.min(1, s.reloadFrac)) * 36) : -1;
     /* The dying bar is driven by the health INTEGER, not by the vignette's
        clock, so it costs a redraw only when the number itself moves. Standing
@@ -2605,15 +2675,15 @@ export class Hud {
     }
 
     /* hit marker — scaled by damage, gold on a headshot, red ring on a kill */
-    if (this.hitMarkerT > 0) {
-      const span = this.hitMarkerKill ? 0.46 : 0.28;
-      const t = Math.min(1, this.hitMarkerT / span);
-      const heft = Math.min(1, this.hitMarkerDmg / 60);
+    if (this.hm.t > 0) {
+      const span = this.hm.kill ? HIT_MARKER_KILL_S : HIT_MARKER_S;
+      const t = Math.min(1, this.hm.t / span);
+      const heft = Math.min(1, this.hm.dmg / 60);
       const r = (6 + heft * 4 + (1 - t) * 7) * d;
       const tick = (4 + heft * 3) * d;
       ctx.shadowBlur = 0;
       ctx.globalAlpha = Math.min(1, t * 1.6);
-      const hw = (this.hitMarkerKill ? 2.8 : 2) * d;
+      const hw = (this.hm.kill ? 2.8 : 2) * d;
       ctx.beginPath();
       for (let i = 0; i < 4; i++) {
         const sx = i & 1 ? 1 : -1;
@@ -2627,10 +2697,10 @@ export class Hud {
       ctx.strokeStyle = CASE;
       ctx.lineWidth = hw + 2.2 * d;
       ctx.stroke();
-      ctx.strokeStyle = this.hitMarkerKill ? '#ff3b18' : this.hitMarkerHead ? '#ffd24a' : '#ffffff';
+      ctx.strokeStyle = this.hm.kill ? '#ff3b18' : this.hm.head ? '#ffd24a' : '#ffffff';
       ctx.lineWidth = hw;
       ctx.stroke();
-      if (this.hitMarkerKill) {
+      if (this.hm.kill) {
         ctx.globalAlpha = Math.min(1, t) * 0.65;
         ctx.lineWidth = 1.6 * d;
         ctx.beginPath();

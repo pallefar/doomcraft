@@ -49,6 +49,8 @@ import {
   MAX_OVERHEAL,
   MAX_PELLETS,
   MAX_PROJECTILES,
+  MONSTER_HEAD_HALF_WIDTH_FRAC,
+  MONSTER_HEAD_MIN_Y_FRAC,
   PITCH_LIMIT,
   PLAYER_EYE_HEIGHT,
   PLAYER_EYE_HEIGHT_CROUCH,
@@ -1195,7 +1197,19 @@ export class Simulation {
       ) >= 0;
     }
 
-    // Monsters share the same ray.
+    /* Monsters share the same ray — and, since this line, the same HEAD BOX.
+     *
+     * `headshot = false` used to sit where the head test now is, and it was not
+     * a simplification, it was a disagreement: the client has always predicted
+     * monster headshots (`refillTargets` pushes every demon with a head box at
+     * MONSTER_HEAD_*_FRAC and `traceTargets` tests it first), so putting a
+     * pellet through an Imp's skull drew a GOLD hit marker and a doubled damage
+     * number on the shooter's screen while the server quietly applied single
+     * damage and reported no DMG_HEADSHOT. The marker was not merely late, it
+     * was contradicted: the authoritative echo landed a round trip later and
+     * repainted the same hit plain white. Same box, same multiplier, both
+     * sides — the prediction is now a prediction rather than a guess.
+     */
     let monster = -1;
     for (let e = 0; e < this.entCapacity; e++) {
       if (this.entActive[e] !== 1 || this.entType[e] >= EntityType.PICKUP_HEALTH) continue;
@@ -1210,12 +1224,24 @@ export class Simulation {
       bestT = t;
       monster = e;
       victim = null;
-      headshot = false;
+      const hh = this.entHeight[e];
+      const hhw = hw * MONSTER_HEAD_HALF_WIDTH_FRAC;
+      headshot = rayAABB(
+        ox, oy, oz, dx, dy, dz,
+        this.entX[e] - hhw, this.entY[e] + hh * MONSTER_HEAD_MIN_Y_FRAC, this.entZ[e] - hhw,
+        this.entX[e] + hhw, this.entY[e] + hh, this.entZ[e] + hhw,
+        HITSCAN_MAX_DISTANCE,
+      ) >= 0;
     }
 
     if (monster >= 0) {
-      const dmg = damageAtDistanceOf(def, bestT);
-      this.damageEntity(monster, shooter.id, dmg, def.id, dx, dy, dz);
+      let dmg = damageAtDistanceOf(def, bestT);
+      let mflags = 0;
+      if (headshot) {
+        dmg *= def.headshotMultiplier > 0 ? def.headshotMultiplier : HEADSHOT_MULTIPLIER;
+        mflags |= DMG_HEADSHOT;
+      }
+      this.damageEntity(monster, shooter.id, dmg, def.id, mflags, dx, dy, dz);
       return;
     }
     if (!victim) return;
@@ -1263,7 +1289,7 @@ export class Simulation {
       const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (d > range + this.entHalfW[e]) continue;
       if (d > 1e-4 && (cx * dx + cy * dy + cz * dz) / d < cosLimit) continue;
-      this.damageEntity(e, attacker.id, damageAtDistanceOf(def, d), def.id, dx, dy, dz);
+      this.damageEntity(e, attacker.id, damageAtDistanceOf(def, d), def.id, 0, dx, dy, dz);
     }
   }
 
@@ -1396,7 +1422,7 @@ export class Simulation {
           const imp = knockbackImpulseOf(def, direct);
           hitPlayer.vel[0] += ndx * imp; hitPlayer.vel[1] += imp * 0.4; hitPlayer.vel[2] += ndz * imp;
         } else if (hitEntity >= 0) {
-          this.damageEntity(hitEntity, this.projOwner[i], this.projDamage[i], weapon, ndx, ndy, ndz);
+          this.damageEntity(hitEntity, this.projOwner[i], this.projDamage[i], weapon, 0, ndx, ndy, ndz);
         }
         this.detonate(i, px, py, pz, hitWorld ? RemoveReason.HIT_WORLD : RemoveReason.HIT_ENTITY);
         continue;
@@ -1467,7 +1493,7 @@ export class Simulation {
         const dmg = splashDamageAtOf(def, d);
         if (dmg > 0.5 && !fromMonster) {
           const inv = d > 1e-4 ? 1 / d : 0;
-          this.damageEntity(e, ownerId, dmg, weapon, cx * inv, cy * inv, cz * inv);
+          this.damageEntity(e, ownerId, dmg, weapon, DMG_SPLASH, cx * inv, cy * inv, cz * inv);
         }
       }
     }
@@ -1671,7 +1697,10 @@ export class Simulation {
    * sitting there at both projectile call sites — it only had to be carried
    * the last step, to the event.
    */
-  damageEntity(slot: number, attackerId: number, amount: number, weaponId: number, dirX: number, dirY: number, dirZ: number): void {
+  damageEntity(
+    slot: number, attackerId: number, amount: number, weaponId: number, flags: number,
+    dirX: number, dirY: number, dirZ: number,
+  ): void {
     if (this.entActive[slot] !== 1 || amount <= 0) return;
     if (this.entType[slot] >= EntityType.PICKUP_HEALTH) return;
     this.entHealth[slot] -= amount;
@@ -1687,6 +1716,30 @@ export class Simulation {
     this.entVZ[slot] += dirZ * k;
 
     const attacker = this.playerById.get(attackerId);
+
+    /* THE FATAL BIT, which is the whole hit marker.
+     *
+     * `flags` is a parameter and DMG_FATAL is raised here for the same reason
+     * `damagePlayer` does both: the client's hit marker is driven by
+     * `(flags & DMG_FATAL)` and `(flags & DMG_HEADSHOT)` and by nothing else
+     * (`Game.onDamage` → `Hud.hitMarker`). A literal 0 sat in this argument, so
+     * the ONLY producer that ever raised a kill marker was the client's own
+     * prediction — and the server's echo of that same shot, arriving a round
+     * trip later, called `hitMarker(false, false, …)` and painted the red kill
+     * ring back out to plain white. Killing a demon looked, at the end of it,
+     * exactly like grazing one.
+     *
+     * The kill EVENT a few lines below has always set its flags from
+     * `weaponKillFlags`, which is why this read as a wire that worked: the
+     * killfeed was right and the thing in the middle of the screen was not.
+     *
+     * Order matters. The health subtraction is above, so `entHealth <= 0` is
+     * already decided; raising the bit BEFORE `pushDamage` is what puts it in
+     * the packet, and raising it after would compile, pass a test that only
+     * reads the entity, and ship the same silent marker.
+     */
+    if (this.entHealth[slot] <= 0) flags |= DMG_FATAL;
+
     // `weaponId`, where a literal 0 used to sit — so every hit on a monster
     // told the attacker's client it had been dealt by the PISTOL. Nothing on
     // the client reads this field today (`Game.onDamage` uses amount, flags
@@ -1695,7 +1748,7 @@ export class Simulation {
     // always says the same wrong weapon is a trap for the first reader that
     // does look, and the right value is now a parameter away. Same layout,
     // same u8, same offset: a value fix, not a format change.
-    this.pushDamage(attackerId, 0, Math.round(amount), weaponId, 0, dirX, dirY, dirZ, Math.max(0, this.entHealth[slot]), 0);
+    this.pushDamage(attackerId, 0, Math.round(amount), weaponId, flags, dirX, dirY, dirZ, Math.max(0, this.entHealth[slot]), 0);
 
     if (this.entHealth[slot] <= 0) {
       this.entState[slot] |= ES_DEAD;
@@ -1709,7 +1762,10 @@ export class Simulation {
           e.killerId = attacker.id;
           e.victimId = 0;
           e.weaponId = weaponId;
-          e.flags = this.weaponKillFlags(weaponId);
+          // Same derivation as `killPlayer`: the weapon's own bits plus the
+          // headshot, so a demon dropped by a shot to the skull reads in the
+          // killfeed exactly as a player dropped the same way does.
+          e.flags = this.weaponKillFlags(weaponId) | ((flags & DMG_HEADSHOT) !== 0 ? KILL_HEADSHOT : 0);
           e.killerStreak = attacker.streak;
         }
       }

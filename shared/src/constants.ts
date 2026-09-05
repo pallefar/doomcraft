@@ -207,6 +207,21 @@ export const PLAYER_EYE_HEIGHT_CROUCH = 0.98;
 /** Head hitbox: a box from PLAYER_HEAD_MIN_Y to PLAYER_HEIGHT, used for headshots. */
 export const PLAYER_HEAD_MIN_Y = 1.42;
 export const PLAYER_HEAD_HALF_WIDTH = 0.22;
+/**
+ * A MONSTER's head box, as fractions of its own body box — demons come in five
+ * sizes, so a fixed metre offset cannot serve a 0.7 m Lost Soul and a 2.4 m
+ * Baron at once.
+ *
+ * These live here rather than beside either reader because they are a
+ * CLIENT/SERVER AGREEMENT, and the agreement is what was missing: the client
+ * predicted a monster headshot off `MONSTER_LOOK` (`height * 0.78`,
+ * `halfW * 0.7`), doubled the damage on its own hit marker, and the server —
+ * which wrote `headshot = false` the moment a monster won the ray — applied
+ * single damage and reported no DMG_HEADSHOT. Two numbers in one place is what
+ * stops that drifting apart again.
+ */
+export const MONSTER_HEAD_MIN_Y_FRAC = 0.78;
+export const MONSTER_HEAD_HALF_WIDTH_FRAC = 0.7;
 /** Skin width kept between the AABB and any solid face after a sweep resolve. */
 export const COLLIDE_EPSILON = 1e-3;
 
