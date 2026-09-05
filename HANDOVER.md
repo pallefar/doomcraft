@@ -1,46 +1,31 @@
 # Doomcraft — handover: where it stands, and what is left
 
-Written 2026-09-05. This session did two arcs. First it took the five money-path
-claims that the S4
-review recorded but never verified (old §6), put each one through TWO independent
-passes — a per-claim Claude fan-out and a Codex run over all six — and found
-**every one of them true**. Codex additionally found a money-loss bug that was in
-nobody's list. All of it is fixed, deployed and pinned by tests proven red.
-Previous handovers are in git history at `b77d907`, `56b23c5`, `108efa5`,
-`9da410b`, `bfdc647`, `557c7b6`. §0 is restated because it keeps earning it —
-rules 21–24 are new. Then it built **sponsors P2a end to end** — the ad log
-instrumented, aggregated, retained, and rendered as an honest delivery report.
+Written 2026-09-05 (second session of the day). This one did the VARIANTS arc's
+phase V1 end to end — the `SessionArsenal` seam, both predictors moved onto it,
+and a byte-compared lockstep golden proving the refactor changed nothing — and
+then, on the strength of an adversarial review of the V2 PLAN, fixed three
+things that were wrong before any of it started. The largest: **the two
+predictors have never agreed about where pellets go**, by up to 10.2 degrees on
+a shotgun. Previous handovers are in git history at `b77d907`, `56b23c5`,
+`108efa5`, `9da410b`, `bfdc647`, `557c7b6`, `ee0991c`. §0 is restated because it
+keeps earning it — rules 25–28 are new and all four cost real time today.
 
 **Live:**
 - **https://doomcraft-production.up.railway.app** — the Node origin: game, rooms,
-  API, release tier, admin console at `/admin` (Studio with a challenges card,
-  Guides with eight walkthroughs). Railway project `doomcraft`, volume `/data`.
-- **Daily/weekly challenges are LIVE**: `GET /api/challenges` serves the board,
-  the profile overlay's Competitions tab renders it, and the quests pack
-  (`quests@1`, 4 dailies + 3 weeklies) is in every room's pinned release.
+  API, release tier, admin console at `/admin`. Railway project `doomcraft`,
+  volume `/data`.
 - **https://doomcraft.vercel.app** — static single-player, same bundle.
   **github.com/pallefar/doomcraft** — `main`.
 - Owner seat claimed and durable: creds in `~/youtube/doomcraft-owner-credentials.txt`.
 - CI: `tsc -b` + `vitest run` + `release:verify` on every push; all pushes green.
-  Suite: **100 files / 2409 tests + 3 deliberate skips**. `release:verify` runs 15
-  checks and emits 7 packs.
-- **S11 rewarded is BUILT** (flag `sponsor_rewarded`, defaultOn:false). Gate 5
-  runs server-side: `/api/sponsor/reward/{start,beat,claim}`. Grant caps are ON
-  THE PROFILE (PERSIST_VERSION 7) so a deploy cannot hand out a fresh four.
-- **The S10 between-match interstitial is BUILT** (flag `sponsor_interstitial`,
-  defaultOn:false — flipping it in production is the user's launch call). Fires
-  after EVERY mode. Proof harness: `tools/shot-interstitial.mjs`.
-- **Sponsor delivery is LIVE**: `GET /api/admin/ads` serves the §3.5 report from
-  durable daily aggregates, and the console's new **Delivery** tab (under
-  Analytics) renders it — every metric the log cannot support prints an em-dash
-  and the reason, never a 0 and never a 100%.
-- **`/api/version`'s `data` block now carries live durability signals** —
-  `degraded`, `unflushed`, `quarantined`, `lostWrites` — beside the boot-time
-  `writable`. They are also how you verify a deploy (rule 17).
+  Suite: **103 files / 2453 tests + 3 deliberate skips**. `release:verify` runs
+  15 checks and emits 7 packs.
+- Sponsors phase 2 (P2a log+report, P2b interstitial, P2c rewarded + Gate 5) is
+  DONE and deployed; `sponsor_interstitial` / `sponsor_rewarded` are
+  deliberately OFF, and flipping them is the user's launch call.
 
-Read this, then `docs/SPONSORS.md` (the next arc — and read §3 here before you
-follow its ordering, which is wrong), `docs/ECONOMY.md`, `docs/STUDIO.md`,
-`docs/PACKS.md` (refreshed 2026-08-29, still current), `docs/VARIANTS.md`,
+Read this, then `docs/VARIANTS.md` (the live arc — §7 now holds the three
+decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
 `ref/BAR.md`.
 
 ---
@@ -123,83 +108,124 @@ follow its ordering, which is wrong), `docs/ECONOMY.md`, `docs/STUDIO.md`,
     EVEN INSIDE A COMMENT (rule 12 applies to prose too). Both were found by
     looking at the screenshot and at the compiler, not at the test result.
 
-## 1. What this session shipped (all pushed, green, deployed)
+25. **NEW — a gate that cannot PASS is worth exactly what one that cannot fail
+    is worth.** `tools/smoke-signal.mjs` advertises itself as a deploy gate and
+    its last check had been red on every build this repo ever produced: it
+    opened `/ws`, waited 400 ms and asserted bytes had arrived, and the server
+    deliberately says nothing until it hears a HELLO. Rule 2 has a mirror image
+    and this is it.
 
-The whole of the old §6, verified twice and then fixed. Every fix has a
-regression test proven red with **its own** fix reverted, and the revert is named
-in the test body so the proof is cheap to repeat.
+26. **NEW — moving code behind a seam DESTROYS the lever your failure proof was
+    using.** The instant `sim.ts` stopped reading `WEAPON_DAMAGE`, the tests
+    that proved the lockstep golden could fail by poking that array went green
+    for the wrong reason. The new lever has to be the seam itself: hand the
+    session a different table and watch the shots move. Whenever you put an
+    indirection in front of something, go and look at whatever was proving that
+    thing was observed.
+
+27. **NEW — "nothing moved" is not "they agree."** The lockstep golden
+    concatenates a server track and a client track and compares the pair
+    against history. That proves neither drifted. It never once asserted that
+    corresponding shots MATCH — and they did not, by up to 10.2° on a shotgun,
+    for the life of the project. Codex found this by attacking the claim rather
+    than the code. If two things are supposed to agree, assert that they agree.
+
+28. **NEW — your measuring instrument has precision too, and it lies first.**
+    The agreement test failed by "0.01°" on every weapon while printing
+    identical components, because `acos` has an infinite derivative at 1 and
+    float noise in a dot product becomes 1.4e-4 radians of imaginary
+    disagreement. Then it failed by 2e-8 because `ShotReport`'s direction
+    arrays are Float32Arrays — the client's OBSERVATION channel is lossy even
+    where its arithmetic is not. Only the third reading was about pellets.
+    Before believing a small discrepancy, check the instrument.
+
+## 1. What this session shipped (all pushed, green, deployed)
 
 | Commit | What |
 |---|---|
-| `1d0ae7b` | **The durability layer.** (a) A transient read error minted a blank profile and renamed it over the real file — one bare catch collapsed ENOENT, EACCES, EIO and a parse failure into "new player". Only an ENOENT *errno* is absence now; anything else QUARANTINES the device (a working profile in memory, never a write) so the bytes survive for recovery. A file that parses to a non-object is quarantined too — that path did not even take the catch. (b) A failed flush was dropped from `dirty` and never retried, while `flush()` still resolved — which is what made it dangerous, because `trades.ts:623` awaits `flush()` to know a swap is durable before stamping it 'settled'. Ids now clear only after their `rename`. (c) A post-`close()` write was discarded in silence; it is counted and logged. |
-| `3de4329` | **The critical one: the drain raced its own settlements.** `shutdown()` detached every player — each detach STARTS a payout several awaits deep — then ran `flush()` (empty dirty set, instant), `close()`, `process.exit(0)`. The journal row landed; the balance did not. Rooms now track in-flight settlements and expose `quiesce()`; shutdown awaits them, bounded by `DOOMCRAFT_SETTLE_DRAIN_MS`. The deploy deadline also now ENDS the round instead of only stopping its clock. **Plus Codex's find:** `payoutSourceId()` was evaluated INSIDE the deferred `store.update` callback, reading a `sessionId` that `beginRound` replaces — so a late settlement journalled round N under N+1's key and round N+1's real payout was then refused as a duplicate. Pinned at submission time. |
-| `ff12185` | **The fraud log stops accusing honest players.** `GRANTS_NOTHING` flagged a violation on `wanted !== 0`, and `wanted` is never 0 (every submission must carry `stats`), so friends in a private room minted a violation each per round. `ALREADY_SETTLED` did the same to any honest mid-round reconnect. And the ring itself logged every REFUSAL, so honest traffic evicted real attacks from a 256-row buffer — it now logs suspicion. Two existing tests updated (invariants kept, plus a direct replay so the guard's own check is still proven). |
-| `edbbe06` | **The award packet stops understating the round.** `landed` came from `applyMatchResult` alone, so a challenge prize appeared in `totalScrap` but not in the delta beside it — a first daily completion could count "+0 Scrap" on a round that paid 40. Display only; the ledger and balance were always right. |
-| `d42374b` | **Sponsors P2a-0: the log becomes readable by a billing job.** `served` rows at mint (a successful decide wrote NOTHING before, so no metric had a denominator); `nonce` on every fill-scoped row (exposure rows carry a RUNNING TOTAL, so without it two fills are indistinguishable from one); `v`/`mode`/`platform`; `decisionId` (a `decide` row is a REFUSAL, not a decision); write failures counted instead of swallowed; rows batched per call so `appendFileSync` is not multiplied on the serving path. **Codex, run over the plan BEFORE any code, overturned its central clause** — a row written at mint is `served`, not `rendered`; the client may never display it, and calling it rendered recreates the conflation §3.5 forbids. |
-| `2c08f9e` | **P2a-0b: non-viewable becomes recordable.** Client-attested `rendered` (metric 1's denominator, deliberately NOT gated on visibility — rendering is not viewing) and a terminal `verdict` carrying `qualified` + `basis`. The basis is load-bearing: rendered-and-failed is a MEASURED failure (bucket 3); never-rendered is UNDETERMINED (bucket 4); no verdict at all is undetermined BY ABSENCE. Folding 4 into 3 flatters the Measured Rate that MRC asks us to maximise. |
-| `f11e8d4` | **P2a-0c: aggregate first, then prune.** Codex's critical finding. Day-sharded rows, a durable per-day aggregate, and a prune that REFUSES to delete a day with no aggregate — retention runs on a timer and the billing job runs on nobody's schedule, so that race has one winner. Exposure is max-per-nonce, straddling fills make the day a lower bound. |
-| `9bb7e74` `74b5bcb` `2c4d498` | **P2a-1: the delivery report and its screen.** `GET /api/admin/ads` over the aggregates; a Delivery console tab. Every unsupported metric is an em-dash WITH ITS REASON. Viewable Rate with no measured failures is *unavailable*, not 100%. The phase-3 in-world metrics are refused BY NAME so a blank does not read as zero. PROVISIONAL banner; house/direct split; session-uniques, never person-uniques. |
-| `d6c74ed` | **A slot is never measured over another fill's creative.** Two pre-existing defects Codex found while attacking the P2a design, both of which P2b would have multiplied. A direct creative REPLACED the house card and nothing put it back, so on the next visit — with that campaign now capped and HOUSE allocated — the old art was still on screen while a new observer measured it under the house nonce, crediting unsold inventory with a sponsor's exposure. A slot now declares whose pixels it is showing. Also: the client defaulted `mode` to 0 and `ModeId.QUEST` IS 0, so every menu impression would have been reported as Quest reach. |
-| `2e2780c` | **P2b (server): the interstitial is admitted, and rationed.** `SERVABLE_SURFACES` = phase one + S10; `perDayInterstitials` — typed, defaulted and read by nothing since it was written — is now a real platform ceiling across ALL campaigns (two campaigns each under their own cap still add up), plus the 180 s interval, both refused with the reason in the log. Counted on SERVE, not impression. A surface this build cannot serve is refused and counted instead of dropped in silence. |
-| `136620f` | **P2b (client): the interstitial, and a skip a keyboard can actually press.** THREE defects the screenshot harness found and no unit test could: the skip starts disabled so `focus()` left the keyboard on nothing; the game binds keys globally and SWALLOWED Enter, so the focused high-contrast skip could not be operated at all; and "Skip (14s)" reads as "wait 14 seconds to skip" — the AADC's named pattern, described in words even though the control was live. |
-| `7bd0274` | **The site promises the reporting we actually ship.** "reported to you line by line" was false — the report is daily aggregates, and the in-world half is phase 3. |
-| `baf2d3c` | **P2c (1/n): Gate 5's rules, and caps that survive a deploy.** PERSIST_VERSION 6→7, `DECLARED_PERSIST_VERSION` bumped in the same commit as the gate demands. The server's own clock, one beat per 2s in a [1.6s, 3.5s] ARRIVAL window (which is what defeats a burst faking elapsed time), four fifths visible+focused, 4/day 180s apart 40/30/20/10, zero under 30min lifetime play, zero in PvP, Scrap never XP. The ad-free player is paid without a session — and the CAP checks sit before the WATCH checks so they are still capped, or the purchase becomes a scrap tap. |
-| `eb212df` | **P2c (2/n): the handshake over the wire.** `settleAdReward` mirrors `settleChallenges` — journal idempotency first, row appended inside the same locked section. PvP is read from the ROOM TABLE, never the request. The session is marked spent only after the grant is durable. R38 is why the ownership tests exist: removing the device check from `RewardSessions.get` broke nothing, so a leaked reward id was a claim on another player's watch. |
-| `3dae9b2` | **P2c (3/n): the rewarded watch and its button.** On the QUEST intermission (`#ui`, clickable); deathmatch gets none (`#hud` is pointer-events:none). HOUSE is accepted here unlike the interstitial — the reward is the GRANT, not the ad. Cancel is never disabled: requiring the full watch to be PAID is fine, requiring it to be endured is not. |
-| `fde6758` | **Guides 9 — how to run the sponsor surfaces.** The standing tutorial directive. States which cap survives a deploy and which does not, and the ad-free rule. |
-| `96d067a` | **A store that cannot write now says so.** `JsonFileStore.degraded` was set in four places and read in none. `/api/version`'s `data` gains `degraded`, `unflushed`, `quarantined`, `lostWrites`. |
+| `a120c24` | **The three VARIANTS §7 decisions, asked and written down.** DPS-dominant budget (0.50 dps / 0.20 range / 0.15 splash / 0.15 handling) at ±12%, an uncommon craft-only rarity floor, and variants table-gated OUT of ranked-adjacent modes. Plus the observation the user's own preview surfaced: a weighted sum at ±12% admits an "everything up 10%" variant, so §6's no-straight-upgrades rule needs a SECOND refusal — strict dominance — which is now part of the decision. |
+| `7de757c` | **V1a — the lockstep determinism harness and its golden, minted pre-refactor.** Both shipping predictors, one script, two arenas, the same `ServerWorld` and the same shared `raycastVoxels`. Three things it took: the trigger has to be PULSED (a held trigger fires a semi-auto exactly once, so the first script recorded four pistol shots against four hundred chaingun ones); the chainsaw needs its OWN arena (2.6 m reach, so at seven metres the whole melee path went unwatched — and running all seven weapons at two metres instead recorded a rocket detonating in the shooter's face); and a respawn puts the victim on top of the shooter under a shield `resolveMelee` refuses. |
+| `dd28363` | **V1b — `SessionArsenal`, with the two representations kept APART.** `weapons.ts` holds every weapon twice — doubles in `WEAPONS[i]`, narrowed values in the derived hot tables — and the narrowing is lossy for six of them (rocket splashRadius 4.4 → 4.400000095367432, and 60000/rpm for four weapons). The shipping code reads BOTH, three lines apart. `EffectiveWeapon` therefore carries the def's doubles AND a `hot` record, and unifying them is a separate change with its own argument. The test caught a bare range check letting `1.5` index a hole in the table. |
+| `786c350` | **V1c — the server predictor fires from the arsenal.** Every reader on the firing path goes through `sim.statsFor(p, weaponId)`; zero module-table reads remain. A projectile now remembers the slot it was FIRED with, because a rocket in flight outlives a weapon switch. `SessionArsenal.from` landed here rather than in V2 because rule 26 demanded it. **The golden did not move.** |
+| `e950dc4` | **V1d — the client predictor too. V1 closes.** `rt.stats(weaponId)` is the mirror of `sim.statsFor`. The failure proof became symmetric: an empty override changes nothing on either side, +1 pistol damage and +20 chaingun rpm move both, a one-centimetre splash radius moves only the server, a wider cone moves only the client. **The golden still did not move.** Verified in the real app — muzzle flash, tracer, an open dynamic crosshair, 13/20 magazine pips. |
+| `949512f` | **A deploy gate that could not pass** (rule 25). And the first fix for it was ALSO wrong — it went green with the HELLO truncated to nonsense — so it now carries a negative control: one junk byte must be told nothing. |
+| `1b7af11` | **Two live bugs the V2 plan review found in shipped code.** `parseItemsManifest('null')` threw a TypeError past every caller instead of refusing (the `root.items` access sits outside the try; `parseChallengesManifest` had it identically). And `HordeDirector.equipStart` refilled magazines from the compiled table on the JOIN path, after `spawnPlayer` had filled them through the arsenal — so a shotgun variant that pays for its damage with a smaller magazine would enter Horde holding the base's eight shells. Proven red at "expected 8 to be 4". |
+| `fc01475` | **THE BIG ONE: the two predictors now agree about where pellets go.** Five separate causes, each proven red alone — the cone was read AFTER the shot bloomed it (0.53° on a shotgun); the seeding schemes were unrelated and the server's used the ROOM seed the client never receives (6.6°); the server did not spread projectiles at all (0.75°, plasma only); the client's accumulated cone was float32 against the server's double (8.3e-9); and the shot counter wrapped on one side only (65 536 shots in, every cone diverges). `agreement.test.ts` is the assertion the golden never was, and the golden moved DELIBERATELY: 135 damage rows → 102, 10 kills → 14, and the pistol and shotgun now finish people they never used to. |
 
 ## 2. Architecture delta
 
 ```
-ads log:    <data>/ads/<day>.jsonl         day-sharded; `served` at mint, `nonce` on every
-                                           fill-scoped row, v/mode/platform/decisionId
-ads roll:   <data>/ads-daily/<day>.json    written once, kept indefinitely, the prune's gate
-rollup:     server/src/adsRollup.ts        rollupRows (pure) + rollupPending + pruneRaw
-report:     admin/model.ts adReport        Measured = value | null + REASON; never 0, never 100%
-route:      GET /api/admin/ads             read-only, no audit row, reads aggregates not raw
-screen:     console.ts tab 'delivery'      em-dash + reason; PROVISIONAL; caveat block
-meter:      client/ads/viewability.ts      emits `rendered` + terminal `verdict{qualified,basis}`
+THE VARIANTS SEAM (new, phase V1)
+  shared/src/arsenal.ts      SessionArsenal.statsFor(weaponId, variantSlot) -> EffectiveWeapon
+                             EffectiveWeapon = WeaponDef's doubles + a `hot` record holding the
+                             SAME narrowed values the derived tables hold (they differ; on purpose)
+                             SessionArsenal.from(overlays)  assembly only — validation is V2's
+                             *Of() twins of the sync-contract functions; the id-taking originals
+                             in weapons.ts are untouched and still serve ~100 display call sites
+  server: Simulation(world, seed, arsenal = BASE_ARSENAL)   sim.statsFor(p, weaponId)
+          PlayerEntity.variantSlots : Uint8Array(WEAPON_COUNT)
+          Simulation.projVariant    : the slot a round in flight was FIRED with
+          room.ts:409               THE V4 WIRING POINT — the pinned release becomes an arsenal here
+  client: WeaponRuntime(fx, camera, projectiles, arsenal = BASE_ARSENAL)   rt.stats(weaponId)
+          WeaponRuntime.variantSlots : the mirror of PlayerEntity's
 
-challenges: shared/src/challenges.ts    defs as data + challengeContribution (ONE predicate,
-                                        three callers: room producer, guard, settlement)
-pack:       PackKind.QUESTS = 5         data class; content/quests.json is the v1 fallback
-producer:   room.ts challengeIdsFor     gated on the member's economy_competitions bit
-guard:      verifyChallengeIds          re-derives from the session's OPENED-with defs
-payout:     persistence.ts settleChallenges   debt -> has-first -> credit -> row, one lock
-state:      StoredProfile.challenges    {day, week, counts, done, owed}  (PERSIST 6)
-route:      GET /api/challenges         view-time period roll; never writes
-studio:     POST /api/admin/studio/quests (+ /validate)   mints quests@<n+1>
+THE SYNC CONTRACT (now actually one)
+  shared/src/weapons.ts  shotSeed(ownerId, shotSeq, pellet)   moved here from the client
+                         nextShotSeq(seq)                     16-bit wrap, one rule for both
+  both predictors: read the cone, fire, THEN bloom; reseed PER PELLET; spread projectiles too
+  client WeaponRuntime.heat is Float64Array, matching the server's double heatSpread
+
+THE PROOFS
+  client/src/game/lockstep.harness.ts  both predictors, one script, two arenas, one world
+  client/src/game/lockstep.golden.txt.gz  gzipped recording; digest pinned inline in the test
+  client/src/game/lockstep.test.ts     "nothing moved", + the gate proven able to fail
+  client/src/game/agreement.test.ts    "and they AGREE" — the assertion the golden never was
 ```
 
 ## 3. What is left — decided order
 
-**SPONSORS PHASE 2 IS DONE** to the limit of what is unblocked — P2a (the log
-instrumented, aggregated, retained and rendered), P2b (the S10 interstitial) and
-P2c (S11 rewarded + Gate 5) — as is §6's list of unverified findings, all six of
-which were true. **The queue starts at the variants arc, which needs three
-answers from you before V2.**
+1. **V2 of the variants arc, and its plan needs rewriting before it is built.**
+   The plan was put to Codex as twelve numbered clauses before a line was
+   written, exactly as the standing rule says, and it came back with enough to
+   block. §6 carries the findings; the two the user has already ruled on are
+   settled (see below). What V2 must now be:
 
-1. **Sponsors phase 2, continued.**
-   - ~~P2a-0 / P2a-1 / P2b~~ — SHIPPED.
-   - ~~P2c — S11 rewarded + Gate 5~~ — SHIPPED (server, client, guide).
-     **What is NOT done and should finish the arc:** there is no screenshot
-     harness for the rewarded overlay (S10's is `tools/shot-interstitial.mjs`
-     and the rewarded one should measure the same three things — focus, the
-     cancel control, and that a completed watch actually pays); and there is no
-     Basic Training drill for either sponsor surface, which is the PLAYER half
-     of the standing tutorial directive. The admin half shipped as Guides 9.
-   - Sponsors is otherwise done to the limit of what is unblocked: everything
-     remaining is the THIRD-PARTY half, which needs the ad-network/CMP accounts
-     in §5.
+   - a `shared/src/variants.ts` parser modelled on `parseItemsManifest` **but
+     not copied from it** — the null-root bug is fixed there now, and the copy
+     would have inherited it;
+   - a whitelist that BANDS EVERY FIELD IT ADMITS. The plan banded 12 of 18.
+     The six unbanded ones include `terrainDamage`, which is passed straight to
+     `world.carveSphere`, whose `for (let y = y0; y <= y1; y++)` never advances
+     when `y0` is -1e20 because `-1e20 + 1 === -1e20`. One projectile would
+     block the event loop forever;
+   - INTEGER refusals, not just numeric bands. `pellets: 1.5` is inside 1..12
+     and makes the server fire twice while the client fires once;
+     `magSize: 7.5` makes a reload destroy a reserve round and load nothing;
+   - **the budget, per the user's decision of 2026-09-05: per-archetype axes
+     and measured currency.** An axis whose BASE value is zero is dropped and
+     its weight redistributed (four of seven weapons have zero splash, so
+     `splash/base_splash` is 0/0, and `Math.abs(NaN) <= 0.12` is false — the
+     check would refuse every pistol variant rather than accept it). And an
+     axis is only chargeable where it actually reaches that archetype's firing
+     path: range is NOT an axis for projectile weapons (direct damage is stored
+     at spawn and never has falloff applied — Codex built a plasma variant
+     scoring exactly 1.0 while gaining 20% real damage), and `reloadMs` is not
+     one for shell-reloaders (the shotgun reloads on `reloadShellMs`, so
+     doubling `reloadMs` costs nothing at all);
+   - `PackKind.VARIANTS = 7` **with its `PackInventory.unsatisfied()` branch in
+     the same commit**, and — separately — the production release gate wired.
+     `runReleaseVerify()` in gate.ts and `ReleaseService.runGate()` in packs.ts
+     are two different implementations; adding a check to the first does not
+     add it to the second, and a candidate naming kind 7 currently gates GREEN
+     and then falls back at serve time;
+   - a canonical fingerprint line that fits the gate's 160-byte cap.
 
-2. **The variants arc, V1–V5** (`docs/VARIANTS.md` §5). The three §7 decisions
-   are TAKEN (2026-09-05): DPS-dominant budget at ±12% **plus** a
-   strict-dominance refusal, an uncommon craft-only floor, and variants
-   table-gated out of ranked-adjacent modes. §7 now records them in full.
-3. **The gauntlet — 0/23.** Then portals/TWA, C7 analytics.
-4. **Deathmatch share surface** — needs its own `#ui` element; the scoreboard
-   lives in pointer-events:none `#hud`.
+2. **The gauntlet — 0/23.** Then portals/TWA, C7 analytics.
+3. **Deathmatch share surface** — needs its own `#ui` element.
+4. **The sponsors loose ends**: no screenshot harness for the REWARDED overlay
+   (S10's is `tools/shot-interstitial.mjs`), and no Basic Training drill for
+   either sponsor surface — the PLAYER half of the standing tutorial directive.
+   The admin half shipped as Guides 9.
 
 ## 4. Deploy runbook (follow exactly)
 
@@ -211,6 +237,13 @@ answers from you before V2.**
   the build id is not proof.
 - **Verify THREE things**: newest deployment == SUCCESS; a route the new build
   ADDS answers; `curl /api/version | jq .data` → `{"writable": true}`.
+- **WHEN THE BUILD ADDS NO ROUTE** — a refactor, a fix — rule 17 leaves you with
+  nothing to probe, and `build.id` is a lie (it is a Railway env var and was
+  reading `b453e8b` for a tree whose HEAD was `e950dc4`). Use the SERVED BUNDLE'S
+  CONTENT HASH instead: `curl -s <origin>/ | grep -o 'a/index-[A-Za-z0-9_-]*\.js'`
+  must equal the `dist/a/index-*.js` your own `vite build` just produced. Vite
+  hashes by content, so it is falsifiable and it cannot be faked by a redeploy of
+  the old build. Both deploys today were verified this way.
 - **Flag changes**: update the Railway env `DOOMCRAFT_FLAGS` with the FULL
   document (rule 14). Currently forces the five economy flags.
   `sponsor_interstitial` / `sponsor_rewarded` are deliberately OFF — flipping
@@ -226,50 +259,54 @@ this gates only the third-party half of sponsors — the first-party work above 
 not blocked) · WorkOS / Paddle / PostHog accounts · ElevenLabs key · legal review
 before real-money prizes · Play Console $25 / Apple Developer $99 / Steamworks
 $100 · a Mac with Xcode · GTA mode has no obtainable bar.
-
 ## 6. What is deliberately still open
 
 Findings this session produced and chose NOT to act on, so none is mistaken for
-oversight. The three Codex findings against the existing ad path that used to
-head this list are FIXED (`d6c74ed`), and the false site claim with them
-(`7bd0274`).
+oversight.
 
-- **The 32-bit device hash is a floor, not an identity.** At a million devices
-  the expected distinct-hash count is ~999,884, and two colliding devices share
-  frequency caps and click dedup. The delivery report labels the count a floor
-  and refuses person-uniques outright; a real audience number needs a wider
-  pseudonymous id and server-issued sessions, which is a schema change.
-- **Orientation is never captured.** `platform` is a coarse-pointer
-  classification, so §3.5's "mobile portrait broken out" — named in the doc as
-  our differentiator against the bar — is refused on the screen rather than
-  approximated. Capturing it means recording viewport shape at observation time.
-- **The interstitial's daily cap is in memory**, like every other cap in
-  `ads.ts`, so a restart forgives the day's count and this project deploys
-  often. That is the conservative direction for a cap that protects a PLAYER,
-  and it keeps one cap machine rather than two. It is NOT acceptable for a
-  rewarded grant, which is money — see P2c in §3.
-- **No screenshot harness for the rewarded overlay, and no Basic Training drill
-  for either sponsor surface.** Both are named in §3; the second is the player
-  half of the standing tutorial directive and the admin half already shipped.
-- **A reconnecting player still loses their post-reconnect earnings.** The false
-  fraud violation is fixed; the value loss is not. A dropped socket settles the
-  player immediately (right — a rage-quitter must not go unpaid), and the ledger
-  has no un-settle, so the second segment cannot be paid without breaking the
-  one-payout-per-device invariant. THE FIX IS A FEATURE: hold the membership in
-  a 30–60 s "awaiting reconnect" grace window keyed on `deviceId`, re-attach the
-  returning connection with its `joinedMs`/`baseKills` intact, and settle only
-  on expiry or `endRound`.
-- **The journal claims its idempotency key BEFORE the write** (`journal.ts:510`),
-  so an EIO during append leaves money moved with no audit row. Codex reported
-  this as a defect; it is not. The comment above it argues the tradeoff — "a
-  lost row is a counter; a double payout is money" — and `failed`/`degraded` are
-  already exposed on two routes. Recorded so it is not re-raised. See rule 23.
-- **`docs/SPONSORS.md:1338` claims a settlement layer shipped. It did not.** The
-  delivery report is flagged PROVISIONAL for exactly this reason; fix the line.
-- **OBSERVED FLAKE, not diagnosed.** `server/src/accounts.test.ts > signin >
-  accepts the right passphrase and refuses a wrong one` failed once in roughly
-  six full-suite runs on 2026-09-05, and passes in isolation every time. It uses
-  `CHEAP` scrypt (N=16) and a fresh temp root per test, so neither KDF cost nor
-  shared state is the obvious cause, and the error text was not captured. Worth
-  a real look before it is trusted as a gate — a flaky test in the auth path
-  quietly weakens "full suite green before any commit".
+**From the V2 plan review (Codex, before any code was written).** Every one
+below was independently reproduced here before being written down — rule 23.
+
+- **`reserveMax` is read by NOTHING.** It is declared on `WeaponDef`, set on all
+  seven weapons, and its only reader is `weaponsFingerprintInputs`. Reserve
+  actually comes from `AMMO_START` / `AMMO_MAX`. If V2 admits it to the variant
+  whitelist, a variant can pay budget for a field that changes nothing while
+  moving the pack fingerprint — the console diff would advertise a reserve-cap
+  change that never happens. Either drop it from the whitelist or make it real.
+- **The server has no pellet clamp.** `client/src/game/weapons.ts` clamps to
+  `MAX_PELLETS` (16); `sim.ts` loops `i < def.pellets` with no bound. Nothing
+  can reach it today (max is 7) and V2's band contains it — but the band is
+  data in a file and the clamp is not.
+- **`ShotReport`'s direction arrays are Float32Arrays** and their own comment
+  says "the netcode layer replays these". Anything replaying a shot from a
+  report is replaying a narrowed vector, which the server — now exact — will
+  not reproduce. Worth a look before V4's kill-log agreement bar.
+- **The decoder accepts a TRUNCATED hello and issues a welcome anyway.** Same
+  leniency family as `decodeSessionConfig` reading with no `r.remaining` guard.
+  Tightening it is a protocol move with its own golden vectors.
+- **`carveSphere` has no radius sanity bound.** See §3; V2's band is the fix
+  being planned, but a defensive clamp in `world.ts` would cost nothing.
+- **The horde SHOP delivery line is unpinned.** `equipStart` is covered by a
+  proven-red test; the shop's identical one-line change has no test of its own.
+
+**Carried forward.**
+
+- **A reconnecting player still loses their post-reconnect earnings.** The fix
+  is a feature: hold the membership in a 30–60 s "awaiting reconnect" grace
+  window keyed on `deviceId`, re-attach with `joinedMs`/`baseKills` intact, and
+  settle only on expiry or `endRound`.
+- **The 32-bit device hash is a floor, not an identity**; orientation is never
+  captured, so §3.5's mobile-portrait split is refused by name rather than
+  approximated.
+- **The interstitial's daily cap is in memory** — conservative for a cap that
+  protects a player, and NOT acceptable for a rewarded grant, which is why P2c
+  put those on the profile.
+- **The journal claims its idempotency key BEFORE the write.** A deliberate,
+  documented tradeoff ("a lost row is a counter; a double payout is money").
+  Recorded so it is not re-raised. See rule 23.
+- **`docs/SPONSORS.md:1338` claims a settlement layer shipped. It did not.**
+- **OBSERVED FLAKE, not diagnosed.** `server/src/accounts.test.ts > signin`
+  failed once in roughly six full-suite runs on 2026-09-05 and passes in
+  isolation. It did NOT recur in the six full runs of this session, and this
+  session's runs were captured to files precisely so the next one is not lost
+  again. Still worth a real look before it is trusted as a gate.

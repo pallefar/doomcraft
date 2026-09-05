@@ -82,6 +82,15 @@ Today both predictors read module-level tables and shared pure functions —
 and the shared functions are the sync contract (the same cone regenerates from
 `(ownerId, shotSeq)` on both sides):
 
+> **This paragraph was FALSE when it was written, and is true as of `fc01475`
+> (2026-09-05).** The cone did not regenerate on both sides: the server read it
+> after the shot had bloomed it, seeded once per shot from a hash that included
+> the ROOM seed the client never receives, and never spread projectiles at all.
+> Measured divergence on a shotgun before the fix: up to 10.2°, 5.4 m apart at
+> 30 m. `client/src/game/agreement.test.ts` is what now holds this sentence to
+> account, and `shotSeed` has moved into `shared/src/weapons.ts` so there is one
+> copy of the rule rather than two.
+
 - client: `client/src/game/weapons.ts` — `WeaponRuntime` (fire loop at
   :684-803, hitscan :982-1064, projectile :1118-1145, reload/switch, and the
   lockstep comment at :748-752 naming sim.ts as its mirror).
@@ -223,6 +232,39 @@ So the V2 check is two refusals, not one: the budget band above, AND a
 **strict-dominance refusal** — a variant may not be better than or equal to its
 base on every axis at once. The second is what makes the first a design rather
 than a compliance box.
+
+**Refined 2026-09-05, after the V2 plan was reviewed against the real weapon
+table.** The formula above cannot be applied to all seven archetypes as
+written, and the user's decision on how to repair it is **per-archetype axes
+and measured currency**:
+
+1. **An axis whose BASE value is zero is dropped, and its weight redistributed
+   across the axes that survive.** Four of the seven weapons have no splash at
+   all, so `splash / base_splash` is 0/0 — and `Math.abs(NaN) <= 0.12` is
+   FALSE, so a naive implementation would refuse every pistol, shotgun,
+   chaingun and chainsaw variant ever written rather than accept a bad one. The
+   chainsaw has `magSize` 0 and `reloadMs` 0 and produces a NaN DPS the same
+   way.
+2. **An axis is chargeable only where it actually reaches that archetype's
+   firing path.** Otherwise the budget accepts payment in currency the engine
+   does not spend:
+   - **Range is not an axis for PROJECTILE weapons.** A projectile's direct
+     damage is stored at spawn (`projDamage`) and falloff is never applied to
+     it, so a plasma variant can "pay" with `falloffStart: 0, falloffMin: 0`,
+     score a budget of exactly 1.0, and collect a 20% real damage increase.
+   - **`reloadMs` is not an axis for SHELL-RELOADERS.** The shotgun reloads on
+     `reloadShellMs`; doubling `reloadMs` from 2400 to 4800 lowers the computed
+     DPS from 70 to 55 and changes the actual reload by nothing at all.
+3. **Every whitelisted field is banded**, not just the twelve the first plan
+   named. `terrainDamage` was unbanded and goes straight to
+   `world.carveSphere`, whose `for (let y = y0; y <= y1; y++)` never advances
+   when `y0` is -1e20 — because `-1e20 + 1 === -1e20` — so one projectile from
+   a variant carrying a finite, in-budget, dominance-clean `terrainDamage: 1e20`
+   blocks the server's event loop forever.
+4. **Counts are refused unless INTEGER**, not merely in band. `pellets: 1.5`
+   sits inside 1..12 and makes the server fire twice while the client fires
+   once; `magSize: 7.5` makes a reload transfer 0.5 rounds, which the typed
+   arrays resolve as destroying one reserve round and loading none.
 
 ### 7.2 Rarity — uncommon floor, craft-only
 
