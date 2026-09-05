@@ -124,10 +124,14 @@ import { CONTENT_VERSION } from '@doomcraft/shared/version';
 import { PackInventory, ReleaseService, releaseContentHash, rollMatchDrops } from './packs.js';
 import { StudioService } from './studio.js';
 import { rawDays, readRollup, rolledDays, sweepAdLog } from './adsRollup.js';
+import { RewardSessions, claimVerdict } from './adReward.js';
 import type { AdDayRollup } from './adsRollup.js';
 import { AdService } from './ads.js';
 import { CreativeStore, IMAGE_MAX_BYTES } from './creatives.js';
-import { AD_MODE_UNKNOWN, SERVABLE_SURFACES, type AdEventType, type SurfaceId } from '@doomcraft/shared/sponsor';
+import {
+  AD_MODE_UNKNOWN, AD_REWARD_BEAT_MS, AD_REWARD_MIN_MS, SERVABLE_SURFACES,
+  type AdEventType, type RewardRefusal, type SurfaceId,
+} from '@doomcraft/shared/sponsor';
 import { PackKind } from '@doomcraft/shared/packs';
 import { flagOn } from '@doomcraft/shared/flags';
 import { utcDayKey, utcWeekKey } from '@doomcraft/shared/challenges';
@@ -140,7 +144,7 @@ import {
 } from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
-import { JsonFileStore, MAX_SCRAP_BALANCE, applyEquip, createProfile, equipVerdict, grantDrops, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile } from './persistence.js';
+import { JsonFileStore, MAX_SCRAP_BALANCE, applyEquip, createProfile, equipVerdict, grantDrops, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile, settleAdReward } from './persistence.js';
 import { CRAFT_COPIES, applyCraft, craftVerdict } from './craft.js';
 import type { EquipSlot, PersistenceStore, StoredProfile } from './persistence.js';
 
@@ -578,6 +582,9 @@ function stampNonce(html: string, nonce: string): string {
  * ------------------------------------------------------------------------ */
 
 const store: PersistenceStore = new JsonFileStore(dataRoot);
+
+/** Open rewarded watches. In memory: a lost session loses a claim, not a grant. */
+const rewardSessions = new RewardSessions(() => Date.now());
 
 /**
  * The profile store's live durability signals, for `/api/version`.
@@ -2898,6 +2905,84 @@ async function handleApi(
    * decide and event are public same-origin surfaces like /api/profile; the
    * redirector is the ONLY place a click becomes a fact. The client never
    * chooses a fill and never asserts a countable event.                     */
+  /* --- S11 rewarded: the Gate 5 handshake (docs/SPONSORS.md §4.5) ---------
+   *
+   * Three calls, and the client never asserts a countable fact in any of them.
+   * `start` stamps the SERVER's clock; `beat` is counted only if it ARRIVED
+   * plausibly; `claim` is decided by `claimVerdict` against the server clock,
+   * the beats this process actually received, and the durable per-day record on
+   * the profile. A refusal answers 200 with a reason code — a 4xx would teach a
+   * prober which rule it tripped, and the client has nothing to retry.        */
+  if (path === '/api/sponsor/reward/start' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
+    if (!isValidDeviceId(deviceId)) { sendJson(res, 200, { ok: false, reason: 'bad-device' }, cors); return true; }
+    const rewardId = randomBytes(12).toString('hex');
+    const s = rewardSessions.start(rewardId, deviceId, AD_REWARD_MIN_MS);
+    sendJson(res, 200, {
+      ok: true, rewardId, minMs: s.minMs, serverStartMs: s.serverStartMs,
+      beatMs: AD_REWARD_BEAT_MS,
+    }, cors);
+    return true;
+  }
+
+  if (path === '/api/sponsor/reward/beat' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const ok = rewardSessions.beat(
+      typeof body.rewardId === 'string' ? body.rewardId : '',
+      typeof body.deviceId === 'string' ? body.deviceId : '',
+      typeof body.seq === 'number' ? body.seq : -1,
+      // BOTH, and read defensively: a missing field is not attention.
+      body.visible === true && body.focused === true,
+    );
+    sendJson(res, 200, { ok }, cors);
+    return true;
+  }
+
+  if (path === '/api/sponsor/reward/claim' && req.method === 'POST') {
+    if (refuseCrossSiteWrite(req, res, cors)) return true;
+    const body = (await readBody(req) ?? {}) as Record<string, unknown>;
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
+    const rewardId = typeof body.rewardId === 'string' ? body.rewardId : '';
+    if (!isValidDeviceId(deviceId)) { sendJson(res, 200, { ok: false, reason: 'bad-device' }, cors); return true; }
+
+    const now = Date.now();
+    const today = new Date(now).toISOString().slice(0, 10);
+    /* PvP is established HERE, from the room table — the client about to be
+     * paid is the last thing that should be asked whether it qualifies. */
+    let inPvp = false;
+    for (const key of router.keys()) {
+      if (router.get(key)?.hasDeviceInPvp(deviceId) === true) { inPvp = true; break; }
+    }
+
+    let paid = 0;
+    let refusal = 'unknown-session' as RewardRefusal;
+    await store.update(deviceId, async (profile) => {
+      const verdict = claimVerdict({
+        session: rewardSessions.get(rewardId, deviceId),
+        nowMs: now, today,
+        rewards: profile.adRewards,
+        lifetimeSeconds: profile.progress.secondsPlayed,
+        inPvp,
+        adsRemoved: profile.progress.adsRemoved,
+      });
+      refusal = verdict.refusal;
+      if (verdict.refusal !== 'ok') return;
+      paid = await settleAdReward(profile, {
+        rewardId, scrap: verdict.scrap, nowMs: now, today,
+        countAfter: verdict.countAfter, deviceId,
+        journal, rowId: newLedgerId,
+      });
+    });
+    // Only after the grant is durable, so a crash mid-write leaves a session
+    // that can be re-claimed rather than a spent one that never paid.
+    if (refusal === 'ok') rewardSessions.settle(rewardId);
+    sendJson(res, 200, { ok: refusal === 'ok', reason: refusal, scrap: paid }, cors);
+    return true;
+  }
+
   if (path === '/api/ads/decide' && req.method === 'POST') {
     if (refuseCrossSiteWrite(req, res, cors)) return true;
     const body = (await readBody(req) ?? {}) as Record<string, unknown>;

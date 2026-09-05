@@ -942,6 +942,57 @@ export interface ChallengeSettlementDeps {
  * would pay a second time once the journal's ~48 h dedup window forgets
  * the key.
  */
+/**
+ * Pay a rewarded-ad grant, durably, inside the caller's per-device lock.
+ *
+ * Shaped like `settleChallenges`: the journal's idempotency check comes FIRST
+ * so a replayed claim moves no balance, and the row is appended inside the same
+ * critical section that moved it, so the journal can never disagree with the
+ * balance it describes. `sourceId` is the reward id, which the server minted
+ * and which is single-use by construction.
+ *
+ * Scrap, never XP: docs/SPONSORS.md §4.5 — "XP is 'how far have I come' and an
+ * ad must not move it."
+ */
+export async function settleAdReward(
+  profile: StoredProfile,
+  deps: {
+    rewardId: string;
+    scrap: number;
+    nowMs: number;
+    today: string;
+    countAfter: number;
+    deviceId: string;
+    journal: {
+      has(kind: 'prize', sourceId: string, playerId: string): Promise<boolean>;
+      append(rows: LedgerEntry[]): Promise<number>;
+    } | null;
+    rowId: (ms: number) => string;
+  },
+): Promise<number> {
+  const sourceId = `adreward:${deps.rewardId}`;
+  if (deps.journal !== null && await deps.journal.has('prize', sourceId, deps.deviceId)) return 0;
+
+  const moved = creditChallengeScrap(profile, deps.scrap);
+  const delta = moved.after - moved.before;
+
+  /* The durable record moves whether or not the credit was clamped away by the
+   * balance ceiling: the player HAD their grant for the day, and a full wallet
+   * must not hand back an extra one tomorrow-shaped hole in the cap. */
+  profile.adRewards = { day: deps.today, count: deps.countAfter, lastMs: deps.nowMs };
+
+  if (deps.journal !== null && delta > 0) {
+    await deps.journal.append([{
+      id: deps.rowId(deps.nowMs), ms: deps.nowMs, kind: 'prize', sourceId,
+      playerId: deps.deviceId, currency: 'scrap',
+      delta, balanceAfter: moved.after,
+      actor: 'system:adreward',
+      reason: `rewarded ad grant ${deps.countAfter} of the day`,
+    }]);
+  }
+  return delta;
+}
+
 export async function settleChallenges(
   profile: StoredProfile, deps: ChallengeSettlementDeps,
 ): Promise<{ id: string; scrap: number }[]> {

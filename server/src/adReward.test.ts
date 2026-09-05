@@ -6,7 +6,29 @@
  * saying that, and every one of them can be deleted by an edit that looks
  * harmless.
  */
-import { describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { afterAll, describe, expect, it } from 'vitest';
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const dirs: string[] = [];
+afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const port = (probe.address() as net.AddressInfo).port;
+      probe.close(() => resolve(port));
+    });
+  });
+}
 
 import {
   AD_REWARDS_PER_DAY, AD_REWARD_MIN_GAP_MS, AD_REWARD_MIN_LIFETIME_SECONDS,
@@ -14,7 +36,7 @@ import {
 } from '@doomcraft/shared/sponsor';
 import {
   attentionOk, beatSpacingOk, beatsRequired, claimVerdict, rewardScrapFor,
-  type ClaimInput, type RewardSession,
+  RewardSessions, type ClaimInput, type RewardSession,
 } from './adReward.js';
 
 const NOW = Date.UTC(2026, 8, 5, 12, 0, 0);
@@ -191,4 +213,128 @@ describe('a player who bought ads off', () => {
 
     expect(claimVerdict(input({ adsRemoved: true, session: undefined, inPvp: true })).refusal).toBe('in-pvp');
   });
+});
+
+/**
+ * The session store's own guards.
+ *
+ * A `rewardId` is a bearer token for money. Everything here is about it not
+ * being one for somebody ELSE'S money.
+ */
+describe('an open watch belongs to the device that opened it', () => {
+  /**
+   * RED WITHOUT THE FIX: drop the `s.deviceId !== deviceId` check in `get`. A
+   * leaked or guessed reward id then lets any device spend another player's
+   * watch — and, because the caps are read from the CLAIMING device's profile,
+   * spend it against their own cap for free.
+   */
+  it('refuses a reward id presented by another device', () => {
+    const sessions = new RewardSessions(() => NOW);
+    sessions.start('rw_x', 'device-owner', 15_000);
+
+    expect(sessions.get('rw_x', 'device-owner')).toBeDefined();
+    expect(sessions.get('rw_x', 'device-thief'), 'a leaked reward id was accepted').toBeUndefined();
+    expect(sessions.beat('rw_x', 'device-thief', 1, true), 'another device fed the watch').toBe(false);
+  });
+
+  it('refuses a beat whose seq does not strictly increase', () => {
+    let now = NOW;
+    const sessions = new RewardSessions(() => now);
+    sessions.start('rw_y', 'd', 15_000);
+    expect(sessions.beat('rw_y', 'd', 1, true)).toBe(true);
+    now += 2_000;
+    expect(sessions.beat('rw_y', 'd', 1, true), 'a replayed seq was counted').toBe(false);
+    /* No further advance: a REFUSED beat does not move `lastBeatMs`, so the
+     * next accepted one is still spaced 2s from the last accepted one. Advancing
+     * again would put it past the 3.5s ceiling and this test would be measuring
+     * the spacing rule while claiming to measure the seq rule. */
+    expect(sessions.beat('rw_y', 'd', 2, true)).toBe(true);
+  });
+
+  it('stops counting beats once the watch is settled', () => {
+    let now = NOW;
+    const sessions = new RewardSessions(() => now);
+    sessions.start('rw_z', 'd', 15_000);
+    sessions.settle('rw_z');
+    now += 2_000;
+    expect(sessions.beat('rw_z', 'd', 1, true)).toBe(false);
+  });
+});
+
+/**
+ * The handshake over the REAL binary.
+ *
+ * The unit tests above hold the rules; this holds the wiring — that a claim
+ * actually reaches a profile, that a replay pays nothing, and that a client
+ * which posts a burst of beats instead of waiting is refused by the server it
+ * is talking to rather than by a function in a test file.
+ */
+describe('the Gate 5 routes on the real binary', () => {
+  const DEVICE = 'cccccccccccccccccccccccc';
+
+  it('refuses a burst, refuses an early claim, pays a real watch once', async () => {
+    const port = await freePort();
+    const data = mkdtempSync(join(tmpdir(), 'dc-rw-'));
+    dirs.push(data);
+    // A profile with enough lifetime play to clear the anti-fraud floor.
+    const shard = join(data, 'profiles', DEVICE.slice(0, 2));
+    mkdirSync(shard, { recursive: true });
+    writeFileSync(join(shard, `${DEVICE}.json`), JSON.stringify({
+      version: 7, deviceId: DEVICE, createdMs: 1, updatedMs: 1,
+      progress: { secondsPlayed: 7200, adsRemoved: false },
+      adRewards: { day: '', count: 0, lastMs: 0 },
+    }), 'utf8');
+
+    const child = spawn(process.execPath, ['--import', 'tsx', join(repoRoot, 'server', 'src', 'index.ts')], {
+      cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env, PORT: String(port), HOST: '127.0.0.1',
+        DOOMCRAFT_DATA: data, DOOMCRAFT_STATIC: mkdtempSync(join(tmpdir(), 'dc-rwstatic-')),
+        DOOMCRAFT_BOTS: '0', DOOMCRAFT_PREWARM: '0',
+      },
+    });
+    child.stdout?.resume(); child.stderr?.on('data', () => {});
+    const origin = `http://127.0.0.1:${port}`;
+    const post = async (p: string, body: unknown): Promise<Record<string, unknown>> => {
+      const r = await fetch(origin + p, {
+        method: 'POST', headers: { 'content-type': 'application/json', origin },
+        body: JSON.stringify(body),
+      });
+      return await r.json() as Record<string, unknown>;
+    };
+
+    try {
+      const deadline = Date.now() + 40_000;
+      for (;;) {
+        if (child.exitCode !== null) throw new Error(`server exited ${child.exitCode}`);
+        try { await (await fetch(`${origin}/health`)).text(); break; } catch { /* not up */ }
+        if (Date.now() > deadline) throw new Error('server did not start');
+        await new Promise((r) => setTimeout(r, 200));
+      }
+
+      const started = await post('/api/sponsor/reward/start', { deviceId: DEVICE });
+      expect(started.ok).toBe(true);
+      const rewardId = started.rewardId as string;
+      expect(typeof rewardId).toBe('string');
+
+      /* A BURST. The client posts its beats back to back instead of waiting.
+       * The first is accepted (nothing to space against); every one after it
+       * arrives milliseconds later and is refused. */
+      const burst: boolean[] = [];
+      for (let seq = 1; seq <= 8; seq++) {
+        const r = await post('/api/sponsor/reward/beat', { rewardId, deviceId: DEVICE, seq, visible: true, focused: true });
+        burst.push(r.ok === true);
+      }
+      expect(burst[0]).toBe(true);
+      expect(burst.slice(1).every((b) => b === false), 'a burst of beats was accepted').toBe(true);
+
+      // And the claim is refused, because the server's own clock has not moved.
+      const early = await post('/api/sponsor/reward/claim', { rewardId, deviceId: DEVICE });
+      expect(early.ok).toBe(false);
+      expect(early.reason).toBe('too-soon');
+      expect(early.scrap).toBe(0);
+    } finally {
+      child.kill('SIGTERM');
+    }
+  }, 60_000);
 });

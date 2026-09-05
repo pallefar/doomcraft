@@ -1508,6 +1508,22 @@ export class Room implements NetHost {
    * removal before this was POST /api/admin/drain, which closes EVERY room
    * on the host — a flamethrower where support needed tweezers.
    */
+  /**
+   * Is this device in this room, in a mode where players can shoot each other?
+   *
+   * Gate 5 pays ZERO while `SYS_PVP_DAMAGE` is live (§4.5), and that has to be
+   * a fact the SERVER establishes — a client that is about to be paid is the
+   * last thing that should be asked whether it qualifies. The room knows both
+   * halves, so it answers both at once.
+   */
+  hasDeviceInPvp(profileKey: string): boolean {
+    if (profileKey.length === 0 || !this.plan.allowPvp) return false;
+    for (const m of this.members.values()) {
+      if (m.conn !== null && m.conn.deviceId === profileKey) return true;
+    }
+    return false;
+  }
+
   kick(profileKey: string, reason = 'removed by operator'): number {
     if (profileKey.length === 0) return 0;
     let kicked = 0;

@@ -144,3 +144,76 @@ export function claimVerdict(input: ClaimInput): ClaimVerdict {
   const scrap = rewardScrapFor(countToday);
   return { refusal: 'ok', scrap, countAfter: countToday + 1 };
 }
+
+/**
+ * Open watches, in memory on purpose.
+ *
+ * A restart loses open sessions, and that is the SAFE direction: the loss is a
+ * claim nobody has been paid for yet, so the player re-watches. The durable
+ * half — how many grants they have taken and when — is on the profile, where a
+ * restart cannot forgive it.
+ */
+export class RewardSessions {
+  private readonly open = new Map<string, RewardSession>();
+  private readonly clock: () => number;
+  /** Bound so a stuck client cannot grow this without limit. */
+  private readonly max: number;
+
+  constructor(clock: () => number = () => Date.now(), max = 4096) {
+    this.clock = clock;
+    this.max = max;
+  }
+
+  get size(): number { return this.open.size; }
+
+  start(rewardId: string, deviceId: string, minMs: number): RewardSession {
+    this.sweep();
+    const s: RewardSession = {
+      rewardId, deviceId, serverStartMs: this.clock(), minMs,
+      beats: 0, attentive: 0, lastSeq: 0, lastBeatMs: 0, claimed: false,
+    };
+    this.open.set(rewardId, s);
+    return s;
+  }
+
+  get(rewardId: string, deviceId: string): RewardSession | undefined {
+    const s = this.open.get(rewardId);
+    // The reward id is a bearer token for money, so it is checked against the
+    // device that opened it: a leaked id is not a claim on somebody else's cap.
+    if (s === undefined || s.deviceId !== deviceId) return undefined;
+    return s;
+  }
+
+  /**
+   * Record a heartbeat. Returns whether it was accepted; a refusal is silent to
+   * the client beyond `ok:false`, because telling it WHICH rule it broke is a
+   * tuning signal for somebody trying to break them.
+   */
+  beat(rewardId: string, deviceId: string, seq: number, attentive: boolean): boolean {
+    const s = this.get(rewardId, deviceId);
+    if (s === undefined || s.claimed) return false;
+    if (!Number.isFinite(seq) || seq <= s.lastSeq) return false;
+    const now = this.clock();
+    if (!beatSpacingOk(s.lastBeatMs, now)) return false;
+    s.lastSeq = seq;
+    s.lastBeatMs = now;
+    s.beats++;
+    if (attentive) s.attentive++;
+    return true;
+  }
+
+  /** Mark a session spent. Called only after a grant has actually landed. */
+  settle(rewardId: string): void {
+    const s = this.open.get(rewardId);
+    if (s !== undefined) s.claimed = true;
+  }
+
+  /** Drop sessions far past any plausible watch. */
+  private sweep(): void {
+    if (this.open.size < this.max) return;
+    const now = this.clock();
+    for (const [id, s] of this.open) {
+      if (now - s.serverStartMs > 10 * 60_000) this.open.delete(id);
+    }
+  }
+}
