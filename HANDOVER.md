@@ -193,9 +193,10 @@ answers from you before V2.**
      remaining is the THIRD-PARTY half, which needs the ad-network/CMP accounts
      in §5.
 
-2. **The variants arc, V1–V5** (`docs/VARIANTS.md` §5). **Three §7 decisions
-   wait on the user before V2** (power-budget weights, variant rarity floor,
-   competitive parity) — ask, do not assume.
+2. **The variants arc, V1–V5** (`docs/VARIANTS.md` §5). The three §7 decisions
+   are TAKEN (2026-09-05): DPS-dominant budget at ±12% **plus** a
+   strict-dominance refusal, an uncommon craft-only floor, and variants
+   table-gated out of ranked-adjacent modes. §7 now records them in full.
 3. **The gauntlet — 0/23.** Then portals/TWA, C7 analytics.
 4. **Deathmatch share surface** — needs its own `#ui` element; the scoreboard
    lives in pointer-events:none `#hud`.
@@ -224,8 +225,7 @@ A domain · AdSense/GAM + a games ad network + a CMP (before any third-party tag
 this gates only the third-party half of sponsors — the first-party work above is
 not blocked) · WorkOS / Paddle / PostHog accounts · ElevenLabs key · legal review
 before real-money prizes · Play Console $25 / Apple Developer $99 / Steamworks
-$100 · a Mac with Xcode · GTA mode has no obtainable bar · **VARIANTS.md §7's
-three decisions** before variants V2.
+$100 · a Mac with Xcode · GTA mode has no obtainable bar.
 
 ## 6. What is deliberately still open
 

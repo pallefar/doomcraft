@@ -194,11 +194,51 @@ V3–V4 want the two-browser harness this repo already runs headless.
 - No touching `CONTENT_VERSION`'s compiled fallbacks — the static build and
   UPDATE_REQUIRED read them with no release in scope (PACKS.md §8.4).
 
-## 7. Open decisions (for the user, before V2)
+## 7. Decisions (taken by the user, 2026-09-05)
 
-1. **The power-budget formula's weights** — sustained DPS vs range vs splash;
-   the ±12% band is a starting proposal.
-2. **Variant rarity ladder** — do variants start at uncommon (craft-only, per
-   the craft fee table) or exist at common as drops-later?
-3. **Competitive parity** — are variants ON in every mode from V4, or
-   table-gated out of ranked-adjacent surfaces until the season rolls?
+These were held open on purpose — they are judgement calls, not derivations,
+and §7 existed so nobody would infer them from the rest of the document. All
+three are now answered. The wording below is the decision; the notes under each
+are what the decision obliges the code to do.
+
+### 7.1 The power budget — DPS-dominant, ±12% band
+
+```
+budget(v) = 0.50·dps + 0.20·range + 0.15·splash + 0.15·handling
+pass if |budget(v) − budget(base)| / budget(base) ≤ 0.12
+```
+
+`dps` is sustained (damage × pellets ÷ fire interval, magazine and reload time
+folded in — a variant that trades magazine size for rate of fire must pay for
+it). `range` is the effective-range integral the falloff curve already
+describes (`falloffStart`, `falloffEnd`, `falloffMin`, `falloffCurve`), not
+`falloffEnd` alone. `splash` is radius × centre damage. `handling` is reload
+plus spread recovery plus switch time. Each term is normalised against the
+BASE weapon, so the budget is a ratio and a pistol and a BFG are scored on the
+same scale.
+
+**The band alone is not the rule.** A weighted sum with a ±12% band admits an
+"everything up 10%" variant, which §6 forbids in words — no straight upgrades.
+So the V2 check is two refusals, not one: the budget band above, AND a
+**strict-dominance refusal** — a variant may not be better than or equal to its
+base on every axis at once. The second is what makes the first a design rather
+than a compliance box.
+
+### 7.2 Rarity — uncommon floor, craft-only
+
+Variants start at **uncommon**. There is no common tier: a tier defined in the
+pack with no route to obtain it is a hole in the inventory UI, and the ladder
+can grow upward later without a schema move. The only acquisition route in this
+arc is the craft bench (N duplicates + fee, per the craft fee table in
+`server/src/craft.ts`); trading follows from `tradable: true` and needs no new
+route. Floor pickups stay out of scope (§3, the `EF_SPAWN` byte).
+
+### 7.3 Competitive parity — table-gated out of ranked-adjacent
+
+Variants are ON in Quest, Horde and casual surfaces from V4, and OFF in the
+ranked-adjacent ones until a season rolls. Per §4 this is a **column on the
+trust/mode table** (`variantsAllowed`), never an `if` — `trust.test.ts`'s tree
+scan fails any line pairing a `ModeId` literal with an economy word, and that
+scan is the thing keeping this honest. The room checks the claim against its
+pinned release at spawn, in the same place it already resolves loadout masks;
+a mode that does not allow variants resolves every claim to slot 0.
