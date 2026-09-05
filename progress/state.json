@@ -1,7 +1,7 @@
 {
-  "updated": "2026-09-05T17:53:17Z",
-  "phase": "GUNFEEL WON — the gauntlet is 1/23",
-  "phaseNote": "The first uncontaminated blind verdict in this project's history, and ours won it. The decisive measurement is palette-independent because each side is compared only to ITS OWN baseline: our shot LIGHTS THE ROOM and the bar's does not. Verified independently — per-tile mean luminance of a far-left region swings +36.2% across our twelve frames, oscillating in phase with the shot cadence, against +1.6% for the bar, whose wall is flat to within one luminance level through twelve frames of sustained fire. Wall damage accumulates on our side across three lighting-matched pairs (5->21, 35->50, 14->42->62 px) and is zero at both ends on the bar's. Two earlier verdicts on this piece were correctly thrown away: the first because the bar clip had a SHOVEL in it, the second because my own honesty note named architecture and mapped the labels. Both are now rules. V4c also shipped: the claim reaches the body.",
+  "updated": "2026-09-05T19:53:44Z",
+  "phase": "V4 ARC COMPLETE — V4a through V4e shipped",
+  "phaseNote": "All five V4 sub-phases are committed. A variants pack reaches a room (V4a), a player can own the token (V4b), equip it and fire it (V4c), see it named in the killfeed (V4d), and now acquire one at the craft bench (V4e). The gauntlet is 1/23 with gunfeel won blind and uncontaminated. Reviewing V4e also fixed a LIVE bug — the craft UI offered crafts the server refused, because craftTargetsFor took raw copy counts with no escrow reservations and no Scrap balance — and deleted a latent trap that V4e itself would have made live: the craft route answered 200 with a receipt for an item it never delivered. TWO REAL DEFECTS FOUND AND LEFT OPEN, both named rather than quietly carried: a pack version above 65535 silently disables EVERY item grant (itemsVersions accepts any integer, parseItemRef caps at 0xffff, so drops, challenge items, prizes and craft output all vanish with no error); and a crafted variant still has NO EQUIP BUTTON, because V4c landed the server half of the variant slot and not the client half.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -445,9 +445,9 @@
     {
       "id": "s2",
       "name": "V4 — now five sub-phases",
-      "state": "building",
+      "state": "done",
       "what": "Split after the review refused it as one phase. V4a: the pack reaches a room (content/variants.json, the content/ fallback, the gate emitting kind 7) — no ownership, every player still at slot 0. V4b: the ownership token. V4c: the claim reaches the body. V4d: display truth — the killfeed cannot tell two shotgun variants apart. V4e: acquisition, which as specified leaves variant supply at zero forever.",
-      "detail": "V4a and V4b DEPLOYED and verified (2111f94, live 19:2x). The origin serves items@1 at digest 5849d24f — a value only the V4b commit declares — plus all ten smoke-signal checks including the negative controls. V4b: ItemKind.WEAPON_VARIANT, the parser biconditional that makes the id prefix a RULE rather than a convention, and the five inventory mint doors closed at mint-vs-transfer granularity. It also fixed a live prototype-pollution defect in the items parser that let two different manifests share one digest. V4c is building: the claim reaches the body."
+      "detail": "V4a-V4e all committed. V4a-V4c live and verified on production; V4d and V4e awaiting deploy. The arc took three adversarial review rounds on V4b, two on V4c, one clean pass on V4d and two on V4e — and the reviews found a live prototype-pollution defect in the items parser, five inventory mint doors, a craft UI that offered what the server refused, and a slot off-by-one that was in MY OWN PLAN and would have served the base weapon silently."
     },
     {
       "id": "s3",
