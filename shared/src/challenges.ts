@@ -105,7 +105,16 @@ export function parseChallengesManifest(text: string): ChallengesParseResult {
   const errors: string[] = [];
   let root: Record<string, unknown>;
   try {
-    root = JSON.parse(text) as Record<string, unknown>;
+    const parsed: unknown = JSON.parse(text);
+    // `JSON.parse('null')` SUCCEEDS and returns null, and the property access
+    // below sits outside this try — so a manifest whose entire body is the
+    // literal `null` threw a TypeError straight past every caller instead of
+    // being refused like any other malformed input. A pack is untrusted bytes
+    // on disk; refusing it is the whole job.
+    if (parsed === null || typeof parsed !== 'object') {
+      return { manifest: null, errors: ['not a JSON object'] };
+    }
+    root = parsed as Record<string, unknown>;
   } catch {
     return { manifest: null, errors: ['not valid JSON'] };
   }

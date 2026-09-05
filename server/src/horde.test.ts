@@ -25,6 +25,8 @@ import {
   TICK_MS,
 } from '@doomcraft/shared';
 import { ModeId, ModePhase } from '@doomcraft/shared/modes';
+import { SessionArsenal } from '@doomcraft/shared/arsenal';
+import { WeaponId, WEAPONS, getWeapon } from '@doomcraft/shared/weapons';
 
 import { MonsterManager } from './bots.js';
 import {
@@ -657,5 +659,60 @@ describe('horde wiring', () => {
     // Same tick, nothing moved: no second packet.
     expect(a.horde.composeState(1)).toBeNull();
     expect(a.horde.composeState(999)).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The loadout reads the room's arsenal
+ *
+ * `equipStart` runs on the JOIN path, after `spawnPlayer` has already filled
+ * the magazines, and it refilled them from the compiled table. That is outside
+ * both predictors, so the V1 seam refactor did not touch it and the lockstep
+ * golden could never have noticed: a shotgun variant that pays for its damage
+ * with a smaller magazine entered Horde holding the BASE's eight shells and
+ * never paid the drawback at all.
+ *
+ * The test only means anything with a variant installed — with zero variants
+ * `statsFor(p, i).magSize` and `getWeapon(i).magSize` are the same number, and
+ * an assertion on the base is a test that cannot fail.
+ * ------------------------------------------------------------------------ */
+
+describe('the horde loadout', () => {
+  function hordeWithArsenal(arsenal: SessionArsenal, slot: number) {
+    const seed = 4242;
+    const world = new ServerWorld(seed);
+    for (let z = Z0; z <= Z1; z++) {
+      for (let x = X0; x <= X1; x++) column(world, x, z, FLOOR, FLOOR);
+    }
+    const sim = new Simulation(world, seed, arsenal);
+    sim.lagCompensation = false;
+    const monsters = new MonsterManager(sim, seed);
+    const plan = resolveModePlan(joinRequestFor(ModeId.HORDE, '', '', 2, seed));
+    const horde = new HordeDirector({ sim, monsters, plan, seed });
+    const p = sim.addPlayer(1, 'Holder', 0, false);
+    p.variantSlots.fill(slot);
+    sim.spawnPlayer(p);
+    horde.addPlayer(1);
+    return p;
+  }
+
+  it('fills the starting magazine from the ROOM\'s arsenal, not the compiled table', () => {
+    const half = Math.floor(WEAPONS[WeaponId.SHOTGUN].magSize / 2);
+    expect(half).toBeGreaterThan(0);
+    expect(half).not.toBe(getWeapon(WeaponId.SHOTGUN).magSize);
+
+    const arsenal = SessionArsenal.from([
+      { id: 'shotgun-drum', base: WeaponId.SHOTGUN, over: { magSize: half } },
+    ]);
+    const p = hordeWithArsenal(arsenal, 1);
+    expect(p.mag[WeaponId.SHOTGUN]).toBe(half);
+  });
+
+  it('still gives the compiled magazine when no variant is equipped', () => {
+    const arsenal = SessionArsenal.from([
+      { id: 'shotgun-drum', base: WeaponId.SHOTGUN, over: { magSize: 3 } },
+    ]);
+    const p = hordeWithArsenal(arsenal, 0);
+    expect(p.mag[WeaponId.SHOTGUN]).toBe(getWeapon(WeaponId.SHOTGUN).magSize);
   });
 });

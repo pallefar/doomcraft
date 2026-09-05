@@ -22,6 +22,29 @@ const good = (over: Record<string, unknown> = {}): string => JSON.stringify({
   ],
 });
 
+describe('a manifest that is not an object', () => {
+  // Found by an adversarial review of the V2 plan, which proposed copying this
+  // parser: `JSON.parse('null')` succeeds, and the `root.items` access sat
+  // outside the try, so the literal `null` threw a TypeError past every caller
+  // instead of being refused. Reverting the guard makes this throw, not fail.
+  it('is refused, not thrown past the caller', () => {
+    for (const body of ['null', '5', '"a string"', 'true']) {
+      const r = parseItemsManifest(body);
+      expect(r.manifest, body).toBeNull();
+      expect(r.errors, body).toEqual(['not a JSON object']);
+    }
+  });
+
+  it('still calls an array with no items array exactly that', () => {
+    expect(parseItemsManifest('{}').errors).toEqual(['no items array']);
+    expect(parseItemsManifest('[]').errors).toEqual(['no items array']);
+  });
+
+  it('still refuses bytes that are not JSON at all', () => {
+    expect(parseItemsManifest('{oh no').errors).toEqual(['not valid JSON']);
+  });
+});
+
 describe('the manifest parser refuses instead of correcting', () => {
   it('parses a good manifest', () => {
     const r = parseItemsManifest(good());

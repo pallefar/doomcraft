@@ -1046,7 +1046,12 @@ export class HordeDirector {
   private equipStart(p: PlayerEntity): void {
     p.weaponMask = this.plan.startWeaponMask;
     for (let i = 0; i < WEAPON_COUNT; i++) {
-      if (ownsWeapon(p.weaponMask, i)) p.mag[i] = getWeapon(i).magSize;
+      // Through the ARSENAL, not the compiled table: this is a real join path
+      // (HordeDirector.addPlayer -> equipStart) that runs AFTER spawnPlayer and
+      // overwrites the magazines it filled. A shotgun variant that pays for its
+      // damage with a smaller magazine would enter Horde holding the base's
+      // eight shells and never pay the drawback at all.
+      if (ownsWeapon(p.weaponMask, i)) p.mag[i] = this.sim.statsFor(p, i).magSize;
     }
     if (ownsWeapon(p.weaponMask, this.plan.startWeapon)) p.weapon = this.plan.startWeapon;
   }
@@ -2046,7 +2051,7 @@ export class HordeDirector {
     let did = false;
     if (def.weapon >= 0 && !ownsWeapon(p.weaponMask, def.weapon)) {
       p.weaponMask = grantWeapon(p.weaponMask, def.weapon);
-      p.mag[def.weapon] = getWeapon(def.weapon).magSize;
+      p.mag[def.weapon] = this.sim.statsFor(p, def.weapon).magSize;   // the arsenal, as above
       this.emitEvent(ModeEventKind.WEAPON_TAKEN, p.id, def.weapon, 0, 0, def.name);
       did = true;
     }

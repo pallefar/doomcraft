@@ -38,6 +38,29 @@ const def = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
 const manifest = (...defs: Record<string, unknown>[]): string =>
   JSON.stringify({ challenges: defs });
 
+describe('a manifest that is not an object', () => {
+  // Found by an adversarial review of the V2 plan, which proposed copying this
+  // parser: `JSON.parse('null')` succeeds, and the `root.challenges` access sat
+  // outside the try, so the literal `null` threw a TypeError past every caller
+  // instead of being refused. Reverting the guard makes this throw, not fail.
+  it('is refused, not thrown past the caller', () => {
+    for (const body of ['null', '5', '"a string"', 'true']) {
+      const r = parseChallengesManifest(body);
+      expect(r.manifest, body).toBeNull();
+      expect(r.errors, body).toEqual(['not a JSON object']);
+    }
+  });
+
+  it('still calls an array with no items array exactly that', () => {
+    expect(parseChallengesManifest('{}').errors).toEqual(['no challenges array']);
+    expect(parseChallengesManifest('[]').errors).toEqual(['no challenges array']);
+  });
+
+  it('still refuses bytes that are not JSON at all', () => {
+    expect(parseChallengesManifest('{oh no').errors).toEqual(['not valid JSON']);
+  });
+});
+
 describe('the parser refuses instead of correcting', () => {
   it('refuses non-JSON and a missing challenges array', () => {
     expect(parseChallengesManifest('nope').errors).toEqual(['not valid JSON']);
