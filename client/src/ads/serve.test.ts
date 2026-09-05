@@ -11,6 +11,7 @@ import { SurfaceId, type AdFill } from '@doomcraft/shared/sponsor';
 
 import {
   MENU_DECIDE_SURFACES, createAdPipeline, interCardModel, mustReleaseBefore,
+  interstitialModel, interstitialWanted, skipAllowedAt,
   staleCompletion, textFillOrNull, writesOwnCreative,
 } from './serve';
 
@@ -190,5 +191,85 @@ describe('a slot is never measured over another fill\'s creative', () => {
     expect(staleCompletion('n-img', DIRECT_IMG)).toBe(false);
     // An unowned slot is not this fill's either — it was released underneath us.
     expect(staleCompletion('', DIRECT_IMG)).toBe(true);
+  });
+});
+
+/**
+ * S10 — the between-match interstitial.
+ *
+ * The one surface that interrupts a player who asked for nothing, which is why
+ * every rule here fails closed and why the skip timing is a legal requirement
+ * rather than a preference.
+ */
+describe('the interstitial refuses more than it accepts', () => {
+  const DIRECT_TEXT = fill({
+    surface: SurfaceId.INTERSTITIAL, source: 'direct', kind: 'text',
+    text: 'CubeRealm — voxel worlds, free', label: 'Ad',
+  });
+  const DIRECT_IMG = fill({
+    surface: SurfaceId.INTERSTITIAL, source: 'direct', kind: 'display',
+    assetUrl: '/cdn/crv/abc', altText: 'CubeRealm key art', text: '',
+  });
+
+  it('renders a direct text or display creative', () => {
+    expect(interstitialModel(DIRECT_TEXT)?.text).toContain('CubeRealm');
+    expect(interstitialModel(DIRECT_IMG)?.imgUrl).toBe('/cdn/crv/abc');
+  });
+
+  /**
+   * Interrupting a player to show our own house card is pure cost with no
+   * revenue against it. The server already declines to mint a house
+   * interstitial; this is the client refusing to render one if it ever
+   * arrives, because a surface this intrusive should fail closed at both ends.
+   */
+  it('refuses HOUSE — an interruption with nothing sold behind it', () => {
+    expect(interstitialModel(fill({ ...DIRECT_TEXT, source: 'house' }))).toBeNull();
+  });
+
+  it('refuses a display creative with no altText', () => {
+    // §5.5(10): a creative nobody can describe is a creative nobody can prove
+    // was seen, so this is an anti-fraud rule as well as an accessibility one.
+    expect(interstitialModel({ ...DIRECT_IMG, altText: '' })).toBeNull();
+  });
+
+  it('refuses an empty line, a missing asset, and a missing fill', () => {
+    expect(interstitialModel({ ...DIRECT_TEXT, text: '' })).toBeNull();
+    expect(interstitialModel({ ...DIRECT_IMG, assetUrl: '' })).toBeNull();
+    expect(interstitialModel(null)).toBeNull();
+    expect(interstitialModel(undefined)).toBeNull();
+  });
+
+  /**
+   * THE LEGAL ONE. The UK Age Appropriate Design Code names "a countdown
+   * interstitial with a low-contrast or delayed skip control" as a nudge
+   * pattern, and docs/SPONSORS.md §5.3 cites it directly. Skip is reachable
+   * from the FIRST SECOND.
+   *
+   * RED WITHOUT THE FIX: raise AD_SKIP_ENABLED_AFTER_MS. The delayed-skip
+   * pattern being legislated against is exactly what a larger number builds.
+   */
+  it('allows the skip from the first second, not later', () => {
+    expect(skipAllowedAt(0)).toBe(false);
+    expect(skipAllowedAt(999)).toBe(false);
+    expect(skipAllowedAt(1_000), 'the skip is delayed past one second').toBe(true);
+    expect(skipAllowedAt(15_000)).toBe(true);
+  });
+
+  /**
+   * `adsRemoved` short-circuits BEFORE the decide, which the spec requires in as
+   * many words: the purchase buys silence on the network, so a player who paid
+   * must not generate a decide at all — not merely be refused one.
+   */
+  it('never even asks when the player bought ads off', () => {
+    expect(interstitialWanted(true, true, 99, 3), 'a paying player generated a decide').toBe(false);
+  });
+
+  it('never asks when the kill switch is off', () => {
+    expect(interstitialWanted(false, false, 99, 3)).toBe(false);
+  });
+
+  it('waits for the death threshold', () => {
+    expect(interstitialWanted(false, true, 2, 3)).toBe(false);
+    expect(interstitialWanted(false, true, 3, 3)).toBe(true);
   });
 });

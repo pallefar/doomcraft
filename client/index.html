@@ -66,6 +66,23 @@ canvas{display:block}
 #ui > *{pointer-events:auto}
 #ad-overlay{position:fixed;inset:0;z-index:40;display:none;background:rgba(4,4,6,.92)}
 #ad-overlay[data-open="1"]{display:grid;place-items:center}
+/* S10 interstitial. The skip control is deliberately the highest-contrast
+   thing on the overlay: the UK Age Appropriate Design Code names a countdown
+   interstitial with a low-contrast or delayed skip as a nudge pattern, so a
+   quiet skip button here is not a style choice, it is the cited harm. */
+.dc-inter{display:flex;flex-direction:column;gap:14px;align-items:center;
+  max-width:min(92vw,720px);padding:22px;background:#101014;border:1px solid #2a2a33;border-radius:10px}
+.dc-inter-label{font:600 11px/1 ui-monospace,monospace;letter-spacing:.14em;
+  text-transform:uppercase;color:#b9b9c6}
+.dc-inter-body{color:#ececf2;font:400 17px/1.5 system-ui,sans-serif;text-align:center;
+  text-decoration:none;max-width:64ch}
+.dc-inter-img{display:block;max-width:100%;height:auto}
+.dc-inter-skip{min-width:132px;min-height:44px;padding:10px 22px;cursor:pointer;
+  background:#fff;color:#000;border:2px solid #fff;border-radius:6px;
+  font:600 15px/1 system-ui,sans-serif}
+.dc-inter-skip:disabled{opacity:.55;cursor:default}
+.dc-inter-auto{font:400 12px/1 system-ui,sans-serif;color:#8a8a97}
+.dc-inter-skip:focus-visible{outline:3px solid #ffcf3d;outline-offset:3px}
 #boot{position:fixed;inset:0;z-index:100}
 
 /* ---- reserved ad slots ------------------------------------------------- */

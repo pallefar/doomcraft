@@ -548,6 +548,11 @@ void (async (): Promise<void> => {
 /* The ad pipeline (docs/SPONSORS.md phase 1). Inert unless a server is
  * configured AND the server-resolved sponsor_slots switch is on AND ads are
  * not removed — in every other case the menu is byte-identical to before. */
+/* Deaths at the moment the last interstitial opened. The S10 gate is "after at
+ * least three deaths", which is a fact about the gap since the last
+ * interruption — `progress.deaths` alone is a lifetime total. */
+let deathsAtLastInterstitial = 0;
+
 const adPipeline = createAdPipeline({
   serverBase: serverUrl,
   deviceId: () => deviceId(),
@@ -566,6 +571,17 @@ const adPipeline = createAdPipeline({
   bootTip: bootTipEl,
   // The honest resting state of a reserved slot (see AdPipelineOptions).
   restoreHouse: () => { fillAdSlots(); },
+  /* S10 — the between-match interstitial. `sponsor_interstitial` is
+   * defaultOn:false and stays off in production until it is deliberately
+   * flipped; the pipeline re-asks the server anyway (rule 15). */
+  interstitialEnabled: () => flagOn(game.net.flagBits, 'sponsor_interstitial'),
+  deathsSinceInterstitial: () => Math.max(0, progress.deaths - deathsAtLastInterstitial),
+  onInterstitial: (open) => {
+    // Reset the death counter when one OPENS, so the "after 3 deaths" gate
+    // measures the gap since the last interruption rather than since the last
+    // time we happened to ask.
+    if (open) deathsAtLastInterstitial = progress.deaths;
+  },
 });
 
 /**
@@ -1731,6 +1747,12 @@ async function backToMenu(): Promise<void> {
   modeSelect.setWorlds(worldRowsFrom(save));
   refreshStats();
   setScreen('menu');
+  /* S10 fires here, after EVERY mode (the operator's call), because this is the
+   * one place every match ends. `leavePlay()` above has already stopped the
+   * renderer, which is the frame-cost guarantee §1a asks for — so the overlay
+   * does not also touch `settings.renderScale`, which belongs to the player.
+   * Every refusal path resolves false; nothing here needs a branch. */
+  void adPipeline.maybeInterstitial();
 }
 
 setScreen('boot');
@@ -2047,6 +2069,15 @@ window.addEventListener('pagehide', () => {
   play(): void { startPlaying(); },
   pause(): void { openPause(); },
   menu(): Promise<void> { return backToMenu(); },
+  /**
+   * S10 — offer the between-match interstitial through the REAL pipeline, so
+   * the screenshot harness proves the shipping code path rather than a mock.
+   * `deaths` pre-satisfies the client-side gate the harness cannot play out.
+   */
+  offerInterstitial(deaths = 3): Promise<boolean> {
+    progress.deaths += deaths;
+    return adPipeline.maybeInterstitial();
+  },
   /** The avatar editor, for tools/capture-ours.mjs and the leak assertion. */
   openLocker(): void { openLocker(); },
   closeLocker(): void { avatarEditor?.close(); },

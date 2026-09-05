@@ -16,6 +16,9 @@
  *    house-filled, and measured under the gate of the screen they live on.
  */
 
+import {
+  AD_INTERSTITIAL_AFTER_DEATHS, AD_INTERSTITIAL_MAX_SECONDS, AD_OVERLAY_ID,
+} from '@doomcraft/shared/constants';
 import { AD_MODE_UNKNOWN, SurfaceId, type AdFill } from '@doomcraft/shared/sponsor';
 
 import { detectBlocked, observeSlot, type ObservedSlot } from './viewability';
@@ -82,6 +85,73 @@ export function staleCompletion(currentOwner: string, fill: AdFill): boolean {
   return currentOwner !== fill.nonce;
 }
 
+/**
+ * What the S10 interstitial renders, or null to refuse.
+ *
+ * Refuses HOUSE outright. The interstitial is the one surface that interrupts a
+ * player who did not ask for anything, and interrupting them to show our own
+ * card is pure cost with no revenue against it. The server already declines to
+ * mint a house interstitial (the house floor is the menu slots and the
+ * intermission card); this is the client refusing to render one if it ever
+ * arrives, because a surface this intrusive should fail closed at both ends.
+ */
+export interface InterstitialModel {
+  label: string;
+  text: string;
+  altText: string;
+  /** Non-empty only for a display creative with an uploaded asset. */
+  imgUrl: string;
+  /** Non-empty only when the creative has a click destination. */
+  href: string;
+}
+
+export function interstitialModel(fill: AdFill | null | undefined): InterstitialModel | null {
+  if (fill === null || fill === undefined) return null;
+  if (fill.source !== 'direct') return null;
+  const isDisplay = fill.kind === 'display' && fill.assetUrl.length > 0;
+  const isText = fill.kind === 'text' && fill.text.length > 0;
+  if (!isDisplay && !isText) return null;
+  // Accessibility is an ANTI-FRAUD measure here as well as a legal one: a
+  // creative nobody can describe is a creative nobody can prove was seen.
+  if (isDisplay && fill.altText.length === 0) return null;
+  return {
+    label: fill.label || 'Sponsored',
+    text: fill.text,
+    altText: fill.altText,
+    imgUrl: isDisplay ? fill.assetUrl : '',
+    href: fill.clickUrl,
+  };
+}
+
+/**
+ * May the player dismiss the interstitial yet?
+ *
+ * From the FIRST SECOND, and that number is not a preference. The UK Age
+ * Appropriate Design Code names "a countdown interstitial with a low-contrast
+ * or delayed skip control" as a nudge pattern, and docs/SPONSORS.md §5.3 cites
+ * it directly. A skip that appears late is the pattern being legislated against.
+ */
+export const AD_SKIP_ENABLED_AFTER_MS = 1_000;
+
+export function skipAllowedAt(elapsedMs: number): boolean {
+  return elapsedMs >= AD_SKIP_ENABLED_AFTER_MS;
+}
+
+/**
+ * Should a between-match interstitial even be asked for?
+ *
+ * `adsRemoved` short-circuits BEFORE the decision call, which docs/SPONSORS.md
+ * requires in as many words: the purchase buys silence on the network, so a
+ * player who paid must not generate a decide at all, not merely be refused one.
+ */
+export function interstitialWanted(
+  adsRemoved: boolean, flagOn: boolean, deathsSinceLast: number, afterDeaths: number,
+): boolean {
+  if (adsRemoved) return false;
+  if (!flagOn) return false;
+  return deathsSinceLast >= afterDeaths;
+}
+
 export interface AdPipelineOptions {
   /** '' = static build with no server: the pipeline never activates. */
   serverBase: string;
@@ -111,6 +181,12 @@ export interface AdPipelineOptions {
    * that has children), so this is safe to call whenever.
    */
   restoreHouse?: () => void;
+  /** S10: the server-resolved `sponsor_interstitial` kill switch. */
+  interstitialEnabled?: () => boolean;
+  /** S10: deaths since the last interstitial — only the client can know this. */
+  deathsSinceInterstitial?: () => number;
+  /** S10: called when the overlay opens and closes, for render throttling. */
+  onInterstitial?: (open: boolean) => void;
 }
 
 /**
@@ -184,6 +260,14 @@ export interface AdPipeline {
    * the mount). Ads-off / removed / flag-off return a working no-op disposer.
    */
   intermissionCard(mount: HTMLElement, options: IntermissionCardOptions): () => void;
+  /**
+   * S10 — offer a between-match interstitial; resolves to whether one opened.
+   * Every refusal path resolves false, so a caller can always await it without
+   * a branch and without a try.
+   */
+  maybeInterstitial(): Promise<boolean>;
+  /** Close an open interstitial from outside (pause, teardown, route change). */
+  closeInterstitial(): void;
 }
 
 interface WatchedFill {
@@ -198,7 +282,7 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
   let bootTried = false;
   let inMenu = false;
   let menuDecided = false;
-  let flagProbe: Promise<boolean> | null = null;
+  let flagProbe: Promise<Record<string, unknown>> | null = null;
 
   const api = (path: string): string => `${opts.serverBase}${path}`;
   const offline = (): boolean => opts.serverBase === '' && location.origin === 'null';
@@ -210,18 +294,31 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
    * know". One GET of the server's own `/api/flags` per page answers it; the
    * kill switch still kills, because a killed flag is false in BOTH sources.
    */
-  function enabledNow(): Promise<boolean> {
-    if (opts.enabled()) return Promise.resolve(true);
+  /**
+   * ONE probe, shared. Rule 15: menu-time flag bits lie, so every sponsor
+   * surface is gated on the server's answer — but a second surface must not
+   * mean a second cache, or the two can disagree about the same fetch.
+   */
+  function serverFlags(): Promise<Record<string, unknown>> {
     if (flagProbe === null) {
       flagProbe = fetch(api('/api/flags'))
         .then(async (res) => {
-          if (!res.ok) return false;
+          if (!res.ok) return {};
           const body = await res.json() as { flags?: Record<string, unknown> };
-          return body.flags?.sponsor_slots === true;
+          return body.flags ?? {};
         })
-        .catch(() => false);
+        .catch(() => ({}));
     }
     return flagProbe;
+  }
+
+  function flagOnNow(name: string, local: boolean): Promise<boolean> {
+    if (local) return Promise.resolve(true);
+    return serverFlags().then((f) => f[name] === true);
+  }
+
+  function enabledNow(): Promise<boolean> {
+    return flagOnNow('sponsor_slots', opts.enabled());
   }
 
   function post(path: string, body: unknown, useBeacon = false): void {
@@ -414,6 +511,160 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
     });
   }
 
+  /* ---- S10: the between-match interstitial ------------------------------ */
+
+  let interOpen = false;
+  let interWatched: WatchedFill | null = null;
+  let interTimer = 0;
+  let interReturnFocus: HTMLElement | null = null;
+  let interSkipReady = false;
+
+  function closeInterstitial(): void {
+    if (!interOpen) return;
+    interOpen = false;
+    window.removeEventListener('keydown', onKeyDown, true);
+    if (interTimer !== 0) { clearInterval(interTimer); interTimer = 0; }
+    const host = document.getElementById(AD_OVERLAY_ID);
+    if (host !== null) {
+      host.dataset.open = '0';
+      host.setAttribute('aria-hidden', 'true');
+      host.removeAttribute('role');
+      host.removeAttribute('aria-modal');
+      host.removeAttribute('tabindex');
+      while (host.firstChild) host.removeChild(host.firstChild);
+    }
+    if (interWatched !== null) { flush(interWatched); interWatched = null; }
+    opts.onInterstitial?.(false);
+    // Give the keyboard back to whatever had it. A modal that leaves focus on a
+    // removed node strands a keyboard user on nothing at all.
+    interReturnFocus?.focus?.();
+    interReturnFocus = null;
+  }
+
+  function openInterstitial(fill: AdFill, model: InterstitialModel): void {
+    const host = document.getElementById(AD_OVERLAY_ID);
+    if (host === null || interOpen) return;
+    interOpen = true;
+    interSkipReady = false;
+    interReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    while (host.firstChild) host.removeChild(host.firstChild);
+    // Announced, not just visible. §5.5(10): the interstitial must be
+    // keyboard-dismissible AND screen-reader-announced.
+    host.setAttribute('role', 'dialog');
+    host.setAttribute('aria-modal', 'true');
+    host.setAttribute('aria-label', model.label + ' — press Escape to dismiss');
+    host.setAttribute('aria-hidden', 'false');
+
+    const card = document.createElement('div');
+    card.className = 'dc-inter';
+
+    const tag = document.createElement('b');
+    tag.className = 'dc-inter-label';
+    tag.textContent = model.label;
+    card.appendChild(tag);
+
+    const body = document.createElement(model.href.length > 0 ? 'a' : 'div');
+    body.className = 'dc-inter-body';
+    if (body instanceof HTMLAnchorElement && model.href.length > 0) {
+      body.href = api(model.href);
+      body.target = '_blank';
+      body.rel = 'noopener';
+    }
+    if (model.imgUrl.length > 0) {
+      const img = document.createElement('img');
+      img.className = 'dc-inter-img';
+      img.alt = model.altText;
+      img.decoding = 'async';
+      img.src = api(model.imgUrl);
+      body.appendChild(img);
+    } else {
+      body.textContent = model.text;
+    }
+    card.appendChild(body);
+
+    /* The skip control. Present from the first frame, high-contrast, and a real
+     * <button> so it is in the tab order — a control a keyboard user cannot
+     * reach is also a control we cannot prove a human used, which makes this an
+     * anti-fraud measure as much as an accessibility one (§5.5(10)). */
+    const skip = document.createElement('button');
+    skip.type = 'button';
+    skip.className = 'dc-inter-skip';
+    skip.textContent = 'Skip';
+    skip.disabled = true;
+    skip.addEventListener('click', () => { closeInterstitial(); });
+    card.appendChild(skip);
+
+    /* The countdown is its OWN line, never the button's label.
+     *
+     * "Skip (14s)" on the button reads as "wait fourteen seconds to skip" —
+     * which is the delayed-skip pattern the Age Appropriate Design Code names,
+     * accidentally described in words even though the control is live. The
+     * button says what pressing it does; this says what happens if nobody does.
+     * Found by looking at the screenshot. */
+    const auto = document.createElement('div');
+    auto.className = 'dc-inter-auto';
+    card.appendChild(auto);
+
+    host.appendChild(card);
+    host.dataset.open = '1';
+    window.addEventListener('keydown', onKeyDown, true);
+    opts.onInterstitial?.(true);
+    /* Focus the DIALOG first, not the button.
+     *
+     * The skip starts disabled for its first second, and a disabled button
+     * cannot take focus — so focusing it here left the keyboard on nothing at
+     * all, which is the precise harm §5.5(10) is about. The screenshot harness
+     * caught it: `document.activeElement` was the body. So the container takes
+     * focus (announcing the dialog), and focus moves to the skip the moment it
+     * becomes usable. */
+    host.tabIndex = -1;
+    host.focus();
+
+    interWatched = watch(host, fill, () => true);
+
+    const startedMs = Date.now();
+    const maxMs = AD_INTERSTITIAL_MAX_SECONDS * 1000;
+    const tick = (): void => {
+      const elapsed = Date.now() - startedMs;
+      const left = Math.max(0, Math.ceil((maxMs - elapsed) / 1000));
+      auto.textContent = left > 0 ? 'Closes automatically in ' + String(left) + 's' : '';
+      if (skipAllowedAt(elapsed)) {
+        const justEnabled = skip.disabled;
+        skip.disabled = false;
+        interSkipReady = true;
+        // Hand the keyboard over exactly once, at the moment it can be used.
+        if (justEnabled && interOpen) skip.focus();
+      }
+      if (elapsed >= maxMs) closeInterstitial();
+    };
+    interTimer = window.setInterval(tick, 250) as unknown as number;
+    tick();
+  }
+
+  /**
+   * The overlay owns the keyboard while it is up.
+   *
+   * In CAPTURE phase, and stopping propagation, for two reasons. The game binds
+   * keys globally and swallowed Enter — so the focused, enabled, high-contrast
+   * skip button could not actually be operated by a keyboard, which is the
+   * §5.5(10) failure exactly (and, since a control we cannot prove a human used
+   * is an anti-fraud hole, not only an accessibility one). The screenshot
+   * harness caught it; no unit test could have. And a modal that lets the game
+   * act on input behind it is not a modal.
+   *
+   * Every dismissal path obeys the same clock as the button.
+   */
+  function onKeyDown(e: KeyboardEvent): void {
+    if (!interOpen) return;
+    const dismiss = e.key === 'Escape' || e.key === 'Enter' || e.key === ' ';
+    if (!dismiss) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!interSkipReady) return;
+    closeInterstitial();
+  }
+
   function menuDecide(): void {
     if (menuDecided || offline() || opts.adsRemoved()) return;
     void enabledNow().then((on) => {
@@ -427,6 +678,35 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
   }
 
   return {
+    /**
+     * S10: offer a between-match interstitial. Returns whether one opened.
+     *
+     * Called from `backToMenu()`, i.e. after EVERY mode — the operator's call.
+     * The gates are layered on purpose: `adsRemoved` short-circuits BEFORE the
+     * decide (the purchase buys silence on the network, not a polite refusal),
+     * then the kill switch, then deaths-since-last, which only the client can
+     * know. The server independently enforces the 180 s interval and the
+     * four-a-day platform ceiling, so a client that lies about deaths still
+     * cannot exceed what a player is allowed to be shown.
+     */
+    async maybeInterstitial(): Promise<boolean> {
+      if (interOpen || offline()) return false;
+      if (!interstitialWanted(
+        opts.adsRemoved(), true,
+        opts.deathsSinceInterstitial?.() ?? 0, AD_INTERSTITIAL_AFTER_DEATHS,
+      )) return false;
+      const on = await flagOnNow('sponsor_interstitial', opts.interstitialEnabled?.() ?? false);
+      if (!on || opts.adsRemoved()) return false;
+      const fills = await decide([SurfaceId.INTERSTITIAL]).catch(() => []);
+      const model = interstitialModel(fills[0]);
+      if (model === null || fills[0] === undefined) return false;
+      openInterstitial(fills[0], model);
+      return true;
+    },
+
+    /** Close it from outside — the pause menu, a route change, a teardown. */
+    closeInterstitial(): void { closeInterstitial(); },
+
     onMenuEnter(): void {
       // The boot line's run ends where the menu begins, whatever else happens.
       flushBoot();
