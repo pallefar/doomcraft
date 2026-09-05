@@ -61,6 +61,20 @@
   .shead{display:flex; align-items:baseline; justify-content:space-between; gap:12px; border-bottom:1px solid var(--rule); padding-bottom:8px; margin-bottom:14px}
   .shead .meta{font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--bone-faint)}
 
+  /* --- the programme: the stages this session is working, above the gauntlet --- */
+  .stages{display:flex; flex-direction:column; gap:6px}
+  .stage{
+    display:grid; grid-template-columns:auto 1fr auto; gap:14px; align-items:start;
+    background:var(--panel); border:1px solid var(--rule); padding:12px 14px;
+  }
+  .stage.st-done{border-left:4px solid var(--tox)}
+  .stage.st-building{border-left:4px solid var(--amber)}
+  .stage.st-pending{border-left:4px solid var(--bone-faint); opacity:.66}
+  .stage .ix{font-family:"IBM Plex Mono",monospace; font-size:10px; color:var(--hell); padding-top:5px}
+  .stage .nm{font-family:"Big Shoulders Display",sans-serif; font-weight:700; font-size:20px; text-transform:uppercase; line-height:1}
+  .stage .what{font-size:13px; color:var(--bone-dim); margin-top:4px; line-height:1.45}
+  .stage .detail{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--bone-faint); margin-top:5px}
+
   /* --- gauntlet board --- */
   .board{display:flex; flex-direction:column; gap:6px}
   .piece{
@@ -135,9 +149,60 @@
 
   <div class="phasestrip">
     <span class="lbl">Phase</span>
-    <span class="now">Live on Railway · console ownable · landing site up</span>
-    <span class="note">Node origin on Railway (document + rooms), admin console with first-signup-becomes-owner, reward journal, profile overlay, landing site with a Play CTA. 64 files / 1944 tests. Gauntlet still 0/23 — no blind A/B run this session.</span>
+    <span class="now">V1-V3 CLOSED · V4 is the first variant content</span>
+    <span class="note">Stage 1 committed: the pellet ceiling on both sides, carveSphere bounded by its loop ranges, reserveMax deleted, the weapons ratchet widened 13 -&gt; 38 fields (weapons@2), the horde shop tested, both release gates checking their declared input lines and byte caps, the variant wire refusing what the parser refuses, and every magazine fill reading the session arsenal. 2592 tests pass; release:verify PASS 17 checks. Next: V4 — content/variants.json, ItemKind.WEAPON_VARIANT, the equip claim into a live room, and a killfeed that can tell two shotgun variants apart.</span>
   </div>
+
+  <section>
+    <div class="shead"><h2>The programme</h2><span class="meta">1/5 closed · Codex reviews every plan before a line is written</span></div>
+    <div class="stages">
+      <div class="stage st-done">
+        <div class="ix">01</div>
+        <div>
+          <div class="nm">V1-V3 closeout</div>
+          <div class="what">Five verified loose ends: the server pellet clamp, carveSphere's unbounded loop, the dead reserveMax field, the weapons ratchet that covers 13 fields while the predictors read 28, and the horde SHOP delivery line with no test.</div>
+          <div class="detail">Committed 9f3b472 + 1d0dfb4. Nine pieces, every one proven red with itself reverted. Three defects came from Codex attacking the plan before a line was written, three more from critics attacking the finished work — one of them in my own test.</div>
+        </div>
+        <div class="chip v-won">DONE</div>
+      </div>
+      <div class="stage st-building">
+        <div class="ix">02</div>
+        <div>
+          <div class="nm">V4 — the first variant content</div>
+          <div class="what">content/variants.json, ItemKind.WEAPON_VARIANT tokens, the equip claim into RoomOptions.variantClaims, the craft recipe, the two-browser bar. Plus the admin console variants row, the three archetype-answering display readers, and a killfeed that can tell two shotgun variants apart.</div>
+          
+        </div>
+        <div class="chip v-building">IN FLIGHT</div>
+      </div>
+      <div class="stage st-pending">
+        <div class="ix">03</div>
+        <div>
+          <div class="nm">Achievements</div>
+          <div class="what">New scope. Server grants every reward; a banked-but-unpayable achievement needs a DEBT not a counter; the condition must be expressible in pack SCHEMA, never shipped code; mode availability is a column on the trust table, never an if.</div>
+          
+        </div>
+        <div class="chip v-pending">QUEUED</div>
+      </div>
+      <div class="stage st-pending">
+        <div class="ix">04</div>
+        <div>
+          <div class="nm">The gauntlet — 0/23</div>
+          <div class="what">23 pieces, each judged blind against the real captured frames in ref/. Never had a blind A/B run.</div>
+          
+        </div>
+        <div class="chip v-pending">QUEUED</div>
+      </div>
+      <div class="stage st-pending">
+        <div class="ix">05</div>
+        <div>
+          <div class="nm">The rest of the queue</div>
+          <div class="what">V5's standing gate, portals/TWA, C7 analytics, the deathmatch share surface, and the two sponsor loose ends.</div>
+          
+        </div>
+        <div class="chip v-pending">QUEUED</div>
+      </div>
+    </div>
+  </section>
 
   <div class="cols">
     <section>
@@ -415,6 +480,19 @@
   <section>
     <div class="shead"><h2>Run log</h2><span class="meta">newest first</span></div>
     <div class="log">
+      <div><time>13:50</time><span>STAGE 1 COMMITTED (9f3b472). Also fixed a doc comment that claimed sandbox and the tutorial call Room.grantAllWeapons — grep finds no caller of that METHOD outside tests; the sandbox hits are plan.grantAllWeapons, a different mechanism. The builder checked my framing instead of inheriting it, which is the third false claim caught in prose today.</span></div>
+      <div><time>13:47</time><span>FULL SUITE: 2592 passed, 3 skipped. Five failures, all in synth.test.ts and chunkz.test.ts — the two load-sensitive flakes the handover names. Evidence they are load and not regression: neither file is touched by this stage, the run took 366s against a 78s baseline because another project was running its own suite on this machine throughout, and both pass 51/51 in isolation immediately afterwards. Recorded in .verify/runs/ rather than dismissed — they remain undiagnosed wall-clock assertions with no headroom, and making them robust is a piece of work, not a footnote.</span></div>
+      <div><time>13:28</time><span>THE WEAPONS RATCHET IS 38 FIELDS, weapons@2, 0xbfdd37e6. It watched 13 while both predictors read 38 — Codex named 11 the plan had missed, including switch timing, which GATES SHOTS (a shotgun switchInMs of 300 vs 600 moves first-fire eligibility from 440 ms to 740 ms) and recoil, which moves the camera that supplies the firing direction. reserveMax is deleted rather than widened: its only reader in the repo was this fingerprint, and reserve is per AMMO TYPE, so it was not merely unread but the wrong shape. Every one of the 38 fields now has its own sensitivity test — drop spreadAir from the line and four tests go red. Longest line 140 bytes against the 160 cap.</span></div>
+      <div><time>13:20</time><span>THE CRITIC BROKE MY OWN TEST. It decoupled the client pellet loop from report.pellets and all 15 tests stayed green while the client resolved 260 pellets against the server 4 — because report.pellets is a scalar that TRAVELS WITH the behaviour. Rewritten to count the hits the client loop actually registered against a real target; the attack now fails at expected 20 to be 16 and expected 260 to be 4. It also falsified two comment claims of mine, both now corrected: a re-export justified by callers that do not exist, and a stale argument for the integer rail that this very change had invalidated.</span></div>
+      <div><time>13:12</time><span>THE GATE NOW CHECKS ITS OWN DECLARED INPUT LINES. checkPacksDeclared compared the fingerprint and read the checked-in input literals ONLY to render a failure diff — so inputs of [&quot;0:lies&quot;] with a correct fingerprint passed both gates. The literals exist precisely so a firing ratchet prints a field-level LINE DIFF instead of two hex numbers, which means the reviewable artifact could be a lie. Also: the offline gate had no MAX_PACK_INPUT_BYTES check at all — a 161-byte line passed release:verify and was caught only by the service gate. Both now go through one shared helper. release:verify is 17 checks.</span></div>
+      <div><time>13:06</time><span>THE VARIANT WIRE NOW REFUSES WHAT THE PARSER REFUSES. decodeVariantTable read 16 f64s with no checks; it accepted a NaN damage (NaN at every range), a magSize of 7.5 (hot.magSize narrows to 7 — a magazine filled to a full magazine is not full), and — the case the plan missed — a magSize of -7, which narrows to 65529. All five refused now, and a legitimate table still decodes. The builder stopped on something better than the fix: the FROZEN golden vector is a row no parser could ever emit — it declares base 1 (shotgun) and carries the pistol rpm 420 against the shotgun band of 22.5..120 — so as long as that literal stands, this door can never be band-checked. It refused to edit the frozen literal and wrote the constraint down as a test instead.</span></div>
+      <div><time>13:05</time><span>CARVESPHERE BOUNDED, both implementations. The radius clamp was never the fix — a centre of 1e20 with a radius of ONE lands y0===y1 and hangs identically, so the three loop RANGES are clamped to the world box and the if (y&lt;1||y&gt;=CHUNK_HEIGHT) continue is deleted: a continue inside a loop whose counter cannot advance just spins faster. Two findings beyond the brief: Infinity is a fourth hang mode the plan never named (floor(Infinity) is Infinity, and it passes radius&lt;=0), and a non-finite POWER in the client carve removes 72 voxels against a rocket real 36 — it carves through obsidian, because NaN &lt;= resistance is false so the survived branch never runs. In-range carves unchanged block for block: 53 removals and digest 78d994cb before and after.</span></div>
+      <div><time>12:56</time><span>HORDE SHOP TEST SHIPPED. The obvious version was vacuous: Horde starts owning the shotgun, so buying one takes the quarter-price ammo branch and horde.ts:2054 never runs — green with the fix reverted on all four observables. The real test buys an UNOWNED chaingun against a magSize-50 variant. Revert → expected 100 to be 50, and the equipStart test stays green under the same revert, so the two lines are separately covered.</span></div>
+      <div><time>12:53</time><span>PELLET CEILING SHIPPED. MAX_PELLETS moved to shared; the server now clamps AND reads hot.pellets. Two tests, and each half of the fix has its own: at 20 pellets the u8 does not wrap so only the CEILING shows (revert → expected 20 to be 16); at 260 it wraps to 4 so only the SOURCE shows (revert → expected 16 to be 4). The original line fails both. Lockstep golden and the cone agreement did not move — 72 tests green.</span></div>
+      <div><time>12:48</time><span>THREE NEW DEFECTS, all confirmed here by reading the source. (1) packs.declared never checks the declared INPUTS — lying inputs with a correct fingerprint pass BOTH gates, and the inputs are the only reason the ratchet prints a line diff instead of two hex numbers. (2) The offline gate has no MAX_PACK_INPUT_BYTES check; only the service gate does. (3) decodeVariantTable reads 16 f64 values with no finite/integer/band check, so the wire accepts a NaN damage and a magSize of 7.5 that the parser refuses.</span></div>
+      <div><time>12:45</time><span>CODEX VERDICT. C1/C2/C4 stand. C3 was WRONG: a NaN radius does not enter carveSphere’s loop, and a radius clamp does not make it terminate — centre 1e20 radius 1 still hangs, because y0===y1 and y++ cannot advance. C5 was INCOMPLETE: eleven more simulation fields (kind, ammo, projectileGravity/Radius/LifeMs, spinDownMs, switchInMs/OutMs, recoilPitch/Yaw/Recovery) are invisible to the proposed ratchet. C6 was VACUOUS — it reproduced a green-with-revert. C7, the stage’s own claim, is false as written.</span></div>
+      <div><time>12:33</time><span>Stage 1 plan written as seven numbered clauses and put to Codex read-only BEFORE any code — the standing rule that has overturned a central design clause four sessions running.</span></div>
+      <div><time>12:27</time><span>Session start. Baseline captured to a file: 105 files / 2525 tests + 3 skips green in 78 s; release:verify PASS, 16 checks. Tree clean at d0d246a.</span></div>
       <div><time>12:58</time><span>Landing site live: doomcraft-site.vercel.app — Play now → Railway, Play offline → Vercel static.</span></div>
       <div><time>12:58</time><span>Accounts: scrypt passphrases, sessions, FIRST SIGNUP BECOMES THE OWNER (proven: two owners without the lock, one with). Audit found and we closed: player-cookie throttle bypass, CSRF owner-claim via text/plain form, unreadable accounts file re-opening bootstrap.</span></div>
       <div><time>12:58</time><span>Admin console at /admin on the Node origin; flags (runtime registry, freeze, force/rollout with typed confirm), fleet, entitlement ring, journal, player lookup. applyServerFlags finally has a caller.</span></div>
@@ -447,5 +525,5 @@
     </div>
   </section>
 
-  <footer>Updated 2026-08-22 10:58:06 UTC · exit condition is winning the blind comparison, not a round count</footer>
+  <footer>Updated 2026-09-05 13:50:00 UTC · exit condition is winning the blind comparison, not a round count</footer>
 </div>

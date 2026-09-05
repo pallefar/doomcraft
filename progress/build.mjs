@@ -27,7 +27,14 @@ const VERDICT = {
   won: ['WON', 'v-won'],
 };
 
+const STAGE = {
+  pending: ['QUEUED', 'v-pending'],
+  building: ['IN FLIGHT', 'v-building'],
+  done: ['DONE', 'v-won'],
+};
+
 const won = S.pieces.filter((p) => p.verdict === 'won').length;
+const stagesDone = (S.stages || []).filter((x) => x.state === 'done').length;
 
 // A/B image pairs: bar frame vs our matching frame, when ours exists.
 const pairs = [
@@ -99,6 +106,20 @@ const html = `<title>Doomcraft Gauntlet</title>
   section h2{font-size:22px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--bone)}
   .shead{display:flex; align-items:baseline; justify-content:space-between; gap:12px; border-bottom:1px solid var(--rule); padding-bottom:8px; margin-bottom:14px}
   .shead .meta{font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--bone-faint)}
+
+  /* --- the programme: the stages this session is working, above the gauntlet --- */
+  .stages{display:flex; flex-direction:column; gap:6px}
+  .stage{
+    display:grid; grid-template-columns:auto 1fr auto; gap:14px; align-items:start;
+    background:var(--panel); border:1px solid var(--rule); padding:12px 14px;
+  }
+  .stage.st-done{border-left:4px solid var(--tox)}
+  .stage.st-building{border-left:4px solid var(--amber)}
+  .stage.st-pending{border-left:4px solid var(--bone-faint); opacity:.66}
+  .stage .ix{font-family:"IBM Plex Mono",monospace; font-size:10px; color:var(--hell); padding-top:5px}
+  .stage .nm{font-family:"Big Shoulders Display",sans-serif; font-weight:700; font-size:20px; text-transform:uppercase; line-height:1}
+  .stage .what{font-size:13px; color:var(--bone-dim); margin-top:4px; line-height:1.45}
+  .stage .detail{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--bone-faint); margin-top:5px}
 
   /* --- gauntlet board --- */
   .board{display:flex; flex-direction:column; gap:6px}
@@ -177,6 +198,24 @@ const html = `<title>Doomcraft Gauntlet</title>
     <span class="now">${esc(S.phase)}</span>
     <span class="note">${esc(S.phaseNote)}</span>
   </div>
+
+  ${(S.stages || []).length ? `<section>
+    <div class="shead"><h2>The programme</h2><span class="meta">${stagesDone}/${S.stages.length} closed · Codex reviews every plan before a line is written</span></div>
+    <div class="stages">
+      ${S.stages.map((x, i) => {
+        const [txt, cls] = STAGE[x.state] || STAGE.pending;
+        return `<div class="stage st-${x.state}">
+        <div class="ix">${String(i + 1).padStart(2, '0')}</div>
+        <div>
+          <div class="nm">${esc(x.name)}</div>
+          <div class="what">${esc(x.what)}</div>
+          ${x.detail ? `<div class="detail">${esc(x.detail)}</div>` : ''}
+        </div>
+        <div class="chip ${cls}">${txt}</div>
+      </div>`;
+      }).join('\n      ')}
+    </div>
+  </section>` : ''}
 
   <div class="cols">
     <section>
