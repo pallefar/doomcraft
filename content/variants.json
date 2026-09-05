@@ -1,0 +1,70 @@
+{
+  "$schema": "doomcraft-variants/1",
+  "manifestVersion": 1,
+
+  "//": [
+    "The variants pack: weapon SIDEGRADES as DATA (docs/VARIANTS.md §1 and §7,",
+    "docs/PACKS.md kind 7). A variant is a named override set applied to ONE",
+    "base weapon — never a new id, never new behaviour, never a feel field.",
+    "shared/src/variants.ts is the only thing that decides whether a line here",
+    "is allowed to exist: the whitelist and its bands, the ±12% power budget,",
+    "and the strict-dominance refusal that forbids a straight upgrade.",
+    "",
+    "WHY EXACTLY TWO, AND WHY THESE TWO.",
+    "",
+    "A variant has ONE base, so a pack that wants to prove the machine end to",
+    "end needs one entry per archetype the machine treats differently. There",
+    "are two that matter here: HITSCAN, where pellets, headshots and falloff",
+    "are all live, and PROJECTILE, where falloff* is inert (a projectile",
+    "stores its damage at spawn) and projectileSpeed is the handling axis.",
+    "Slug Shotgun is the hitscan half and carries a pellet change AND a rate",
+    "change in one row, so a single entry exercises the payload band",
+    "(damage × pellets) as well as the budget. Swift Rocket is the projectile",
+    "half. A THIRD entry would exist only to make the table look fuller, and",
+    "an entry nobody can justify is content that has to be balanced, migrated",
+    "and dormanted forever — see the removal note below.",
+    "",
+    "SLUG SHOTGUN. One 62-damage slug instead of seven 11-damage pellets: the",
+    "per-shot payload goes 77 -> 62 (inside 0.25..2.5× of the base) while the",
+    "cone tightens 0.09 -> 0.012 rad and the useful range stretches 28 -> 44 m.",
+    "It PAYS in rate of fire, 75 -> 42 rpm. Budget 1.0196, +2.0%: dps ×0.528,",
+    "range ×1.503, handling ×2.013. Better at reach and worse at throughput,",
+    "which is what a sidegrade is.",
+    "",
+    "SWIFT ROCKET. A rocket that travels 46 -> 66 m/s and fires 88 -> 104 rpm,",
+    "paying with a 92 -> 82 direct hit and a 4.4 -> 3.8 m blast. Budget 0.9879,",
+    "-1.2%: dps ×0.978, splash ×0.864, handling ×1.145. Note what is NOT here:",
+    "falloffStart/End/Min/Curve are INERT on a projectile and the parser",
+    "refuses them outright rather than pricing them at zero, and spread* has a",
+    "band of 0..0 against a base cone of exactly 0 — so speed, rate, damage and",
+    "splash are the whole of the projectile's vocabulary.",
+    "",
+    "REMOVING an id from this file is the destructive direction, exactly as it",
+    "is for items: every owned copy goes dormant and its holder falls back to",
+    "the BASE weapon at the next read, so they keep firing — just not the gun",
+    "they earned. The gate counts them (variants.dormanted). A re-cut pack is a",
+    "NEW version directory under DOOMCRAFT_PACKS, never an in-place edit of",
+    "this file: this file IS variants@1 on a host with no packs root."
+  ],
+
+  "variants": [
+    {
+      "id": "shotgun-slug", "base": 1, "name": "Slug Shotgun",
+      "over": {
+        "pellets": 1, "damage": 62,
+        "spread": 0.012, "spreadMax": 0.03,
+        "falloffEnd": 44,
+        "rpm": 42
+      }
+    },
+    {
+      "id": "rocket-swift", "base": 3, "name": "Swift Rocket",
+      "over": {
+        "damage": 82,
+        "rpm": 104,
+        "splashRadius": 3.8,
+        "projectileSpeed": 66
+      }
+    }
+  ]
+}

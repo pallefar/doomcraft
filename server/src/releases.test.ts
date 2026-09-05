@@ -27,6 +27,15 @@ import {
   type ReleaseDoc,
 } from '@doomcraft/shared/packs';
 import { weaponsFingerprintInputs } from '@doomcraft/shared/version';
+import { SessionArsenal } from '@doomcraft/shared/arsenal';
+import {
+  CAP_VARIANTS, PacketReader, PacketWriter, S2C, encodeHello,
+} from '@doomcraft/shared/protocol';
+import {
+  VARIANT_FIELDS, createVariantTableMessage, decodeVariantTable, overlaysFromWire,
+  parseVariantsManifest, wireValuesFor,
+} from '@doomcraft/shared/variants';
+import { WEAPONS, WeaponId } from '@doomcraft/shared/weapons';
 
 import { PackInventory, ReleaseService } from './packs.js';
 import { Room } from './room.js';
@@ -119,7 +128,7 @@ describe('PackInventory', () => {
     const declared = new Map(BUILTIN_PACKS.map((p) => [p.key, p.label]));
     expect(packs.map((p) => p.label).sort()).toEqual([
       'campaign@1', declared.get('characters'), declared.get('core'),
-      'items@1', 'levels@1', 'quests@1', declared.get('weapons'),
+      'items@1', 'levels@1', 'quests@1', 'variants@1', declared.get('weapons'),
     ].sort());
     expect(packs.find((p) => p.label === 'levels@1')?.digest).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -226,10 +235,60 @@ describe('PackInventory', () => {
     expect(inv.installedPacks().map((p) => p.label)).toContain('variants@1');
   });
 
-  it('has no variants until one is installed — V2 ships the binary, not content', () => {
-    const inv = new PackInventory({ packsRoot: packsRoot(), log: () => {} });
-    expect(inv.variantsVersions()).toEqual([]);
-    expect(inv.variantsAt(1)).toBeNull();
+  /*
+   * REPLACES 'has no variants until one is installed — V2 ships the binary,
+   * not content'. That test asserted `variantsVersions()` was `[]` on a host
+   * with a packs root but no variants directory, and its premise expired in
+   * V4a: `content/variants.json` IS variants@1 now, exactly as
+   * `content/items.json` is items@1. Deleting it outright would have thrown
+   * away the property it was really guarding — that a host answers about
+   * variants the same way it answers about every other data kind — so it is
+   * rewritten to assert the new answer rather than removed.
+   */
+  it('falls back to content/variants.json as version 1, like every other data kind', () => {
+    const unconfigured = new PackInventory({ packsRoot: null, log: () => {} });
+    expect(unconfigured.variantsVersions()).toEqual([1]);
+    expect(unconfigured.variantsAt(1)?.pack.label).toBe('variants@1');
+    expect(unconfigured.variantsAt(1)?.manifest.variants.length).toBeGreaterThan(0);
+    expect(unconfigured.installedPacks().map((p) => p.label)).toContain('variants@1');
+    // A packs root with no variants directory still resolves the bundled one:
+    // the fallback is the FLOOR for every host, not a special case of "no
+    // DOOMCRAFT_PACKS at all". That is what `itemsFileFor` does above it.
+    const halfPopulated = new PackInventory({ packsRoot: packsRoot(), log: () => {} });
+    expect(halfPopulated.variantsVersions()).toEqual([1]);
+    expect(halfPopulated.variantsAt(1)).not.toBeNull();
+  });
+
+  /*
+   * PACKSROOT PRECEDENCE. Written the way the failure would actually arrive:
+   * the operator installs a variants@1 of their own and the bundled file must
+   * not shadow it. Reverse the two branches in `variantsFileFor` and this
+   * host serves the repo's two-row pack under the label of the operator's
+   * one-row pack — a green gate over content nobody approved, which is the
+   * worst outcome this system has. The counts are deliberately DIFFERENT so
+   * one can be seen to lose; equal counts would make the assertion pass under
+   * either order.
+   */
+  it('prefers an INSTALLED variants@1 over the bundled one, never the reverse', () => {
+    const root = packsRoot();
+    installVariants(root, 1, JSON.stringify({
+      variants: [{ id: 'pistol-burst', base: 0, name: 'Burst Pistol', over: { rpm: 620, damage: 12 } }],
+    }));
+    const inv = new PackInventory({ packsRoot: root, log: () => {} });
+    const at = inv.variantsAt(1);
+    expect(at?.manifest.variants.map((v) => v.id)).toEqual(['pistol-burst']);
+
+    // And the two are not interchangeable at the same version number: the
+    // digests differ, so a release pinned to one is REFUSED on a host that
+    // resolves the other rather than silently served the substitute.
+    const bundled = new PackInventory({ packsRoot: null, log: () => {} }).variantsAt(1);
+    expect(bundled).not.toBeNull();
+    expect(at!.pack.digest).not.toBe(bundled!.pack.digest);
+    const release = {
+      revision: 1, state: 'live', ordinal: 2, rolloutBp: 10000, baseRevision: 0,
+      gate: null, createdMs: 0, publishedMs: 0, note: '', packs: [bundled!.pack],
+    } as unknown as Release;
+    expect(inv.unsatisfied(release)).toEqual(['variants@1']);
   });
 });
 
@@ -262,7 +321,44 @@ describe('the production gate and pack kind 7', () => {
     expect(gated.ok).toBe(true);
     const report = gated.ok ? gated.release?.gate : null;
     expect(report?.ok, 'the production gate must not pass an uninstallable kind 7').toBe(false);
-    expect(JSON.stringify(report?.checks)).toContain('variants@1 is not installed on this host');
+    /*
+     * WHICH REFUSAL, AND WHY IT MOVED IN V4a. Deleting `variants/1` used to
+     * leave the host with no version 1 at all, so the row read "is not
+     * installed on this host". `content/variants.json` is now the version-1
+     * FLOOR, so the host resolves a variants@1 again — a DIFFERENT one, whose
+     * digest is not the digest the draft recorded — and the refusal lands on
+     * the digest branch instead.
+     *
+     * The property under test is unchanged and the fallback does not weaken
+     * it: the gate must not go green over a kind 7 whose approved bytes are
+     * gone. Asserting the exact sentence rather than merely `ok === false`
+     * keeps that honest — a refusal for some unrelated reason would satisfy
+     * the boolean and tell us nothing.
+     */
+    expect(JSON.stringify(report?.checks)).toContain('variants@1: digest mismatch');
+  });
+
+  it('and says "not installed" when the version has no bundled floor under it', async () => {
+    /*
+     * The other half of the branch above, kept alive because V4a moved the
+     * version-1 case off it. Only version 1 falls back to `content/`, so a
+     * draft pinned to variants@2 that vanishes lands on the "not installed"
+     * message — and if that message ever stops being reachable, this goes red
+     * rather than the string quietly becoming dead code.
+     */
+    const root = packsRoot(false, true);
+    installVariants(root, 2);
+    const { svc } = service(root);
+    let doc = svc.document();
+    expect((await svc.createDraft(doc.revision, { variants: 2 })).ok).toBe(true);
+
+    rmSync(join(root, 'variants', '2'), { recursive: true });
+
+    doc = svc.document();
+    const gated = await svc.gateDraft(doc.revision);
+    const report = gated.ok ? gated.release?.gate : null;
+    expect(report?.ok).toBe(false);
+    expect(JSON.stringify(report?.checks)).toContain('variants@2 is not installed on this host');
   });
 
   it('passes a draft naming a variants pack it DOES have, and says how many parsed', async () => {
@@ -940,3 +1036,170 @@ describe('a release\'s variants pack reaches the room that pinned it', () => {
     expect(roomCall, 'new Room(...) no longer passes `variants`').toMatch(/^ {6}variants,$/m);
   });
 });
+
+/* ------------------------------------------------------------------------ *
+ * V4a — the BUNDLED pack reaches a real client over a real socket
+ *
+ * Everything above this line proves the machine works when a test hands it a
+ * manifest. This proves the machine works on the tree as shipped: no
+ * DOOMCRAFT_PACKS, no release document, no picks — the state a Railway deploy
+ * actually boots in — and the content that reaches the client is
+ * `content/variants.json`.
+ *
+ * WHY THE OBVIOUS VERSION OF THIS TEST IS WORTHLESS, MEASURED.
+ *
+ * The natural shape is: boot, connect with CAP_VARIANTS, assert the received
+ * rows equal the manifest's rows and that `slotCount === variants.length + 1`.
+ * Replace the manifest with `{"variants":[]}` and every one of those passes.
+ * It parses with ZERO errors, `variants.validate` says ok, and then:
+ *
+ *     Room.variantTable.length:       0
+ *     arsenal.slotCount:              1
+ *     received rows == manifest rows: true      <-- 0 == 0
+ *     slotCount == variants.length+1: true      <-- 1 == 0+1
+ *
+ * Both comparisons are between two quantities that go to zero TOGETHER, so
+ * they are satisfied by a room serving nothing. That is rule 25 in its other
+ * direction — a gate that passes on nothing — and it is exactly the failure
+ * this whole arc exists to prevent, rebuilt as the test that was supposed to
+ * catch it.
+ *
+ * So the numbers below are LITERAL. Two rows, these two ids, these two bases.
+ * A denominator that can go to zero is never allowed to be the whole of an
+ * assertion; the sixteen-field comparison against the parsed file rides on top
+ * of literals that pin the count first.
+ *
+ * WHICH ARSENAL IS BEING INSPECTED. A socket exposes the TABLE and the claim
+ * bytes; it does not expose `room.sim.arsenal`, and asserting on an arsenal
+ * this process built from the same file the server read would prove nothing
+ * about the server. So the client half is reconstructed the way
+ * `NetClient.onVariantTable` reconstructs it — `SessionArsenal.from(
+ * overlaysFromWire(decoded.variants))` — from the bytes that came off the
+ * wire. The SERVER half stays where it is, in the `new Room(...)` test above.
+ *
+ * Display names are deliberately NOT compared: they are not on this protocol
+ * (the row is an id, a base and sixteen f64s), and asserting a name here would
+ * be asserting a token that travels by some other route.
+ * ------------------------------------------------------------------------ */
+
+describe('V4a: the bundled variants pack reaches a real client', () => {
+  it('serves both bundled variants, every effective field, to a CAP_VARIANTS socket', async () => {
+    const bundledText = readFileSync(join(repoRoot, 'content', 'variants.json'), 'utf8');
+    const bundled = parseVariantsManifest(bundledText);
+    expect(bundled.errors, 'content/variants.json does not parse').toEqual([]);
+    expect(bundled.manifest, 'content/variants.json does not parse').not.toBeNull();
+    const defs = bundled.manifest!.variants;
+
+    // THE PREMISE, STATED AS LITERALS. If the pack is emptied, this is where
+    // the test goes red — before anything is booted and before any comparison
+    // whose two sides could vanish together.
+    expect(defs.length, 'the bundled pack must carry content, not an empty array').toBe(2);
+    expect(defs.map((v) => v.id)).toEqual(['shotgun-slug', 'rocket-swift']);
+    expect(defs.map((v) => v.base)).toEqual([WeaponId.SHOTGUN, WeaponId.ROCKET]);
+
+    const port = await freePort();
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PORT: String(port), HOST: '127.0.0.1',
+      DOOMCRAFT_DATA: tempDir('dc-v4adata-'),
+      DOOMCRAFT_STATIC: tempDir('dc-v4astatic-'),
+      DOOMCRAFT_BOTS: '0',
+    };
+    // The whole point is the UNCONFIGURED host — content/ as version 1. An
+    // ambient packs root would silently make this a test of somebody's volume.
+    delete env.DOOMCRAFT_PACKS;
+    const child = spawn(process.execPath, ['--import', 'tsx', serverEntry], {
+      cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'], env,
+    });
+    child.stdout?.on('data', () => {});
+    child.stderr?.on('data', () => {});
+    const origin = `http://127.0.0.1:${port}`;
+    try {
+      const deadline = Date.now() + 40_000;
+      for (;;) {
+        if (child.exitCode !== null) throw new Error(`server exited ${child.exitCode}`);
+        try { await (await fetch(`${origin}/health`)).text(); break; } catch { /* not up */ }
+        if (Date.now() > deadline) throw new Error('server did not start');
+        await new Promise((r) => setTimeout(r, 200));
+      }
+
+      // The host pins it with no release document and no picks: this is the
+      // boot identity, which is what `hostFallback()` hands every room.
+      const version = await (await fetch(`${origin}/api/version`)).json() as {
+        release: { packs: { label: string; cls: string }[]; unsatisfied: string[] };
+      };
+      expect(version.release.packs.map((p) => p.label)).toContain('variants@1');
+      expect(version.release.unsatisfied).toEqual([]);
+
+      const frames = await helloAndCollect(port, CAP_VARIANTS);
+      const raw = frames.find((f) => f.length > 0 && f[0] === S2C.VARIANT_TABLE);
+      expect(raw, 'no S2C.VARIANT_TABLE arrived at all').toBeDefined();
+
+      const decoded = decodeVariantTable(
+        new PacketReader(raw as Uint8Array), createVariantTableMessage(),
+      );
+      expect(decoded, 'the room sent a VARIANT_TABLE this client refuses').not.toBeNull();
+      const rows = decoded!.variants;
+
+      // NON-EMPTINESS, SAID OUT LOUD AND FIRST. Everything below it is a
+      // comparison, and a comparison is only worth what its operands are.
+      expect(rows.length, 'the room served an EMPTY table').toBeGreaterThan(0);
+      expect(rows.length).toBe(2);
+      expect(rows.map((r) => r.id)).toEqual(['shotgun-slug', 'rocket-swift']);
+      expect(rows.map((r) => r.base)).toEqual([WeaponId.SHOTGUN, WeaponId.ROCKET]);
+
+      // All sixteen effective fields, in VARIANT_FIELDS order, per row. f64 is
+      // lossless both ways, so this is exact equality and not a tolerance.
+      for (let i = 0; i < defs.length; i++) {
+        const expected = wireValuesFor(defs[i]);
+        expect(expected.length).toBe(VARIANT_FIELDS.length);
+        for (let f = 0; f < VARIANT_FIELDS.length; f++) {
+          expect(rows[i].values[f], `${rows[i].id}.${VARIANT_FIELDS[f]}`).toBe(expected[f]);
+        }
+      }
+
+      // The CLIENT's arsenal, rebuilt from the bytes exactly as
+      // `NetClient.onVariantTable` rebuilds it. Slot 0 is the untouched
+      // archetype; row i is slot i+1.
+      const arsenal = SessionArsenal.from(overlaysFromWire(rows));
+      expect(arsenal.slotCount).toBe(3);
+      expect(arsenal.statsFor(WeaponId.SHOTGUN, 1).variantId).toBe('shotgun-slug');
+      expect(arsenal.statsFor(WeaponId.SHOTGUN, 1).pellets).toBe(1);
+      expect(arsenal.statsFor(WeaponId.ROCKET, 2).variantId).toBe('rocket-swift');
+      expect(arsenal.statsFor(WeaponId.ROCKET, 2).projectileSpeed).toBe(66);
+      // And slot 0 is still the compiled archetype on the same client, which
+      // is what "every player stays at slot 0 in V4a" rests on.
+      expect(arsenal.statsFor(WeaponId.SHOTGUN, 0).pellets).toBe(WEAPONS[WeaponId.SHOTGUN].pellets);
+
+      // The interlock, on the same booted host: a client that does not set the
+      // bit is told nothing it could not decode.
+      const plain = await helloAndCollect(port, 0);
+      expect(plain.some((f) => f.length > 0 && f[0] === S2C.VARIANT_TABLE)).toBe(false);
+      expect(plain.length, 'the control socket got no world at all — it proves nothing')
+        .toBeGreaterThan(0);
+    } finally {
+      child.kill('SIGKILL');
+    }
+  }, 90_000);
+});
+
+/** HELLO on a real /ws socket, then every binary frame that arrives in 1.5 s. */
+async function helloAndCollect(port: number, caps: number): Promise<Uint8Array[]> {
+  const { WebSocket } = await import('ws');
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  const frames: Uint8Array[] = [];
+  await new Promise<void>((res, rej) => {
+    const timer = setTimeout(() => rej(new Error('socket did not open')), 10_000);
+    ws.on('open', () => { clearTimeout(timer); res(); });
+    ws.on('error', (e) => { clearTimeout(timer); rej(e); });
+  });
+  ws.on('message', (d: Buffer) => { frames.push(new Uint8Array(d)); });
+  // `encodeHello`, not a frozen hex string: a protocol change must move this
+  // with it rather than leaving the test speaking a dialect the server has
+  // stopped understanding.
+  const w = encodeHello(new PacketWriter(256), 'v4a-probe', 0, caps);
+  ws.send(w.copy());
+  await new Promise((r) => setTimeout(r, 1500));
+  ws.close();
+  return frames;
+}

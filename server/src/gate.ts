@@ -36,11 +36,12 @@ import {
   type ChallengesManifest,
 } from '@doomcraft/shared/challenges';
 import { sanitiseContentId } from '@doomcraft/shared/modes';
-import { parseVariantsManifest } from '@doomcraft/shared/variants';
+import { parseVariantsManifest, variantsFingerprintInputs } from '@doomcraft/shared/variants';
 import {
   BUILTIN_FLAG_ORDER,
   itemsPack,
   questsPack,
+  variantsPack,
   BUILTIN_PACKS,
   BUILTIN_PROTOCOL_FINGERPRINT,
   MAX_PACK_INPUTS,
@@ -69,6 +70,15 @@ const repoRoot = resolve(here, '..', '..', '..');
 export const DEFAULT_EPISODES_FILE = join(repoRoot, 'content', 'episodes.json');
 export const DEFAULT_ITEMS_FILE = join(repoRoot, 'content', 'items.json');
 export const DEFAULT_QUESTS_FILE = join(repoRoot, 'content', 'quests.json');
+/**
+ * V4a. There deliberately was NO default here through V2 and V3: the pack
+ * parser, the wire and both gates shipped with no content at all, because the
+ * variants-aware BINARY had to be live before any release could name kind 7 —
+ * a host that predated it would have Rule-E-fallen-back to the previous
+ * release, silently, on every room. The deployed origin reports `weapons@2`,
+ * so that condition is satisfied and the tree can carry the content.
+ */
+export const DEFAULT_VARIANTS_FILE = join(repoRoot, 'content', 'variants.json');
 
 /**
  * The schema versions this release was authored against. When either moves,
@@ -627,11 +637,23 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
   const itemsFile = options.itemsFile ?? DEFAULT_ITEMS_FILE;
   const itemsText = existsSync(itemsFile) ? readFileSync(itemsFile, 'utf8') : null;
   const parsedItems = itemsText === null ? null : parseItemsManifest(itemsText).manifest;
-  // No DEFAULT_VARIANTS_FILE: V2 ships no content, so this is null until a
-  // caller points at one, and the check passes by design.
-  const variantsFile = options.variantsFile ?? '';
+  /*
+   * V4a: read by DEFAULT, like items and quests and unlike every earlier
+   * revision of this line.
+   *
+   * `tools/release-verify.mjs` — the CLI face, and what CI runs on every push
+   * — passes no options at all, so while this defaulted to `''` the entire
+   * variants half of the offline gate was reachable only from a test that
+   * chose to reach it. `variants.validate` printed "no variants manifest
+   * installed — nothing to check" against a tree that had one, and the pack
+   * never entered the released set, so `packs.inputs` never measured its
+   * lines. Both are the same defect: a check that only a test can run is not
+   * a gate.
+   */
+  const variantsFile = options.variantsFile ?? DEFAULT_VARIANTS_FILE;
   const variantsText = variantsFile !== '' && existsSync(variantsFile)
     ? readFileSync(variantsFile, 'utf8') : null;
+  const parsedVariants = variantsText === null ? null : parseVariantsManifest(variantsText).manifest;
   const questsFile = options.questsFile ?? DEFAULT_QUESTS_FILE;
   const questsText = existsSync(questsFile) ? readFileSync(questsFile, 'utf8') : null;
   const parsedQuests = questsText === null ? null : parseChallengesManifest(questsText).manifest;
@@ -675,6 +697,29 @@ export function runReleaseVerify(options: VerifyOptions = {}): VerifyResult {
     const inputs = challengesFingerprintInputs(parsedQuests);
     const qp = questsPack(inputs);
     packs.push({ ...qp, digest: sha256(Buffer.from(inputs.join('\n'), 'utf8')) });
+  }
+  /*
+   * Kind 7 joins the released set, and it has to happen HERE — above the
+   * check list — for the reason the block comment above `computedInputs`
+   * gives: `checkPackInputs` binds on the lines that would actually ship, and
+   * a data pack's lines are computed from content/ rather than declared
+   * anywhere. Pushed after the checks and every variant line would be exempt
+   * from the 160-byte cap in this gate while `ReleaseService.runGate` still
+   * enforced it — the cheap gate saying yes and the expensive one saying no,
+   * which is the exact asymmetry `checkPackInputs` was extracted to close.
+   *
+   * `parseVariantsManifest` refuses a line over `MAX_VARIANT_INPUT_BYTES`
+   * itself, so a manifest that reaches here is already under the cap and this
+   * looks redundant. It is not: that constant is declared in
+   * shared/src/variants.ts and mirrors `MAX_PACK_INPUT_BYTES` by assertion,
+   * the pack LABEL is not part of what the parser measures, and a check that
+   * is correct only while two constants happen to agree is a check that stops
+   * being correct silently.
+   */
+  if (parsedVariants !== null) {
+    const inputs = variantsFingerprintInputs(parsedVariants);
+    const vp = variantsPack(inputs);
+    packs.push({ ...vp, digest: sha256(Buffer.from(inputs.join('\n'), 'utf8')) });
   }
 
   const checks: GateCheck[] = [

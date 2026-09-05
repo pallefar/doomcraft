@@ -148,23 +148,135 @@ try {
    * the bit the server must say nothing about variants at all, because a
    * client that cannot decode the message has already had every claim
    * resolved to the base.
+   *
+   * V4a — WHAT THIS USED TO CHECK, AND WHY IT WAS WORTH NOTHING.
+   *
+   * Until now the whole of it was `if (d[0] === 13) seen = true`. HANDOVER §4
+   * called this "the only check anywhere that can see a deployed binary whose
+   * room factory forgot its pinned content", and it could not: a lone opcode
+   * byte satisfies it, and so does a table with a count of zero — which is
+   * PRECISELY the state a forgotten room factory produces. It proved the
+   * message was SENT. That is this project's rule 25 in its other direction, a
+   * gate that passes on nothing, sitting in the one place that was supposed to
+   * catch nothing being served.
+   *
+   * WHY A CROSS-CHECK AND NOT A HARD-CODED COUNT. "Expect two rows" would be
+   * wrong on every host that legitimately pins no variants pack — a local
+   * `node server/dist/server.mjs` with a bare DOOMCRAFT_PACKS, a rollback to a
+   * six-pack release — and a check that cannot pass is worth exactly what one
+   * that cannot fail is worth; this file already carries that lesson in the
+   * `/ws` block above it. So the tool asks the ORIGIN what it pins and
+   * requires the wire to agree: `/api/version` reports the live release's pack
+   * set, and a `variants@N` in it that is NOT in `unsatisfied` is exactly the
+   * version `server/src/index.ts` resolves for every room it builds. Pinned
+   * means the wire must carry rows; not pinned means it must not.
+   *
+   * WHAT IT DELIBERATELY DOES NOT TRY TO CHECK. The pack's digest and
+   * fingerprint are computed over `variantsFingerprintInputs` — one line per
+   * variant listing only the fields the author OVERRODE. The wire carries all
+   * sixteen fields at their effective value for every row and no record of
+   * which were overridden (that is decision 1 of the layout, argued at length
+   * in shared/src/variants.ts), so the digest is not reconstructible from
+   * these bytes and pretending otherwise would mint a check that fails on
+   * correct data. The row COUNT is the strongest quantity both sides can
+   * honestly speak about, and the wire's own values are checked for being
+   * simulable rather than for being any particular number.
    */
   const HELLO_VARIANTS = Buffer.from('0103064d6172696e650431009999a0000100', 'hex');
   const S2C_VARIANT_TABLE = 13;
+  const VARIANT_FIELD_COUNT = 16;
+  const WEAPON_COUNT = 7;
 
-  async function sawVariantTable(hello) {
-    const ws = await open('/ws'); sockets.push(ws);
-    let seen = false;
-    ws.on('message', (d) => { if (d.length > 0 && d[0] === S2C_VARIANT_TABLE) seen = true; });
-    ws.send(hello);
-    await sleep(1200);
-    return seen;
+  /**
+   * The V3 layout, by hand: opcode, u8 count, then per row a u8-prefixed id,
+   * a u8 base and sixteen little-endian f64s, then WEAPON_COUNT slot bytes.
+   *
+   * Hand-written because this tool runs under plain `node` against a DEPLOYED
+   * origin and cannot import the repo's TypeScript. That is a real duplication
+   * and the mitigation is that it is STRUCTURAL — lengths and widths, not
+   * values — so it fails loudly on a layout change instead of drifting: a
+   * moved field makes `end !== buf.length` and the row is refused.
+   */
+  function decodeVariantTable(buf) {
+    if (buf.length < 2 || buf[0] !== S2C_VARIANT_TABLE) return null;
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let o = 1;
+    const count = buf[o]; o += 1;
+    const rows = [];
+    for (let i = 0; i < count; i++) {
+      if (o >= buf.length) return null;
+      const idLen = buf[o]; o += 1;
+      if (o + idLen + 1 + VARIANT_FIELD_COUNT * 8 > buf.length) return null;
+      const id = new TextDecoder().decode(buf.subarray(o, o + idLen)); o += idLen;
+      const base = buf[o]; o += 1;
+      const values = [];
+      for (let f = 0; f < VARIANT_FIELD_COUNT; f++) { values.push(view.getFloat64(o, true)); o += 8; }
+      rows.push({ id, base, values });
+    }
+    if (o + WEAPON_COUNT !== buf.length) return null;   // trailing slot map, exactly
+    return { rows, slots: [...buf.subarray(o)] };
   }
 
-  check('a client that sets CAP_VARIANTS is told the room\'s variant table',
-    await sawVariantTable(HELLO_VARIANTS));
+  async function variantTableFrame(hello) {
+    const ws = await open('/ws'); sockets.push(ws);
+    let frame = null;
+    ws.on('message', (d) => { if (d.length > 0 && d[0] === S2C_VARIANT_TABLE) frame = d; });
+    ws.send(hello);
+    await sleep(1200);
+    return frame;
+  }
+
+  /* What the ORIGIN says it is serving. Unreachable is a FAILURE, not a
+   * shrug: without it there is nothing to cross-check against and the wire
+   * assertion collapses back into "a byte arrived". */
+  const httpOrigin = BASE.replace(/^ws/, 'http').replace(/\/+$/, '');
+  let pinnedVariants = null;
+  let versionReadable = false;
+  try {
+    const v = await (await fetch(`${httpOrigin}/api/version`)).json();
+    const packs = v?.release?.packs ?? [];
+    const unsat = new Set(v?.release?.unsatisfied ?? []);
+    pinnedVariants = packs
+      .map((p) => p.label)
+      .find((l) => typeof l === 'string' && l.startsWith('variants@') && !unsat.has(l)) ?? null;
+    versionReadable = Array.isArray(packs);
+  } catch {
+    versionReadable = false;
+  }
+  check('the origin says which packs it is serving', versionReadable,
+    versionReadable ? `variants: ${pinnedVariants ?? 'none pinned'}` : `${httpOrigin}/api/version unreadable`);
+
+  const frame = await variantTableFrame(HELLO_VARIANTS);
+  check('a client that sets CAP_VARIANTS is told the room\'s variant table', frame !== null);
+
+  const table = frame === null ? null : decodeVariantTable(frame);
+  check('that table DECODES as the V3 layout, whole', table !== null,
+    frame === null ? 'no frame' : `${frame.length} bytes`);
+
+  /* THE CROSS-CHECK. This is the assertion the old opcode test was pretending
+   * to be, and it is symmetric on purpose: a host pinning variants@N that
+   * serves nothing is the forgotten-room-factory bug, and a host pinning
+   * nothing that serves rows is content nobody released. */
+  if (versionReadable && table !== null) {
+    const n = table.rows.length;
+    check('the wire\'s variant table agrees with the release the origin pins',
+      pinnedVariants === null ? n === 0 : n > 0,
+      pinnedVariants === null
+        ? `no variants pack pinned, ${n} row(s) on the wire`
+        : `${pinnedVariants} pinned, ${n} row(s) on the wire: ${table.rows.map((r) => r.id).join(', ')}`);
+
+    /* And every row has to be a stat line something could actually fire.
+     * Subordinate to the count check above — on a host that legitimately
+     * serves zero rows this passes over an empty list, which is why it is not
+     * the one carrying the weight. */
+    const bad = table.rows.filter((r) => r.id.length === 0 || r.base >= WEAPON_COUNT
+      || r.values.some((x) => !Number.isFinite(x) || x < 0));
+    check('every row on the wire carries a usable stat line', bad.length === 0,
+      bad.length === 0 ? `${table.rows.length} row(s)` : bad.map((r) => r.id || '(unnamed)').join(', '));
+  }
+
   check('a client that does not is told nothing it could not decode',
-    !(await sawVariantTable(HELLO)));
+    (await variantTableFrame(HELLO)) === null);
 
   /* --- and nothing else upgrades ---------------------------------------- */
   let refused = false;

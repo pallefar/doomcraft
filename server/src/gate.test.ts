@@ -319,12 +319,52 @@ describe('runReleaseVerify over the shipped tree', () => {
       'campaign.refs', 'quests.validate', 'quests.refs', 'variants.validate',
       'protocol.stable', 'flags.order', 'saves.schema', 'gate.nonempty',
     ]) expect(ids).toContain(required);
-    // The pack set is the three build packs plus the four data packs, digests on.
+    // The pack set is the three build packs plus the FIVE data packs, digests on.
     expect(packs.map((p) => p.key).sort())
-      .toEqual(['campaign', 'characters', 'core', 'items', 'levels', 'quests', 'weapons']);
+      .toEqual(['campaign', 'characters', 'core', 'items', 'levels', 'quests', 'variants', 'weapons']);
     expect(packs.find((p) => p.key === 'levels')?.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(packs.find((p) => p.key === 'campaign')?.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(packs.find((p) => p.key === 'quests')?.digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  /*
+   * V4a — THE DEFAULT, AND WHY ITS ABSENCE WAS INVISIBLE.
+   *
+   * `variants.validate` has been in the required-id list above since V2 and
+   * has been passing all along — on the string "no variants manifest
+   * installed — nothing to check", because `runReleaseVerify` defaulted
+   * `variantsFile` to '' and `tools/release-verify.mjs` (the CLI, and what CI
+   * runs on every push) passes no options at all. Presence in a report is not
+   * evidence that anything was read. The two assertions the old test could
+   * not make are the two below: the check must not be the null-manifest
+   * PASS, and the pack must be in the released set so `checkPackInputs` binds
+   * on its lines.
+   *
+   * Revert either half of the fix and exactly one of them goes red, which is
+   * what makes them two assertions instead of one.
+   */
+  it('reads content/variants.json BY DEFAULT and puts kind 7 in the released set', () => {
+    const { report, packs } = runReleaseVerify();
+    const check = report.checks.find((c) => c.id === 'variants.validate');
+    expect(check?.ok).toBe(true);
+    expect(check?.detail, 'variants.validate passed on NO manifest — the default never took')
+      .not.toContain('no variants manifest installed');
+
+    const vp = packs.find((p) => p.key === 'variants');
+    expect(vp, 'the released set carries no variants pack').toBeDefined();
+    expect(vp?.label).toBe('variants@1');
+    expect(vp?.digest).toMatch(/^[0-9a-f]{64}$/);
+    // Non-empty, said out loud: an empty manifest parses clean and would give
+    // a pack with zero input lines that still satisfies every check above.
+    expect(vp!.inputs.length, 'the variants pack shipped with no rows').toBeGreaterThan(0);
+    expect(vp!.inputs.length).toBe(2);
+    // The lines are what an operator reviews, so name them.
+    expect(vp!.inputs.some((l) => l.startsWith('shotgun-slug:1/'))).toBe(true);
+    expect(vp!.inputs.some((l) => l.startsWith('rocket-swift:3/'))).toBe(true);
+
+    // And `packs.inputs` measured it: the pack is in the list that check is
+    // handed, which is the whole reason it is pushed above the check list.
+    expect(report.checks.find((c) => c.id === 'packs.inputs')?.ok).toBe(true);
   });
 
   it('one changed byte in one level file moves the levels pack fingerprint', () => {

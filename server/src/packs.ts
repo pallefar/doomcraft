@@ -75,6 +75,7 @@ import {
   DEFAULT_EPISODES_FILE,
   DEFAULT_ITEMS_FILE,
   DEFAULT_QUESTS_FILE,
+  DEFAULT_VARIANTS_FILE,
   campaignDigest,
   checkCampaignRefs,
   checkFlagsOrder,
@@ -110,6 +111,8 @@ export interface PackInventoryOptions {
   episodesFallbackFile?: string;
   /** The version-1 fallback for items. Defaults to `content/items.json`. */
   itemsFallbackFile?: string;
+  /** The version-1 fallback for variants. Defaults to `content/variants.json`. */
+  variantsFallbackFile?: string;
   /** The version-1 fallback for quests. Defaults to `content/quests.json`. */
   questsFallbackFile?: string;
   log?: (line: string) => void;
@@ -127,6 +130,7 @@ export class PackInventory {
   private readonly levelsFallbackDir: string;
   private readonly episodesFallbackFile: string;
   private readonly itemsFallbackFile: string;
+  private readonly variantsFallbackFile: string;
   private readonly questsFallbackFile: string;
   private readonly log: (line: string) => void;
 
@@ -143,6 +147,7 @@ export class PackInventory {
     this.levelsFallbackDir = resolve(options.levelsFallbackDir ?? DEFAULT_LEVEL_DIR);
     this.episodesFallbackFile = resolve(options.episodesFallbackFile ?? DEFAULT_EPISODES_FILE);
     this.itemsFallbackFile = resolve(options.itemsFallbackFile ?? DEFAULT_ITEMS_FILE);
+    this.variantsFallbackFile = resolve(options.variantsFallbackFile ?? DEFAULT_VARIANTS_FILE);
     this.questsFallbackFile = resolve(options.questsFallbackFile ?? DEFAULT_QUESTS_FILE);
     this.log = options.log ?? ((line) => { process.stderr.write(`${line}\n`); });
   }
@@ -197,23 +202,48 @@ export class PackInventory {
   }
 
   /**
-   * No fallback file, deliberately. V2 ships the BINARY that understands
-   * variants and no content: `variantsVersions()` is empty until a pack is
-   * installed, which is exactly the "optional manifest" state the gate check
-   * is written for, and it is the state the deploy order requires — the
-   * variants-aware binary must be live BEFORE the first release names kind 7,
-   * or a host that predates it silently serves the previous release (Rule E).
+   * V4a: `content/variants.json` IS variants@1, exactly as `content/items.json`
+   * is items@1.
+   *
+   * THIS METHOD USED TO HAVE NO FALLBACK, AND THE REASON HAS EXPIRED. V2
+   * shipped the BINARY that understands kind 7 and no content, because the
+   * variants-aware binary had to be live BEFORE any release could name kind 7:
+   * a host that predated it cannot satisfy the pack, so it Rule-E-falls-back
+   * to the previous release on every room, silently. The deployed origin now
+   * reports `weapons@2` — that condition is satisfied — so the bundled content
+   * can ship and an unconfigured deploy (no DOOMCRAFT_PACKS, which is what
+   * Railway runs) serves real variants instead of an empty table.
+   *
+   * PACKSROOT WINS, AND THE ORDER IS NOT A STYLE CHOICE. It is copied from
+   * `itemsFileFor` above for one measured reason: with the fallback first, an
+   * installed `variants/1/variants.json` — the operator's own pack, minted by
+   * the Studio and walked through the release machine — would be SHADOWED by
+   * whatever this repo happens to bundle. Measured with the two branches
+   * swapped: a host with a one-row installed `variants@1` resolves this
+   * repo's TWO rows instead, under the operator's own label and under a green
+   * gate, because both are called version 1 and only the loser is the one
+   * anybody approved. The installed bytes are the ones with a release
+   * document behind them; the bundled file is the floor for a host that has
+   * none. `releases.test.ts` pins the order with counts that differ, so the
+   * assertion cannot pass under either branch order.
+   *
+   * Note that the two are NOT interchangeable even at the same version number:
+   * their digests differ, so `unsatisfied()` still refuses a release pinned to
+   * one when the host resolves the other, and `runGate` prints a digest
+   * mismatch rather than quietly serving the substitute.
    */
   variantsFileFor(version: number): string | null {
     if (this.packsRoot !== null) {
       const file = join(this.packsRoot, 'variants', String(version), 'variants.json');
       if (existsSync(file)) return file;
     }
+    if (version === 1 && existsSync(this.variantsFallbackFile)) return this.variantsFallbackFile;
     return null;
   }
 
   variantsVersions(): number[] {
     const out = new Set<number>();
+    if (existsSync(this.variantsFallbackFile)) out.add(1);
     if (this.packsRoot !== null) {
       const root = join(this.packsRoot, 'variants');
       if (existsSync(root)) {

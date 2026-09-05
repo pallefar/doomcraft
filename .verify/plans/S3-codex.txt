@@ -1,0 +1,391 @@
+# Codex verdict on the V4a plan (2026-09-05)
+#
+# The plan is .verify/plans/S3-v4a.txt — six numbered clauses put to it
+# BEFORE a line was written, after the same reviewer refused the unsplit V4
+# (nine of eleven clauses broken; see S2-codex.txt). Splitting the phase
+# moved the score to FOUR of six correct.
+#
+# The two breaks are both about PROOF, and both were reproduced here:
+#   E4 - the obvious acceptance test is vacuous. {"variants":[]} parses with
+#        ZERO errors, so "received == manifest" is 0 == 0 and "slots ==
+#        len + 1" is 1 == 0+1. Every assertion green, room serving nothing.
+#   E6 - tools/smoke-signal.mjs, which HANDOVER §4 calls the only check that
+#        can see a forgotten room factory, tests only `d[0] === 13`. A lone
+#        opcode byte passes it. It proves the message was SENT.
+#
+# ~7.5k lines of tool-call traces from its own probes are stripped.
+
+**E1 — CORRECT. Two entries are sufficient for the requested coverage.**
+
+A single variant has one base, so covering HITSCAN and PROJECTILE requires at least **two** entries. The hitscan entry can exercise both pellet and rate changes.
+
+I verified this candidate pair against the current parser:
+
+```json
+{
+  "variants": [
+    {
+      "id": "shotgun-slug",
+      "base": 1,
+      "name": "Slug Shotgun",
+      "over": {
+        "pellets": 1,
+        "damage": 62,
+        "spread": 0.012,
+        "spreadMax": 0.03,
+        "falloffEnd": 44,
+        "rpm": 42
+      }
+    },
+    {
+      "id": "rocket-swift",
+      "base": 3,
+      "name": "Swift Rocket",
+      "over": {
+        "projectileSpeed": 60,
+        "splashRadius": 3.5
+      }
+    }
+  ]
+}
+```
+
+| Entry | Concrete tradeoff | Measured budget |
+|---|---|---:|
+| Slug Shotgun | Better range and handling; lower sustained DPS | `1.019645942293001` |
+| Swift Rocket | Speed `46 → 60`; blast radius `4.4 → 3.5` | `0.980669466403162` |
+
+Both parse without errors, satisfy the payload band and avoid strict dominance. Their longest fingerprint input is **69 bytes**. The pair produces **2 wire rows and 3 arsenal slots**.
+
+Four entries can be worthwhile content, but two cover everything E1 names. Extra pistol and chaingun entries need their own gameplay justification.
+
+The magazine warning remains accurate for the shorter-magazine-only shotgun: `{magSize:4}` produces handling ratio **1.1666666666666667**, unchanged DPS/range, and a strict-dominance refusal. See the [scoring implementation](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:292).
+
+**E2 — CORRECT, including version 1 and packsRoot precedence.**
+
+**(a)** [Items resolves the installed file first](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:165), then uses bundled content for version 1. Its version listing deduplicates the number; it does not reconcile two different definitions.
+
+Copying that policy is appropriate. An installed `variants/1/variants.json` owns version 1 on that host. If it is present but invalid, parsing must fail; do not silently substitute bundled content.
+
+Release digests distinguish competing definitions. A release approved against the bundled six-shell definition cannot be satisfied by a different installed four-shell definition with a different digest.
+
+**(b)** The initial deployment prerequisite has been satisfied for the deployed host described in the plan. **Rule E remains necessary.** An older binary that cannot understand kind 7 still cannot satisfy such a release. Retire the “V2 deliberately ships no content” explanation; retain the compatibility warning and fallback behavior.
+
+**(c)** Yes, `unsatisfied()` changes. In my probe, making the matching version-1 manifest available changed:
+
+```text
+["variants@1"] → []
+```
+
+A mismatched declared digest must still return `["variants@1"]`. Releases without kind 7 remain satisfied.
+
+Several existing expectations must change:
+
+- [The unconfigured inventory test](/Users/karstenhaldan/youtube/doomcraft/server/src/releases.test.ts:107) gains `variants@1`.
+- [“has no variants until one is installed”](/Users/karstenhaldan/youtube/doomcraft/server/src/releases.test.ts:229) needs an explicitly absent fallback fixture to retain its original coverage.
+- [The pack-disappears-after-drafting test](/Users/karstenhaldan/youtube/doomcraft/server/src/releases.test.ts:241) currently removes only the installed directory. With a different bundled fallback, it should still fail, but through **digest mismatch**, rather than the asserted “not installed” string. If both definitions are identical, passing is correct: the declared content remains available.
+
+Keep separate tests for genuine absence, identical substitution and mismatched substitution.
+
+**E3 — CORRECT. The current counts confirm the proposal.**
+
+| Gate and configuration | Checks | Packs |
+|---|---:|---:|
+| Current offline tree | **17** | **7** |
+| Proposed offline tree | **17** | **8** |
+| Current ordinary service draft | **17** | **7** |
+| Service draft containing valid variants | **19** | **8** |
+
+I measured the service cases with the current gate and an in-memory inventory supplying valid variants. Its additional rows are `variants.validate` and `variants.dormanted`.
+
+[`packs.parse`](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:993) exists only in the service gate. It scans installed versions; the offline tree has no corresponding versioned inventory.
+
+The offline change needs default discovery, parsing, canonical inputs, SHA-256 digest and `variantsPack` emission **before `checkPackInputs`**. The service already discovers variants for new drafts and already validates the selected pack. No duplicate service validation block or item-reference check is needed in V4a.
+
+The identity/update inventory is:
+
+| Artifact | Required action |
+|---|---|
+| Offline pack-list assertion in [gate.test.ts](/Users/karstenhaldan/youtube/doomcraft/server/src/gate.test.ts:322) | Add `variants`; assert its digest. |
+| Inventory and absence tests described under E2 | Update their assumptions or isolate the fallback. |
+| Current status in [HANDOVER.md](/Users/karstenhaldan/youtube/doomcraft/HANDOVER.md:22) | Change emitted packs from 7 to 8 after implementation. |
+| Historical verdicts and recorded runs | Preserve their historical numbers. |
+| Stored `releases.json` | Existing releases do not acquire kind 7 automatically. Assemble and promote a new release where necessary. |
+| `release.jsonl` | Append normal transition records; preserve history. |
+| Build-pack versions, fingerprints and inputs | **No change:** V4a changes data content. |
+| `BUILTIN_CONTENT_HASH`, `BUILTIN_RELEASE`, `CONTENT_VERSION` | **No change:** the builtin set contains only three build packs. |
+| Protocol vectors, protocol fingerprint and base lockstep golden | **No change:** neither layout nor slot-0 behavior changes. |
+
+There is **no checked-in production `packSetHash` literal to update**. The two quoted decimal hashes occur in review documents, not runtime declarations.
+
+The current ordinal-1 seven-pack hash is still **2251357389**. Adding my candidate pair produces **1661453485**. Your eventual value depends on the final content, including names; **1491019016 is not a target to preserve**. See [hash construction](/Users/karstenhaldan/youtube/doomcraft/shared/src/packs.ts:151).
+
+Both gate paths should have regression coverage for valid content and invalid content. Their existing shared input-cap enforcement remains applicable.
+
+**E4 — WRONG/incomplete: the listed assertions can pass for an empty manifest.**
+
+The production-binary/WebSocket approach is sound. My earlier claim-callback objection does not invalidate it.
+
+However, your listed assertions compare the received rows with the manifest and compare slots with `manifest.length + 1`. They need an independent assertion that the shipped content exists.
+
+**Concrete failure scenario:** replace the shipped document with:
+
+```json
+{"variants":[]}
+```
+
+I measured:
+
+```text
+parser errors:                  []
+variants.validate.ok:           true
+Room.variantTable.length:       0
+Room.sim.arsenal.slotCount:     1
+received rows == manifest rows: true
+slotCount == variants.length+1: true
+```
+
+Thus the proposed equality assertions stay green while the room serves **0 variants**. This breaks E4’s stated nonempty-table requirement.
+
+Add an explicit nonempty assertion and the intended content coverage assertions. For the proposed minimum, verify two rows covering both firing kinds and actual pellet/rate changes. Compare IDs, bases and all sixteen effective wire fields in order. Display names are absent from this protocol and belong outside that comparison.
+
+Also identify which arsenal the test inspects. A WebSocket exposes the table and claim bytes, not `room.sim.arsenal`. Reconstructing a client arsenal proves its slot count. Retain the existing [real-Room server-arsenal assertion](/Users/karstenhaldan/youtube/doomcraft/server/src/releases.test.ts:901) to prove the server side.
+
+The remaining deployment gap is real: a locally booted binary can find checkout content while the deployed origin still runs an older image or selects another release. The [Dockerfile currently copies the entire content directory](/Users/karstenhaldan/youtube/doomcraft/Dockerfile:73), which supports the intended packaging.
+
+**The existing production smoke cannot detect missing content.** Its [predicate](/Users/karstenhaldan/youtube/doomcraft/tools/smoke-signal.mjs:155) only checks `d[0] === 13`. It accepts an empty table—and even a lone opcode byte. Extend it to decode and compare the expected nonempty table.
+
+A small attribution correction: the actual send occurs in [NetConnection’s HELLO handling](/Users/karstenhaldan/youtube/doomcraft/server/src/net.ts:692), using the room’s table.
+
+**E5 — CORRECT. A populated table with zero eligible claims is coherent.**
+
+The protocol separates available table rows from the player’s resolved claims. My two-row probe produced:
+
+```text
+table rows:    2
+arsenal slots: 3
+player claims: [0,0,0,0,0,0,0]
+```
+
+The client receiving that table has not been promised an equipped variant. An installed pack can truthfully describe available content while gameplay remains on slot 0. I found no variant-gameplay metric that V4a necessarily falsifies.
+
+Nothing in this phase needs ownership or acquisition to be validated. Parser acceptance, pack identity, discovery, release selection, wire values, order and zero claims are independently testable now. Player-facing balance and usefulness remain later validation work.
+
+Two entries are the smaller content slice. Removing another pipeline component would stop proving the stated disk-to-room path.
+
+**E6 — WRONG as a completion claim without stronger production evidence.**
+
+**Concrete failure scenario:** the new local binary passes E4, but deployment leaves the previous image running. Production continues sending its current empty opcode-13 table. The existing smoke prints:
+
+```text
+ok   a client that sets CAP_VARIANTS is told the room's variant table
+```
+
+The completion claim says real content reached production; the received count is **0 instead of 2**. Both the local acceptance and current production smoke remain green.
+
+“Every gate sees it” also needs release-selection precision. I reproduced an existing seven-pack draft still gating **green with 17 checks and no `variants.*` rows** after variants became available. A fresh draft contained eight packs and ran 19 checks. An existing satisfiable seven-pack live release continued selecting no variants. That is correct release pinning, not a reason to mutate historical releases.
+
+The [handover records production at revision 0](/Users/karstenhaldan/youtube/doomcraft/HANDOVER.md:23), so bundled discovery should suffice on that host once the new artifact is actually deployed. Verify that condition when closing the stage.
+
+A defensible closing claim is:
+
+> The repo ships the first variants manifest. The offline gate validates and emits it; the service gate validates the version selected by a draft. A newly created room on the deployed origin has been observed sending the expected nonempty table and seven zero claims to a capable client.
+
+That establishes V4a without claiming equip, browser display, local Worker support or fleet-wide rollout.
+
+## CLAUSES I JUDGE CORRECT
+
+- **E1** — One manifest of genuine sidegrades; two entries cover the requested branches.
+- **E2** — Bundled version-1 fallback with installed-file precedence and retained Rule E behavior.
+- **E3** — Default offline parsing and pack emission before input validation.
+- **E5** — A populated room table with all players remaining at slot 0.
+tokens used
+108,842
+**V4a is a coherent first phase. I judge E4’s listed assertions incomplete and E6’s completion claim too strong. E1, E2, E3 and E5 hold up.** Neither objection requires adding equip, ownership, crafting or display work.
+
+I read the current implementation and prior verdict, ran `runReleaseVerify()`, and exercised the parser, release service and real `Room` in memory. I made no repository edits. These were local measurements, not a new production verification.
+
+**E1 — CORRECT. Two entries are sufficient for the requested coverage.**
+
+A single variant has one base, so covering HITSCAN and PROJECTILE requires at least **two** entries. The hitscan entry can exercise both pellet and rate changes.
+
+I verified this candidate pair against the current parser:
+
+```json
+{
+  "variants": [
+    {
+      "id": "shotgun-slug",
+      "base": 1,
+      "name": "Slug Shotgun",
+      "over": {
+        "pellets": 1,
+        "damage": 62,
+        "spread": 0.012,
+        "spreadMax": 0.03,
+        "falloffEnd": 44,
+        "rpm": 42
+      }
+    },
+    {
+      "id": "rocket-swift",
+      "base": 3,
+      "name": "Swift Rocket",
+      "over": {
+        "projectileSpeed": 60,
+        "splashRadius": 3.5
+      }
+    }
+  ]
+}
+```
+
+| Entry | Concrete tradeoff | Measured budget |
+|---|---|---:|
+| Slug Shotgun | Better range and handling; lower sustained DPS | `1.019645942293001` |
+| Swift Rocket | Speed `46 → 60`; blast radius `4.4 → 3.5` | `0.980669466403162` |
+
+Both parse without errors, satisfy the payload band and avoid strict dominance. Their longest fingerprint input is **69 bytes**. The pair produces **2 wire rows and 3 arsenal slots**.
+
+Four entries can be worthwhile content, but two cover everything E1 names. Extra pistol and chaingun entries need their own gameplay justification.
+
+The magazine warning remains accurate for the shorter-magazine-only shotgun: `{magSize:4}` produces handling ratio **1.1666666666666667**, unchanged DPS/range, and a strict-dominance refusal. See the [scoring implementation](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:292).
+
+**E2 — CORRECT, including version 1 and packsRoot precedence.**
+
+**(a)** [Items resolves the installed file first](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:165), then uses bundled content for version 1. Its version listing deduplicates the number; it does not reconcile two different definitions.
+
+Copying that policy is appropriate. An installed `variants/1/variants.json` owns version 1 on that host. If it is present but invalid, parsing must fail; do not silently substitute bundled content.
+
+Release digests distinguish competing definitions. A release approved against the bundled six-shell definition cannot be satisfied by a different installed four-shell definition with a different digest.
+
+**(b)** The initial deployment prerequisite has been satisfied for the deployed host described in the plan. **Rule E remains necessary.** An older binary that cannot understand kind 7 still cannot satisfy such a release. Retire the “V2 deliberately ships no content” explanation; retain the compatibility warning and fallback behavior.
+
+**(c)** Yes, `unsatisfied()` changes. In my probe, making the matching version-1 manifest available changed:
+
+```text
+["variants@1"] → []
+```
+
+A mismatched declared digest must still return `["variants@1"]`. Releases without kind 7 remain satisfied.
+
+Several existing expectations must change:
+
+- [The unconfigured inventory test](/Users/karstenhaldan/youtube/doomcraft/server/src/releases.test.ts:107) gains `variants@1`.
+- [“has no variants until one is installed”](/Users/karstenhaldan/youtube/doomcraft/server/src/releases.test.ts:229) needs an explicitly absent fallback fixture to retain its original coverage.
+- [The pack-disappears-after-drafting test](/Users/karstenhaldan/youtube/doomcraft/server/src/releases.test.ts:241) currently removes only the installed directory. With a different bundled fallback, it should still fail, but through **digest mismatch**, rather than the asserted “not installed” string. If both definitions are identical, passing is correct: the declared content remains available.
+
+Keep separate tests for genuine absence, identical substitution and mismatched substitution.
+
+**E3 — CORRECT. The current counts confirm the proposal.**
+
+| Gate and configuration | Checks | Packs |
+|---|---:|---:|
+| Current offline tree | **17** | **7** |
+| Proposed offline tree | **17** | **8** |
+| Current ordinary service draft | **17** | **7** |
+| Service draft containing valid variants | **19** | **8** |
+
+I measured the service cases with the current gate and an in-memory inventory supplying valid variants. Its additional rows are `variants.validate` and `variants.dormanted`.
+
+[`packs.parse`](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:993) exists only in the service gate. It scans installed versions; the offline tree has no corresponding versioned inventory.
+
+The offline change needs default discovery, parsing, canonical inputs, SHA-256 digest and `variantsPack` emission **before `checkPackInputs`**. The service already discovers variants for new drafts and already validates the selected pack. No duplicate service validation block or item-reference check is needed in V4a.
+
+The identity/update inventory is:
+
+| Artifact | Required action |
+|---|---|
+| Offline pack-list assertion in [gate.test.ts](/Users/karstenhaldan/youtube/doomcraft/server/src/gate.test.ts:322) | Add `variants`; assert its digest. |
+| Inventory and absence tests described under E2 | Update their assumptions or isolate the fallback. |
+| Current status in [HANDOVER.md](/Users/karstenhaldan/youtube/doomcraft/HANDOVER.md:22) | Change emitted packs from 7 to 8 after implementation. |
+| Historical verdicts and recorded runs | Preserve their historical numbers. |
+| Stored `releases.json` | Existing releases do not acquire kind 7 automatically. Assemble and promote a new release where necessary. |
+| `release.jsonl` | Append normal transition records; preserve history. |
+| Build-pack versions, fingerprints and inputs | **No change:** V4a changes data content. |
+| `BUILTIN_CONTENT_HASH`, `BUILTIN_RELEASE`, `CONTENT_VERSION` | **No change:** the builtin set contains only three build packs. |
+| Protocol vectors, protocol fingerprint and base lockstep golden | **No change:** neither layout nor slot-0 behavior changes. |
+
+There is **no checked-in production `packSetHash` literal to update**. The two quoted decimal hashes occur in review documents, not runtime declarations.
+
+The current ordinal-1 seven-pack hash is still **2251357389**. Adding my candidate pair produces **1661453485**. Your eventual value depends on the final content, including names; **1491019016 is not a target to preserve**. See [hash construction](/Users/karstenhaldan/youtube/doomcraft/shared/src/packs.ts:151).
+
+Both gate paths should have regression coverage for valid content and invalid content. Their existing shared input-cap enforcement remains applicable.
+
+**E4 — WRONG/incomplete: the listed assertions can pass for an empty manifest.**
+
+The production-binary/WebSocket approach is sound. My earlier claim-callback objection does not invalidate it.
+
+However, your listed assertions compare the received rows with the manifest and compare slots with `manifest.length + 1`. They need an independent assertion that the shipped content exists.
+
+**Concrete failure scenario:** replace the shipped document with:
+
+```json
+{"variants":[]}
+```
+
+I measured:
+
+```text
+parser errors:                  []
+variants.validate.ok:           true
+Room.variantTable.length:       0
+Room.sim.arsenal.slotCount:     1
+received rows == manifest rows: true
+slotCount == variants.length+1: true
+```
+
+Thus the proposed equality assertions stay green while the room serves **0 variants**. This breaks E4’s stated nonempty-table requirement.
+
+Add an explicit nonempty assertion and the intended content coverage assertions. For the proposed minimum, verify two rows covering both firing kinds and actual pellet/rate changes. Compare IDs, bases and all sixteen effective wire fields in order. Display names are absent from this protocol and belong outside that comparison.
+
+Also identify which arsenal the test inspects. A WebSocket exposes the table and claim bytes, not `room.sim.arsenal`. Reconstructing a client arsenal proves its slot count. Retain the existing [real-Room server-arsenal assertion](/Users/karstenhaldan/youtube/doomcraft/server/src/releases.test.ts:901) to prove the server side.
+
+The remaining deployment gap is real: a locally booted binary can find checkout content while the deployed origin still runs an older image or selects another release. The [Dockerfile currently copies the entire content directory](/Users/karstenhaldan/youtube/doomcraft/Dockerfile:73), which supports the intended packaging.
+
+**The existing production smoke cannot detect missing content.** Its [predicate](/Users/karstenhaldan/youtube/doomcraft/tools/smoke-signal.mjs:155) only checks `d[0] === 13`. It accepts an empty table—and even a lone opcode byte. Extend it to decode and compare the expected nonempty table.
+
+A small attribution correction: the actual send occurs in [NetConnection’s HELLO handling](/Users/karstenhaldan/youtube/doomcraft/server/src/net.ts:692), using the room’s table.
+
+**E5 — CORRECT. A populated table with zero eligible claims is coherent.**
+
+The protocol separates available table rows from the player’s resolved claims. My two-row probe produced:
+
+```text
+table rows:    2
+arsenal slots: 3
+player claims: [0,0,0,0,0,0,0]
+```
+
+The client receiving that table has not been promised an equipped variant. An installed pack can truthfully describe available content while gameplay remains on slot 0. I found no variant-gameplay metric that V4a necessarily falsifies.
+
+Nothing in this phase needs ownership or acquisition to be validated. Parser acceptance, pack identity, discovery, release selection, wire values, order and zero claims are independently testable now. Player-facing balance and usefulness remain later validation work.
+
+Two entries are the smaller content slice. Removing another pipeline component would stop proving the stated disk-to-room path.
+
+**E6 — WRONG as a completion claim without stronger production evidence.**
+
+**Concrete failure scenario:** the new local binary passes E4, but deployment leaves the previous image running. Production continues sending its current empty opcode-13 table. The existing smoke prints:
+
+```text
+ok   a client that sets CAP_VARIANTS is told the room's variant table
+```
+
+The completion claim says real content reached production; the received count is **0 instead of 2**. Both the local acceptance and current production smoke remain green.
+
+“Every gate sees it” also needs release-selection precision. I reproduced an existing seven-pack draft still gating **green with 17 checks and no `variants.*` rows** after variants became available. A fresh draft contained eight packs and ran 19 checks. An existing satisfiable seven-pack live release continued selecting no variants. That is correct release pinning, not a reason to mutate historical releases.
+
+The [handover records production at revision 0](/Users/karstenhaldan/youtube/doomcraft/HANDOVER.md:23), so bundled discovery should suffice on that host once the new artifact is actually deployed. Verify that condition when closing the stage.
+
+A defensible closing claim is:
+
+> The repo ships the first variants manifest. The offline gate validates and emits it; the service gate validates the version selected by a draft. A newly created room on the deployed origin has been observed sending the expected nonempty table and seven zero claims to a capable client.
+
+That establishes V4a without claiming equip, browser display, local Worker support or fleet-wide rollout.
+
+## CLAUSES I JUDGE CORRECT
+
+- **E1** — One manifest of genuine sidegrades; two entries cover the requested branches.
+- **E2** — Bundled version-1 fallback with installed-file precedence and retained Rule E behavior.
+- **E3** — Default offline parsing and pack emission before input validation.
+- **E5** — A populated room table with all players remaining at slot 0.
