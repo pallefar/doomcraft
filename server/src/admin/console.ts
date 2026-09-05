@@ -846,6 +846,22 @@ export const ADMIN_CONSOLE_HTML: string = `<!doctype html>
             <div class="warn bad">Re-cutting the pack mid-period deletes nobody's progress or Scrap &mdash; but a REMOVED challenge stops accruing and paying at the next settlement, and a player mid-way gets nothing. Prefer re-cuts at the UTC day boundary.</div>
           </div>
         </div>
+
+        <div class="card">
+          <div class="card-head">9 &middot; run the sponsor surfaces</div>
+          <div class="card-body">
+            <ol>
+              <li>Three flags, all <code>defaultOn:false</code>, all flipped from the Flags tab: <code>sponsor_slots</code> (the menu slots, the mode-tile badge, the boot line, the intermission card), <code>sponsor_interstitial</code> (S10, between matches), <code>sponsor_rewarded</code> (S11, opt-in on the Quest intermission).</li>
+              <li>Nothing serves until a campaign is booked AND a creative is approved. With nothing booked, the menu slots fall back to the house card and the interstitial simply does not fire &mdash; there is no house interstitial, because interrupting a player to show our own card costs them and earns nothing.</li>
+              <li>The interstitial is rationed by the PLATFORM, over any campaign's own numbers: four per device per UTC day and 180s apart. Those counters are in memory and a restart forgives them.</li>
+              <li>The rewarded grant is NOT in memory &mdash; it is on the profile, so a deploy cannot hand a player a fresh four. Four a day, 180s apart, 40/30/20/10 Scrap, zero under 30 minutes of lifetime play, zero while players can shoot each other, Scrap and never XP.</li>
+              <li>A player who bought ads off still SEES the rewarded button and is paid instantly with no video. That is deliberate: if the purchase removed the reward it would leave them strictly worse off.</li>
+              <li>Read the numbers on the Delivery tab, not here. It reports daily aggregates and prints an em-dash with a reason for anything the log cannot honestly support.</li>
+            </ol>
+            <div class="warn">Every refusal is logged with its reason &mdash; a surface this build cannot serve, a device at its ceiling, a claim that arrived before the server's own clock allowed it. If a surface earns nothing, the log says why before you have to guess.</div>
+            <div class="warn bad">Flipping a sponsor flag makes ads visible to players immediately. Flag writes hit ONE process; production durability is the <code>DOOMCRAFT_FLAGS</code> env, which full-replaces the document at boot, so an admin flip is lost on the next restart unless the env carries it too.</div>
+          </div>
+        </div>
       </section>
     </main>
   </div>

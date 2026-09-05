@@ -230,6 +230,21 @@ describe('the warnings the screen is required to print', () => {
     expect(SCRIPT).toContain('are phase 3 and do not exist yet');
   });
 
+  /**
+   * The standing tutorial directive: an admin capability ships with the guide
+   * that explains it. These pin the two facts an operator most needs and is
+   * least likely to guess.
+   */
+  it('has a guide for the sponsor surfaces, with the durability distinction', () => {
+    // The guides are static MARKUP, not embedded script — assert against the
+    // page, or this passes for the wrong reason and pins nothing.
+    expect(ADMIN_CONSOLE_HTML).toContain('run the sponsor surfaces');
+    expect(ADMIN_CONSOLE_HTML, 'the operator is not told which cap survives a deploy')
+      .toContain('so a deploy cannot hand a player a fresh four');
+    expect(ADMIN_CONSOLE_HTML, 'the ad-free reward rule is not explained')
+      .toContain('still SEES the rewarded button');
+  });
+
   it('says the metrics are in-memory and per-process, so nobody reads them as history', () => {
     expect(SCRIPT).toContain('in-memory and per-process');
     expect(SCRIPT).toContain('No event is emitted');
