@@ -146,7 +146,7 @@ import {
 } from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
-import { JsonFileStore, MAX_SCRAP_BALANCE, applyEquip, createProfile, equipVerdict, grantDrops, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile, settleAdReward } from './persistence.js';
+import { JsonFileStore, MAX_SCRAP_BALANCE, applyEquip, createProfile, equipVerdict, grantDrops, grantRefusal, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile, settleAdReward } from './persistence.js';
 import { CRAFT_COPIES, applyCraft, craftVerdict } from './craft.js';
 import type { EquipSlot, PersistenceStore, StoredProfile } from './persistence.js';
 
@@ -3246,9 +3246,35 @@ async function handleApi(
       }
       const v = craftVerdict(p, source, target, defs, decl.version, reserved);
       if (!v.ok) { refusal = { status: v.status, error: v.error }; return; }
+      /*
+       * V4e — ASK THE GRANT BEFORE SPENDING, and never report a ref that was
+       * not delivered.
+       *
+       * `crafted` used to be `landed[0]?.ref ?? v.plan.targetRef`: a grant that
+       * wrote NOTHING answered 200 naming the item the player did not get,
+       * after three copies and the fee had already gone. That was unreachable
+       * while every craft target was a cosmetic `grantDrops` accepts — V4e is
+       * the change that makes a refused mint reachable, so the fallback goes
+       * and the question is asked FIRST, through the same predicate the grant
+       * loop itself uses (§0 rule 29), while nothing has been consumed yet.
+       */
+      const blocked = grantRefusal(v.plan.targetRef, 'craft');
+      if (blocked !== null) {
+        refusal = { status: 400, error: `this craft cannot be delivered: ${blocked}` };
+        return;
+      }
       const outcome = applyCraft(p, v.plan);
       const landed = grantDrops(p, [v.plan.targetRef], 'craft', sourceId, now);
-      crafted = landed[0]?.ref ?? v.plan.targetRef;
+      const got = landed[0];
+      /*
+       * Unreachable by construction and loud anyway: the only refusal left in
+       * the loop is `MAX_OWNED_ITEMS`, and `applyCraft` has just freed
+       * CRAFT_COPIES slots, so a profile that could craft always has room.
+       * `craft.test.ts` ratchets `MAX_OWNED_ITEMS > CRAFT_COPIES` so the day
+       * that stops being true somebody is told (§0 rule 32).
+       */
+      if (got === undefined) throw new Error(`craft granted nothing for ${v.plan.targetRef}`);
+      crafted = got.ref;
       await journal.append([{
         id: newLedgerId(now), ms: now, kind: 'spend', sourceId,
         playerId: key, currency: 'scrap',
@@ -3865,7 +3891,19 @@ async function handleApi(
     if (!isValidDeviceId(profileKey)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
     const profile = await store.load(profileKey);
     if (profile === null) { sendJson(res, 404, { error: 'no such profile' }, cors); return true; }
-    sendJson(res, 200, { profile: publicProfile(profile) }, cors);
+    /*
+     * V4e — the escrow's reservations ride along.
+     *
+     * `craftVerdict` counts FREE copies (`owned - reserved`), and the Loadout
+     * tab had no way to know what the escrow holds, so it offered a craft the
+     * server then refused with 400 "1 copy is on a trade table". Reproduced on
+     * the unchanged tree. The tab reads what the rule reads, off the same
+     * source of truth (`TradeService.reservedRefs`) rather than a second
+     * implementation of it.
+     */
+    const reservedForProfile: Record<string, number> = {};
+    for (const [ref, n] of trades.reservedRefs(profileKey)) reservedForProfile[ref] = n;
+    sendJson(res, 200, { profile: publicProfile(profile), reserved: reservedForProfile }, cors);
     return true;
   }
 

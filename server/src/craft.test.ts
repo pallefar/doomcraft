@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { CRAFT_COPIES, CRAFT_FEES, applyCraft, craftVerdict } from './craft.js';
-import { createProfile, grantDrops } from './persistence.js';
+import { MAX_OWNED_ITEMS, createProfile, grantDrops } from './persistence.js';
 import { ItemRarity, parseItemsManifest, type ItemDef } from '@doomcraft/shared/items';
 
 const MANIFEST = parseItemsManifest(JSON.stringify({
@@ -128,29 +128,90 @@ describe('applyCraft', () => {
   });
 });
 
-describe('V4b: no craft mints a weapon variant', () => {
+describe('V4e: the ENTRY recipe — three COMMON cosmetics into one UNCOMMON variant', () => {
   /*
-   * CONFIRMING the existing rule rather than adding a second one: variants are
-   * craft-only per docs/VARIANTS.md §7.2, and V4b ships NO recipe — V4e does.
-   * `CRAFTABLE_KINDS` is where that is decided and it is a whitelist, so the
-   * new kind is excluded by construction. This is the test that says the
-   * whitelist is doing that job, so the day someone widens it they are told.
+   * `docs/VARIANTS.md` §7.2 makes the craft bench the ONLY acquisition route
+   * for a weapon variant, which was circular while no craft could target one:
+   * a variant craft needed three variants and there were none. V4e bends the
+   * kind rule in exactly one direction, and every test here picks the input
+   * where the RIGHT rule and a plausible WRONG one disagree (§0 rule 38) —
+   * which mostly means NOT using the bundled uncommon tokens, because the
+   * rarity rule refuses those whatever the kind rule says.
    */
-  const SLUG = 'items@1:weapon_variant-shotgun-slug';
+  const SLUG = 'items@1:weapon_variant-shotgun-slug';   // uncommon in DEFS
+  const SWIFT = 'weapon_variant-rocket-swift';          // RARE in DEFS
 
-  it('refuses a weapon_variant as crafting MATERIAL and as a crafting TARGET', () => {
+  it('accepts three common skins + the uncommon fee for an uncommon variant', () => {
+    const v = craftVerdict(owner(), A, 'weapon_variant-shotgun-slug', DEFS, 1, NONE);
+    expect(v.ok).toBe(true);
+    if (v.ok) {
+      expect(v.plan.targetRef).toBe('items@1:weapon_variant-shotgun-slug');
+      expect(v.plan.fee).toBe(CRAFT_FEES[ItemRarity.UNCOMMON]);
+    }
+  });
+
+  it('refuses a variant as MATERIAL — and the input is a RARE target, not the bundled one', () => {
+    /*
+     * DISCRIMINATION. The obvious input is "three Slug copies, target Swift"
+     * with both uncommon — and that is refused by `targetDef.rarity ===
+     * sourceDef.rarity + 1` whether or not variants are legal material, so it
+     * proves nothing: false either way. The DEFS fixture carries a RARE Swift
+     * for exactly this, so the rarity rule is satisfied and the SOURCE-kind
+     * rule is the only thing left standing. Measured with WEAPON_VARIANT added
+     * to CRAFTABLE_KINDS (the one-set version of V4e): ok true.
+     */
     const p = createProfile('device-craft-variant');
     for (let i = 0; i < 3; i++) grantDrops(p, [SLUG], 'trade', `seed-${i}`, 100 + i);
     p.economy.scrap = 5000;
     expect(p.inventory.items.length, 'the fixture never got the copies').toBe(3);
+    expect(DEFS.get('weapon_variant-shotgun-slug')?.rarity).toBe(ItemRarity.UNCOMMON);
+    expect(DEFS.get(SWIFT)?.rarity, 'the separating input needs a RARE target').toBe(ItemRarity.RARE);
 
-    const asSource = craftVerdict(p, SLUG, 'weapon_variant-rocket-swift', DEFS, 1, NONE);
+    const asSource = craftVerdict(p, SLUG, SWIFT, DEFS, 1, NONE);
     expect(asSource.ok).toBe(false);
     if (!asSource.ok) expect(asSource.error).toContain('cannot be crafted');
+  });
 
-    // And a skin cannot be crafted INTO one: the kinds must match.
-    const asTarget = craftVerdict(owner(), A, 'weapon_variant-shotgun-slug', DEFS, 1, NONE);
-    expect(asTarget.ok).toBe(false);
-    if (!asTarget.ok) expect(asTarget.error).toContain('crafts into a skin');
+  it('refuses an UNCOMMON cosmetic into a variant — the entry recipe is COMMON-only', () => {
+    /*
+     * DISCRIMINATION, both rarities pinned. With only the source pinned the
+     * bundled uncommon tokens make this false/false again: an uncommon skin
+     * into an uncommon variant is refused by rarity+1 regardless. The target
+     * must be the RARE Swift, so rarity+1 PASSES and the only rule that can
+     * refuse is the explicit COMMON restriction on the entry recipe. Drop that
+     * restriction and this returns ok: true, i.e. a rare variant crafted in a
+     * phase whose scope says uncommon only.
+     */
+    const p = createProfile('device-craft-uncommon-source');
+    for (let i = 0; i < 3; i++) grantDrops(p, ['items@1:skin-b'], 'drop', `seed-${i}`, 100 + i);
+    p.economy.scrap = 5000;
+    expect(DEFS.get('skin-b')?.rarity, 'the source must be UNCOMMON').toBe(ItemRarity.UNCOMMON);
+    expect(DEFS.get(SWIFT)?.rarity, 'the target must be RARE or rarity+1 does the refusing').toBe(ItemRarity.RARE);
+
+    const v = craftVerdict(p, 'items@1:skin-b', SWIFT, DEFS, 1, NONE);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain('COMMON cosmetics');
+  });
+
+  it('still refuses a variant target from a title, and a title target from anything', () => {
+    // The source whitelist and the target whitelist are separate sets; neither
+    // one leaks the other's kinds.
+    const titled = createProfile('device-craft-title-source');
+    for (let i = 0; i < 3; i++) grantDrops(titled, ['items@1:title-a'], 'prize', `s${i}`, 100 + i);
+    titled.economy.scrap = 5000;
+    expect(craftVerdict(titled, 'items@1:title-a', 'weapon_variant-shotgun-slug', DEFS, 1, NONE).ok).toBe(false);
+    // And a trail is still not a legal skin target: the bend is variant-only.
+    expect(craftVerdict(owner(), A, 'trail-b', DEFS, 1, NONE).ok).toBe(false);
+  });
+
+  it('RATCHET: the craft route\'s "granted nothing" branch stays unreachable', () => {
+    /*
+     * §0 rule 32. The route throws if `grantDrops` lands nothing after the
+     * copies are consumed, and that branch has no red proof because it cannot
+     * happen: `applyCraft` frees CRAFT_COPIES slots first, so a profile that
+     * could craft at all has room for the output. This fires the day the two
+     * constants move close enough to make it live.
+     */
+    expect(MAX_OWNED_ITEMS).toBeGreaterThan(CRAFT_COPIES);
   });
 });

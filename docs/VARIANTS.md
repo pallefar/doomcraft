@@ -274,12 +274,33 @@ being silently wrong.
   unread — but a new decoder must accept 8-byte messages and RESET the reused
   event's slot, or it retains the previous kill's. Shot identity must PROPAGATE
   from the firing path, not be looked up at kill time.
-- **V4e — acquisition.** §7.2 says craft-only, uncommon floor. As written that
-  is unreachable: initial supply 0, drops supply none, trading conserves, and
-  every craft needs three variants, so supply stays 0 forever. It needs a
-  distinct ENTRY recipe (e.g. three common cosmetic duplicates + a Scrap fee ->
-  a chosen uncommon variant), which extends §7.2 rather than contradicting it —
-  acquisition is still at the bench and the floor is still uncommon.
+- **V4e — acquisition. SHIPPED.** §7.2 says craft-only, uncommon floor. As
+  written that was unreachable: initial supply 0, drops supply none, trading
+  conserves, and every craft needed three variants, so supply stayed 0 forever.
+  The ENTRY recipe closes it — three duplicates of one COMMON cosmetic plus the
+  50-Scrap uncommon fee become one chosen UNCOMMON weapon-variant token — and it
+  extends §7.2 rather than contradicting it: acquisition is still at the bench
+  and the floor is still uncommon. What it took:
+  - **Two kind sets, not one.** `CRAFTABLE_KINDS` is checked against the
+    SOURCE, so adding `WEAPON_VARIANT` to it would have made variants craft
+    into each other. `CRAFT_TARGET_KINDS` is the output side; the kind rule
+    bends one way and only for a COMMON source.
+  - **The COMMON restriction is explicit**, not a consequence of the rarity+1
+    rule. Without it an UNCOMMON cosmetic reaches a RARE variant the day one
+    exists — the ladder V4e puts out of scope.
+  - **One mint door.** `VARIANT_MINT_SOURCES = {'craft'}` in `persistence.ts`;
+    'drop', 'challenge' and 'prize' still mint none, and it is an allow-list so
+    a sixth call site inherits the refusal.
+  - **Two live bugs fixed on the way.** `craftTargetsFor` took the RAW copy
+    count and no Scrap balance, so the tab offered an enabled Craft button
+    against a server that answered 400 (`GET /api/profile` now carries the
+    escrow's `reserved` map for it); and the craft route reported
+    `landed[0]?.ref ?? plan.targetRef`, i.e. the ref it had NOT delivered, when
+    the grant wrote nothing. The route now asks `grantRefusal` before it spends
+    anything. `server/src/craftAgreement.test.ts` runs both real
+    implementations and asserts SET EQUALITY, not a subset.
+  - Still out of scope: floor pickups (§3's `EF_SPAWN`) and any rarity above
+    uncommon.
 
 Each sub-phase goes to the review as its own numbered clauses before it is
 built. V4a's are in `.verify/plans/S3-v4a.txt`.

@@ -15,6 +15,11 @@
  *  - Source and target share a KIND, and only the tradable kinds craft
  *    (skins, emblems, trails). Titles and trophies are proof of achievement;
  *    crafting one would launder it exactly as a trade would.
+ *  - V4e: the kind rule bends in exactly ONE direction. Three COMMON cosmetics
+ *    plus the uncommon fee become one UNCOMMON weapon-variant token — the
+ *    entry recipe, and the only way variant supply is ever greater than zero
+ *    (docs/VARIANTS.md §7.2). A variant is never crafting MATERIAL, so the
+ *    ladder has one rung and V4e does not add a second.
  *  - Copies on a live trade's table are NOT consumable — the escrow already
  *    owns them (`TradeService.reservedRefs`), and a copy must never be in
  *    two stories at once.
@@ -49,10 +54,47 @@ export const CRAFT_FEES: Readonly<Record<number, number>> = Object.freeze({
   [ItemRarity.RELIC]: 1000,
 });
 
-/** The kinds that craft — exactly the kinds that trade. */
+/**
+ * The kinds that may be crafting MATERIAL — exactly the kinds that trade.
+ *
+ * THIS SET IS CHECKED AGAINST THE SOURCE AND NOTHING ELSE. V4e adds an entry
+ * recipe whose OUTPUT is a weapon variant, and the tempting one-line version of
+ * that change — adding `ItemKind.WEAPON_VARIANT` here — would also have made
+ * variants legal material, i.e. variant -> variant crafting, which is out of
+ * scope for V4e. The two directions therefore have two sets.
+ */
 export const CRAFTABLE_KINDS: ReadonlySet<ItemKind> = new Set([
   ItemKind.SKIN, ItemKind.EMBLEM, ItemKind.TRAIL,
 ]);
+
+/**
+ * V4e — the kinds a craft may PRODUCE. Titles and trophies stay out (crafting
+ * proof-of-achievement launders it exactly as a trade would); weapon variants
+ * come in, because the craft bench is the ONLY acquisition route
+ * `docs/VARIANTS.md` §7.2 gives them and without this V4e the rule is circular:
+ * a variant craft would need three variants and there are none.
+ *
+ * A variant is a legal TARGET and never a legal SOURCE, so no craft can climb
+ * the variant ladder — which matters because there is no ladder to climb: both
+ * bundled tokens are uncommon and rarities above uncommon are out of scope.
+ */
+export const CRAFT_TARGET_KINDS: ReadonlySet<ItemKind> = new Set([
+  ItemKind.SKIN, ItemKind.EMBLEM, ItemKind.TRAIL, ItemKind.WEAPON_VARIANT,
+]);
+
+/**
+ * The V4e ENTRY RECIPE, as one predicate both sides of the craft rule read:
+ * three duplicates of one COMMON cosmetic become one UNCOMMON weapon-variant
+ * token. The COMMON restriction is EXPLICIT and not inherited from the
+ * rarity+1 rule: with the source merely "a cosmetic", an UNCOMMON skin would
+ * craft into a RARE variant the moment a rare token exists, which is the
+ * rarity ladder clause 10 puts out of scope.
+ */
+export function isEntryCraft(sourceDef: ItemDef, targetDef: ItemDef): boolean {
+  return targetDef.kind === ItemKind.WEAPON_VARIANT
+    && CRAFTABLE_KINDS.has(sourceDef.kind)
+    && sourceDef.rarity === ItemRarity.COMMON;
+}
 
 export interface CraftPlan {
   readonly sourceRef: string;
@@ -103,8 +145,17 @@ export function craftVerdict(
 
   const targetDef = defs.get(targetLocalId);
   if (targetDef === undefined) return refuse(400, 'the live items pack does not define that target');
+  if (!CRAFT_TARGET_KINDS.has(targetDef.kind)) {
+    return refuse(400, `a ${ITEM_KIND_NAMES[targetDef.kind] ?? 'item'} cannot be crafted — it is proof, not material`);
+  }
   if (targetDef.kind !== sourceDef.kind) {
-    return refuse(400, `a ${ITEM_KIND_NAMES[sourceDef.kind]} crafts into a ${ITEM_KIND_NAMES[sourceDef.kind]}, not a ${ITEM_KIND_NAMES[targetDef.kind]}`);
+    // The ONE direction the kind rule bends: the V4e entry recipe.
+    if (targetDef.kind !== ItemKind.WEAPON_VARIANT) {
+      return refuse(400, `a ${ITEM_KIND_NAMES[sourceDef.kind]} crafts into a ${ITEM_KIND_NAMES[sourceDef.kind]}, not a ${ITEM_KIND_NAMES[targetDef.kind]}`);
+    }
+    if (!isEntryCraft(sourceDef, targetDef)) {
+      return refuse(400, `a weapon variant is crafted from ${CRAFT_COPIES} COMMON cosmetics — ${sourceDef.name} is ${ITEM_RARITY_NAMES[sourceDef.rarity] ?? 'not common'}`);
+    }
   }
   if (targetDef.rarity !== sourceDef.rarity + 1) {
     return refuse(400, `the target must be exactly one rarity up (${ITEM_RARITY_NAMES[sourceDef.rarity + 1]})`);

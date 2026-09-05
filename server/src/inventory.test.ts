@@ -23,6 +23,7 @@ import {
   createProfile,
   equipVerdict,
   grantDrops,
+  grantRefusal,
   migrateProfile,
   serialiseProfile,
 } from './persistence.js';
@@ -532,11 +533,50 @@ describe('grantDrops is where "no variant supply" is a fact rather than an argum
     return p.inventory.items.map((i) => i.ref);
   };
 
-  it('refuses a weapon variant from EVERY minting source, including one nobody has written yet', () => {
-    // The four live mint sources, plus two that do not exist: the default has
-    // to be the SAFE side or a sixth call site inherits the hole.
-    for (const source of ['drop', 'challenge', 'prize', 'craft', 'grant', 'sponsor', '']) {
+  it('refuses a weapon variant from EVERY minting source but the craft bench', () => {
+    /*
+     * V4e — 'craft' MOVED to the accepting test below; every other source
+     * still mints zero.
+     *
+     * WHY 'sponsor' AND '' ARE IN THIS LIST AND WHY THEY ARE THE POINT
+     * (§0 rule 38). Reverting V4e's craft exemption leaves 'drop', 'challenge'
+     * and 'prize' minting 0 either way, so those three discriminate NOTHING
+     * about how the rule is written — they only catch the guard being deleted
+     * outright. A plausible wrong V4e is a DENY-list naming exactly the three
+     * sources that exist today; it passes all three of them and mints a
+     * variant from a fourth. 'sponsor' and '' are the inputs where the
+     * deny-list and the allow-list DISAGREE: deny-list 1, allow-list 0.
+     */
+    for (const source of ['drop', 'challenge', 'prize', 'grant', 'sponsor', '']) {
       expect(inventoryAfter(source), `source "${source}" minted a variant`).toEqual([SKIN]);
+    }
+  });
+
+  it('V4e: the craft bench MINTS one — the single door §7.2 leaves open', () => {
+    /*
+     * The other half of the same rule, and it has to be asserted positively:
+     * with the door shut, `docs/VARIANTS.md` §7.2 is circular — a variant
+     * craft needs three variants and there are none, so supply is zero
+     * forever. This is the assertion that says the door is open, and it is
+     * the one that fails if somebody "tidies" `VARIANT_MINT_SOURCES` away.
+     */
+    expect(inventoryAfter('craft')).toEqual([SKIN, VARIANT]);
+  });
+
+  it('grantRefusal is the SAME predicate the loop runs, so a pre-check cannot drift', () => {
+    /*
+     * §0 rule 29: the craft route asks BEFORE it consumes three copies, and
+     * `grantDrops` decides afterwards. Two implementations of "would this
+     * land?" would drift, so there is one and this asserts they agree over
+     * every (ref, source) pair either side can see.
+     */
+    for (const source of ['drop', 'challenge', 'prize', 'craft', 'grant', 'sponsor', 'trade', '']) {
+      for (const ref of [SKIN, VARIANT, 'not-a-ref', 'items@0:skin-rust-marine']) {
+        const p = createProfile('device-refusal-agreement', 1_000);
+        grantDrops(p, [ref], source, 'src', 2_000);
+        const landed = p.inventory.items.length === 1;
+        expect(grantRefusal(ref, source) === null, `${source} / ${ref}`).toBe(landed);
+      }
     }
   });
 

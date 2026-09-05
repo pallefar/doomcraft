@@ -865,6 +865,37 @@ function lastMatchOf(v: unknown): LastMatch | null {
 const TRANSFER_SOURCES: ReadonlySet<string> = new Set(['trade']);
 
 /**
+ * V4e — the grant sources allowed to MINT a weapon variant. Also an ALLOW-list,
+ * and for the same reason: `docs/VARIANTS.md` §7.2 makes the craft bench the
+ * ONLY acquisition route, so 'drop', 'challenge', 'prize' and anything written
+ * next year still mint none. V4b closed every door here; this opens exactly
+ * one, by name.
+ */
+const VARIANT_MINT_SOURCES: ReadonlySet<string> = new Set(['craft']);
+
+/**
+ * Why `grantDrops` would REFUSE this ref from this source, or null when it will
+ * write it.
+ *
+ * `grantDrops`' own loop calls this, so a caller that asks BEFORE spending
+ * (the craft route, which must not consume three copies and a fee for a token
+ * the grant then drops) and the loop that actually decides cannot drift — §0
+ * rule 29: two doors onto the same data agree by construction only when one of
+ * them runs the other's list.
+ *
+ * CAPACITY is deliberately not here: `MAX_OWNED_ITEMS` depends on how many refs
+ * the same call has already pushed, so it is the loop's business alone.
+ */
+export function grantRefusal(ref: string, source: string): string | null {
+  if (parseItemRef(ref) === null) return `"${ref}" is not an item ref`;
+  const minting = !TRANSFER_SOURCES.has(source);
+  if (minting && refIsWeaponVariant(ref) && !VARIANT_MINT_SOURCES.has(source)) {
+    return `a weapon variant cannot be minted by '${source}' — the craft bench is the only route`;
+  }
+  return null;
+}
+
+/**
  * Append match drops to the inventory, inside the SAME store.update callback
  * that moved the balance — the idempotency check that guards the payout
  * guards these too, so a replayed round grants nothing twice. Deliberately
@@ -892,6 +923,14 @@ const TRANSFER_SOURCES: ReadonlySet<string> = new Set(['trade']);
  * skip, `CRAFTABLE_KINDS`, `quests.refs`) all stay: they refuse EARLIER and
  * with a better message. This is the backstop that makes them redundant rather
  * than load-bearing — three separate checks drift, one invariant does not.
+ *
+ * V4e — ONE DOOR OPENS. `docs/VARIANTS.md` §7.2 makes the craft bench the sole
+ * acquisition route, and V4b's blanket mint refusal made that rule circular: a
+ * variant craft needed three variants and there were none. `VARIANT_MINT_SOURCES`
+ * names 'craft' and nothing else, so 'drop', 'challenge' and 'prize' still mint
+ * zero, and — because it is an allow-list rather than a deny-list of the three
+ * sources that exist today — a sixth call site added next year still inherits
+ * the refusal.
  */
 export function grantDrops(
   profile: StoredProfile,
@@ -900,12 +939,10 @@ export function grantDrops(
   sourceId: string,
   nowMs = Date.now(),
 ): OwnedItem[] {
-  const minting = !TRANSFER_SOURCES.has(source);
   const landed: OwnedItem[] = [];
   for (const ref of refs) {
     if (profile.inventory.items.length >= MAX_OWNED_ITEMS) break;
-    if (parseItemRef(ref) === null) continue;
-    if (minting && refIsWeaponVariant(ref)) continue;
+    if (grantRefusal(ref, source) !== null) continue;
     const item: OwnedItem = { ref, ms: nowMs, source: source.slice(0, 16), sourceId: sourceId.slice(0, 128) };
     profile.inventory.items.push(item);
     landed.push(item);

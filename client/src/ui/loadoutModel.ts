@@ -65,6 +65,12 @@ export interface LoadoutInputs {
   readonly scrap: number;
   readonly lifetimeScrap: number;
   readonly pack: WireItemsPack | null;
+  /**
+   * V4e — what the trade escrow holds for this player, ref -> copies, straight
+   * off `GET /api/profile`'s `reserved`. `craftVerdict` counts FREE copies, so
+   * a tab that counted RAW copies offered crafts the server refused with 400.
+   */
+  readonly reserved: Readonly<Record<string, number>>;
   /** `economySurfacesOn(product, probe)` — decided by the caller, once. */
   readonly scrapVisible: boolean;
   /** The ref a POST /api/equip is in flight for, or ''. Disables actions. */
@@ -232,19 +238,42 @@ export const CRAFT_FEES_BY_RARITY: Readonly<Record<number, number>> = Object.fre
   [ItemRarity.RELIC]: 1000,
 });
 const CRAFTABLE_KINDS: ReadonlySet<ItemKind> = new Set([ItemKind.SKIN, ItemKind.EMBLEM, ItemKind.TRAIL]);
+/**
+ * V4e — `CRAFT_TARGET_KINDS`, restated. Two sets on the server for the reason
+ * spelled out there: `CRAFTABLE_KINDS` is a SOURCE check, so a weapon variant
+ * is a legal craft OUTPUT and never legal material.
+ */
+const CRAFT_TARGET_KINDS: ReadonlySet<ItemKind> = new Set([
+  ItemKind.SKIN, ItemKind.EMBLEM, ItemKind.TRAIL, ItemKind.WEAPON_VARIANT,
+]);
 
+/**
+ * The offered targets for one row. `free` is copies MINUS what the escrow
+ * holds and `scrap` is the live balance, because those are the two things
+ * `craftVerdict` checks that this function used to ignore — it took the raw
+ * copy count and no balance at all, so with one copy on a trade table (or 49
+ * Scrap) the tab offered an enabled button against a server that answered 400.
+ * `craftAgreement.test.ts` asserts the two sets are EQUAL, not that one is a
+ * subset: a subset assertion is vacuously true when the tab offers nothing,
+ * which is the other half of the same bug.
+ */
 function craftTargetsFor(
   def: ItemDef | undefined,
   state: ItemState,
-  copies: number,
+  free: number,
   pack: WireItemsPack | null,
+  scrap: number,
 ): CraftTarget[] {
-  if (def === undefined || state !== 'active' || copies < CRAFT_COPIES) return [];
+  if (def === undefined || state !== 'active' || free < CRAFT_COPIES) return [];
   if (!CRAFTABLE_KINDS.has(def.kind) || def.rarity >= ItemRarity.RELIC) return [];
   const fee = CRAFT_FEES_BY_RARITY[def.rarity + 1] ?? 0;
-  if (fee <= 0) return [];
+  if (fee <= 0 || scrap < fee) return [];
   return (pack?.items ?? [])
-    .filter((t) => t.kind === def.kind && t.rarity === def.rarity + 1)
+    .filter((t) => CRAFT_TARGET_KINDS.has(t.kind)
+      && t.rarity === def.rarity + 1
+      && (t.kind === def.kind
+        // The V4e entry recipe, and only it: a COMMON cosmetic into a variant.
+        || (t.kind === ItemKind.WEAPON_VARIANT && def.rarity === ItemRarity.COMMON)))
     .map((t) => ({
       localId: t.id,
       name: t.name,
@@ -313,7 +342,8 @@ export function buildLoadoutView(inputs: LoadoutInputs): LoadoutView {
       busy: inputs.busyRef === ref,
       swatch: swatchCss(def?.tint ?? null),
       note,
-      craftTargets: inputs.busyRef !== '' ? [] : craftTargetsFor(def, state, copies, inputs.pack),
+      craftTargets: inputs.busyRef !== '' ? []
+        : craftTargetsFor(def, state, copies - (inputs.reserved[ref] ?? 0), inputs.pack, inputs.scrap),
     };
     const bucket = rowsByKind.get(kind) ?? [];
     bucket.push(row);

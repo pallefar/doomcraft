@@ -8,7 +8,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,9 +21,13 @@ const serverEntry = join(here, 'index.ts');
 const ALFA = 'afafafafafafafafafafafaf';
 const BRAVO = 'bfbfbfbfbfbfbfbfbfbfbfbf';
 const CHARLIE = 'cfcfcfcfcfcfcfcfcfcfcfcf';
+const DELTA = 'dfdfdfdfdfdfdfdfdfdfdfdf';
+const ECHO = 'efefefefefefefefefefefef';
 const RUST = 'items@1:skin-rust-marine';     // common skin in the live pack
 const HAZARD = 'skin-void-hazard';           // uncommon skin — the target
 const EMBER = 'items@1:skin-ember-core';
+const SLUG_ID = 'weapon_variant-shotgun-slug';   // uncommon token in the live pack
+const SLUG = `items@1:${SLUG_ID}`;
 
 async function freePort(): Promise<number> {
   return new Promise((done, fail) => {
@@ -87,22 +91,52 @@ async function boot(env: Record<string, string>, seedFn: (dataRoot: string) => v
 
 let on: Boot;
 let off: Boot;
+let unmintable: Boot;
+
+const FLAGS_ON = '{"rules":{"economy_items":{"force":true},"economy_trading":{"force":true}}}';
+
+/**
+ * A packs root whose newest items version is 100000 — installable today
+ * (`PackInventory.itemsVersions` accepts any integer >= 1) and OUTSIDE what
+ * `parseItemRef` will read back (`items@(\d{1,5})`, capped at 0xffff). Every
+ * ref the live pack can mint is therefore unparseable, which is the ONE
+ * product-reachable way to make `grantDrops` land nothing after a green craft
+ * verdict. It is what obligation (a2) needs and it is also a real defect in
+ * its own right — see the report.
+ */
+function unmintablePacks(): string {
+  const root = mkdtempSync(join(tmpdir(), 'dc-craft-packs-'));
+  const dir = join(root, 'items', '100000');
+  mkdirSync(dir, { recursive: true });
+  copyFileSync(join(here, '..', '..', 'content', 'items.json'), join(dir, 'items.json'));
+  return root;
+}
 
 beforeAll(async () => {
-  [on, off] = await Promise.all([
+  [on, off, unmintable] = await Promise.all([
     boot(
-      { DOOMCRAFT_FLAGS: '{"rules":{"economy_items":{"force":true},"economy_trading":{"force":true}}}' },
+      { DOOMCRAFT_FLAGS: FLAGS_ON },
       (dataRoot) => {
         seed(dataRoot, ALFA, [RUST, RUST, RUST, RUST], 500);
         seed(dataRoot, BRAVO, [RUST, RUST, RUST, RUST], 500);
         seed(dataRoot, CHARLIE, [EMBER], 500);
+        // V4e (a): exactly three free copies and exactly the uncommon fee.
+        seed(dataRoot, DELTA, [RUST, RUST, RUST], 50);
       },
     ),
     boot({}, (dataRoot) => { seed(dataRoot, ALFA, [RUST, RUST, RUST], 500); }),
+    boot(
+      { DOOMCRAFT_FLAGS: FLAGS_ON, DOOMCRAFT_PACKS: unmintablePacks() },
+      (dataRoot) => { seed(dataRoot, ECHO, [RUST, RUST, RUST], 500); },
+    ),
   ]);
-}, 90_000);
+}, 120_000);
 
-afterAll(() => { on?.child.kill('SIGKILL'); off?.child.kill('SIGKILL'); });
+afterAll(() => {
+  on?.child.kill('SIGKILL');
+  off?.child.kill('SIGKILL');
+  unmintable?.child.kill('SIGKILL');
+});
 
 async function call(origin: string, path: string, body?: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
   const res = await fetch(`${origin}${path}`, body === undefined ? {} : {
@@ -113,8 +147,8 @@ async function call(origin: string, path: string, body?: unknown): Promise<{ sta
   return { status: res.status, json: await res.json().catch(() => ({})) as Record<string, unknown> };
 }
 
-async function stock(device: string): Promise<{ refs: string[]; scrap: number }> {
-  const { status, json } = await call(on.origin, `/api/profile?device=${device}`);
+async function stock(device: string, origin = on.origin): Promise<{ refs: string[]; scrap: number }> {
+  const { status, json } = await call(origin, `/api/profile?device=${device}`);
   expect(status).toBe(200);
   const profile = json.profile as {
     inventory: { items: Array<{ ref: string; source: string }> };
@@ -177,10 +211,93 @@ describe('POST /api/craft', () => {
     expect(status).toBe(400);
     expect(String(json.error)).toContain('trade table');
 
+    /*
+     * V4e — and the ANSWER the tab reads has to carry that reservation, or the
+     * client cannot possibly agree with this refusal. `GET /api/profile` now
+     * reports the escrow's hold beside the profile; without it `reserved` is
+     * `{}` on the client and the Loadout tab offers an enabled Craft button
+     * against this exact 400.
+     */
+    const profileAnswer = await call(on.origin, `/api/profile?device=${BRAVO}`);
+    expect(profileAnswer.status).toBe(200);
+    expect(profileAnswer.json.reserved).toEqual({ [RUST]: 2 });
+
     // Cancel frees the copies; the same craft (new nonce) now goes through.
     expect((await call(on.origin, '/api/trade/cancel', { deviceId: BRAVO, tradeId: trade.id })).status).toBe(200);
+    expect((await call(on.origin, `/api/profile?device=${BRAVO}`)).json.reserved).toEqual({});
     const freed = await call(on.origin, '/api/craft', { deviceId: BRAVO, source: RUST, target: HAZARD, nonce: 'craft-routes-nonce-0004' });
     expect(freed.status).toBe(200);
     expect(freed.json.crafted).toBe(`items@1:${HAZARD}`);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * V4e — acquisition: the entry recipe, over the real wire
+ * ------------------------------------------------------------------------ */
+
+describe('V4e: the entry craft is where variant supply comes from', () => {
+  it('(a) three common skins + 50 Scrap put a Slug token IN THE INVENTORY', async () => {
+    /*
+     * THE ASSERTION IS THE INVENTORY, never the route's `crafted` field
+     * (§0 rule 38). `crafted` used to be `landed[0]?.ref ?? plan.targetRef`,
+     * so with the mint door shut it reported the Slug the player did not get
+     * and this test would have passed against a server that granted nothing.
+     *
+     * Measured with V4b's blanket refusal restored (`grantRefusal` minus the
+     * craft exemption, and with the old `??` fallback): Slug 0, Rust 0,
+     * Scrap 0 — three copies and the fee gone, 200 OK, nothing delivered.
+     */
+    const before = await stock(DELTA);
+    expect(before.refs).toEqual([RUST, RUST, RUST]);
+    expect(before.scrap).toBe(50);
+
+    const { status, json } = await call(on.origin, '/api/craft', {
+      deviceId: DELTA, source: RUST, target: SLUG_ID, nonce: 'craft-v4e-entry-001',
+    });
+    expect(status).toBe(200);
+
+    const after = await stock(DELTA);
+    expect(after.refs.filter((r) => r === SLUG)).toEqual([SLUG]);
+    expect(after.refs.filter((r) => r === RUST)).toEqual([]);
+    expect(after.scrap).toBe(0);
+    expect(json.crafted).toBe(SLUG);
+  });
+
+  it('(a2) a craft whose grant cannot deliver REFUSES, and spends nothing', async () => {
+    /*
+     * (a) does NOT prove this. With minting enabled, reverting only the
+     * `?? v.plan.targetRef` fallback still leaves (a) at Slug 1 / Slug 1 —
+     * the fallback is only ever consulted when the grant lands nothing.
+     *
+     * The separating input is a live items pack at version 100000: legal to
+     * install (`itemsVersions` accepts any integer >= 1) and unreadable by
+     * `parseItemRef` (`items@\d{1,5}`, <= 0xffff), so every ref the pack can
+     * mint is refused by `grantDrops` while `craftVerdict` still says yes.
+     *
+     * Defective (the `??` fallback, no pre-check): 200, `crafted:
+     * "items@100000:skin-void-hazard"`, three copies and 50 Scrap gone, and
+     * the inventory holds nothing new. Correct: a refusal, and the profile is
+     * exactly as it was.
+     */
+    const before = await stock(ECHO, unmintable.origin);
+    expect(before.refs, 'the fixture never got its copies').toEqual([RUST, RUST, RUST]);
+
+    const { status, json } = await call(unmintable.origin, '/api/craft', {
+      deviceId: ECHO, source: RUST, target: HAZARD, nonce: 'craft-v4e-undeliverable-1',
+    });
+    expect(status, `answered ${status} with ${JSON.stringify(json)}`).not.toBe(200);
+    expect(String(json.error)).toContain('cannot be delivered');
+    expect(json.crafted).toBeUndefined();
+
+    // And nothing was spent for it.
+    expect(await stock(ECHO, unmintable.origin)).toEqual(before);
+  });
+
+  it('the live pack really is at the version this test needs', async () => {
+    // Rule 2 in miniature: if the packs root did not take, the refusal above
+    // would be proving something else entirely.
+    const { status, json } = await call(unmintable.origin, '/api/items');
+    expect(status).toBe(200);
+    expect(json.version).toBe(100000);
   });
 });

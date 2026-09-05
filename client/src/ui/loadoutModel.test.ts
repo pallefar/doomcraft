@@ -56,6 +56,7 @@ function inputsOf(patch: Partial<LoadoutInputs> = {}): LoadoutInputs {
     scrap: 860,
     lifetimeScrap: 1200,
     pack: PACK,
+    reserved: {},
     scrapVisible: true,
     busyRef: '',
     ...patch,

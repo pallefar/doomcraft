@@ -136,12 +136,29 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
  * The tab
  * ------------------------------------------------------------------------ */
 
+/**
+ * `reserved` off the wire, laundered. A NEGATIVE count would *raise* the free
+ * copy count above what is owned and re-open exactly the gap V4e closes, so
+ * only finite non-negative integers survive.
+ */
+function laundered(raw: Record<string, unknown> | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (raw === null || typeof raw !== 'object') return out;
+  for (const [ref, v] of Object.entries(raw)) {
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) continue;
+    out[ref] = Math.floor(v);
+  }
+  return out;
+}
+
 interface ProfileAnswer {
   status: number;
   inventory: WireInventory | null;
   revoked: string[];
   scrap: number;
   lifetimeScrap: number;
+  /** V4e — `reserved` off the same answer: ref -> copies the escrow holds. */
+  reserved: Record<string, number>;
 }
 
 export class LoadoutTab {
@@ -207,6 +224,7 @@ export class LoadoutTab {
       scrap: p?.scrap ?? 0,
       lifetimeScrap: p?.lifetimeScrap ?? 0,
       pack: this.pack,
+      reserved: p?.reserved ?? {},
       scrapVisible: this.opts.product() && this.scrapFlagOn,
       busyRef: this.busyRef,
     };
@@ -218,14 +236,15 @@ export class LoadoutTab {
   private async fetchProfile(device: string): Promise<ProfileAnswer> {
     try {
       const res = await fetch(`${this.opts.serverBase}/api/profile?device=${encodeURIComponent(device)}`);
-      if (res.status === 404) return { status: 404, inventory: null, revoked: [], scrap: 0, lifetimeScrap: 0 };
-      if (!res.ok) return { status: 0, inventory: null, revoked: [], scrap: 0, lifetimeScrap: 0 };
+      if (res.status === 404) return { status: 404, inventory: null, revoked: [], scrap: 0, lifetimeScrap: 0, reserved: {} };
+      if (!res.ok) return { status: 0, inventory: null, revoked: [], scrap: 0, lifetimeScrap: 0, reserved: {} };
       const body = await res.json() as {
         profile?: {
           inventory?: WireInventory;
           economy?: { scrap?: number; lifetimeScrap?: number };
           moderation?: { revokedItems?: Array<{ ref?: string }> };
         };
+        reserved?: Record<string, unknown>;
       };
       const prof = body.profile;
       const inv = prof?.inventory;
@@ -239,9 +258,10 @@ export class LoadoutTab {
           .filter((r) => r.length > 0),
         scrap: typeof prof?.economy?.scrap === 'number' ? prof.economy.scrap : 0,
         lifetimeScrap: typeof prof?.economy?.lifetimeScrap === 'number' ? prof.economy.lifetimeScrap : 0,
+        reserved: laundered(body.reserved),
       };
     } catch {
-      return { status: 0, inventory: null, revoked: [], scrap: 0, lifetimeScrap: 0 };
+      return { status: 0, inventory: null, revoked: [], scrap: 0, lifetimeScrap: 0, reserved: {} };
     }
   }
 
