@@ -21,6 +21,14 @@ const MANIFEST = parseItemsManifest(JSON.stringify({
     { id: 'skin-r', kind: 'skin', name: 'Skin R', rarity: 'relic', tradable: true },
     { id: 'trail-b', kind: 'trail', name: 'Trail B', rarity: 'uncommon', tradable: true },
     { id: 'title-a', kind: 'title', name: 'Title A', rarity: 'common', text: 'T' },
+    {
+      id: 'weapon_variant-shotgun-slug', kind: 'weapon_variant', name: 'Slug Shotgun',
+      rarity: 'uncommon', tradable: true, variantId: 'shotgun-slug',
+    },
+    {
+      id: 'weapon_variant-rocket-swift', kind: 'weapon_variant', name: 'Swift Rocket',
+      rarity: 'rare', tradable: true, variantId: 'rocket-swift',
+    },
   ],
 })).manifest!;
 const DEFS = new Map<string, ItemDef>(MANIFEST.items.map((i) => [i.id, i]));
@@ -117,5 +125,32 @@ describe('applyCraft', () => {
     expect(CRAFT_FEES[ItemRarity.UNCOMMON]).toBeLessThan(CRAFT_FEES[ItemRarity.RARE]);
     expect(CRAFT_FEES[ItemRarity.RARE]).toBeLessThan(CRAFT_FEES[ItemRarity.EPIC]);
     expect(CRAFT_FEES[ItemRarity.EPIC]).toBeLessThan(CRAFT_FEES[ItemRarity.RELIC]);
+  });
+});
+
+describe('V4b: no craft mints a weapon variant', () => {
+  /*
+   * CONFIRMING the existing rule rather than adding a second one: variants are
+   * craft-only per docs/VARIANTS.md §7.2, and V4b ships NO recipe — V4e does.
+   * `CRAFTABLE_KINDS` is where that is decided and it is a whitelist, so the
+   * new kind is excluded by construction. This is the test that says the
+   * whitelist is doing that job, so the day someone widens it they are told.
+   */
+  const SLUG = 'items@1:weapon_variant-shotgun-slug';
+
+  it('refuses a weapon_variant as crafting MATERIAL and as a crafting TARGET', () => {
+    const p = createProfile('device-craft-variant');
+    for (let i = 0; i < 3; i++) grantDrops(p, [SLUG], 'trade', `seed-${i}`, 100 + i);
+    p.economy.scrap = 5000;
+    expect(p.inventory.items.length, 'the fixture never got the copies').toBe(3);
+
+    const asSource = craftVerdict(p, SLUG, 'weapon_variant-rocket-swift', DEFS, 1, NONE);
+    expect(asSource.ok).toBe(false);
+    if (!asSource.ok) expect(asSource.error).toContain('cannot be crafted');
+
+    // And a skin cannot be crafted INTO one: the kinds must match.
+    const asTarget = craftVerdict(owner(), A, 'weapon_variant-shotgun-slug', DEFS, 1, NONE);
+    expect(asTarget.ok).toBe(false);
+    if (!asTarget.ok) expect(asTarget.error).toContain('crafts into a skin');
   });
 });

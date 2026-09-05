@@ -5,6 +5,10 @@
  * migrateProfile, with the economy it carried proven intact.
  */
 
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -25,6 +29,8 @@ import {
 import type { EquipSlot } from './persistence.js';
 import { buildSubmission } from './reward.js';
 import { ItemKind, itemStateFor, parseItemRef, parseItemsManifest } from '@doomcraft/shared/items';
+
+const repoRoot = join(fileURLToPath(import.meta.url), '..', '..', '..');
 
 /** A profile exactly as a v4 host serialised one (economy present, no inventory). */
 const V4_FIXTURE = {
@@ -241,5 +247,140 @@ describe('equipVerdict / applyEquip', () => {
     expect(equipVerdict(p, 'skin', SKIN, kindOf)).toEqual({ ok: true });
     expect(itemStateFor(SKIN, new Set<string>(), new Set<string>())).toBe('dormant');
     expect(itemStateFor(SKIN, new Set(['skin-rust-marine']), new Set<string>())).toBe('active');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * V4b — a weapon variant never DROPS
+ * ------------------------------------------------------------------------ */
+
+describe('rollMatchDrops and the V4b ownership token', () => {
+  /*
+   * Clause 19. `rollMatchDrops` skipped only TITLE and TROPHY, so the two
+   * tokens `content/items.json` gains in V4b were droppable the moment they
+   * were authored — and docs/VARIANTS.md §7.2 makes variants CRAFT-ONLY.
+   *
+   * The manifest here is the honest worst case: the only rows that are not
+   * titles or trophies ARE the tokens. On the unfixed code every drop is a
+   * variant; on the fixed code the roll has nothing to give and returns [].
+   * (Against the real content manifest the effect is dilute — 79 of 902 drops
+   * in 4000 seeded rounds — which is exactly why the test does not use it: a
+   * denominator that hides the mechanism is the wrong denominator.)
+   */
+  const VARIANTS_ONLY = parseItemsManifest(JSON.stringify({
+    items: [
+      { id: 't1', kind: 'title', name: 'T', rarity: 'common', tradable: false, text: 'T' },
+      {
+        id: 'weapon_variant-shotgun-slug', kind: 'weapon_variant', name: 'Slug Shotgun',
+        rarity: 'uncommon', tradable: true, variantId: 'shotgun-slug',
+      },
+      {
+        id: 'weapon_variant-rocket-swift', kind: 'weapon_variant', name: 'Swift Rocket',
+        rarity: 'uncommon', tradable: true, variantId: 'rocket-swift',
+      },
+    ],
+  })).manifest!;
+
+  const seq = (...values: number[]): (() => number) => {
+    let n = 0;
+    return () => values[n++] ?? 0;
+  };
+
+  it('gives a manifest of nothing-but-variants nothing to drop', () => {
+    // The chance roll PASSES (0 < DROP_CHANCE) and the rarity roll lands
+    // squarely inside the uncommon bucket, so the only thing standing between
+    // this and a minted variant is the kind exclusion.
+    expect(rollMatchDrops(VARIANTS_ONLY, 1, seq(0, 0.6, 0.6))).toEqual([]);
+    expect(rollMatchDrops(VARIANTS_ONLY, 1, seq(0, 0.6, 0.0))).toEqual([]);
+    expect(rollMatchDrops(VARIANTS_ONLY, 1, seq(0, 0, 0))).toEqual([]);
+  });
+
+  it('never emits a weapon_variant ref over the whole reachable space', () => {
+    // Sweeping rather than sampling: the assertion is about the SET of refs
+    // the roll can ever return, which is what "supply is zero" means.
+    const seen = new Set<string>();
+    for (let a = 0; a < 100; a++) {
+      for (let b = 0; b < 100; b++) {
+        for (const ref of rollMatchDrops(VARIANTS_ONLY, 1, seq(0, a / 100, b / 100))) seen.add(ref);
+      }
+    }
+    expect(seen.size, 'the sweep reached no drop at all — the lever is gone').toBe(0);
+
+    // The same sweep over the REAL bundled manifest: plenty of drops, no
+    // variant among them. Without this half the test above passes on an empty
+    // manifest for the wrong reason.
+    const bundled = parseItemsManifest(
+      readFileSync(join(repoRoot, 'content', 'items.json'), 'utf8'),
+    ).manifest!;
+    expect(bundled.items.some((i) => i.kind === ItemKind.WEAPON_VARIANT)).toBe(true);
+    const live = new Set<string>();
+    for (let a = 0; a < 100; a++) {
+      for (let b = 0; b < 100; b++) {
+        for (const ref of rollMatchDrops(bundled, 1, seq(0, a / 100, b / 100))) live.add(ref);
+      }
+    }
+    expect(live.size).toBeGreaterThan(3);
+    expect([...live].filter((r) => r.includes('weapon_variant'))).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * V4b — variant SUPPLY cannot increase, at the one chokepoint
+ * ------------------------------------------------------------------------ */
+
+describe('grantDrops is where "no variant supply" is a fact rather than an argument', () => {
+  /*
+   * Three separate refusals — rollMatchDrops' kind skip, CRAFTABLE_KINDS and
+   * quests.refs — were the whole case that V4b mints no variants, and a FOURTH
+   * and FIFTH path walked past all of them: `ChallengeDef.item` (closed in
+   * gate.ts) and competition `winnerItems`, which `createTournament` validates
+   * with `parseItemRef` ALONE — pure syntax, no kind resolution at all — and
+   * then hands to `grantDrops(..., 'prize', ...)` at finalisation.
+   *
+   * So the invariant lives at the chokepoint every one of them flows through,
+   * and it is stated as MINT vs TRANSFER rather than as a blanket refusal:
+   * variants are deliberately TRADABLE, so "no variant ref may be written"
+   * would be the wrong rule and would break the only thing the token can do
+   * in V4b.
+   */
+  const VARIANT = 'items@1:weapon_variant-shotgun-slug';
+  const SKIN = 'items@1:skin-rust-marine';
+
+  const inventoryAfter = (source: string): string[] => {
+    const p = createProfile('device-mint-test', 1_000);
+    grantDrops(p, [SKIN, VARIANT], source, 'src', 2_000);
+    return p.inventory.items.map((i) => i.ref);
+  };
+
+  it('refuses a weapon variant from EVERY minting source, including one nobody has written yet', () => {
+    // The four live mint sources, plus two that do not exist: the default has
+    // to be the SAFE side or a sixth call site inherits the hole.
+    for (const source of ['drop', 'challenge', 'prize', 'craft', 'grant', 'sponsor', '']) {
+      expect(inventoryAfter(source), `source "${source}" minted a variant`).toEqual([SKIN]);
+    }
+  });
+
+  it('still MOVES one on a transfer — the token is tradable and that is the point', () => {
+    expect(inventoryAfter('trade')).toEqual([SKIN, VARIANT]);
+  });
+
+  it('names every grantDrops call site, so a sixth one cannot inherit the default silently', () => {
+    /*
+     * A SOURCE SCAN in trust.test.ts's style, and it is here because of the
+     * shape of the miss it closes: competition prizes were a grant path nobody
+     * had enumerated, and the argument "there is no other path" was made three
+     * times without anyone counting. This counts.
+     */
+    const files = readdirSync(join(repoRoot, 'server', 'src'))
+      .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'));
+    const sources = new Set<string>();
+    for (const f of files) {
+      const src = readFileSync(join(repoRoot, 'server', 'src', f), 'utf8');
+      for (const m of src.matchAll(/grantDrops\([\s\S]{0,200}?'([a-z]+)'/g)) sources.add(m[1]);
+    }
+    // 'drop' room.ts | 'challenge' persistence.ts | 'prize' competitions.ts
+    // | 'craft' index.ts | 'trade' trades.ts. A new one here is a decision:
+    // does it MINT (and must therefore refuse variants) or TRANSFER?
+    expect([...sources].sort()).toEqual(['challenge', 'craft', 'drop', 'prize', 'trade']);
   });
 });

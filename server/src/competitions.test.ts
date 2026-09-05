@@ -225,3 +225,41 @@ describe('standings hygiene', () => {
     expect(t2?.[0]).toMatchObject({ rank: 1, you: true, wins: 1 });
   });
 });
+
+describe('V4b: a tournament prize cannot mint a weapon variant', () => {
+  /*
+   * The FIFTH supply path, and the one the "supply is zero by three
+   * mechanisms" argument never counted. `createTournament` validates
+   * `winnerItems` with `parseItemRef` ALONE — pure syntax, no kind resolution,
+   * no items manifest in scope — and finalisation hands the list to
+   * `grantDrops(..., 'prize', ...)`. So the refusal cannot live at creation
+   * (nothing there knows what a ref IS); it lives at the chokepoint, and this
+   * is the end-to-end proof that it fires on the real path.
+   */
+  const VARIANT = 'items@1:weapon_variant-shotgun-slug';
+  const SKIN = 'items@1:skin-rust-marine';
+
+  it('accepts the ref at creation and grants only the non-variant half at payout', async () => {
+    const r = await rig();
+    const made = r.svc.createTournament({
+      name: 'Slug Cup', startMs: T0, endMs: T0 + 3600_000, minLevel: 1,
+      scrapByRank: [100], winnerItems: [SKIN, VARIANT], actor: 'admin:test',
+    });
+    // Creation says yes: syntax is all it checks, and that is the finding.
+    expect(made.ok, 'createTournament rejected it — then this test proves nothing').toBe(true);
+    if (!made.ok) throw new Error(made.error);
+
+    await playRound(r, 'marine-aaaa-0001', 200);
+    expect((await r.svc.enter('marine-aaaa-0001', made.id, r.deps)).ok).toBe(true);
+    await playRound(r, 'marine-aaaa-0001', 250, true);
+    r.setNow(T0 + 3600_001);
+    await r.svc.ensure(r.deps);
+
+    const winner = (await r.store.load('marine-aaaa-0001'))!;
+    const refs = winner.inventory.items.map((i) => i.ref);
+    // The rank-1 payout really ran — otherwise the absence below is vacuous.
+    expect(winner.economy.scrap).toBe(100);
+    expect(refs).toContain(SKIN);
+    expect(refs, 'a tournament prize minted a weapon variant').not.toContain(VARIANT);
+  });
+});

@@ -1346,7 +1346,13 @@ export function rollMatchDrops(
   const byRarity = new Map<ItemRarity, typeof manifest.items[number][]>();
   for (const item of manifest.items) {
     // Titles and trophies never DROP — they are earned (challenges, prizes).
+    // Nor do weapon VARIANTS: docs/VARIANTS.md §7.2 makes them craft-only, and
+    // this loop skipped only TITLE and TROPHY, so the two V4b tokens were
+    // eligible from the moment they entered the manifest. Measured against a
+    // manifest whose only droppable rows were the two tokens, every one of the
+    // 902 drops in 4000 seeded rounds returned a variant ref.
     if (item.kind === ItemKind.TITLE || item.kind === ItemKind.TROPHY) continue;
+    if (item.kind === ItemKind.WEAPON_VARIANT) continue;
     const list = byRarity.get(item.rarity) ?? [];
     list.push(item);
     byRarity.set(item.rarity, list);

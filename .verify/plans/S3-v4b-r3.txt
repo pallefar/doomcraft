@@ -1,0 +1,48 @@
+Third and final round on Doomcraft V4b. You judged clauses 18, 19 and 21
+CORRECT and 17, 20, 22 BROKEN. All three of your clause-22 measurements were
+reproduced here exactly (434 bytes / 290 code units; 237 / 93; 438 / 294), and
+you were right that my "a .length cap would pass that as 96" was false — that
+row is 290 code units and .length rejects it.
+
+Three repaired clauses. Same shape: for each you judge BROKEN, a CONCRETE
+FAILURE with the specific wrong value; then a closing CORRECT list by number.
+Anything stated as fact may be wrong — read the code and say so.
+
+23. (repairs 17.) The deployment precondition is NOT established by
+    /api/version. It is established by `GET /api/admin/release`, which returns
+    the raw `document`. Probed on the live origin with the owner session today:
+    `{history: [], liveRevision: 0, pendingRevision: 0, revision: 1}` — no
+    stored release of any state records an items digest, so V4b's change to
+    items@1's fingerprint and digest invalidates nothing. Because a draft can
+    be created between now and the deploy, the same probe is repeated
+    immediately before deploying, and a non-empty `history` blocks the deploy
+    rather than being reasoned about. HANDOVER rule 35 records why the public
+    endpoint cannot serve this purpose.
+
+24. (repairs 20.) V4b closes the challenge grant path rather than documenting
+    it. The `quests.refs` gate check (server/src/gate.ts:495) already resolves
+    each `ChallengeDef.item` against the paired items manifest to prove the id
+    exists; it therefore holds the `ItemDef` and can also refuse
+    `kind === ItemKind.WEAPON_VARIANT`, on the ground that docs/VARIANTS.md
+    §7.2 makes variants craft-only and a challenge reward is neither a craft
+    nor a drop. With that refusal plus clause 19's drop exclusion plus
+    WEAPON_VARIANT's absence from CRAFTABLE_KINDS, variant supply in V4b is
+    zero. The regression test asserts the gate check that goes red is
+    `quests.refs` specifically, and it is proven red by reverting the kind
+    refusal alone.
+    QUESTION FOR YOU: enumerate every OTHER path in this tree that can put a
+    new ref into `StoredProfile.inventory.items`. If the four named here
+    (drops, crafting, trading, challenge settlement) are not the complete set,
+    clause 24's "supply is zero" is false and I need the list.
+
+25. (repairs 22.) The parse-time cap counts UTF-8 bytes via a local
+    `utf8Bytes` helper copied from shared/src/challenges.ts:119, not
+    `String.length`. The regression input is the row where the two candidate
+    implementations DIFFER — `{id:'a', kind:'skin', rarity:'common',
+    name:'界'.repeat(48), text:'界'.repeat(24)}`, which is 237 bytes
+    and 93 code units, so a `.length <= 160` cap accepts it and a byte cap
+    refuses it. The 434-byte row is NOT used as the proof, because both
+    candidate caps reject it and it therefore discriminates nothing.
+
+Which are broken, with a concrete failure and a specific wrong value; then the
+CORRECT list; then answer clause 24's question with the enumeration.

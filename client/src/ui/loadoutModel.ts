@@ -186,8 +186,16 @@ export function economyTabsFor(flags: Readonly<Record<string, unknown>> | null):
  * The view
  * ------------------------------------------------------------------------ */
 
+/**
+ * KIND_ORDER IS THE ONLY THING THAT BUILDS SECTIONS, so a kind missing from it
+ * is not merely unsorted — it is DROPPED. Measured before V4b added the last
+ * entry: one owned item at `kind = 5` produced `sections = 0, rows = 0`, i.e.
+ * the player owns a thing and the tab renders nothing at all, which reads as
+ * a lost item. Appending is mandatory whenever `ItemKind` grows.
+ */
 const KIND_ORDER: readonly ItemKind[] = [
   ItemKind.SKIN, ItemKind.TITLE, ItemKind.EMBLEM, ItemKind.TRAIL, ItemKind.TROPHY,
+  ItemKind.WEAPON_VARIANT,
 ];
 
 const SECTION_TITLES: Readonly<Record<number, string>> = Object.freeze({
@@ -196,6 +204,7 @@ const SECTION_TITLES: Readonly<Record<number, string>> = Object.freeze({
   [ItemKind.EMBLEM]: 'Emblems',
   [ItemKind.TRAIL]: 'Trails',
   [ItemKind.TROPHY]: 'Trophies',
+  [ItemKind.WEAPON_VARIANT]: 'Weapon Variants',
 });
 
 const SLOT_FOR_KIND: Readonly<Record<number, LoadoutSlot | null>> = Object.freeze({
@@ -204,6 +213,10 @@ const SLOT_FOR_KIND: Readonly<Record<number, LoadoutSlot | null>> = Object.freez
   [ItemKind.EMBLEM]: null,
   [ItemKind.TRAIL]: null,
   [ItemKind.TROPHY]: null,
+  // null, deliberately: V4b's token grants no equip slot. `equipVerdict` on
+  // the server knows only 'skin' and 'title', so offering an Equip button
+  // here would be a button that always 400s. V4c adds the slot on both sides.
+  [ItemKind.WEAPON_VARIANT]: null,
 });
 
 /**

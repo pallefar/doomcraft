@@ -13,7 +13,9 @@
  * this module is safe to import (as types) from browser code.
  */
 
-import { ITEM_KIND_NAMES, ItemKind, formatItemRef, parseItemRef, type OwnedItem } from '@doomcraft/shared/items';
+import {
+  ITEM_KIND_NAMES, ItemKind, formatItemRef, parseItemRef, refIsWeaponVariant, type OwnedItem,
+} from '@doomcraft/shared/items';
 import {
   challengeAggregation,
   challengeContribution,
@@ -792,12 +794,44 @@ function lastMatchOf(v: unknown): LastMatch | null {
 }
 
 /**
+ * The grant sources that MOVE an existing copy rather than creating one.
+ *
+ * This list is an ALLOW-list and the default is the strict side on purpose:
+ * anything not named here is treated as a MINT, so a sixth call site added
+ * next year inherits the refusal instead of the hole. `grantDrops` is the one
+ * chokepoint every write of an owned item flows through, and getting the
+ * default wrong is the difference between a bug and a silent economy.
+ */
+const TRANSFER_SOURCES: ReadonlySet<string> = new Set(['trade']);
+
+/**
  * Append match drops to the inventory, inside the SAME store.update callback
  * that moved the balance — the idempotency check that guards the payout
  * guards these too, so a replayed round grants nothing twice. Deliberately
  * NOT part of applyMatchResult: that function is the economy's single
  * writer, and an item is not a currency. Returns what actually landed (the
  * cap can refuse).
+ *
+ * V4b — WHY THE VARIANT RULE IS HERE AND WHY IT IS NOT A BLANKET REFUSAL.
+ *
+ * Every path that writes into `inventory.items` through a grant comes through
+ * this function: match drops ('drop'), challenge settlement ('challenge'),
+ * competition winner prizes ('prize'), craft output ('craft') and trade
+ * settlement ('trade'). Four of those five MINT; the fifth MOVES a copy that
+ * already exists. docs/VARIANTS.md §7.2 makes variants craft-only, and clause
+ * 14 makes them deliberately TRADABLE — so the invariant to protect is
+ * "variant SUPPLY cannot increase", NOT "no variant ref may be written".
+ * Refusing every variant here would have looked like the tidy one-line fix and
+ * would have broken trading, which is the thing the token is FOR in V4b.
+ *
+ * The kind is read off the REF, not off a manifest: `parseItemsManifest`
+ * enforces `id === "weapon_variant-<variantId>"` as a biconditional, so the
+ * prefix is exact for anything a gated pack could contain, and this function
+ * needs no pack registry, no async lookup and no new argument that a call site
+ * can forget to pass. The three upstream refusals (`rollMatchDrops`'s kind
+ * skip, `CRAFTABLE_KINDS`, `quests.refs`) all stay: they refuse EARLIER and
+ * with a better message. This is the backstop that makes them redundant rather
+ * than load-bearing — three separate checks drift, one invariant does not.
  */
 export function grantDrops(
   profile: StoredProfile,
@@ -806,10 +840,12 @@ export function grantDrops(
   sourceId: string,
   nowMs = Date.now(),
 ): OwnedItem[] {
+  const minting = !TRANSFER_SOURCES.has(source);
   const landed: OwnedItem[] = [];
   for (const ref of refs) {
     if (profile.inventory.items.length >= MAX_OWNED_ITEMS) break;
     if (parseItemRef(ref) === null) continue;
+    if (minting && refIsWeaponVariant(ref)) continue;
     const item: OwnedItem = { ref, ms: nowMs, source: source.slice(0, 16), sourceId: sourceId.slice(0, 128) };
     profile.inventory.items.push(item);
     landed.push(item);
@@ -1027,7 +1063,17 @@ export async function settleChallenges(
     /* BOTH halves or neither, for real: grantDrops REFUSES at the inventory
      * cap and returns what actually landed. A receipt written while the item
      * silently dropped would lose it forever, so an item that cannot land
-     * keeps the whole completion owed — it pays when space frees. */
+     * keeps the whole completion owed — it pays when space frees.
+     *
+     * V4b note: grantDrops also refuses to MINT a weapon variant, and that
+     * refusal is permanent rather than "when space frees" — such a completion
+     * would stay owed forever and its Scrap would never pay. That is the SAFE
+     * failure (nothing is minted, and the operator sees an unpaid challenge)
+     * and it is unreachable: `quests.refs` refuses a manifest whose challenge
+     * pays a weapon_variant, in the release gate AND in the studio's CHECK
+     * button, so no gated pack can create such an `owed` row. If V4e ever
+     * makes a variant a legitimate challenge reward, this branch is the thing
+     * that has to change with it. */
     if (o.item !== null) {
       const landed = grantDrops(
         profile, [formatItemRef(deps.itemVersion, o.item)], 'challenge', o.sourceId, deps.nowMs,

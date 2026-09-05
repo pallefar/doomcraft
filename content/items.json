@@ -10,7 +10,20 @@
     "",
     "REMOVING an id from this file is the destructive direction: every owned",
     "copy goes dormant at the next read. The gate counts them (items.dormanted).",
-    "A re-cut pack is a NEW version directory, never an in-place edit."
+    "A re-cut pack is a NEW version directory, never an in-place edit.",
+    "",
+    "THE TWO weapon_variant ROWS (V4b) ARE OWNERSHIP TOKENS, NOT STATS. The",
+    "numbers live in content/variants.json; a token names a row there through",
+    "variantId, and there is one token per row. The id prefix is load-bearing:",
+    "client/src/ui/loadoutModel.ts guessKind() splits a localId on '-' and",
+    "looks the head up in ITEM_KIND_NAMES, so a token whose pack has been",
+    "re-cut still renders under Weapon Variants instead of falling back to",
+    "Skins. rarity is 'uncommon' per docs/VARIANTS.md §7.2's floor.",
+    "",
+    "NOTHING GRANTS ONE IN V4b, deliberately, and it is closed three ways:",
+    "rollMatchDrops skips the kind, CRAFTABLE_KINDS excludes it, and the",
+    "quests reference gate refuses a challenge that pays one. Trading moves",
+    "copies that exist and mints none. V4e adds the craft recipe."
   ],
 
   "items": [
@@ -35,6 +48,11 @@
     { "id": "title-knee-deep", "kind": "title", "name": "Knee-Deep", "rarity": "rare",
       "tradable": false, "text": "Knee-Deep" },
     { "id": "trophy-first-season", "kind": "trophy", "name": "Season Zero Veteran", "rarity": "epic",
-      "tradable": false }
+      "tradable": false },
+
+    { "id": "weapon_variant-shotgun-slug", "kind": "weapon_variant", "name": "Slug Shotgun",
+      "rarity": "uncommon", "tradable": true, "variantId": "shotgun-slug" },
+    { "id": "weapon_variant-rocket-swift", "kind": "weapon_variant", "name": "Swift Rocket",
+      "rarity": "uncommon", "tradable": true, "variantId": "rocket-swift" }
   ]
 }

@@ -23,7 +23,7 @@ import {
   parseLevelJson,
   validateLevel,
 } from '@doomcraft/shared/level';
-import { parseItemsManifest } from '@doomcraft/shared/items';
+import { challengeGrantRefusal, parseItemsManifest, type ItemDef } from '@doomcraft/shared/items';
 import { parseChallengesManifest } from '@doomcraft/shared/challenges';
 import { sanitiseContentId } from '@doomcraft/shared/modes';
 import {
@@ -31,7 +31,7 @@ import {
 } from '@doomcraft/shared/characters';
 import { weaponsFingerprintInputs } from '@doomcraft/shared/version';
 
-import { checkCampaignRefs, checkQuestsRefs, parseEpisodesManifest, scanLevelDir } from './gate.js';
+import { checkCampaignRefs, parseEpisodesManifest, scanLevelDir } from './gate.js';
 import type { PackInventory } from './packs.js';
 
 export interface StudioOptions {
@@ -251,9 +251,9 @@ export class StudioService {
      * gate would happily pass unauthorable — and the dormant direction
      * (an id dropped by a newer items cut) is legal by docs/PACKS.md §7. */
     const iv = this.inventory.itemsVersions();
-    const known = new Set<string>();
+    const known = new Map<string, ItemDef>();
     for (const v of iv) {
-      for (const i of this.inventory.itemsAt(v)?.manifest.items ?? []) known.add(i.id);
+      for (const i of this.inventory.itemsAt(v)?.manifest.items ?? []) known.set(i.id, i);
     }
     const missing = parsed.manifest.challenges
       .filter((c) => c.item !== null && !known.has(c.item))
@@ -264,6 +264,23 @@ export class StudioService {
         detail: `would fail quests.refs — no installed items version (${iv.join(', ') || 'none'}) `
           + `carries: ${missing.join('; ')}`,
       };
+    }
+    /* The SECOND half of quests.refs, and it has to be here because this
+     * function is a second door onto the same decision — it does its own id
+     * lookup across every installed version rather than calling
+     * checkQuestsRefs, so a rule added only to the gate would let the studio
+     * bless a quests pack the release gate then refuses forever. Both doors
+     * call `challengeGrantRefusal`, so the set each ACCEPTS agrees by
+     * construction (HANDOVER §0 rule 29). */
+    const forbidden: string[] = [];
+    for (const c of parsed.manifest.challenges) {
+      const def = c.item === null ? undefined : known.get(c.item);
+      if (def === undefined) continue;
+      const refusal = challengeGrantRefusal(def);
+      if (refusal !== null) forbidden.push(`${c.id} pays ${refusal}`);
+    }
+    if (forbidden.length > 0) {
+      return { ok: false, detail: `would fail quests.refs — ${forbidden.join('; ')}` };
     }
     const total = parsed.manifest.challenges.reduce((sum, c) => sum + c.scrap, 0);
     return {

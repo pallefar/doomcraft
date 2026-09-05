@@ -20,7 +20,7 @@ import {
   type LoadoutInputs,
   type WireItemsPack,
 } from '@/ui/loadoutModel';
-import { parseItemsManifest } from '@shared/items';
+import { ITEM_KIND_NAMES, ItemKind, parseItemsManifest } from '@shared/items';
 
 const RUST = 'items@1:skin-rust-marine';
 const HAZARD = 'items@1:skin-void-hazard';
@@ -237,5 +237,87 @@ describe('helpers', () => {
     expect(swatchCss([1, 0.5, 0])).toBe('rgb(255,128,0)');
     expect(swatchCss(null)).toBe('');
     expect(swatchCss([9, 9, 9])).toBe('rgb(255,255,255)'); // clamped, not garbage
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * V4b — an owned weapon-variant token has to be VISIBLE
+ * ------------------------------------------------------------------------ */
+
+describe('V4b: the Weapon Variants section', () => {
+  /*
+   * 15(f). KIND_ORDER is the ONLY thing that builds sections, so a kind
+   * missing from it is not merely unsorted — the row is DROPPED and the player
+   * owns an item the tab renders nothing for. Measured before the fix with a
+   * single owned token: `sections = 0, rows = 0`.
+   *
+   * The DORMANT direction is the one that matters, because it is the one that
+   * cannot be repaired by the pack: with no def to read a kind from,
+   * `guessKind` splits the localId on '-' and looks the head up in
+   * ITEM_KIND_NAMES, which is why the id has to be `weapon_variant-<row>`.
+   * Get that wrong and the token renders under "Skins".
+   */
+  const VARIANT_PACK: WireItemsPack = {
+    version: 1,
+    items: parseItemsManifest(JSON.stringify({
+      items: [{
+        id: 'weapon_variant-shotgun-slug', kind: 'weapon_variant', name: 'Slug Shotgun',
+        rarity: 'uncommon', tradable: true, variantId: 'shotgun-slug',
+      }],
+    })).manifest!.items,
+  };
+  const OWNED = 'items@1:weapon_variant-shotgun-slug';
+
+  it('renders an ACTIVE token under Weapon Variants, with no equip action in V4b', () => {
+    const v = buildLoadoutView(inputsOf({
+      pack: VARIANT_PACK,
+      revoked: [],
+      inventory: { items: [{ ref: OWNED, ms: 1, source: 'grant' }], equippedSkin: '', title: '' },
+    }));
+    const titles = v.sections.map((s) => s.title);
+    expect(titles).toContain('Weapon Variants');
+    const row = v.sections.find((s) => s.title === 'Weapon Variants')!.rows[0];
+    expect(row.name).toBe('Slug Shotgun');
+    expect(row.state).toBe('active');
+    expect(row.kindLabel).toBe('weapon_variant');
+    // No slot on either side yet: `equipVerdict` knows only 'skin' and
+    // 'title', so an Equip button here would be a button that always 400s.
+    expect(row.slot).toBeNull();
+    expect(row.action).toBeNull();
+    // And no craft target — CRAFTABLE_KINDS does not carry the kind.
+    expect(row.craftTargets).toEqual([]);
+  });
+
+  it('renders a DORMANT token under Weapon Variants and NOT under Skins', () => {
+    const v = buildLoadoutView(inputsOf({
+      pack: { version: 2, items: [] },
+      revoked: [],
+      inventory: { items: [{ ref: OWNED, ms: 1, source: 'grant' }], equippedSkin: '', title: '' },
+    }));
+    expect(v.sections.map((s) => s.title)).toEqual(['Weapon Variants']);
+    const row = v.sections[0].rows[0];
+    expect(row.state).toBe('dormant');
+    expect(row.name).toBe('Shotgun Slug');
+    expect(v.sections.some((s) => s.title === 'Skins')).toBe(false);
+  });
+
+  it('every ItemKind has a section, so the next kind cannot vanish the way this one would have', () => {
+    // The ratchet the measurement above earned. A kind absent from KIND_ORDER
+    // renders in NO section; asserting the list is complete is cheaper than
+    // rediscovering that per kind.
+    const kinds = Object.values(ItemKind).filter((v): v is ItemKind => typeof v === 'number');
+    for (const kind of kinds) {
+      const localId = `${ITEM_KIND_NAMES[kind]}-thing`;
+      const v = buildLoadoutView(inputsOf({
+        pack: { version: 9, items: [] },
+        revoked: [],
+        inventory: {
+          items: [{ ref: `items@1:${localId}`, ms: 1, source: 'grant' }],
+          equippedSkin: '', title: '',
+        },
+      }));
+      expect(v.sections.length, `kind ${kind} (${ITEM_KIND_NAMES[kind]}) renders in no section`).toBe(1);
+      expect(v.sections[0].title, `kind ${kind}`).not.toBe('Items');
+    }
   });
 });

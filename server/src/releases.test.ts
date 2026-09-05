@@ -1203,3 +1203,59 @@ async function helloAndCollect(port: number, caps: number): Promise<Uint8Array[]
   ws.close();
   return frames;
 }
+
+describe('V4b moves items@1\'s digest, and the host says so out loud', () => {
+  /*
+   * Clause 17(b). V4b changes BOTH the content of `content/items.json` (two
+   * ownership tokens) and the SERIALIZATION of every item line (the variantId
+   * column), and `itemsAt()` recomputes the fingerprint AND the sha256 from
+   * the file on every load — so no version bump can dodge it and the same
+   * version number legitimately gets a new digest.
+   *
+   * What makes that safe is a fact about the RUNNING HOST, not about the code:
+   * `GET /api/admin/release` on the live origin returns `history: []`,
+   * `liveRevision: 0`, `pendingRevision: 0`, so no stored release document
+   * records an items digest at all. `/api/version` could not have told us
+   * that — it publishes the post-fallback view, which is identical for an
+   * empty document and for a stored release this host already cannot satisfy
+   * (HANDOVER §0 rule 35). RE-PROBE `/api/admin/release` immediately before
+   * the deploy, not only now.
+   *
+   * This test asserts the MECHANISM that fact makes irrelevant today: pin a
+   * release to the pre-V4b digest and the host reports it unsatisfiable rather
+   * than serving it. The digest below is the real one the live origin reports
+   * for items@1 as this was written.
+   */
+  const PRE_V4B_ITEMS_DIGEST =
+    '61be01e94291a5ef8a87bcf4d8d713910ab8e987d2f1e8e166818688f6c8b1fe';
+
+  it('reports exactly ["items@1"] for a release recorded against the OLD items digest', () => {
+    const { inv } = service(packsRoot());
+    const now = inv.itemsAt(1);
+    expect(now, 'items@1 stopped parsing').not.toBeNull();
+    expect(now!.pack.digest, 'the serialization did NOT move — this test is asleep')
+      .not.toBe(PRE_V4B_ITEMS_DIGEST);
+
+    const stored: Release = {
+      revision: 4, state: 'live', ordinal: 1,
+      packs: inv.installedPacks().map((p) => (
+        p.kind === PackKind.ITEMS ? { ...p, digest: PRE_V4B_ITEMS_DIGEST } : p
+      )),
+      rolloutBp: 10000, baseRevision: 0, gate: null,
+      createdMs: 0, publishedMs: 0, note: 'recorded before V4b',
+    };
+    expect(inv.unsatisfied(stored)).toEqual(['items@1']);
+
+    // The control: the same release carrying TODAY's digest is satisfiable,
+    // so the refusal above is about the digest and not about the fixture.
+    const current: Release = { ...stored, packs: inv.installedPacks() };
+    expect(inv.unsatisfied(current)).toEqual([]);
+  });
+
+  it('carries the two V4b ownership tokens in the bundled items@1', () => {
+    const { inv } = service(packsRoot());
+    const ids = inv.itemsAt(1)!.manifest.items.map((i) => i.id);
+    expect(ids).toContain('weapon_variant-shotgun-slug');
+    expect(ids).toContain('weapon_variant-rocket-swift');
+  });
+});

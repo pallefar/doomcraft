@@ -38,6 +38,10 @@ const MANIFEST = parseItemsManifest(JSON.stringify({
     { id: 'void-trail', kind: 'trail', name: 'Void Trail', rarity: 'rare', tradable: true },
     { id: 'ember-emblem', kind: 'emblem', name: 'Ember Emblem', rarity: 'epic', tradable: true },
     { id: 'keepsake', kind: 'skin', name: 'Keepsake', rarity: 'relic', tradable: false },
+    {
+      id: 'weapon_variant-shotgun-slug', kind: 'weapon_variant', name: 'Slug Shotgun',
+      rarity: 'uncommon', tradable: true, variantId: 'shotgun-slug',
+    },
   ],
 })).manifest!;
 const DEFS: ReadonlyMap<string, ItemDef> = new Map(MANIFEST.items.map((i) => [i.id, i]));
@@ -46,6 +50,7 @@ const RUST = 'items@1:rust-skin';
 const VOID = 'items@1:void-trail';
 const EMBER = 'items@1:ember-emblem';
 const KEEPSAKE = 'items@1:keepsake';
+const SLUG = 'items@1:weapon_variant-shotgun-slug';
 
 interface Rig {
   root: string;
@@ -444,5 +449,44 @@ describe('lifecycle', () => {
     expect(mine[0].id).toBe(id);
     expect(mine[0].code).toBe('');
     expect(mine[0].them.present).toBe(true);
+  });
+});
+
+describe('V4b: a weapon variant is tradable, and the supply rule must not break that', () => {
+  /*
+   * The negative control for `grantDrops`' mint refusal. The tidy version of
+   * that fix — refuse a variant ref anywhere in grantDrops — passes every
+   * supply test in the suite and silently breaks the ONE thing a V4b token can
+   * do. Trade settlement grants through the same function with source 'trade',
+   * so this is the test that stops someone "fixing" it by refusing everywhere.
+   *
+   * Note what seeding the copy takes: source 'trade', because there is no
+   * minting path in V4b that can put one in an inventory at all. That is the
+   * supply rule restating itself from the other side.
+   */
+  it('settles a trade whose whole offer is a variant token', async () => {
+    const r = await rig();
+    await r.store.update('trader-alfa-0001', (p) => {
+      grantDrops(p, [SLUG], 'trade', 'seed', OLD_ENOUGH);
+    });
+    expect((await r.store.load('trader-alfa-0001'))!.inventory.items.some((i) => i.ref === SLUG))
+      .toBe(true);
+
+    const id = await activeTrade(r);
+    expect(offerRefusal((await r.store.load('trader-alfa-0001'))!, [SLUG], DEFS, NOW)).toBeNull();
+    expect((await r.svc.offer('trader-alfa-0001', id, [SLUG], r.deps)).ok).toBe(true);
+    expect((await r.svc.offer('trader-bravo-001', id, [EMBER], r.deps)).ok).toBe(true);
+    await r.svc.confirm('trader-alfa-0001', id, r.deps);
+    const done = await r.svc.confirm('trader-bravo-001', id, r.deps);
+    if (!done.ok) throw new Error(done.error);
+    expect(done.trade.state).toBe('settled');
+
+    const bravo = (await r.store.load('trader-bravo-001'))!;
+    const received = bravo.inventory.items.find((i) => i.ref === SLUG);
+    expect(received, 'the variant did not land — a transfer was treated as a mint').toBeDefined();
+    expect(received!.source).toBe('trade');
+    // …and it really moved: alfa no longer holds it.
+    const alfa = (await r.store.load('trader-alfa-0001'))!;
+    expect(alfa.inventory.items.some((i) => i.ref === SLUG)).toBe(false);
   });
 });
