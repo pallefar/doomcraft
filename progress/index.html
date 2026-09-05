@@ -170,7 +170,7 @@
         <div>
           <div class="nm">V4 — now five sub-phases</div>
           <div class="what">Split after the review refused it as one phase. V4a: the pack reaches a room (content/variants.json, the content/ fallback, the gate emitting kind 7) — no ownership, every player still at slot 0. V4b: the ownership token. V4c: the claim reaches the body. V4d: display truth — the killfeed cannot tell two shotgun variants apart. V4e: acquisition, which as specified leaves variant supply at zero forever.</div>
-          <div class="detail">V4a DONE and deployed (ef1100d). V4b-V4e specified in docs/VARIANTS.md §5a with the trap each one carries. Nobody can own or equip a variant yet — every player still resolves to slot 0.</div>
+          <div class="detail">V4a and V4b DEPLOYED and verified (2111f94, live 19:2x). The origin serves items@1 at digest 5849d24f — a value only the V4b commit declares — plus all ten smoke-signal checks including the negative controls. V4b: ItemKind.WEAPON_VARIANT, the parser biconditional that makes the id prefix a RULE rather than a convention, and the five inventory mint doors closed at mint-vs-transfer granularity. It also fixed a live prototype-pollution defect in the items parser that let two different manifests share one digest. V4c is building: the claim reaches the body.</div>
         </div>
         <div class="chip v-building">IN FLIGHT</div>
       </div>
@@ -535,5 +535,5 @@
     </div>
   </section>
 
-  <footer>Updated 2026-09-05 17:18:37 UTC · exit condition is winning the blind comparison, not a round count</footer>
+  <footer>Updated 2026-09-05 17:22:29 UTC · exit condition is winning the blind comparison, not a round count</footer>
 </div>
