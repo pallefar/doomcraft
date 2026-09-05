@@ -34,6 +34,9 @@ import {
   Rng,
   BlockId,
   clamp,
+  CAP_VARIANTS,
+  PacketReader,
+  PacketWriter,
 } from '@doomcraft/shared';
 import {
   ModeAction,
@@ -60,6 +63,13 @@ import {
 } from '@doomcraft/shared/level';
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
 import { BUILTIN_CONTENT_HASH } from '@doomcraft/shared/packs';
+import {
+  MAX_VARIANT_TABLE_BYTES,
+  createVariantTableMessage, decodeVariantTable, encodeVariantTable,
+  overlaysFromWire, wireEntriesFor,
+  type VariantWireEntry, type VariantsManifest,
+} from '@doomcraft/shared/variants';
+import { BASE_SLOT, SessionArsenal } from '@doomcraft/shared/arsenal';
 import { defaultFlagBits, flagOn } from '@doomcraft/shared/flags';
 import { BotDriver, MonsterManager, botSkillFor } from './bots.js';
 import { HordeDirector } from './horde.js';
@@ -113,6 +123,50 @@ export const MAX_CATCHUP_TICKS = 8;
 /** Live Doom monsters a Quest room will hold at once. E1M6 authors 31. */
 export const QUEST_MONSTER_CEILING = 64;
 
+/**
+ * A room's table, encoded and decoded once, so what the arsenal is built from
+ * is literally what the wire will carry. See the note at the construction site.
+ */
+function decodeRoomVariantTable(manifest: VariantsManifest | null): readonly VariantWireEntry[] {
+  if (manifest === null || manifest.variants.length === 0) return [];
+  const w = encodeVariantTable(
+    new PacketWriter(MAX_VARIANT_TABLE_BYTES), wireEntriesFor(manifest), ZERO_SLOTS,
+  );
+  const decoded = decodeVariantTable(
+    new PacketReader(w.copy()), createVariantTableMessage(),
+  );
+  return decoded === null ? [] : decoded.variants;
+}
+
+const ZERO_SLOTS = new Uint8Array(WEAPON_COUNT);
+
+/**
+ * What this connection ACTUALLY fires with, from what it claims.
+ *
+ * Two refusals, and each one is the whole reason this function exists rather
+ * than the claim being written straight onto the body:
+ *
+ *   1. NO `CAP_VARIANTS`, NO VARIANTS. A bundle that predates opcode 13 is
+ *      admitted by `onHello` — it checks the protocol window and draining and
+ *      nothing else — and would then fire the compiled archetype while this
+ *      server resolved a variant. Every number on that shot would disagree.
+ *   2. A SLOT THIS ROOM DOES NOT HAVE IS THE BASE. `statsFor` clamps too, so
+ *      this is belt and braces; the belt matters because the slot map goes on
+ *      the wire, and a client told "slot 3" by a room with two variants would
+ *      be told a number it must then reinterpret.
+ */
+export function resolveVariantSlots(
+  claims: Uint8Array | undefined, caps: number, slotCount: number,
+): Uint8Array {
+  const out = new Uint8Array(WEAPON_COUNT);
+  if (claims === undefined || (caps & CAP_VARIANTS) === 0) return out;
+  for (let i = 0; i < WEAPON_COUNT; i++) {
+    const c = claims[i] ?? BASE_SLOT;
+    out[i] = Number.isInteger(c) && c > 0 && c < slotCount ? c : BASE_SLOT;
+  }
+  return out;
+}
+
 export interface RoomOptions {
   /**
    * Roll this member's item drops for a paying round. Provided by the factory
@@ -131,6 +185,24 @@ export interface RoomOptions {
   challenges?: readonly ChallengeDef[];
   /** The pinned items version challenge item rewards are formatted against. */
   challengeItemVersion?: number;
+  /**
+   * The variant table this room's pinned release names, already parsed and
+   * refused-or-accepted by `parseVariantsManifest`. Provided by the factory,
+   * same contract as `rollDrops` and `challenges`: the room must not know the
+   * release tier exists. Absent = no variants, which is the browser Worker,
+   * a host whose release names no variants pack, and every test that does not
+   * care. docs/VARIANTS.md 3.
+   */
+  variants?: VariantsManifest | null;
+  /**
+   * This connection's CLAIMED variant slot per weapon — what the player says
+   * they have equipped, straight off their profile and not yet trusted.
+   * `Room.onHello` resolves it: a connection without `CAP_VARIANTS` gets the
+   * base for everything, and a slot this room's table does not contain gets
+   * the base too. Absent = nobody claims anything, which is V3 everywhere and
+   * what V4 replaces with the real `inventory.variants` read.
+   */
+  variantClaims?: (conn: Connection) => Uint8Array;
   seed?: number;
   mode?: GameMode;
   maxPlayers?: number;
@@ -277,6 +349,15 @@ export class Room implements NetHost {
    */
   readonly instanceId: string;
 
+  /**
+   * This room's pinned variant table, DECODED from the bytes it sends —
+   * `NetHost.variantTable`. Row `i` is slot `i + 1`, which is the numbering
+   * `SessionArsenal.from` gives them and therefore the numbering the slot map
+   * beside them on the wire is written in.
+   */
+  readonly variantEntries: readonly VariantWireEntry[];
+  private readonly variantClaims?: (conn: Connection) => Uint8Array;
+
   seed: number;
   gameMode: GameMode;
   readonly maxPlayers: number;
@@ -404,6 +485,7 @@ export class Room implements NetHost {
     this.sessionOrigin = options.sessionOrigin ?? SessionOrigin.SERVER_MATCHMAKER;
     this.sessionIntent = options.sessionIntent ?? MatchType.PUBLIC;
     this.clock = options.clock ?? (() => Date.now());
+    this.variantClaims = options.variantClaims;
     this.eagerWorld = options.eagerWorld ?? true;
 
     this.world = new ServerWorld(this.seed);
@@ -414,7 +496,22 @@ export class Room implements NetHost {
     // and nothing downstream changes — every reader on the firing path already
     // goes through `sim.statsFor`. Until then the default is the compiled
     // arsenal, which is also what the local Worker gets with no fetches at all.
-    this.sim = new Simulation(this.world, this.seed);
+    /* THE ROOM BUILDS ITS ARSENAL FROM THE BYTES IT WILL SEND.
+     *
+     * Not from the manifest it parsed. The encode/decode round trip is
+     * lossless now that the fields travel as f64, so this costs nothing — and
+     * that is exactly why it is worth doing: it makes "both predictors read
+     * the same numbers" a property of the STRUCTURE rather than a fact about
+     * today's field widths. `fc01475` was five separate versions of the two
+     * sides computing the same quantity slightly differently.
+     *
+     * A table that will not decode leaves the room on the compiled arsenal
+     * and tells its clients count 0, so the two sides still agree — agreement
+     * over content, every time. */
+    this.variantEntries = decodeRoomVariantTable(options.variants ?? null);
+    this.sim = new Simulation(
+      this.world, this.seed, SessionArsenal.from(overlaysFromWire(this.variantEntries)),
+    );
     this.allWeaponsAtBoot = options.allWeapons === true;
     if (this.allWeaponsAtBoot) this.sim.defaultWeaponMask = ALL_WEAPON_MASK;
     this.monsters = new MonsterManager(this.sim, this.seed);
@@ -1079,7 +1176,10 @@ export class Room implements NetHost {
 
   get matchOver(): boolean { return this.state === RoundState.ENDED; }
 
-  onHello(conn: Connection, name: string, skin: number, _caps: number): number {
+  /** `NetHost.variantTable` — what every joiner is told this room fires with. */
+  get variantTable(): readonly VariantWireEntry[] { return this.variantEntries; }
+
+  onHello(conn: Connection, name: string, skin: number, caps: number): number {
     const humans = this.humanCount;
     if (humans >= this.maxPlayers) return 0;
     // Take a bot's slot rather than refusing a human.
@@ -1088,7 +1188,14 @@ export class Room implements NetHost {
     }
 
     const id = this.allocateId();
-    const player = this.sim.addPlayer(id, name, skin, false);
+    /* RESOLVED BEFORE THE BODY EXISTS, because `addPlayer` spawns it and
+     * `spawnPlayer` fills the first magazine through `sim.statsFor` — so a
+     * slot decided one line later is a slot that arrived after the magazine
+     * it was supposed to size. A variant that pays for its damage with four
+     * shells instead of eight would hand this player eight. */
+    const player = this.sim.addPlayer(
+      id, name, skin, false, resolveVariantSlots(this.variantClaims?.(conn), caps, this.sim.arsenal.slotCount),
+    );
     const member: Membership = {
       conn, player, isBot: false, joinedMs: this.elapsedMs,
       baseKills: 0, baseDeaths: 0,

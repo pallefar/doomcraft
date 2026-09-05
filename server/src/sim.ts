@@ -771,9 +771,21 @@ export class Simulation {
    * Players
    * -------------------------------------------------------------- */
 
-  addPlayer(id: number, name: string, skin: number, isBot: boolean): PlayerEntity {
+  /**
+   * `variantSlots` is taken here rather than written by the caller afterwards
+   * because `spawnPlayer` — three lines below — fills the first magazine
+   * through `statsFor`, which reads them. A slot installed after `addPlayer`
+   * returns is a slot that arrived after the magazine it was meant to size.
+   * `reset()` zeroes them first, so a pooled body cannot inherit the last
+   * occupant's claim the way it used to inherit their `shotSeq`.
+   */
+  addPlayer(
+    id: number, name: string, skin: number, isBot: boolean,
+    variantSlots?: Uint8Array,
+  ): PlayerEntity {
     const p = this.playerPool.pop() ?? new PlayerEntity();
     p.reset();
+    if (variantSlots !== undefined) p.variantSlots.set(variantSlots.subarray(0, WEAPON_COUNT));
     p.id = id;
     p.name = name;
     p.skin = skin;

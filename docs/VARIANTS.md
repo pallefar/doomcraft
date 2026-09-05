@@ -134,18 +134,51 @@ plumbing change is pure.
 - **Rooms already pin:** the factory resolves a release per `roomInstanceId`
   (`server/src/index.ts:952-989`) and the bucket is room-keyed precisely so
   two tables can never meet in one room. Variants inherit this for free.
-- **The wire bill:** the client today learns only the folded u32 contentHash
-  (SESSION_CONFIG, adopted without dispute — client.ts:1558-1568). A client
-  whose bundle predates a variant table would mispredict spread/rpm/damage —
+- **The wire bill** — BUILT, phase V3. The client today learns only the folded
+  u32 contentHash (SESSION_CONFIG, adopted without dispute). A client whose
+  bundle predates a variant table would mispredict spread/rpm/damage —
   rubber-banding ammo, wrong kill markers, silently dropped shots. So **the
-  room SENDS its pinned variant table** in a new S2C message immediately after
-  SESSION_CONFIG: `u8 count × (id slug, u8 base, then the whitelisted fields
-  as a fixed-order record)`. Bounded: ≤64 variants × ~18 numbers. This is the
-  §1.2 answer too — a variant table lands on the next ROOM, one clock, stated
-  honestly. Protocol notes: `decodeSessionConfig` reads unconditionally with
-  no `r.remaining` guard (protocol.ts:858-867) — the new message is a NEW
-  opcode (not an append) to keep old decoders untouched, it moves the protocol
-  fingerprint ratchet once, and it ships with a second golden vector.
+  room SENDS its pinned variant table** in `S2C.VARIANT_TABLE = 13`,
+  immediately after SESSION_CONFIG:
+  `u8 count × (str id, u8 base, 16 × f64), then u8 slot[WEAPON_COUNT]`.
+  Bounded at 11 401 bytes. Four things about it, each with a reason:
+
+  - **Effective values, not a present/absent mask.** Every row carries all 16
+    whitelisted fields at the value the variant actually fires with, so the
+    receiver never combines the wire with its own compiled table for any of
+    them. That is a NARROWING of the trust surface, not its abolition — the
+    ~25 fields a variant may not move are still compiled on both sides (see
+    §6's open item).
+  - **f64, not f32.** A row carries fields the variant inherited rather than
+    overrode. Narrowed to float32 a rocket variant that moves only `rpm` would
+    arrive with splashRadius 4.400000095367432 instead of 4.4, and
+    `detonate()` tests that double; a shotgun variant that moves magazine and
+    damage would inherit headshotMultiplier 1.600000023841858 and pay
+    16.00000023841858 for a headshot pellet instead of 16.
+  - **Both ends build their arsenal from the decoded bytes**, the server
+    included. Lossless at f64 and therefore free, which is the point: it makes
+    "both predictors read the same numbers" structural rather than a fact
+    about today's field widths.
+  - **`CAP_VARIANTS = 1 << 5`.** `onHello` checks the protocol window and
+    draining and nothing else, so without the bit an old bundle is welcomed,
+    ignores opcode 13 and fires base stats against variant resolution. A
+    connection that does not set it has every claim resolved to `BASE_SLOT`,
+    before the first magazine is filled.
+
+  **This message is ADDITIVE and moves no ratchet.** An earlier draft of this
+  section claimed it "moves the protocol fingerprint ratchet once"; that was
+  FALSE. `protocolFingerprint()` lists the ids frozen at v3 BY NAME and its
+  S2C list stops at `s2c.chunkz`, `client.ts` has always had `default: break`,
+  and only `cap.inflate` of the capability bits is named — so opcode 13 and
+  `CAP_VARIANTS` are both free. `PROTOCOL_VERSION` stays 3 and
+  `PROTOCOL_MIN_SUPPORTED` stays 2. It ships with a golden vector all the
+  same. (This is the third false claim found in this document; §2's cone
+  paragraph and §5's ratchet row were the other two.)
+
+  The LAYOUT IS FROZEN. V4 wants a display name for the HUD and the killfeed;
+  that is a SEPARATE additive message, not a field appended here. A v3 decoder
+  handed `str name` after the id would read "Slug"'s length byte as `base` and
+  its four letters as the first float, 1.1589780174433289e24, and never know.
 - **Pickups of variants are OUT of scope for the first arc:** the `EF_SPAWN`
   u8 `variant` byte already MEANS `WeaponId` for weapon pickups
   (level.ts:154-162, deathmatch.ts:296-315) — expressing "a slug shotgun on
@@ -185,7 +218,7 @@ Two packs' concerns, kept apart on purpose:
 |---|---|---|
 | **V1 seam** | `SessionArsenal` + both predictors take it; zero variants exist | determinism harness: fixed-seed scripted session on BOTH predictors, byte-compared against pre-refactor recordings; suite + bench untouched-green |
 | **V2 schema + pack** | `shared/src/variants.ts` parser (whitelist, bands, refusals), `PackKind.VARIANTS`, producer + gate `variants.validate`, power-budget check | crafting.test.ts-style adversarial proof: mutate one real row into an upgrade → the budget check bites; load-time validation on import |
-| **V3 wire** | new S2C opcode carrying the room's table; arsenal applies it; local Worker fallback | golden vector for the new message; a mixed-version harness (old-bundle client vs variant room) showing adopt-and-predict-correctly |
+| **V3 wire** — DONE | `S2C.VARIANT_TABLE = 13` + `CAP_VARIANTS`, the room's table and the player's resolved slots; both predictors build from the decoded bytes; local Worker unchanged | golden vector; `client/src/net/variantWire.test.ts` runs a real Room, a real `NetClient` and a real `WeaponRuntime` and compares the effective weapon field for field — every OTHER test in the repo passes with the client's `case S2C.VARIANT_TABLE` deleted, which is why that one exists |
 | **V4 first content** | `slug-shotgun`, `burst-pistol` in a variants pack + `ItemKind.WEAPON_VARIANT` tokens + equip claim + craft recipe | the shipped-content bar: two-browser harness crafts a variant, equips it, fires it in a room, and the SERVER's kill log agrees with the client's prediction |
 | **V5 standing gate** | ratchet closes: every variant in every installed pack passes bands + budget at gate AND at module load; the exemption list (if any) is empty | the wiring-ratchet end state — a green check that can fail, proven by seed-breaking once |
 

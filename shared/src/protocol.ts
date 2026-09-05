@@ -126,6 +126,34 @@ export enum S2C {
    * `default: break` on an unknown id, so a v2 client ignores this entirely.
    */
   MATCH_AWARD = 12,
+  /**
+   * The variant stat table this ROOM pinned, plus this player's resolved
+   * per-weapon variant slots. Sent once, immediately after `SESSION_CONFIG`.
+   *
+   * The client does not merge this with anything: every whitelisted field
+   * arrives at its EFFECTIVE value, so a variant's numbers come off the wire
+   * rather than out of the receiving bundle's compiled table. What the wire
+   * does NOT carry — `spreadAir`, `spreadRecovery`, `spreadCrouchScale`,
+   * `reloadShellMs`, `knockback`, the feel fields — is still read from the
+   * compiled archetype on both sides, exactly as it is for the base weapon
+   * today. The wire narrows the trust surface to the 16 fields a variant may
+   * move; it does not abolish it. See docs/VARIANTS.md 3.
+   *
+   * Additive, and therefore NOT a protocol bump, for the same two reasons
+   * `MATCH_AWARD` was: `protocolFingerprint()` lists the ids frozen at v3 BY
+   * NAME and stops at `s2c.chunkz`, and `client/src/net/client.ts` has always
+   * had `default: break` on an unknown id. A client that predates this bit
+   * also never sets `CAP_VARIANTS`, and a server that sees no `CAP_VARIANTS`
+   * resolves every claim to the base — so the old bundle is not merely
+   * ignorant of the message, it is genuinely playing the game it thinks it is.
+   *
+   * The layout is FROZEN. A later addition — V4 wants a display name for the
+   * HUD and the killfeed — is a SEPARATE additive message, not a field
+   * appended here: a v3 decoder handed `str name` after the id would read
+   * "Slug"'s length byte as `base` and its four letters as the first float,
+   * 1.1589780174433289e24, and never know.
+   */
+  VARIANT_TABLE = 13,
 }
 
 /* ------------------------------------------------------------------------ *
@@ -226,6 +254,20 @@ export const CAP_RETURNING = 1 << 3;
  * that sees it and has no compressor simply ignores it.
  */
 export const CAP_INFLATE = 1 << 4;
+/**
+ * "I understand `S2C.VARIANT_TABLE`, so you may resolve my variant claims."
+ *
+ * THIS BIT IS A SAFETY INTERLOCK, NOT AN OPTIMISATION. `onHello` checks the
+ * protocol window and whether the host is draining, and nothing else —
+ * `server/src/patch.test.ts` admits a client declaring content version 99 on
+ * purpose. Without this bit a bundle that predates variants would be welcomed,
+ * would ignore opcode 13, and would fire BASE stats while the server resolved
+ * VARIANT stats: a four-shell shotgun variant would hand it eight shells and
+ * a damage number 10% out on every pellet. So a connection that does not set
+ * it has every claim resolved to `BASE_SLOT`, and that resolution happens
+ * before the first magazine is filled.
+ */
+export const CAP_VARIANTS = 1 << 5;
 
 /* ------------------------------------------------------------------------ *
  * Enums carried in payloads

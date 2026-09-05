@@ -21,6 +21,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { PackKind, type Release, type ReleaseDoc } from '@doomcraft/shared/packs';
 
 import { PackInventory, ReleaseService } from './packs.js';
+import { Room } from './room.js';
 
 const here = fileURLToPath(import.meta.url);
 const repoRoot = join(here, '..', '..', '..');
@@ -652,4 +653,57 @@ describe('the release routes on the real binary', () => {
       child.kill('SIGKILL');
     }
   }, 90_000);
+});
+
+/* ------------------------------------------------------------------------ *
+ * The pinned variant table actually reaches the room (V3)
+ *
+ * `8c6f196` fixed the production draft route dropping `picks.variants` while
+ * every service-level test passed. This is the same hazard one layer further
+ * on: an installed, approved variants pack that never reaches `new Room(...)`
+ * makes every room serve an empty table forever, and every unit test in the
+ * repo stays green while it happens.
+ * ------------------------------------------------------------------------ */
+
+describe('a release\'s variants pack reaches the room that pinned it', () => {
+  it('an installed manifest becomes a room arsenal with real slots', () => {
+    const inv = new PackInventory({ packsRoot: packsRoot(false, true), log: () => {} });
+    const at = inv.variantsAt(1);
+    expect(at, 'variants@1 not installed').not.toBeNull();
+    expect(at!.manifest.variants).toHaveLength(2);
+
+    const room = new Room({
+      seed: 1, botFill: 0, enemies: 0, eagerWorld: false, store: null,
+      clock: () => 0, name: 'pinned', variants: at!.manifest,
+    });
+    try {
+      // Decoded from the bytes the room will send, not from the manifest.
+      expect(room.variantTable.map((v) => v.id)).toEqual(['shotgun-slug', 'pistol-burst']);
+      // Two variants -> the base plus two slots.
+      expect(room.sim.arsenal.slotCount).toBe(3);
+      expect(room.sim.arsenal.statsFor(1, 1).variantId).toBe('shotgun-slug');
+      expect(room.sim.arsenal.statsFor(1, 1).pellets).toBe(1);
+      expect(room.sim.arsenal.statsFor(0, 2).variantId).toBe('pistol-burst');
+      expect(room.sim.arsenal.statsFor(0, 2).rpm).toBe(620);
+    } finally { room.stop(); }
+  });
+
+  it('and the room FACTORY passes it, which no behavioural test can see', () => {
+    // The gap this guards is the one that has bitten this repo twice: the
+    // wiring, not the thing being wired. `server/src/index.ts` builds every
+    // production room; if its options object stops naming `variants`, the two
+    // assertions above still pass, the whole suite still passes, and every
+    // real room silently serves an empty table. There is no lighter way to see
+    // that than to look at the line — booting the binary is a child process
+    // and a minute.
+    const src = readFileSync(join(repoRoot, 'server', 'src', 'index.ts'), 'utf8');
+    expect(src, 'index.ts no longer resolves the release\'s variants pack')
+      .toMatch(/inventory\.variantsAt\(variantsVersion\)/);
+    const from = src.indexOf('const room = new Room({');
+    expect(from, 'the room factory moved').toBeGreaterThan(0);
+    // The options object's own close, at its own indent — the inner arrow
+    // callbacks close at deeper ones, so this really is the end of the call.
+    const roomCall = src.slice(from, src.indexOf('\n    });', from));
+    expect(roomCall, 'new Room(...) no longer passes `variants`').toMatch(/^ {6}variants,$/m);
+  });
 });

@@ -401,7 +401,7 @@ export class WeaponRuntime {
    * resolved from its pinned release, and the local Worker passes the compiled
    * one, exactly as it builds rooms from BUILTIN_CONTENT_HASH today.
    */
-  readonly arsenal: SessionArsenal;
+  arsenal: SessionArsenal;
   /**
    * This player's equipped variant slot per weapon. All zeros in phase V1.
    * The MIRROR of `PlayerEntity.variantSlots` on the server — these two are a
@@ -538,6 +538,46 @@ export class WeaponRuntime {
    */
   beginSession(): void {
     this.shotSeq = 0;
+    /* AND THE ARSENAL, for the same reason and with a sharper edge.
+     *
+     * `shotSeq` had to be reset because the runtime outlives the connection.
+     * So does the arsenal — and the failure is worse than a mis-seeded cone.
+     * Play a room whose slot 1 is a four-shell shotgun, then reconnect to a
+     * server too old to send `S2C.VARIANT_TABLE` at all: with no reset the
+     * runtime keeps resolving slot 1 and predicts four shells and 10 damage
+     * against that server's eight and 11, and nothing on the wire ever
+     * contradicts it, because the contradiction is a message that never
+     * arrives. A session starts on the compiled table and is told otherwise,
+     * or it is not told at all and stays there. */
+    this.arsenal = BASE_ARSENAL;
+    this.variantSlots.fill(BASE_SLOT);
+  }
+
+  /**
+   * Adopt the room's pinned table — `S2C.VARIANT_TABLE`. A SESSION
+   * INITIALISATION ACT, and only that.
+   *
+   * The two are installed together and the loadout is re-derived from them,
+   * because `mag[i]` and `heat[i]` were computed from the arsenal this
+   * replaces: a client that swapped the table and kept its magazines would
+   * hold eight shells of a variant that pays for its damage with four.
+   *
+   * WHAT THIS CANNOT REPAIR, and why it is therefore not a mid-match call:
+   * `cooldownMs` was accumulated from the old fire interval, `reloadRemainingMs`
+   * from the old reload time (start a base pistol reload, adopt a
+   * `reloadMs: 1000` variant, and 850 ms of the old one is still ticking),
+   * reserve ammunition has already been spent, and any projectile in flight
+   * was spawned with the old numbers. Re-deriving the loadout mid-match would
+   * also manufacture ammunition. V3 adopts once, immediately after
+   * SESSION_CONFIG and before the player can fire; V4 is where a slot map may
+   * change under a live player, and it will need an authoritative loadout
+   * boundary rather than this.
+   */
+  adoptArsenal(arsenal: SessionArsenal, slots: Uint8Array): void {
+    this.arsenal = arsenal;
+    this.variantSlots.fill(BASE_SLOT);
+    this.variantSlots.set(slots.subarray(0, WEAPON_COUNT));
+    this.resetLoadout(this.owned);
   }
 
   /** Fresh spawn: full mags on owned weapons, starting reserves. */

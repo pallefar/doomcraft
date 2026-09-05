@@ -24,6 +24,7 @@ import {
   BlockId,
   BLOCK_SOLID,
   CAP_INFLATE,
+  CAP_VARIANTS,
   CAP_RETURNING,
   CHUNK_HEIGHT,
   CHUNK_SIZE_MASK,
@@ -123,6 +124,10 @@ import {
   UpdateReason,
 } from '@shared/version';
 import { defaultFlagBits, flagOn } from '@shared/flags';
+import {
+  createVariantTableMessage, decodeVariantTable, overlaysFromWire,
+} from '@shared/variants';
+import { SessionArsenal } from '@shared/arsenal';
 import type {
   ChatMessage, DamageEvent, KillEvent, MatchAwardMessage, SessionConfigMessage, SolidAt,
   UpdateRequiredMessage, WelcomeMessage,
@@ -643,6 +648,13 @@ export interface NetClientEvents {
    */
   onSessionConfig?(config: SessionConfigMessage): void;
   /**
+   * The variant stat table this ROOM pinned, and this player's server-resolved
+   * slot per weapon. Arrives once, immediately after SESSION_CONFIG, and only
+   * from a server new enough to send it. The message is decoded whole or not
+   * at all; by the time this fires, the arsenal handed to it is safe to adopt.
+   */
+  onVariantTable?(arsenal: SessionArsenal, slots: Uint8Array): void;
+  /**
    * What the server granted for the round that just ended, and the balances it
    * wrote. The record is REUSED — read it now. Fires only when the server has
    * the `economy_scrap` kill switch on for this player.
@@ -947,6 +959,14 @@ export class NetClient {
   private readonly snapshot = new SnapshotBuffer(MAX_PLAYERS, MAX_ENTITIES, MAX_PROJECTILES);
   private readonly welcome = createWelcomeMessage();
   private readonly sessionConfig = createSessionConfigMessage();
+  private readonly variantTable = createVariantTableMessage();
+  /**
+   * True once this connection has been told a table. False against a server
+   * too old to send one — which is a different thing from "the table is still
+   * in flight", and V4 will have to tell them apart before it lets a claim
+   * change what a shot does. See HANDOVER 6.
+   */
+  variantsAdopted = false;
   private readonly updateMsg = createUpdateRequiredMessage();
   private readonly matchAward = createMatchAwardMessage();
   private readonly damage = createDamageEvent();
@@ -1244,7 +1264,12 @@ export class NetClient {
     this.updateReason = UpdateReason.NONE;
     const caps = this.hello.caps
       | (this.everConnected ? CAP_RETURNING : 0)
-      | (chunkInflateSupported() ? CAP_INFLATE : 0);
+      | (chunkInflateSupported() ? CAP_INFLATE : 0)
+      /* ALWAYS SET, and set HERE rather than by a caller: this bundle knows
+       * how to decode `S2C.VARIANT_TABLE`, and a server that does not see the
+       * bit resolves every variant claim to the base. It is an interlock, not
+       * a preference — there is nothing for a caller to decide. */
+      | CAP_VARIANTS;
     this.everConnected = true;
     encodeHello(
       this.writer, this.hello.name, this.hello.skin, caps, this.hello.avatar,
@@ -1534,6 +1559,7 @@ export class NetClient {
       case S2C_MODE.EVENT: this.onModeEvent(r); break;
       case S2C_MODE.CONTEXT: this.onModeContext(r); break;
       case S2C.SESSION_CONFIG: this.onSessionConfig(r); break;
+      case S2C.VARIANT_TABLE: this.onVariantTable(r); break;
       case S2C.MATCH_AWARD: this.onMatchAward(r); break;
       case S2C.UPDATE_REQUIRED: this.onUpdateRequired(r); break;
       // An unknown id is a message from a NEWER server. Ignoring it is what
@@ -1566,6 +1592,24 @@ export class NetClient {
     this.serverBuildId = c.buildId;
     this.flagBits = c.flags >>> 0;
     this.events.onSessionConfig?.(c);
+  }
+
+  /**
+   * The room's table, adopted whole or not at all.
+   *
+   * `decodeVariantTable` returns null for anything it cannot vouch for and
+   * touches nothing on the way — so a truncated packet leaves both the
+   * arsenal and the slot map exactly as they were. A HALF-adopted table is
+   * two predictors disagreeing, which is the one outcome this whole arc
+   * exists to prevent, and it is worse than no table at all.
+   */
+  private onVariantTable(r: PacketReader): void {
+    const m = decodeVariantTable(r, this.variantTable);
+    if (m === null) return;
+    this.variantsAdopted = true;
+    this.events.onVariantTable?.(
+      SessionArsenal.from(overlaysFromWire(m.variants)), m.slots,
+    );
   }
 
   /**

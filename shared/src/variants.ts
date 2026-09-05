@@ -46,7 +46,10 @@
  * than silently priced at zero. See `INERT`.
  */
 
-import { sanitiseContentId } from './modes.ts';
+import { MAX_CONTENT_ID_LENGTH, sanitiseContentId } from './modes.ts';
+import {
+  type PacketReader, type PacketWriter, S2C,
+} from './protocol.ts';
 import {
   FireKind, WEAPON_COUNT, WeaponId, WEAPONS, type WeaponDef,
 } from './weapons.ts';
@@ -559,4 +562,165 @@ export function variantsFingerprintInputs(manifest: VariantsManifest): string[] 
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((v) => `${v.id}:${v.base}/`
       + VARIANT_FIELDS.map((f) => (v.over[f] === undefined ? '-' : String(v.over[f]))).join(','));
+}
+
+/* ------------------------------------------------------------------------ *
+ * The wire — S2C.VARIANT_TABLE
+ *
+ * Phase V3. A room pins a variant table; this is how a client learns which
+ * one, and which slots the server resolved for it.
+ *
+ * THREE DECISIONS ARE BUILT INTO THE LAYOUT, AND EACH ONE HAS A NUMBER
+ * BEHIND IT.
+ *
+ * 1. EFFECTIVE VALUES, NOT A PRESENT/ABSENT MASK. Every row carries all 16
+ *    whitelisted fields at the value the variant actually fires with, so the
+ *    receiver never combines the wire with its own compiled table for any of
+ *    them. This is a narrowing of the trust surface, NOT its abolition: the
+ *    ~25 fields a variant may not move — `spreadAir`, `spreadRecovery`,
+ *    `spreadCrouchScale`, `reloadShellMs`, `knockback`, the feel fields — are
+ *    still read from the compiled archetype on both sides, exactly as they
+ *    are for the base weapon today, and a bundle whose compiled table differs
+ *    still mispredicts through them. (Measured: a client whose pistol
+ *    `spreadAir` is 0.028 against a server's 0.014 fires an airborne cold
+ *    cone of 0.03799999977648258 rad against the server's
+ *    0.02399999977648258, and no field on this wire touches it. Worse, that
+ *    divergence is invisible to `weaponsFingerprintInputs()`, which does not
+ *    list `spreadAir` either — see HANDOVER 6.)
+ *
+ * 2. f64, NOT f32. `w.f32()` narrows, and a row carries fields the variant
+ *    never overrode. A rocket variant that moves only `rpm` would arrive with
+ *    `splashRadius` 4.400000095367432 instead of 4.4 — and `detonate()` tests
+ *    that DOUBLE against the blast distance, so a body 4.40000005 m away
+ *    would take an impulse of 6.3e-16 m/s where it takes exactly 0 today.
+ *    A shotgun variant moving only magazine and damage would inherit a
+ *    headshot multiplier of 1.600000023841858 and pay 16.00000023841858 for
+ *    a headshot pellet instead of 16. f64 is lossless, so an inherited field
+ *    keeps the archetype's double and `hotFor()` does exactly the narrowing
+ *    it already does. 8 bytes x 16 x 64 rows is 8 KB; the writer is 16 KB and
+ *    grows by doubling anyway.
+ *
+ * 3. IT IS DECODED BEFORE IT IS USED, ON BOTH SIDES. The server builds its
+ *    arsenal from the bytes it sends, not from the manifest it parsed. With
+ *    f64 that is a lossless round trip and therefore free — which is the
+ *    point: it is a structural guarantee rather than a fact about today's
+ *    format, and it is what keeps a future narrowing from silently splitting
+ *    the two predictors in the eighth digit (the `fc01475` bug class).
+ * ------------------------------------------------------------------------ */
+
+/** One row as it travels: an id, its archetype, and all 16 fields resolved. */
+export interface VariantWireEntry {
+  readonly id: string;
+  readonly base: WeaponId;
+  /** `VARIANT_FIELDS` order, effective values. Always 16 long. */
+  readonly values: Float64Array;
+}
+
+export interface VariantTableMessage {
+  variants: VariantWireEntry[];
+  /** `WEAPON_COUNT` bytes: the slot the SERVER resolved for each weapon id. */
+  slots: Uint8Array;
+}
+
+export function createVariantTableMessage(): VariantTableMessage {
+  return { variants: [], slots: new Uint8Array(WEAPON_COUNT) };
+}
+
+/**
+ * Worst case on the wire: 1 opcode + 1 count + 64 rows of
+ * (1 + 48 id bytes + 1 base + 16 x 8) + WEAPON_COUNT slot bytes.
+ *
+ * Stated as arithmetic rather than as a literal so it cannot drift away from
+ * the constants it is made of, and asserted in the tests.
+ */
+export const MAX_VARIANT_TABLE_BYTES =
+  2 + MAX_VARIANTS_PER_PACK * (1 + MAX_CONTENT_ID_LENGTH + 1 + VARIANT_FIELDS.length * 8)
+  + WEAPON_COUNT;
+
+/** The 16 effective values of one parsed variant, in `VARIANT_FIELDS` order. */
+export function wireValuesFor(v: VariantDef): Float64Array {
+  const eff = applyOver(WEAPONS[v.base], v.over);
+  const out = new Float64Array(VARIANT_FIELDS.length);
+  for (let i = 0; i < VARIANT_FIELDS.length; i++) out[i] = eff[VARIANT_FIELDS[i]] as number;
+  return out;
+}
+
+/** A parsed manifest as rows. Order IS the slot order: row i becomes slot i+1. */
+export function wireEntriesFor(manifest: VariantsManifest): VariantWireEntry[] {
+  return manifest.variants.map((v) => ({ id: v.id, base: v.base, values: wireValuesFor(v) }));
+}
+
+export function encodeVariantTable(
+  w: PacketWriter, entries: readonly VariantWireEntry[], slots: Uint8Array,
+): PacketWriter {
+  w.reset();
+  w.u8(S2C.VARIANT_TABLE);
+  const n = entries.length > MAX_VARIANTS_PER_PACK ? MAX_VARIANTS_PER_PACK : entries.length;
+  w.u8(n);
+  for (let i = 0; i < n; i++) {
+    const e = entries[i];
+    w.str(e.id, MAX_CONTENT_ID_LENGTH);
+    w.u8(e.base & 0xff);
+    for (let f = 0; f < VARIANT_FIELDS.length; f++) w.f64(e.values[f]);
+  }
+  for (let i = 0; i < WEAPON_COUNT; i++) w.u8(slots[i] ?? 0);
+  return w;
+}
+
+/**
+ * Decode, or refuse — never half of one.
+ *
+ * Returns `null` on anything it cannot vouch for, and does NOT touch `out`
+ * until every byte has been read, so a truncated packet leaves the receiver's
+ * existing table and slot map exactly where they were. That atomicity is the
+ * point: a partially replaced arsenal is two predictors disagreeing, which is
+ * the one failure this whole arc exists to prevent.
+ *
+ * A row whose `base` is not a `WeaponId` refuses the WHOLE message rather
+ * than being dropped. Dropping would renumber every later slot, and the slot
+ * map that arrives with it was numbered by the sender.
+ */
+export function decodeVariantTable(
+  r: PacketReader, out: VariantTableMessage,
+): VariantTableMessage | null {
+  if (r.remaining < 2) return null;
+  r.u8();
+  const count = r.u8();
+  if (count > MAX_VARIANTS_PER_PACK) return null;
+  const rows: VariantWireEntry[] = [];
+  for (let i = 0; i < count; i++) {
+    if (r.remaining < 1) return null;
+    const idLen = r.bytes[r.offset];
+    if (r.remaining < 1 + idLen + 1 + VARIANT_FIELDS.length * 8) return null;
+    const id = sanitiseContentId(r.str());
+    if (id.length === 0) return null;
+    const base = r.u8();
+    if (!Number.isInteger(base) || base < 0 || base >= WEAPON_COUNT) return null;
+    const values = new Float64Array(VARIANT_FIELDS.length);
+    for (let f = 0; f < VARIANT_FIELDS.length; f++) values[f] = r.f64();
+    rows.push({ id, base: base as WeaponId, values });
+  }
+  if (r.remaining < WEAPON_COUNT) return null;
+  const slots = new Uint8Array(WEAPON_COUNT);
+  for (let i = 0; i < WEAPON_COUNT; i++) slots[i] = r.u8();
+  out.variants = rows;
+  out.slots = slots;
+  return out;
+}
+
+/**
+ * Decoded rows as the assembly step wants them.
+ *
+ * `SessionArsenal.from` gives overlay `i` slot `i + 1`, which is the same
+ * numbering the sender used when it wrote the slot map, so the two agree by
+ * construction rather than by convention.
+ */
+export function overlaysFromWire(
+  entries: readonly VariantWireEntry[],
+): { id: string; base: number; over: Partial<Record<VariantField, number>> }[] {
+  return entries.map((e) => {
+    const over: Partial<Record<VariantField, number>> = {};
+    for (let f = 0; f < VARIANT_FIELDS.length; f++) over[VARIANT_FIELDS[f]] = e.values[f];
+    return { id: e.id, base: e.base, over };
+  });
 }

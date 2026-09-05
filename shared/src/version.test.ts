@@ -38,7 +38,15 @@ import {
   encodeSessionConfig,
   encodeUpdateRequired,
   encodeWelcome,
+  CAP_INFLATE,
+  CAP_VARIANTS,
 } from './protocol.ts';
+import {
+  MAX_VARIANT_TABLE_BYTES,
+  createVariantTableMessage,
+  decodeVariantTable,
+  encodeVariantTable,
+} from './variants.ts';
 import {
   BUILD_ID,
   CLOSE_CODE_BY_REASON,
@@ -212,6 +220,20 @@ describe('the protocol ratchet', () => {
     expect(S2C.MATCH_AWARD).toBeGreaterThan(S2C.SESSION_CONFIG);
     expect(protocolFingerprint()).toBe(0x04e8d61f);
   });
+
+  it('holds while a THIRTEENTH id and a SIXTH capability bit are appended', () => {
+    // `S2C.VARIANT_TABLE` and `CAP_VARIANTS` are phase V3. The fingerprint
+    // names ids up to `s2c.chunkz` and exactly one capability bit, so both are
+    // free — which is the entire reason the room's variant table could ship
+    // without stranding a single connected tab. If this fails, something was
+    // inserted rather than appended, or the fingerprint grew a name it should
+    // not have.
+    expect(S2C.VARIANT_TABLE).toBe(13);
+    expect(S2C.VARIANT_TABLE).toBeGreaterThan(S2C.MATCH_AWARD);
+    expect(CAP_VARIANTS).toBe(1 << 5);
+    expect(CAP_VARIANTS).toBeGreaterThan(CAP_INFLATE);
+    expect(protocolFingerprint()).toBe(0x04e8d61f);
+  });
 });
 
 describe('the content ratchet, per pack', () => {
@@ -300,6 +322,52 @@ describe('golden wire vectors', () => {
     expect(m.xp).toBe(0xffff);
     expect(m.scrap).toBe(0);
     expect(m.code).toBe(9);
+  });
+
+  it('VARIANT_TABLE encodes to the frozen bytes', () => {
+    // A one-row table for the shotgun (base 1), the sixteen whitelisted fields
+    // in `VARIANT_FIELDS` order, and a slot map putting this player on slot 1
+    // for the shotgun and the base for everything else.
+    //
+    // The values are f64 AND THAT IS THE POINT OF THE VECTOR. `w.f32()` would
+    // narrow every one of them, including the fields the variant inherited
+    // rather than overrode — a rocket variant that moves only `rpm` would
+    // arrive carrying splashRadius 4.400000095367432 instead of 4.4, and
+    // `detonate()` tests that double. If someone ever "optimises" this to f32,
+    // this vector is what says no.
+    const values = Float64Array.from([
+      11, 1, 1.6, 420, 15, 850, 0, 0, 0.01, 0.03, 0.006, 12, 40, 0.55, 1.4, 0,
+    ]);
+    const bytes = encodeVariantTable(
+      w, [{ id: 'slug', base: 1, values }], Uint8Array.from([0, 1, 0, 0, 0, 0, 0]),
+    ).copy();
+    expect(bytes.length).toBe(143);
+    expect(hex(bytes)).toBe(
+      '0d0104736c7567010000000000002640000000000000f03f9a9999999999f93f'
+      + '0000000000407a400000000000002e400000000000908a400000000000000000'
+      + '00000000000000007b14ae47e17a843fb81e85eb51b89e3ffa7e6abc7493783f'
+      + '000000000000284000000000000044409a9999999999e13f666666666666f63f'
+      + '000000000000000000010000000000',
+    );
+
+    const out = decodeVariantTable(new PacketReader(bytes), createVariantTableMessage());
+    expect(out).not.toBeNull();
+    expect(out?.variants).toHaveLength(1);
+    expect(out?.variants[0].id).toBe('slug');
+    expect(out?.variants[0].base).toBe(1);
+    // Object.is, not toBeCloseTo: the whole reason for f64 is that these are
+    // the SAME doubles on both sides, not merely nearby ones.
+    for (let i = 0; i < values.length; i++) {
+      expect(Object.is(out?.variants[0].values[i], values[i])).toBe(true);
+    }
+    expect([...(out?.slots ?? [])]).toEqual([0, 1, 0, 0, 0, 0, 0]);
+  });
+
+  it('bounds the biggest table it can ever be asked to send', () => {
+    // 64 variants x (a 48-byte id + a base byte + sixteen f64) + the opcode,
+    // the count and the seven slot bytes. Stated so a widening of the field
+    // list or the variant cap has to walk past it.
+    expect(MAX_VARIANT_TABLE_BYTES).toBe(11401);
   });
 
   it('round-trips every one of them', () => {

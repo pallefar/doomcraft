@@ -17,6 +17,8 @@ import {
   C2S,
   CAP_INFLATE,
   CAP_LOW_SPEC,
+  CAP_VARIANTS,
+  WEAPON_COUNT,
   CHUNK_HEIGHT,
   CHUNK_SIZE,
   CLIENT_TIMEOUT_MS,
@@ -90,6 +92,9 @@ import {
   rleEncodeInto,
   rleMaxBytes,
 } from '@doomcraft/shared';
+import {
+  encodeVariantTable, type VariantWireEntry,
+} from '@doomcraft/shared/variants';
 import {
   C2S_MODE,
   createModeActionMessage,
@@ -284,6 +289,13 @@ export interface NetHost {
    * is transmitted — the client never resolves a flag itself.
    */
   resolveFlags?(conn: Connection): number;
+  /**
+   * The variant table this room pinned, already DECODED from the bytes it
+   * will send (`Room.variantEntries`). Absent = a host that predates variants,
+   * which sends nothing at all and leaves every client on the compiled
+   * arsenal — the browser Worker and every older test harness.
+   */
+  readonly variantTable?: readonly VariantWireEntry[];
 }
 
 export interface ConnectionStats {
@@ -456,6 +468,8 @@ export class NetHub {
   private readonly edit = createBlockEditCommand();
   private readonly reader = new PacketReader();
   private readonly shared = new PacketWriter(16384);
+  /** A connection with no body yet claims nothing. */
+  private readonly emptySlots = new Uint8Array(WEAPON_COUNT);
 
   /* --- compressed chunk cache (see "Chunk compression" above) --- */
   /**
@@ -660,6 +674,26 @@ export class NetHub {
       conn.flagBits, BUILD_ID,
     );
     conn.send(w.copy());
+
+    /* THE ROOM'S VARIANT TABLE, immediately after SESSION_CONFIG.
+     *
+     * Once per connection is the whole lifetime of the table: a room pins its
+     * release when it is constructed, a reconnect is a new connection and
+     * resolves the same table, and a release promotion only reaches NEW rooms.
+     * The per-player slot MAP is a different kind of thing — mode eligibility
+     * and ownership are not pinned, and an unlocked room can still take a
+     * `SELECT` (`Room.applyPlan`) — so the encoder is written to be sent
+     * again, and the client's adoption is atomic and idempotent, against the
+     * day V4 gives a slot map a reason to change. Nothing changes one today.
+     *
+     * Sent ONLY to a client that set `CAP_VARIANTS`: one that did not has
+     * already had every claim resolved to the base, so the message would tell
+     * it nothing it could act on, and its slot map is seven zeroes anyway. */
+    const table = this.host.variantTable;
+    if (table !== undefined && (conn.caps & CAP_VARIANTS) !== 0) {
+      encodeVariantTable(w, table, conn.player?.variantSlots ?? this.emptySlots);
+      conn.send(w.copy());
+    }
   }
 
   private onInput(conn: Connection, bytes: Uint8Array): void {

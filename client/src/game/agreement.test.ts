@@ -301,9 +301,19 @@ function shotsBoth(script: readonly Beat[], arsenal: Arsenal, slot: number): { s
   sim.spawnPlayer(p);
   p.spawnProtectUntilMs = 0;
 
-  const rt = new WeaponRuntime(undefined, undefined, undefined, arsenal);
-  rt.variantSlots.fill(slot);
+  /* THE REAL ORDER, and it is load-bearing.
+   *
+   * `beginSession()` is a NEW CONNECTION — it drops the previous room's
+   * arsenal and slots along with the shot counter, because the runtime
+   * outlives the socket and a stale variant claim against a server that never
+   * sends one is unfalsifiable. So the session's arsenal has to be installed
+   * AFTER it, through the same `adoptArsenal` the wire uses, not handed to the
+   * constructor and then wiped. This test caught that ordering itself: it went
+   * red the moment `beginSession` learned to reset the arsenal, which is
+   * exactly what a lever is for (rule 26). */
+  const rt = new WeaponRuntime();
   rt.beginSession();
+  rt.adoptArsenal(arsenal, new Uint8Array(WEAPON_COUNT).fill(slot));
   rt.resetLoadout(ALL_WEAPON_MASK);
 
   const cmd = createInputCommand();

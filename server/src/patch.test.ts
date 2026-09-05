@@ -45,6 +45,8 @@ import {
 } from '@doomcraft/shared/version';
 import { FLAG_ORDER, flagOn, resolveFlagBits } from '@doomcraft/shared/flags';
 
+import { CAP_VARIANTS, WEAPON_COUNT, WeaponId } from '@doomcraft/shared';
+import { parseVariantsManifest } from '@doomcraft/shared/variants';
 import { Room } from './room.js';
 import { FlagService, stableIdFor } from './deploy.js';
 import type { Connection, NetTransport } from './net.js';
@@ -399,5 +401,72 @@ describe('a draining room refuses new players and keeps the ones it has', () => 
     expect(inside.close).toBeNull();
     // Still being simulated and still being sent snapshots: the match is live.
     expect(inside.messages.length).toBeGreaterThan(before);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The capability interlock
+ *
+ * `onHello` checks the protocol window and whether the host is draining, and
+ * nothing else — the test above admits a client declaring content version 99
+ * on purpose. So there is no existing barrier that would stop a bundle which
+ * predates variants from being welcomed into a room that has them, ignoring
+ * opcode 13, and firing the compiled archetype while this server resolved a
+ * variant. `CAP_VARIANTS` is that barrier, and this is what it costs to be
+ * without it.
+ * ------------------------------------------------------------------------ */
+
+describe('a client that cannot decode the table is not given variants', () => {
+  const parsed = parseVariantsManifest(JSON.stringify({
+    variants: [
+      { id: 'four-shell', base: WeaponId.SHOTGUN, name: 'Four Shell', over: { magSize: 4, damage: 10 } },
+    ],
+  }));
+
+  function variantRoom(): Room {
+    expect(parsed.errors).toEqual([]);
+    const claims = new Uint8Array(WEAPON_COUNT);
+    claims[WeaponId.SHOTGUN] = 1;
+    return makeRoom({
+      allWeapons: true, variants: parsed.manifest, variantClaims: () => claims,
+    });
+  }
+
+  it('resolves every claim to the base, and says nothing it cannot decode', () => {
+    const room = variantRoom();
+    const c = new Client(room).hello(PROTOCOL_VERSION, { caps: 0 });
+    expect(c.welcomed).toBe(true);
+    expect(c.first(S2C.VARIANT_TABLE)).toBeNull();
+
+    const p = room.sim.getPlayer(c.conn.playerId);
+    expect(p).toBeDefined();
+    expect([...p!.variantSlots]).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    // THE NUMBER THAT MATTERS. Without the interlock this reads 4 while the
+    // client, which never heard of variants, holds the archetype's eight.
+    expect(p!.mag[WeaponId.SHOTGUN]).toBe(8);
+    expect(room.sim.statsFor(p!, WeaponId.SHOTGUN).damage).toBe(11);
+  });
+
+  it('and DOES resolve them for a client that set the bit', () => {
+    // The positive control, without which the test above passes on a server
+    // that resolves nothing for anybody.
+    const room = variantRoom();
+    const c = new Client(room).hello(PROTOCOL_VERSION, { caps: CAP_VARIANTS });
+    expect(c.welcomed).toBe(true);
+    expect(c.first(S2C.VARIANT_TABLE)).not.toBeNull();
+
+    const p = room.sim.getPlayer(c.conn.playerId)!;
+    expect([...p.variantSlots]).toEqual([0, 1, 0, 0, 0, 0, 0]);
+    expect(p.mag[WeaponId.SHOTGUN]).toBe(4);
+    expect(room.sim.statsFor(p, WeaponId.SHOTGUN).damage).toBe(10);
+  });
+
+  it('a room with no variants pack sends an empty table, not silence', () => {
+    // "Count zero" and "a server too old to say anything" are different facts.
+    const room = makeRoom({ allWeapons: true });
+    const c = new Client(room).hello(PROTOCOL_VERSION, { caps: CAP_VARIANTS });
+    const msg = c.first(S2C.VARIANT_TABLE);
+    expect(msg).not.toBeNull();
+    expect(msg!.length).toBe(2 + WEAPON_COUNT);
   });
 });

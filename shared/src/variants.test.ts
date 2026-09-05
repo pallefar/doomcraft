@@ -18,7 +18,13 @@ import {
   parseVariantsManifest, scoreVariant, VARIANT_FIELDS, variantsFingerprintInputs,
   type VariantField,
 } from './variants.ts';
+import {
+  createVariantTableMessage, decodeVariantTable, encodeVariantTable,
+  MAX_VARIANT_TABLE_BYTES, overlaysFromWire, wireEntriesFor,
+} from './variants.ts';
 import { FireKind, WEAPON_COUNT, WeaponId, WEAPONS } from './weapons.ts';
+import { PacketReader, PacketWriter } from './protocol.ts';
+import { SessionArsenal } from './arsenal.ts';
 
 const IDS = Array.from({ length: WEAPON_COUNT }, (_, i) => i);
 
@@ -404,5 +410,148 @@ describe('fingerprint inputs', () => {
     expect(r.errors).toEqual([]);
     const line = variantsFingerprintInputs(r.manifest!)[0];
     expect(Buffer.byteLength(line, 'utf8')).toBeLessThanOrEqual(160);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The wire — V3
+ *
+ * The claim under test is not "it round-trips". It is that a SERVER and a
+ * CLIENT that build their arsenals from the same bytes hold the same numbers,
+ * including the narrowed `hot` reads, including the fields a variant never
+ * touched. That is what `fc01475` cost five separate fixes to establish for
+ * the cone, and this is the same property one layer down.
+ * ------------------------------------------------------------------------ */
+
+const SLUG = {
+  id: 'slug-shotgun', base: WeaponId.SHOTGUN, name: 'Slug Shotgun',
+  over: { pellets: 1, damage: 62, spread: 0.012, spreadMax: 0.03, rpm: 42 },
+};
+const RK = { id: 'heavy-rocket', base: WeaponId.ROCKET, name: 'Heavy', over: { rpm: 80 } };
+
+function wire(...variants: unknown[]): { entries: ReturnType<typeof wireEntriesFor>; bytes: Uint8Array } {
+  const r = parse(...variants);
+  expect(r.errors).toEqual([]);
+  const entries = wireEntriesFor(r.manifest!);
+  const w = encodeVariantTable(
+    new PacketWriter(MAX_VARIANT_TABLE_BYTES), entries, new Uint8Array(WEAPON_COUNT),
+  );
+  return { entries, bytes: w.copy() };
+}
+
+describe('the room table on the wire', () => {
+  it('gives a server and a client the SAME numbers, hot reads included', () => {
+    const { bytes } = wire(SLUG, RK);
+    // Two INDEPENDENT decodes, as the two ends really do it.
+    const a = decodeVariantTable(new PacketReader(bytes), createVariantTableMessage());
+    const b = decodeVariantTable(new PacketReader(bytes), createVariantTableMessage());
+    const server = SessionArsenal.from(overlaysFromWire(a!.variants));
+    const client = SessionArsenal.from(overlaysFromWire(b!.variants));
+    expect(server.slotCount).toBe(3);
+    for (let slot = 0; slot < server.slotCount; slot++) {
+      for (let id = 0; id < WEAPON_COUNT; id++) {
+        const s = server.statsFor(id, slot);
+        const c = client.statsFor(id, slot);
+        for (const k of Object.keys(s) as (keyof typeof s)[]) {
+          if (k === 'hot') continue;
+          expect(Object.is(s[k], c[k]), `slot ${slot} weapon ${id} field ${String(k)}`).toBe(true);
+        }
+        for (const k of Object.keys(s.hot) as (keyof typeof s.hot)[]) {
+          expect(Object.is(s.hot[k], c.hot[k]), `slot ${slot} weapon ${id} hot.${String(k)}`).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('leaves an INHERITED field at the archetype\'s double, which f32 would not', () => {
+    // THE REASON THIS WIRE IS f64. `heavy-rocket` overrides `rpm` and nothing
+    // else, so it inherits the rocket's splashRadius. Narrowed to float32 that
+    // becomes 4.400000095367432 — and `sim.ts detonate()` tests the DOUBLE
+    // against the blast distance, so a body at 4.40000005 m would take an
+    // impulse where it takes none today. The shotgun's headshot multiplier is
+    // the same story: 1.6 narrows to 1.600000023841858 and a headshot pellet
+    // pays 16.00000023841858 instead of 16.
+    const { bytes } = wire(RK, SLUG);
+    const m = decodeVariantTable(new PacketReader(bytes), createVariantTableMessage())!;
+    const arsenal = SessionArsenal.from(overlaysFromWire(m.variants));
+    const rocket = arsenal.statsFor(WeaponId.ROCKET, 1);
+    expect(rocket.variantId).toBe('heavy-rocket');
+    expect(rocket.rpm).toBe(80);
+    expect(Object.is(rocket.splashRadius, WEAPONS[WeaponId.ROCKET].splashRadius)).toBe(true);
+    expect(rocket.splashRadius).toBe(4.4);
+    // And the hot read stays exactly the narrowing weapons.ts already does.
+    expect(rocket.hot.splashRadius).toBe(4.400000095367432);
+
+    const slug = arsenal.statsFor(WeaponId.SHOTGUN, 2);
+    expect(slug.headshotMultiplier).toBe(WEAPONS[WeaponId.SHOTGUN].headshotMultiplier);
+    expect(slug.headshotMultiplier).toBe(1.6);
+  });
+
+  it('carries the per-player slot map beside the table', () => {
+    const { entries } = wire(SLUG);
+    const slots = new Uint8Array(WEAPON_COUNT);
+    slots[WeaponId.SHOTGUN] = 1;
+    const bytes = encodeVariantTable(new PacketWriter(512), entries, slots).copy();
+    const m = decodeVariantTable(new PacketReader(bytes), createVariantTableMessage())!;
+    expect([...m.slots]).toEqual([0, 1, 0, 0, 0, 0, 0]);
+  });
+
+  it('an empty table is a real message, not silence', () => {
+    // A room with no variants still says so. "Count zero" and "a server too
+    // old to say anything" are different facts and the client has to be able
+    // to tell them apart.
+    const bytes = encodeVariantTable(
+      new PacketWriter(64), [], new Uint8Array(WEAPON_COUNT),
+    ).copy();
+    expect(bytes.length).toBe(2 + WEAPON_COUNT);
+    const m = decodeVariantTable(new PacketReader(bytes), createVariantTableMessage())!;
+    expect(m.variants).toEqual([]);
+    expect(SessionArsenal.from(overlaysFromWire(m.variants)).slotCount).toBe(1);
+  });
+
+  it('REFUSES a truncated packet whole, and leaves the previous message untouched', () => {
+    // Atomicity is the property, not tolerance. A half-adopted table is two
+    // predictors disagreeing, which is worse than no table at all — so every
+    // prefix of a real message must decode to null, and the caller-owned
+    // output object must still hold whatever it held before.
+    const { bytes } = wire(SLUG, RK);
+    const out = createVariantTableMessage();
+    out.variants = [{ id: 'previous', base: WeaponId.PISTOL, values: new Float64Array(VARIANT_FIELDS.length) }];
+    out.slots = Uint8Array.from([9, 9, 9, 9, 9, 9, 9]);
+    for (let cut = 1; cut < bytes.length; cut++) {
+      expect(
+        decodeVariantTable(new PacketReader(bytes.subarray(0, cut)), out),
+        `prefix of ${cut} bytes decoded`,
+      ).toBeNull();
+    }
+    expect(out.variants[0].id).toBe('previous');
+    expect([...out.slots]).toEqual([9, 9, 9, 9, 9, 9, 9]);
+    // The whole thing still decodes, so the loop above was testing truncation
+    // and not a broken encoder.
+    expect(decodeVariantTable(new PacketReader(bytes), out)).not.toBeNull();
+    expect(out.variants).toHaveLength(2);
+  });
+
+  it('refuses a row whose base is not a WeaponId, rather than dropping it', () => {
+    // Dropping renumbers every later slot, and the slot map beside it was
+    // written in the SENDER's numbering. One bad row would silently point a
+    // player at a different weapon's variant.
+    const { entries } = wire(SLUG, RK);
+    const bytes = encodeVariantTable(
+      new PacketWriter(512),
+      [{ ...entries[0], base: WEAPON_COUNT as WeaponId }, entries[1]],
+      new Uint8Array(WEAPON_COUNT),
+    ).copy();
+    expect(decodeVariantTable(new PacketReader(bytes), createVariantTableMessage())).toBeNull();
+  });
+
+  it('the wire order IS the slot order', () => {
+    const { bytes } = wire(SLUG, RK);
+    const m = decodeVariantTable(new PacketReader(bytes), createVariantTableMessage())!;
+    const arsenal = SessionArsenal.from(overlaysFromWire(m.variants));
+    // Row 0 -> slot 1, row 1 -> slot 2. Both ends derive it the same way from
+    // the same bytes, which is what makes the slot map meaningful at all.
+    expect(arsenal.statsFor(m.variants[0].base, 1).variantId).toBe(m.variants[0].id);
+    expect(arsenal.statsFor(m.variants[1].base, 2).variantId).toBe(m.variants[1].id);
   });
 });

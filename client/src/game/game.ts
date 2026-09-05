@@ -711,6 +711,10 @@ export class Game {
         onDamage: (e) => this.onDamage(e),
         onKill: (e) => this.onKill(e),
         onChat: (m) => this.onChat(m),
+        /* The room's pinned variant table. Installed straight onto the
+         * predictor, because the predictor is the only thing that reads it —
+         * every firing-path lookup already goes through `weapons.stats()`. */
+        onVariantTable: (arsenal, slots) => { this.weapons.adoptArsenal(arsenal, slots); },
         // A monster is killed and removed in the same server tick, so the only
         // notice the client ever gets that one died is this reason byte.
         onEntityGone: (v, reason) => {

@@ -296,24 +296,56 @@ oversight.
 **THE SHOT CLOCKS DIVERGE, AND THE CONE SEED RIDES ON THEM. Read this before
 V3 or V4 promises anything about prediction.**
 
-The server schedules on a 20 ms tick (`nextFireMs = now + interval`); the
-client accumulates into a per-frame cooldown. Neither is wrong and they cannot
-be made to agree by matching a formula — porting the client's carry-the-
-overshoot rule to the server let a pistol fire its second round 17 ms after its
-first, because that difference is only an overshoot while the trigger is held.
+The server schedules on a tick (`nextFireMs = now + interval`); the client
+accumulates into a per-frame cooldown. Neither is wrong and they cannot be made
+to agree by matching a formula — porting the client's carry-the-overshoot rule
+to the server let a pistol fire its second round 17 ms after its first, because
+that difference is only an overshoot while the trigger is held.
 
-Measured: over a 40-tick burst the client fires three rounds where the server
-fires four. The consequence is bigger than one shot, because the cone seed is
+**CORRECTION, 2026-09-05 (V3): the "20 ms tick" this paragraph used to name is
+NOT production.** `TICK_MS` is 50 (20 Hz, shared/src/constants.ts) and
+`Room.step` uses it; 20 is `agreement.test.ts`'s own harness constant. The
+measured "three rounds against four over a 40-tick burst" is therefore a
+statement about the harness, not about a shipping room. The PHENOMENON is real
+— two different quantisations of the same fire interval — but the ratio has not
+been measured at 50 ms.
+
+The consequence is bigger than one shot, because the cone seed is
 `shotSeed(ownerId, shotSeq, pellet)` — once the counts differ, every later shot
 is seeded differently on the two sides. **The bit-identical cone proof in
 `agreement.test.ts` holds FOR A GIVEN SHOT NUMBER; the numbers themselves
 drift.** `compareShots` therefore compares per BURST, checks the magazine by
 RATE and the sequence by BOUND, and says so where it asserts.
 
-Closing it means the server telling the client which shot number it actually
-resolved — wire work, and the obvious candidate to fold into V3's new message.
-Until then the server is authoritative and the client's tracer pattern is
-cosmetic after the first divergence.
+**AND "the server tells the client which shot it resolved" IS NOT THE FIX. This
+was V3's planned second half and it was CUT, before any of it was written, on
+three findings that were then reproduced here.**
+
+1. **An in-order acknowledgement reuses a seed.** The client predicts shots 1
+   and 2; the ack for shot 1 arrives and assigns `shotSeq = 1`; the next
+   `fireOnce()` pre-increments to 2 **again**. For owner 1, pellet 0, that
+   re-uses seed 3087140845 where the next local shot should have used
+   1394675828. No reordering required.
+2. **No assignment rule using only the two counters can be right.** Client at
+   3 receives ack 4. Its next shot is 5 — which matches the server only if the
+   server is still at 4. If the server has already resolved 5 and that ack is
+   in flight, the server's next is 6. The client cannot tell those two
+   histories apart.
+3. **The decisive one: aligning the COUNT does not align the CONE.** Three
+   pistol shots leave `heatSpread` at 0.027999999999999997; four leave 0.03.
+   Advancing the counter from 3 to 4 does not apply the missing bloom, so both
+   sides can agree on shot 5 and still hand `currentSpreadOf` different heat.
+   The shot number was never the only state that drifted.
+
+   (Also: `deathmatch.ts:752` reads `weapons.shotSeq` ticking as a first-shot
+   timer, so an authoritative assignment would stamp a first-shot time for a
+   runtime that never fired.)
+
+A real reconciliation needs an authoritative simulation/input boundary and
+enough weapon state to replay outstanding prediction, or authoritative shot
+effects. A counter is not that design. Until somebody builds it the server is
+authoritative and the client's tracer pattern is cosmetic after the first
+divergence — which is what this section said before, and is still true.
 
 **From the V2 plan review (Codex, before any code was written).** Every one
 below was independently reproduced here before being written down — rule 23.
@@ -344,6 +376,58 @@ below was independently reproduced here before being written down — rule 23.
   being planned, but a defensive clamp in `world.ts` would cost nothing.
 - **The horde SHOP delivery line is unpinned.** `equipStart` is covered by a
   proven-red test; the shop's identical one-line change has no test of its own.
+
+**From the V3 plan review (Codex, before any code was written).** Every one
+below was independently reproduced here before being written down — rule 23.
+
+- **THE WIRE NARROWS THE TRUST SURFACE; IT DOES NOT ABOLISH IT.** V3's plan
+  claimed that sending effective values means "the client never combines the
+  wire with its own compiled table". That is true of the 16 whitelisted
+  fields and FALSE of everything else: `SessionArsenal.from` spreads the
+  decoded overlay over the receiver's own `WEAPONS[base]`, so `spreadAir`,
+  `spreadRecovery`, `spreadCrouchScale`, `reloadShellMs`, `knockback` and the
+  feel fields still come out of the bundle. A client whose pistol `spreadAir`
+  is 0.028 against a server's 0.014 fires an airborne cold cone of
+  0.03799999977648258 rad against the server's 0.02399999977648258, and no
+  field on this wire touches it. **Worse: that divergence is invisible to
+  `weaponsFingerprintInputs()`, which lists 13 fields and does not list
+  `spreadAir` either.** Slot 0 is entirely compiled, as it always was. Closing
+  it is a content-ratchet change — widen the weapons fingerprint, bump the
+  weapons pack — and it is a real one, not V3's.
+- **The room factory is where this class of bug lives.** `8c6f196` was the
+  production draft route dropping `picks.variants` while every service-level
+  test passed. V3 has the same shape one layer on: an installed, approved
+  variants pack that never reaches `new Room(...)` makes every room serve an
+  empty table forever with the whole suite green. Proven: removing the line
+  from index.ts fails exactly ONE test in the repo, and it is a source scan.
+- **`CAP_VARIANTS` is not optional and the ordering is not either.**
+  `NetHub.onHello -> Room.onHello -> Simulation.addPlayer -> spawnPlayer ->
+  first magazine fill` all happens before `host.onHello` returns, so a slot
+  written after that call is a slot that arrived after the magazine it was
+  meant to size. `addPlayer` takes the slots now.
+- **A mid-session slot map is NOT covered by the release pin.** The TABLE is
+  immutable for the life of a room; eligibility is not. An unlocked room still
+  takes a `C2S_MODE.SELECT` (`Room.applyPlan`), so §7.3's `variantsAllowed`
+  column can change under a live connection, and V4's revocation rule can too.
+  V3 sends once because every slot is 0 today; the encoder is written to be
+  sent again and the client's adoption is atomic and idempotent, which is what
+  V4 needs. **What adoption CANNOT repair mid-match**, and why it is a
+  session-initialisation act only: `cooldownMs` was accumulated from the old
+  fire interval, `reloadRemainingMs` from the old reload time (start a base
+  pistol reload, adopt a `reloadMs: 1000` variant, and 850 ms of the old one
+  is still ticking), reserve ammunition is already spent, projectiles in
+  flight carry the old numbers, and re-deriving the loadout manufactures ammo.
+- **`S2C.SNAPSHOT` is UNRELIABLE and opcode 13 is RELIABLE**, so on the WebRTC
+  peer topology a snapshot can precede the table and the client can be
+  `playing` before it has adopted. Pre-existing — SESSION_CONFIG's flag bits
+  have exactly the same property — and harmless while every slot is 0. V4 must
+  distinguish "table pending" from "a server too old to send one"
+  (`NetClient.variantsAdopted` is the flag, and it is not yet a gate).
+- **V4's killfeed needs more than a name.** `S2C.KILL` carries a weapon id and
+  `game.ts` calls `getWeapon(e.weaponId).name`, so two shotgun variants arrive
+  as the same weapon. The killing shot's variant identity has to travel too —
+  and the display readers `maxBurstDamage` / `currentAmmoType` /
+  `headshotScale` still answer for the archetype (§3).
 
 **Carried forward.**
 

@@ -1018,6 +1018,15 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
      * once, read by both the defs filter and the settlement. */
     const challengeItemVersion = release.packs.find((pk) => pk.kind === PackKind.ITEMS)?.version
       ?? (inventory.itemsVersions().at(-1) ?? 1);
+    /* THE VARIANT TABLE THIS ROOM FIRES WITH, resolved from the SAME pinned
+     * release and never re-read. Without this line the room's constructor
+     * defaults to no variants, a host with an installed and approved variants
+     * pack serves a permanently empty table, and the whole V3 wire reports
+     * count 0 forever — green everywhere, wrong in production. Null when the
+     * release names no variants pack, which is every release today. */
+    const variantsVersion = release.packs.find((pk) => pk.kind === PackKind.VARIANTS)?.version;
+    const variants = variantsVersion === undefined
+      ? null : (inventory.variantsAt(variantsVersion)?.manifest ?? null);
     const room = new Room({
       ...options,
       store,
@@ -1042,6 +1051,7 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
        * resolves for its next campaign level. Falls back to the shared
        * library when the release names no installed levels version. */
       levels: inventory.viewFor(release) ?? levels,
+      variants,
       name: key,
       plan,
       // Many rooms in one process: a `SELECT` naming a different place must not
