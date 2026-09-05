@@ -47,6 +47,7 @@ import {
   MAX_ENTITIES,
   MAX_HEALTH,
   MAX_OVERHEAL,
+  MAX_PELLETS,
   MAX_PROJECTILES,
   PITCH_LIMIT,
   PLAYER_EYE_HEIGHT,
@@ -1089,7 +1090,16 @@ export class Simulation {
 
     switch (def.kind) {
       case FireKind.HITSCAN: {
-        for (let i = 0; i < def.pellets; i++) {
+        // `hot.pellets`, not `def.pellets`, and clamped — the two halves of one
+        // fix. The client has always read the uint8 (`weapons.ts` fireHitscan)
+        // and this loop read the double, so a pellet count of 256 would be 0
+        // there and 256 here; and clamping only this side's double would give
+        // 16 against the client's 0, which is a worse disagreement than none.
+        // Identical for every shipping weapon — the counts are [1,7,1,1,1,1,1]
+        // and u8 of a small integer is that integer, so the lockstep golden and
+        // the cone agreement do not move. See MAX_PELLETS in shared/weapons.ts.
+        const pellets = def.hot.pellets > MAX_PELLETS ? MAX_PELLETS : def.hot.pellets;
+        for (let i = 0; i < pellets; i++) {
           anglesToForward(SCRATCH_DIR, 0, p.yaw, p.pitch);
           // PER PELLET, from (owner, shot, pellet) and nothing else. The old
           // scheme reseeded ONCE per shot from `hash3i(id, seq, this.seed, …)`

@@ -16,7 +16,7 @@
 
 import {
   BLOCK_BREAK_BASE_MS, REACH_BREAK, REACH_PLACE,
-  CHUNK_HEIGHT, clamp01,
+  CHUNK_HEIGHT, TERRAIN_CARVE_MAX_RADIUS, clamp01,
 } from '@shared/constants';
 import {
   BlockId, BLOCK_COUNT, BLOCK_HARDNESS, BLOCK_SOLID, BLOCK_OPAQUE, Face,
@@ -485,6 +485,29 @@ function settleDebris(
  * blast from draining a lava pool.
  *
  * Returns the number of voxels removed.
+ *
+ * BOUNDS, BEFORE ANY OF THIS. `radius` and the centre are loop bounds, and
+ * `for (let x = x0; x <= x1; x++)` is a loop only while `x + 1` is a different
+ * number from `x` — which above 2^53 it is not, because `-1e20 + 1 === -1e20`.
+ * The y range was already clamped to the column and looked like the whole
+ * answer; it was not, because x and z were clamped to nothing at all. A centre
+ * of 1e20 in x, with a radius of ONE, gives x0 === x1 === 1e20 and spins the
+ * innermost loop forever on the render thread. So all three ranges are pinned
+ * to the extents `world.setBlock` already enforces, and the radius is pinned to
+ * TERRAIN_CARVE_MAX_RADIUS — two separate fixes for two separate inputs, since
+ * neither one alone catches the other. `server/src/world.ts` carries the same
+ * pair; a bound that only one of the two carve implementations honours is not a
+ * bound.
+ *
+ * `power` is not a loop bound but is refused on the same line, because a
+ * non-finite one is worse than useless: `strength` becomes NaN, `NaN <= resist
+ * * jitter` is FALSE, and the "this voxel survived the blast" branch never
+ * runs — a NaN power carved 72 voxels where a real rocket takes 36, straight
+ * through the obsidian that is supposed to keep an arena's skeleton standing.
+ *
+ * None of this can move an in-range carve. Everything the range clamps cut is
+ * outside the loaded world, where `rawBlock` reads AIR and `setBlock` refuses
+ * the write.
  */
 export function carveSphere(
   world: VoxelWorld,
@@ -492,12 +515,17 @@ export function carveSphere(
   radius: number, power: number, seed: number,
   fx?: DestructionFx, sink?: BlockChangeSink,
 ): number {
+  if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz)) return 0;
+  if (!Number.isFinite(radius) || !Number.isFinite(power)) return 0;
   if (radius <= 0 || power <= 0) return 0;
-  const r2 = radius * radius;
+  const r = radius > TERRAIN_CARVE_MAX_RADIUS ? TERRAIN_CARVE_MAX_RADIUS : radius;
+  const r2 = r * r;
   const inv = 1 / r2;
-  const x0 = Math.floor(cx - radius), x1 = Math.floor(cx + radius);
-  const y0 = Math.max(0, Math.floor(cy - radius)), y1 = Math.min(CHUNK_HEIGHT - 1, Math.floor(cy + radius));
-  const z0 = Math.floor(cz - radius), z1 = Math.floor(cz + radius);
+  const x0 = Math.max(world.minBlockX, Math.floor(cx - r));
+  const x1 = Math.min(world.maxBlockX, Math.floor(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(CHUNK_HEIGHT - 1, Math.floor(cy + r));
+  const z0 = Math.max(world.minBlockZ, Math.floor(cz - r));
+  const z1 = Math.min(world.maxBlockZ, Math.floor(cz + r));
 
   let removed = 0;
   let bursts = 0;
@@ -542,8 +570,12 @@ export function carveSphere(
   }
   lastDebris = 0;
   if (removed > 0) {
-    scorchCrater(world, cx, cy, cz, radius, removed, seed, sink);
-    lastDebris = settleDebris(world, cx, cy, cz, radius, removed, seed, sink);
+    // The clamped radius, so the scorch ring and the debris throw stay the
+    // crater's own size. Neither needs a bound of its own: both only run when
+    // the carve removed something, which puts the centre within a radius of
+    // the loaded world.
+    scorchCrater(world, cx, cy, cz, r, removed, seed, sink);
+    lastDebris = settleDebris(world, cx, cy, cz, r, removed, seed, sink);
   }
   world.endBatch();
   return removed;

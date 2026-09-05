@@ -22,8 +22,10 @@ import {
   REACH_BREAK,
   REACH_PLACE,
   SEA_LEVEL,
+  TERRAIN_CARVE_MAX_RADIUS,
   WORLD_CHUNK_COUNT,
   WORLD_MAX_BLOCK_X,
+  WORLD_MAX_BLOCK_Z,
   WORLD_MAX_CHUNK,
   WORLD_MIN_BLOCK_X,
   WORLD_MIN_BLOCK_Z,
@@ -605,16 +607,52 @@ export class ServerWorld {
   /**
    * Blow a spherical hole in the world. Obsidian and bedrock survive, water and
    * lava are left alone so seas do not evaporate. Returns the block count removed.
+   *
+   * EVERY NUMBER IN THE SIGNATURE IS A LOOP BOUND, so all four are bounded here
+   * before they become one. `for (let y = y0; y <= y1; y++)` is a loop only
+   * while `y + 1` is a different number from `y`, and past 2^53 it is not:
+   * `-1e20 + 1 === -1e20`. A carve that reaches that state does not run slowly,
+   * it never returns, and it is the tick thread — the room is gone until the
+   * process is killed. Two independent inputs get there and they need two
+   * different answers:
+   *
+   *   * a huge RADIUS, which the clamp to TERRAIN_CARVE_MAX_RADIUS handles;
+   *   * a huge CENTRE, which the clamp does NOT touch — `carveSphere(0, 1e20,
+   *     0, 1, 0)` carries a radius of ONE and still lands y0 === y1 === 1e20 —
+   *     handled by clamping the three ranges to the world box instead. The
+   *     `if (y < 1 || y >= CHUNK_HEIGHT) continue` that used to open the body
+   *     is gone with them, and it is worth saying why: it never helped. A
+   *     `continue` inside a loop whose counter cannot advance just spins
+   *     faster. The bound has to be on the start and the end.
+   *
+   * Non-finite input is refused up front rather than left to luck. NaN is
+   * already harmless by accident — it survives `radius <= 0`, then makes y0 and
+   * y1 NaN, and `NaN <= NaN` is false, so the body runs zero times — but
+   * Infinity is not: it floors to ±Infinity and hangs exactly like 1e20. One
+   * branch turns an accident into a decision and closes the Infinity case with
+   * it.
+   *
+   * The clamps cannot change an in-range carve. Every coordinate they remove is
+   * outside the world box, where `getBlock` returns BEDROCK (hardness -1, so
+   * `continue`) and `setBlock` refuses the write — iterations that were already
+   * guaranteed no-ops. `scorchCrater` gets the clamped radius for the same
+   * reason, and needs no bound of its own: it only runs when the carve removed
+   * something, which can only happen when the centre is within a radius of the
+   * world box.
    */
   carveSphere(cxf: number, cyf: number, czf: number, radius: number, by: number): number {
-    if (radius <= 0) return 0;
-    const r2 = radius * radius;
-    const x0 = Math.floor(cxf - radius), x1 = Math.floor(cxf + radius);
-    const y0 = Math.floor(cyf - radius), y1 = Math.floor(cyf + radius);
-    const z0 = Math.floor(czf - radius), z1 = Math.floor(czf + radius);
+    if (!Number.isFinite(cxf) || !Number.isFinite(cyf) || !Number.isFinite(czf)) return 0;
+    if (!Number.isFinite(radius) || radius <= 0) return 0;
+    const r = radius > TERRAIN_CARVE_MAX_RADIUS ? TERRAIN_CARVE_MAX_RADIUS : radius;
+    const r2 = r * r;
+    const x0 = Math.max(WORLD_MIN_BLOCK_X, Math.floor(cxf - r));
+    const x1 = Math.min(WORLD_MAX_BLOCK_X, Math.floor(cxf + r));
+    const y0 = Math.max(1, Math.floor(cyf - r));
+    const y1 = Math.min(CHUNK_HEIGHT - 1, Math.floor(cyf + r));
+    const z0 = Math.max(WORLD_MIN_BLOCK_Z, Math.floor(czf - r));
+    const z1 = Math.min(WORLD_MAX_BLOCK_Z, Math.floor(czf + r));
     let removed = 0;
     for (let y = y0; y <= y1; y++) {
-      if (y < 1 || y >= CHUNK_HEIGHT) continue;
       for (let z = z0; z <= z1; z++) {
         for (let x = x0; x <= x1; x++) {
           const dx = x + 0.5 - cxf, dy = y + 0.5 - cyf, dz = z + 0.5 - czf;
@@ -634,7 +672,7 @@ export class ServerWorld {
         }
       }
     }
-    if (removed > 0) this.scorchCrater(cxf, cyf, czf, radius, removed, by);
+    if (removed > 0) this.scorchCrater(cxf, cyf, czf, r, removed, by);
     return removed;
   }
 

@@ -1,0 +1,161 @@
+You are reviewing a PLAN before any code is written, for the Doomcraft repo you
+can read at /Users/karstenhaldan/youtube/doomcraft. This is the "V1-V3 closeout"
+stage: five small changes that finish the VARIANTS arc's first three phases.
+
+YOUR JOB. Attack every numbered clause below. For each one you judge WRONG,
+give a CONCRETE FAILURE SCENARIO that ends in a SPECIFIC WRONG NUMBER, a
+specific wrong string, or a specific test that stays green when it should not.
+Do not hand back generalities. Read the actual files; every file:line below is
+real and you should check it.
+
+Attack the CLAIM each clause makes, not only the code it proposes. If a clause
+says "this closes X", ask whether it actually closes X or merely narrows it.
+
+REQUIRED CLOSING SECTION. End your answer with a section headed
+"CLAUSES I JUDGE CORRECT" listing, by number, every clause you could not break.
+A clean bill must be a visible judgement, not an omission.
+
+---------------------------------------------------------------------------
+CONTEXT YOU NEED
+
+- `shared/src/arsenal.ts` is the session seam. `EffectiveWeapon extends
+  WeaponDef` and additionally carries `hot`, a record of the SAME numbers
+  narrowed to the widths `shared/src/weapons.ts`'s derived typed arrays use
+  (float32 damage, uint8 pellets, uint16 magSize, ...). Call sites deliberately
+  read whichever representation they read before the seam existed; the file's
+  header comment explains that unifying them would be a behaviour change
+  wearing a refactor's clothes.
+- The server predictor is `server/src/sim.ts`; the client predictor is
+  `client/src/game/weapons.ts`.
+- `client/src/game/lockstep.test.ts` holds a byte-compared golden of a
+  server track concatenated with a client track.
+- `client/src/game/agreement.test.ts` asserts the two predictors produce
+  bit-identical cones for a given shot number.
+- `shared/src/version.ts:351 weaponsFingerprintInputs()` produces one canonical
+  line per weapon; `shared/src/packs.ts` holds `WEAPONS_PACK_VERSION = 1`,
+  `WEAPONS_FINGERPRINT = 0x1834e116` and `WEAPONS_INPUTS`, all checked-in
+  literals. `shared/src/packs.ts:136 MAX_PACK_INPUT_BYTES = 160`.
+- `shared/src/variants.ts` is the variant pack parser: a 16-field whitelist,
+  per-field bands, integer refusals, a per-archetype power budget and a
+  strict-dominance refusal. `terrainDamage` is deliberately NOT on it.
+- Baseline as of this plan: 105 test files, 2525 passing, 3 skipped;
+  `npm run release:verify` says PASS - 16 checks.
+
+---------------------------------------------------------------------------
+THE PLAN, AS NUMBERED CLAUSES
+
+C1. MOVE THE PELLET CLAMP TO SHARED AND APPLY IT ON BOTH SIDES.
+    Today `client/src/game/weapons.ts:288` declares `export const MAX_PELLETS =
+    16` and `:1107` clamps with
+    `const pellets = def.hot.pellets > MAX_PELLETS ? MAX_PELLETS : def.hot.pellets;`
+    while `server/src/sim.ts:1092` loops `for (let i = 0; i < def.pellets; i++)`
+    with no bound at all.
+    PROPOSAL: declare `MAX_PELLETS = 16` in `shared/src/weapons.ts`, re-export it
+    from `client/src/game/weapons.ts` so existing importers do not move, and
+    clamp the server loop the same way.
+
+C2. THE TWO SIDES MUST READ THE SAME PELLET SOURCE.
+    The client reads `def.hot.pellets`, a uint8. The server reads `def.pellets`,
+    a JavaScript double. For every shipping weapon these are equal (max is 7).
+    PROPOSAL: make the server read `def.hot.pellets` as well, so a pellet count
+    of 256 cannot be 0 on one side and 256 on the other.
+    THE CLAIM I WANT ATTACKED: that this is a no-op for the shipping table and
+    therefore the lockstep golden in `client/src/game/lockstep.test.ts` and the
+    cone agreement in `client/src/game/agreement.test.ts` do not move. If it
+    DOES move either one, that is a behaviour change and it needs its own
+    argument, not a bundled one.
+
+C3. CLAMP `carveSphere`.
+    `server/src/world.ts:609` guards only `if (radius <= 0) return 0;`. At
+    radius 1e20, `y0 = Math.floor(cyf - 1e20)` is -1e20 and
+    `for (let y = y0; y <= y1; y++)` never advances because
+    `-1e20 + 1 === -1e20`: one call blocks the event loop forever. NaN is not
+    guarded either — `NaN <= 0` is false, so a NaN radius enters the loop.
+    PROPOSAL: replace the guard with a finite-and-positive test plus an upper
+    clamp to a named constant (proposed: the largest radius any shipping weapon
+    can ask for, times a small factor — concretely `TERRAIN_CARVE_MAX_RADIUS`,
+    value to be argued, candidate 16). Reject non-finite; clamp above.
+    THE CLAIM I WANT ATTACKED: that no shipping call site can pass a radius
+    above the chosen constant today, so the clamp cannot change behaviour. The
+    largest `terrainDamage` in `shared/src/weapons.ts` is 5.5 (BFG). Find every
+    caller of `carveSphere` and say whether the claim holds for all of them,
+    including `scorchCrater`'s `radius + 1` and any horde/monster path.
+
+C4. DROP `reserveMax` FROM `WeaponDef` ENTIRELY.
+    `shared/src/weapons.ts:119` declares it, all seven weapons set it, and its
+    ONLY reader anywhere in the repo is `weaponsFingerprintInputs`
+    (`shared/src/version.ts:356`). Reserve ammunition is per AMMO TYPE, from
+    `AMMO_START` / `AMMO_MAX` (`shared/src/weapons.ts:46`), not per weapon, so
+    the field is not merely unread, it is the wrong shape.
+    PROPOSAL: delete the field from the interface and from all seven weapon
+    literals, and remove it from the fingerprint line.
+    ATTACK: is there a reader outside `.ts` sources — a JSON pack, a doc-driven
+    tool, the admin console's template literals, `server/src/studio.ts`, a
+    content file — that would break? Is deleting it better or worse than making
+    it real, given that V4 will let a variant move `magSize`?
+
+C5. WIDEN THE WEAPONS FINGERPRINT TO EVERY FIELD A PREDICTOR READS.
+    `weaponsFingerprintInputs` lists 13 fields. It does NOT list `spreadAir`,
+    `spreadRecovery`, `spreadCrouchScale`, `reloadShellMs`, `knockback`,
+    `projectileSpeed`, `falloffStart`, `falloffEnd`, `falloffMin`,
+    `falloffCurve`, `automatic`, `spinUpMs`, `selfDamageScale`,
+    `selfKnockbackScale` or `meleeRange` — every one of which a predictor
+    reads. Measured: a client whose pistol `spreadAir` is 0.028 against a
+    server's 0.014 fires an airborne cold cone of 0.03799999977648258 rad
+    against the server's 0.02399999977648258, and no ratchet notices.
+    PROPOSAL: the new line is, in order,
+      damage, pellets, headshotMultiplier, rpm, magSize, reloadMs,
+      splashRadius, splashDamage, terrainDamage, spread, spreadMax,
+      spreadPerShot, spreadAir, spreadRecovery, spreadCrouchScale,
+      reloadShellMs, knockback, projectileSpeed, falloffStart, falloffEnd,
+      falloffMin, falloffCurve, automatic, spinUpMs, selfDamageScale,
+      selfKnockbackScale, meleeRange
+    (i.e. the old 13 minus `reserveMax`, plus 15). Measured byte lengths of the
+    resulting lines are 91, 96, 100, 86, 100, 85, 73 — all under
+    `MAX_PACK_INPUT_BYTES = 160`.
+    In the SAME COMMIT: `WEAPONS_PACK_VERSION` 1 -> 2, a new
+    `WEAPONS_FINGERPRINT`, and the seven new `WEAPONS_INPUTS` literals.
+    ATTACK, specifically:
+    (a) Is `automatic` — a boolean stringified as `true`/`false` — a correct
+        thing to put in a canonical line, or does it want `1`/`0`?
+    (b) Are there fields a predictor reads that this list STILL misses? Check
+        both predictors, `shared/src/arsenal.ts`, and the recoil/viewmodel/
+        muzzle/crosshair fields. State clearly for each omission whether it is
+        SIMULATION state (must be in) or PRESENTATION only (may stay out), and
+        justify the line you draw. Consider `projectileGravity`,
+        `projectileRadius`, `projectileLifeMs`, `spinDownMs`, `switchInMs`,
+        `switchOutMs`, `recoilPitch`, `recoilYaw`, `recoilRecovery`.
+    (c) What ELSE moves when `WEAPONS_PACK_VERSION` goes to 2? Name every
+        checked-in literal, golden vector, stored release document, gate check
+        and test that must be updated in the same commit, and say what breaks
+        if one is missed. There are two gate implementations —
+        `runReleaseVerify()` in `server/src/gate.ts` and
+        `ReleaseService.runGate()` in `server/src/packs.ts` — and adding a
+        check to one does not add it to the other.
+    (d) Does bumping the weapons pack version invalidate any LIVE release
+        document on the deployed Railway origin, and if so what does a player
+        connecting to it see? Is there a migration this plan is missing?
+
+C6. THE HORDE SHOP DELIVERY LINE NEEDS A PROVEN-RED TEST.
+    `server/src/horde.ts:2054` (`deliver`) already does
+    `p.mag[def.weapon] = this.sim.statsFor(p, def.weapon).magSize;` — through
+    the arsenal, correctly. The equivalent line in `equipStart`
+    (`server/src/horde.ts:1054`) has a test that is proven red when the fix is
+    reverted; the shop line has none.
+    PROPOSAL: add a test that buys a weapon from the horde shop in a session
+    whose arsenal gives that weapon a DIFFERENT magSize from the compiled
+    table, and asserts the magazine is the session's number.
+    ATTACK: name the exact way this test can pass with the fix reverted. Rule
+    20 of this project: a test that quietly fails to set up its scenario is a
+    green test that cannot fail. What in `HordeDirector` — credits, wave state,
+    `ownsWeapon`, the shop's price/refusal path at :2040, `bought === 0` — can
+    silently make the purchase not happen, leaving the assertion trivially
+    satisfied or never reached?
+
+C7. THE STAGE'S OWN CLAIM.
+    After C1-C6, the claim is: "the V1-V3 arc is closed — every field either
+    predictor reads is now under the weapons ratchet, both predictors clamp
+    pellets identically from a shared constant, the one unbounded loop on the
+    variant surface is bounded, the dead field is gone, and both arsenal-join
+    paths in horde have proven-red coverage."
+    ATTACK THAT CLAIM. What does it still not cover? Be specific.

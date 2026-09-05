@@ -62,7 +62,6 @@ import {
   WORLD_SIZE_BLOCKS,
   ammoTypeOf,
   clamp,
-  getWeapon,
   grantWeapon,
   ownsWeapon,
 } from '@doomcraft/shared';
@@ -148,8 +147,30 @@ export interface DmBody {
   readonly reserve: Uint16Array;
 }
 
+/**
+ * The one thing the pickup path needs that the compiled weapon table cannot
+ * answer: the magazine THIS body's `weaponId` actually holds in THIS room.
+ *
+ * It is a separate interface from `DmSim` only so `applyPickupTo` — a free
+ * function over a body, with no director and no simulation behind it — can ask
+ * for exactly this and nothing else. `DmSim` extends it, so the one production
+ * call site passes the simulation it already has and the compile-time
+ * `SimulationSatisfiesDmSim` assertion below keeps proving the real engine
+ * answers it.
+ */
+export interface DmArsenal {
+  /**
+   * `Simulation.statsFor`, narrowed to the one field this file reads. Declared
+   * over `DmBody` rather than `PlayerEntity` because that is the only player
+   * type this module knows; the real method takes the wider record and a
+   * method declaration is bivariant, which is what lets the assertion below
+   * still hold.
+   */
+  statsFor(body: DmBody, weaponId: number): { readonly magSize: number };
+}
+
 /** The slice of `Simulation` the director drives. */
-export interface DmSim {
+export interface DmSim extends DmArsenal {
   nowMs: number;
   readonly players: DmBody[];
   getPlayer(id: number): DmBody | undefined;
@@ -383,7 +404,7 @@ export class DmPickupField {
     if (dx * dx + dz * dz > DM_PICKUP_TOUCH_XZ * DM_PICKUP_TOUCH_XZ) return DmTake.TOO_FAR;
     if (dy * dy > DM_PICKUP_TOUCH_Y * DM_PICKUP_TOUCH_Y) return DmTake.TOO_FAR;
 
-    if (!applyPickupTo(body, s.type, s.variant)) return DmTake.NO_EFFECT;
+    if (!applyPickupTo(body, s.type, s.variant, sim)) return DmTake.NO_EFFECT;
 
     const slot = this.liveSlotOf(sim, s);
     if (slot >= 0) sim.removeEntity(slot, RemoveReason.PICKED_UP);
@@ -440,8 +461,32 @@ export class DmPickupField {
  * deliberately and with the same numbers: both paths can consume a pickup (the
  * sim's proximity sweep and an explicit director claim) and they must agree, or
  * a medikit would heal differently depending on who noticed you first.
+ *
+ * WHY `arsenal` IS A PARAMETER, AND WHY IT HAS NO DEFAULT.
+ *
+ * The weapon branch fills a magazine, and it used to fill it from the compiled
+ * table. That is the same hole `HordeDirector.equipStart` and the horde shop's
+ * `deliver` had: a shotgun variant that pays for its damage with a four-shell
+ * magazine handed the player the base's eight and never charged the drawback.
+ * `Simulation.applyPickup` — the mirror this function is written to agree with
+ * — already resolves it through `statsFor`, so the two paths that can consume
+ * the SAME pickup disagreed by construction, and so did the client: the
+ * predictor's `WeaponRuntime.grant` fills the magazine from
+ * `this.stats(weaponId).hot.magSize`. Two of the three readers of that number
+ * were already variant-aware; this one was not.
+ *
+ * The obvious shape is an optional last argument defaulting to the compiled
+ * table, so nothing else has to change. That default is precisely the failure
+ * this repo has already been bitten by: a caller that forgets the argument
+ * gets the OLD behaviour, silently, with every test still green, and the only
+ * thing that could ever find it is somebody re-reading the source. A required
+ * parameter makes the compiler the ratchet instead — a new call site that has
+ * no arsenal to offer is a build error, and the person adding it has to decide
+ * where the room's numbers come from rather than defaulting into the bug.
  */
-export function applyPickupTo(body: DmBody, type: number, variant: number): boolean {
+export function applyPickupTo(
+  body: DmBody, type: number, variant: number, arsenal: DmArsenal,
+): boolean {
   switch (type) {
     case EntityType.PICKUP_HEALTH: {
       const amount = variant === 1 ? 100 : 25;
@@ -466,15 +511,30 @@ export function applyPickupTo(body: DmBody, type: number, variant: number): bool
       const had = ownsWeapon(body.weaponMask, w);
       body.weaponMask = grantWeapon(body.weaponMask, w);
       const t = ammoTypeOf(w);
+      /* Resolved ONCE, and the reserve is measured in magazines of it — the
+       * grant is "the gun plus two spare mags", the top-up is "one more mag".
+       * The alternative rule, a reserve sized off the compiled table while the
+       * magazine follows the variant, was rejected for a reason that has
+       * nothing to do with balance taste: `Simulation.applyPickup` already
+       * spends `this.statsFor(p, w).magSize` on both the magazine AND the
+       * `* 2` reserve, and the two functions consume the same pickup off the
+       * same floor. Split the rule and a weapon crate would hand you a
+       * different number of shells depending on whether the director's claim
+       * or the sim's proximity sweep noticed you first — which is the exact
+       * divergence the header of this function forbids. Agreement with the
+       * mirror is a harder constraint than any argument about whether a
+       * small-magazine variant "should" also carry less spare ammo, and it
+       * decides the question outright. */
+      const mag = arsenal.statsFor(body, w).magSize;
       if (!had) {
-        body.mag[w] = getWeapon(w).magSize;
+        body.mag[w] = mag;
         if (t !== AmmoType.NONE) {
-          body.reserve[t] = Math.min(AMMO_MAX[t], body.reserve[t] + getWeapon(w).magSize * 2);
+          body.reserve[t] = Math.min(AMMO_MAX[t], body.reserve[t] + mag * 2);
         }
         return true;
       }
       if (t !== AmmoType.NONE && body.reserve[t] < AMMO_MAX[t]) {
-        body.reserve[t] = Math.min(AMMO_MAX[t], body.reserve[t] + getWeapon(w).magSize);
+        body.reserve[t] = Math.min(AMMO_MAX[t], body.reserve[t] + mag);
         return true;
       }
       return false;

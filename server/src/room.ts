@@ -30,7 +30,6 @@ import {
   MAX_HEALTH,
   SPAWN_PROTECTION_MS,
   WEAPON_COUNT,
-  getWeapon,
   Rng,
   BlockId,
   clamp,
@@ -2052,12 +2051,36 @@ export class Room implements NetHost {
     return this.monsters.spawnAt(type, x, y, z);
   }
 
-  /** Give a player every weapon, loaded. Sandbox mode and the tutorial use this. */
+  /**
+   * Give a player every weapon, loaded.
+   *
+   * This comment used to say "Sandbox mode and the tutorial use this", and that
+   * is FALSE: `grep -rn grantAllWeapons` finds no caller of this METHOD outside
+   * tests. The hits in `modes.ts` and at :901 are `plan.grantAllWeapons`, a
+   * different thing — a boolean that sets `sim.defaultWeaponMask`, which is the
+   * mechanism sandbox actually uses. Corrected rather than deleted because the
+   * method is public API, a room CAN legitimately be built with both a pinned
+   * variant table and a full arsenal (`patch.test.ts` builds one), and the
+   * magazine bug that lived on this line was real whether or not anything
+   * calls it today.
+   */
   grantAllWeapons(playerId: number): void {
     const p = this.sim.getPlayer(playerId);
     if (!p) return;
     p.weaponMask = ALL_WEAPON_MASK;
-    for (let i = 0; i < WEAPON_COUNT; i++) p.mag[i] = getWeapon(i).magSize;
+    /* Through `sim.statsFor`, not the compiled table — the same seam
+     * `spawnPlayer` and `onHello` already go through, and for the same reason.
+     * This room can hold a pinned variant table (the constructor builds its
+     * `SessionArsenal` from the bytes it will send) AND hand somebody the full
+     * arsenal: the two are independent options, `variants` and `allWeapons`,
+     * and `patch.test.ts` already builds exactly that room. Filling from
+     * `getWeapon(i)` here overwrote the magazines `spawnPlayer` had just sized
+     * correctly, so a shotgun variant that pays for its damage with four
+     * shells handed this player the base's eight and never charged the
+     * drawback — and, worse, only on the sandbox and tutorial path, so the
+     * player who was being TAUGHT the weapon was the one taught the wrong
+     * number. */
+    for (let i = 0; i < WEAPON_COUNT; i++) p.mag[i] = this.sim.statsFor(p, i).magSize;
     p.reserve.set(AMMO_MAX);
   }
 }

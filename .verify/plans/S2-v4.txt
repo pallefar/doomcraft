@@ -1,0 +1,261 @@
+You are reviewing a PLAN before any code is written, for the Doomcraft repo at
+/Users/karstenhaldan/youtube/doomcraft. This is phase V4 of the VARIANTS arc:
+the first actual variant CONTENT, plus the ownership and equip path that makes
+a variant reach a live room.
+
+YOUR JOB. Attack every numbered clause. For each one you judge WRONG, give a
+CONCRETE FAILURE SCENARIO ending in a SPECIFIC WRONG NUMBER, a specific wrong
+string, or a specific test that stays green when it should not. Read the real
+files; every file:line below has been verified and you should check it.
+
+Attack the CLAIM each clause makes, not only the code it proposes.
+
+REQUIRED CLOSING SECTION headed "CLAUSES I JUDGE CORRECT", listing by number
+every clause you could not break. A clean bill must be a visible judgement.
+
+---------------------------------------------------------------------------
+WHAT ALREADY SHIPPED (V1-V3), SO YOU DO NOT RE-PROPOSE IT
+
+- `shared/src/arsenal.ts` — `SessionArsenal.statsFor(weaponId, variantSlot)`,
+  `EffectiveWeapon extends WeaponDef` plus a `hot` record of the same numbers
+  narrowed to the widths `shared/src/weapons.ts` uses. Both predictors take it
+  as a constructor argument.
+- `shared/src/variants.ts` — `parseVariantsManifest` (:373): a 16-field
+  whitelist with bands (`BANDS` :134), integer refusals, `isInert` per
+  archetype (:177), a payload band (:491), a +/-12% power budget (:503) and a
+  strict-dominance refusal (:512). Any error voids the WHOLE file (:524).
+- `PackKind.VARIANTS = 7`, `PackInventory.variantsFileFor` (server/src/packs.ts
+  :208), `variantsVersions` (:216), `variantsAt` (:230), `installedPacks()`
+  (:400-406), `DraftPicks.variants` (:567), gate checks `variants.validate` /
+  `variants.dormanted` (server/src/gate.ts:352, server/src/packs.ts:983-1024).
+- V3, the wire: `S2C.VARIANT_TABLE = 13`, `CAP_VARIANTS = 1 << 5`; the room's
+  pinned table at EFFECTIVE values in f64 plus the player's resolved slot map;
+  a frozen golden vector at `shared/src/version.test.ts:327-360`;
+  `RoomOptions.variantClaims` (server/src/room.ts:205) declared and consumed in
+  `Room.onHello` (:1197) -> `resolveVariantSlots` (:158) -> `sim.addPlayer`,
+  which happens BEFORE the first magazine is filled (server/src/sim.ts:839,881).
+- The decided design is docs/VARIANTS.md §4 and §7. Read them.
+
+---------------------------------------------------------------------------
+THE PLAN, AS NUMBERED CLAUSES
+
+D1. THE CONTENT FILE. Add `content/variants.json` holding the first real
+    variants — a `{ "variants": [ { id, base, name, over } ] }` document that
+    `parseVariantsManifest` accepts. The intended first set is one variant per
+    HITSCAN archetype plus one projectile, each a genuine sidegrade that
+    survives the payload band, the +/-12% budget and the dominance refusal.
+    ATTACK: is one file with N variants the right granularity, given that ANY
+    error voids the whole file (variants.ts:524) and that a variants pack is
+    versioned as a directory (`packs/variants/<v>/variants.json`)? What does an
+    operator do when variant 5 of 8 is rejected in production?
+
+D2. `release:verify` DOES NOT SEE `content/variants.json` TODAY, AND MUST.
+    `runReleaseVerify` (server/src/gate.ts:499) reads items from
+    `DEFAULT_ITEMS_FILE` (:68) unconditionally at :521 and EMITS an items pack
+    at :579-583. Variants are read ONLY if a caller passes
+    `options.variantsFile` (:526, `VerifyOptions.variantsFile` :486) and there
+    is NO `variantsPack` push in `runReleaseVerify` at all.
+    `tools/release-verify.mjs:41` calls `runReleaseVerify()` with no options.
+    PROPOSAL: add `DEFAULT_VARIANTS_FILE`, read it by default, and push a
+    `variantsPack` beside the items one, taking the check count from 16 to 17
+    and the emitted pack count from 7 to 8.
+    ATTACK: (a) does adding a pack to `runReleaseVerify` change
+    `ReleaseService.runGate()` (server/src/packs.ts) too, or are they still two
+    implementations — name what has to change in BOTH; (b) does emitting a
+    variants pack change `packSetHash` and therefore any checked-in literal or
+    stored release document; (c) `PackInventory.variantsFileFor` (packs.ts:208)
+    is deliberately packsRoot-only with NO `content/` fallback, unlike
+    `itemsFileFor` (:165) — if V4 adds the fallback so bundled variants ship as
+    version 1, what breaks for a host that ALSO has `packs/variants/1/`?
+
+D3. `ItemKind.WEAPON_VARIANT = 5` AND THE TOKEN'S LINK TO THE STAT TABLE.
+    `ItemKind` is `shared/src/items.ts:26-32` (SKIN 0 .. TROPHY 4) with a
+    parallel `ITEM_KIND_NAMES` at :34 whose ORDER is load-bearing (`guessKind`,
+    client/src/ui/loadoutModel.ts:324-328, indexes it by the id's first
+    hyphen-segment). docs/VARIANTS.md §4 says each def carries `variantId`
+    naming a variants-pack entry.
+    PROPOSAL: append `WEAPON_VARIANT = 5` and `'weapon_variant'`, and add
+    `variantId: string` to `ItemDef` (:46-64).
+    ATTACK: (a) `itemsFingerprintInputs` (items.ts:208-216) emits one line per
+    item — does adding a FIELD change every line and re-fingerprint the whole
+    items pack, and if so what else must move in the same commit (see
+    `ITEMS_*` literals in shared/src/packs.ts and the 160-byte
+    `MAX_PACK_INPUT_BYTES` cap at packs.ts:137)? (b) `guessKind` splits the id
+    on `-` and indexes `ITEM_KIND_NAMES`; `'weapon_variant'` contains `_`, not
+    `-`, so what id must a variant token have to survive dormancy rendering,
+    and does that constraint conflict with `sanitiseContentId`? (c) name every
+    site that enumerates the five kinds explicitly and would silently render
+    nothing for a sixth: client/src/ui/loadoutModel.ts:189-207
+    (KIND_ORDER / SECTION_TITLES / SLOT_FOR_KIND), server/src/craft.ts:53-55
+    (CRAFTABLE_KINDS) and its client restatement loadoutModel.ts:221,
+    server/src/packs.ts:1229 (drop exclusion), server/src/trades.ts:225 and
+    client/src/ui/tradeModel.ts:238 (untradable pair), server/src/admin/
+    console.ts:358 and :769.
+
+D4. THE EQUIP CLAIM: `inventory.variants: { [weaponId]: ref }`.
+    docs/VARIANTS.md §4 puts the claim beside `equippedSkin` and routes it
+    through `/api/equip`'s existing validate-then-write shape with slot
+    `variant:<weaponId>`. Today `StoredInventory` (server/src/persistence.ts
+    :206-211) has `items`, `equippedSkin`, `title`; `EquipSlot` is :1067,
+    `KIND_FOR_SLOT` :1069-1072, `equipVerdict` :1082-1103, `applyEquip`
+    :1105-1110; the route loops over `['skin','title']` at
+    server/src/index.ts:3111-3120 and writes inside ONE `store.update` so a
+    refusal writes no slot (:3134-3142).
+    PROPOSAL: add `variants: Record<string, string>` to `StoredInventory`,
+    `defaultInventory` (:444), the migration seed (:544) and
+    `sanitiseInventory` (:747-754); extend `EquipSlot`/`KIND_FOR_SLOT` and the
+    route's slot loop to accept `variant:<weaponId>` for an integer weaponId in
+    [0, WEAPON_COUNT).
+    ATTACK: (a) `sanitiseInventory` must bound this map — how many keys, what
+    happens to a key that is not an integer weapon id, and what happens to a
+    ref whose item is dormant; (b) the route's ONE-`store.update` invariant is
+    pinned by `server/src/equipRoutes.test.ts:144` ("a mixed request writes
+    neither") — does a variable-length slot list keep that property; (c) when
+    the last copy of an equipped variant is traded or crafted away, the
+    cosmetic path clears the slot (server/src/trades.ts:682,
+    server/src/craft.ts:153) — what clears a variant slot, and what happens if
+    it is missed?
+
+D5. THE CLAIM MUST REACH `new Room(...)`, AND THE SEAM IS SYNCHRONOUS WHILE THE
+    STORE IS NOT. `RoomOptions.variantClaims` is
+    `(conn: Connection) => Uint8Array` (room.ts:205) — SYNCHRONOUS. Every
+    `PersistenceStore` read is a Promise (persistence.ts:364-384,
+    `JsonFileStore.load` :1633); `JsonFileStore` has a private cache Map (:1529)
+    with no sync accessor. The production factory `new Room({...})`
+    (server/src/index.ts:1030) passes `variants` (:1054) but never
+    `variantClaims`, so every real player sits at slot 0.
+    PROPOSAL: prefetch the profile at ticket-redeem time — `graph.redeemTicket`
+    at server/src/index.ts:4116 is already async and runs BEFORE
+    `room.join(...)` at :4125 and before `conn.deviceId = ticket.profileKey` at
+    :4128 — resolve the claim to a `Uint8Array` there, stash it on the
+    connection (or in a map keyed by `conn`), and have `variantClaims` read it
+    synchronously.
+    ATTACK: (a) what happens on the paths that reach `onHello` WITHOUT a
+    redeemed ticket (anonymous / no-ticket / peer topology / the local Worker),
+    and does the plan fail closed to slot 0 there; (b) the claim must be
+    resolved against the ROOM's pinned release, not the host's live one — where
+    is `arsenal.slotCount` set from, and can a prefetch computed before
+    `room.join` know which room the connection lands in; (c) `resolveVariantSlots`
+    (room.ts:158-170) drops out-of-range slots to base — is silently dropping
+    right, or must the player be told; (d) §7.3 says a mode that does not allow
+    variants resolves every claim to slot 0 and that this is a COLUMN on the
+    trust/mode table, never an `if` (`shared/src/trust.ts`, `TrustPolicy`
+    :~380-430) — where exactly does that column get read, and does
+    `trust.test.ts`'s tree scan (which fails any line pairing a `ModeId`
+    literal with an economy word) actually catch a violation here?
+    (e) a source-text test pinning the factory line is the ONLY thing that can
+    catch a forgotten `variantClaims,` — `server/src/releases.test.ts:702-707`
+    is the precedent for `variants`. Is a source scan really the best available
+    proof, or is there a behavioural one?
+
+D6. THE DISPLAY READERS STILL ANSWER FOR THE ARCHETYPE.
+    `client/src/game/weapons.ts`: `maxBurstDamage` (:1441-1444) returns
+    `getWeapon(id).damage * getWeapon(id).pellets` from the MODULE table;
+    `headshotScale` (:1452-1454) returns `getWeapon(id).headshotMultiplier *
+    (HEADSHOT_MULTIPLIER / 2)` — and `headshotMultiplier` IS whitelisted
+    (variants.ts:76); `currentAmmoType` (:1447-1449) returns
+    `WEAPON_AMMO[runtime.current]` from the module hot table.
+    PROPOSAL: move all three onto `WeaponRuntime.stats(weaponId)` (:519-521),
+    which is `arsenal.statsFor(id, this.variantSlots[id] ?? BASE_SLOT)`.
+    ATTACK: (a) `ammo` is NOT a variant-able field — is moving
+    `currentAmmoType` a behaviour change, a no-op, or a correctness trap?
+    (b) `maxBurstDamage` reads the DOUBLES while a shot fires on `hot` — which
+    should the HUD show, and does the answer differ for the crosshair vs the
+    damage number? (c) name the test that would go red if this change were
+    reverted, and say why an assertion on the base table is a test that cannot
+    fail.
+
+D7. THE KILLFEED CANNOT TELL TWO SHOTGUN VARIANTS APART.
+    `S2C.KILL = 6` (shared/src/protocol.ts:82) carries
+    `{killerId, victimId, weaponId, flags, killerStreak}` in 8 bytes
+    (encodeKill :1164-1174) and there is no variant field.
+    `client/src/game/game.ts:1308` calls `getWeapon(e.weaponId).name`, and
+    `client/src/modes/deathmatch/killfeed.ts:379` calls `weaponName(e.weaponId)`
+    with a glyph at :374. protocol.ts:151-155 states the VARIANT_TABLE layout
+    is FROZEN and that a display name must be a SEPARATE ADDITIVE MESSAGE — a
+    `str name` appended to opcode 13 would make a shipped V3 client read the
+    length byte as `base` and the letters as the first float,
+    1.1589780174433289e24, silently.
+    PROPOSAL: the killing shot's variant SLOT (0..slotCount-1, one byte) is
+    what has to travel, not a name — the client already holds the room's table
+    and can look the name up. Carry it by appending a byte to `S2C.KILL`, which
+    is NOT frozen the way opcode 13 is.
+    ATTACK: (a) is `S2C.KILL` actually safe to extend — find every decoder and
+    every golden vector that would mis-read an 9-byte kill, and say what a
+    client one build old does with the extra byte; (b) the slot is the
+    KILLER's slot for that weapon at the moment of the shot — where is the kill
+    event built (server/src/sim.ts:1523-1529) and is the killer's slot still
+    available there, or has the shot's identity already been lost;
+    (c) environment and self kills have no weapon — what slot do they carry;
+    (d) is a slot byte enough, or does the feed need the display NAME because
+    a spectator/late joiner may not have the table?
+
+D8. CRAFTING. docs/VARIANTS.md §7.2: variants are craft-only, uncommon floor.
+    `server/src/craft.ts` crafts SAME KIND, ONE RARITY UP from `CRAFT_COPIES = 3`
+    duplicates plus a `CRAFT_FEES` scrap fee (:41-50), route `POST /api/craft`
+    (server/src/index.ts:3155+).
+    ATTACK: if the engine only makes a variant from three variants, and
+    variants are craft-only with no drop and no floor pickup, where does the
+    FIRST variant come from? Name the bootstrap this plan is missing and say
+    whether it contradicts §7.2 or merely extends it.
+
+D9. THE ADMIN CONSOLE HAS NO VARIANTS ROW. `PackInventory.summary()`
+    (server/src/packs.ts:417-470) returns `{levels, campaign, items, quests}`
+    (:469) and has no variants entry, though `variantsVersions()` (:216) and
+    `variantsAt()` (:230) exist. The console's expansion-draft selects
+    (server/src/admin/console.ts:432-435, filled :1754-1757, read :1780-1787)
+    have no `variants` control even though the server already accepts
+    `body.variants` (server/src/index.ts:3254, server/src/packs.ts:748).
+    PROPOSAL: add the summary entry, an `inv-variants` detail section in
+    `paintInventory` (:1454-1494) and a `studio-exp-variants` select.
+    ATTACK: rule 12 of this project — `server/src/admin/console.ts` is TWO
+    giant template literals, no backticks are legal anywhere in its embedded
+    JS INCLUDING INSIDE COMMENTS, no `${` in static content, and all maths goes
+    server-side. Does the proposal violate any of those? And rule 24: a
+    `pairs()`-style render of an EMPTY object is a broken table, not an empty
+    one — what does the variants section render on a host with no variants
+    installed, which is every host until D1 lands?
+
+D10. THE STAGE'S CLAIM. After D1-D9: "a player can own, equip and fire a weapon
+    variant in a live room; the server resolves the claim against the room's
+    pinned release; the HUD, the killfeed and the admin console all tell the
+    variant from its archetype; and `release:verify` refuses a release whose
+    variants pack does not parse."
+    ATTACK THAT CLAIM. What does it still not cover? Name specifically what a
+    player could do that this plan does not defend against, and what an
+    operator still cannot see.
+
+---------------------------------------------------------------------------
+WHAT CHANGED IN THE TREE SINCE THIS PLAN WAS DRAFTED (read the files, not this
+summary, but know these moved):
+
+- `weaponsFingerprintInputs` is now 38 fields and `WEAPONS_PACK_VERSION` is 2
+  (`WEAPONS_FINGERPRINT = 0xbfdd37e6`). `reserveMax` is DELETED from `WeaponDef`.
+- `MAX_PELLETS` moved to `shared/src/weapons.ts` and the server hitscan loop
+  clamps and reads `def.hot.pellets`.
+- `carveSphere` is bounded in BOTH implementations (server/src/world.ts and
+  client/src/world/destruction.ts): non-finite refused, radius clamped to
+  `TERRAIN_CARVE_MAX_RADIUS`, and the three loop ranges clamped to the world box.
+- `checkPacksDeclared` now compares the declared INPUT LINES, not just the
+  fingerprint, and a new shared `checkPackInputs` enforces
+  `MAX_PACK_INPUT_BYTES` in BOTH gates. `release:verify` is 17 checks.
+- `decodeVariantTable` now refuses non-finite, non-integral (where the band says
+  integer) and NEGATIVE values, returning null for the whole message. It
+  deliberately does NOT band-check — see the comment there, and D11 below.
+
+D11. A NEW CLAUSE, AND I WANT IT ATTACKED HARDEST.
+    The frozen golden vector at `shared/src/version.test.ts` (the
+    `VARIANT_TABLE` bytes) declares `base: 1` (shotgun) and carries mostly the
+    PISTOL's numbers — `rpm` 420 against the shotgun's band of 22.5..120. So the
+    frozen vector is a row NO PARSER COULD EVER EMIT, and as long as it stands,
+    the wire decoder can never band-check.
+    THE CLAIM: that this is acceptable, because the relative bands are scaled by
+    the RECEIVER's compiled `WEAPONS` table and this game deploys its halves
+    separately (Railway server, Vercel client), so a client on yesterday's
+    weapon table is the normal state during a rebalance and band-checking would
+    turn a partial mispredict into a total desync.
+    ATTACK THAT. Is the reasoning right? Does V4 — which puts REAL variant
+    content on this wire for the first time — change the calculus? And is a
+    golden vector that encodes an impossible row a defect in the golden that V4
+    should fix while the layout is still cheap to re-freeze, or is re-freezing a
+    protocol golden never cheap?

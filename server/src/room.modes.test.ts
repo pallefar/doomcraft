@@ -23,16 +23,20 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  CAP_VARIANTS,
   EntityType,
   GameMode,
   MAX_HEALTH,
   PacketWriter,
   S2C,
   TICK_MS,
+  WEAPON_COUNT,
   WeaponId,
   encodeHello,
   encodeInput,
 } from '@doomcraft/shared';
+import { WEAPONS, getWeapon, ownsWeapon } from '@doomcraft/shared/weapons';
+import { parseVariantsManifest } from '@doomcraft/shared/variants';
 import {
   ModeAction,
   ModeId,
@@ -416,3 +420,107 @@ describe('a mode selection changes what the room does', () => {
  * with real levels loaded. Until that exists, the evidence for the fix is the
  * counterfactual recorded in docs/BUGS-FOUND.md.
  */
+
+/* ------------------------------------------------------------------------ *
+ * 6. The sandbox arsenal is the ROOM'S arsenal
+ *
+ * `Room.grantAllWeapons` is the sandbox and tutorial door — "here is one of
+ * everything, loaded" — and it filled all seven magazines from the compiled
+ * table. Every other fill on the server had already been moved onto the seam:
+ * `sim.spawnPlayer` resolves through `statsFor`, `onHello` resolves the slots
+ * BEFORE the body exists precisely so that fill is right, and the horde's
+ * `equipStart` and shop `deliver` were both moved after they were caught. This
+ * one was left, and it is the worst place to leave it, because it runs LAST:
+ * it overwrites the magazines `spawnPlayer` had just sized correctly, so a
+ * room that pinned a four-shell shotgun handed the player the base's eight.
+ *
+ * A room can be BOTH — `variants` and `allWeapons` are independent options and
+ * `patch.test.ts` already builds a room with both — so this is not theoretical.
+ * And the player it lied to is the one being taught the weapon.
+ *
+ * The one thing that makes this test mean anything is that the variant is
+ * really resolved. With zero variants installed, or with a client that never
+ * set `CAP_VARIANTS` (`resolveVariantSlots` hands those a table of zeroes),
+ * `statsFor(p, i).magSize` and `getWeapon(i).magSize` are the same number and
+ * the assertion below cannot fail whatever the production line reads. So the
+ * slot map and the resolved magazine are both asserted before the act.
+ *
+ * The room deliberately does NOT set `allWeapons`. With it on, the body spawns
+ * holding the shotgun already loaded — by `spawnPlayer`, through the seam,
+ * with the correct number — and the assertion would be reading a magazine the
+ * OTHER, already-fixed line wrote: green with this fix reverted. Starting from
+ * `mag[SHOTGUN] === 0` and an unowned shotgun leaves `grantAllWeapons` as the
+ * only thing that can have put a number there.
+ * ------------------------------------------------------------------------ */
+
+describe('the sandbox loadout reads the room\'s arsenal', () => {
+  /** Half the base magazine, so the two candidate answers cannot coincide. */
+  const HALF_MAG = Math.floor(WEAPONS[WeaponId.SHOTGUN].magSize / 2);
+
+  const parsed = parseVariantsManifest(JSON.stringify({
+    variants: [
+      {
+        id: 'four-shell', base: WeaponId.SHOTGUN, name: 'Four Shell',
+        // The damage cut is not decoration: `parseVariantsManifest` refuses a
+        // variant that is better on every axis and worse on none, and a
+        // shorter magazine reloads faster, so a magazine-only overlay is a
+        // straight upgrade and never reaches the room at all.
+        over: { magSize: HALF_MAG, damage: 10 },
+      },
+    ],
+  }));
+
+  function variantRoom(): Room {
+    expect(parsed.errors).toEqual([]);
+    const claims = new Uint8Array(WEAPON_COUNT);
+    claims[WeaponId.SHOTGUN] = 1;
+    return new Room({
+      seed: 4242,
+      mode: GameMode.DEATHMATCH,
+      botFill: 0,
+      enemies: 0,
+      eagerWorld: false,
+      store: null,
+      clock: () => 0,
+      variants: parsed.manifest,
+      variantClaims: () => claims,
+    });
+  }
+
+  /** A join that declares `CAP_VARIANTS`, without which no slot resolves. */
+  function joinClaiming(room: Room): PlayerEntity {
+    const socket = new FakeSocket();
+    const conn = room.join(socket);
+    const writer = new PacketWriter(256);
+    encodeHello(writer, 'Sandbox', 0, CAP_VARIANTS);
+    room.receive(conn, writer.copy());
+    const p = room.sim.getPlayer(conn.playerId);
+    expect(p).toBeDefined();
+    return p as PlayerEntity;
+  }
+
+  it('loads every gun from the pinned table, not the compiled one', () => {
+    expect(HALF_MAG).toBeGreaterThan(0);
+    expect(HALF_MAG).not.toBe(getWeapon(WeaponId.SHOTGUN).magSize);
+
+    const room = variantRoom();
+    const p = joinClaiming(room);
+
+    // The premises. Without these the assertion at the bottom is an assertion
+    // about the base, and it cannot fail.
+    expect(p.variantSlots[WeaponId.SHOTGUN]).toBe(1);
+    expect(room.sim.statsFor(p, WeaponId.SHOTGUN).magSize).toBe(HALF_MAG);
+    expect(ownsWeapon(p.weaponMask, WeaponId.SHOTGUN)).toBe(false);
+    expect(p.mag[WeaponId.SHOTGUN]).toBe(0);
+
+    room.grantAllWeapons(p.id);
+
+    expect(ownsWeapon(p.weaponMask, WeaponId.SHOTGUN)).toBe(true);
+    // THE NUMBER. This room's shotgun holds four shells; the compiled one holds
+    // eight, and the sandbox used to hand out eight.
+    expect(p.mag[WeaponId.SHOTGUN]).toBe(HALF_MAG);
+    // A weapon nobody varied still gets the compiled number — the fix resolves
+    // through the arsenal, it does not shrink everything.
+    expect(p.mag[WeaponId.PISTOL]).toBe(getWeapon(WeaponId.PISTOL).magSize);
+  });
+});

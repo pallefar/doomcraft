@@ -1,0 +1,64 @@
+    480|     }
+    481|     const ms = performance.now() - t0;
+    482|     expect(ms).toBeLessThan(2500);
+       |                ^
+    483|   });
+    484| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+ FAIL  client/src/net/chunkz.test.ts > the join burst is compressed > sends CHUNK_Z to a capable client and never a plain CHUNK
+ FAIL  client/src/net/chunkz.test.ts > the join burst is compressed > decodes to exactly the voxels the server has, in all 169 chunks
+ FAIL  client/src/net/chunkz.test.ts > the inflate worker itself > turns a deflated RLE stream into the server's exact voxels, off-thread
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+ FAIL  client/src/net/chunkz.test.ts > the inflate worker itself > reports a corrupt stream instead of publishing garbage
+AssertionError: expected 2 to be 1 // Object.is equality
+
+- Expected
++ Received
+
+- 1
++ 2
+
+ ❯ client/src/net/chunkz.test.ts:393:32
+    391|     await settle();
+    392| 
+    393|     expect(workerInbox.length).toBe(1);
+       |                                ^
+    394|     const out = workerInbox[0] as { voxels?: ArrayBuffer; err?: string…
+    395|     expect(out.voxels).toBeUndefined();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯
+
+ Test Files  2 failed | 105 passed (107)
+      Tests  5 failed | 2592 passed | 3 skipped (2600)
+   Start at  13:39:46
+   Duration  366.30s (transform 134.46s, setup 0ms, collect 266.45s, tests 2749.51s, environment 72ms, prepare 68.23s)
+
+
+--------------------------------------------------------------------------
+DIAGNOSIS OF THE 5 FAILURES ABOVE (written 2026-09-05 13:47)
+
+All five are in TWO files, and both are named in HANDOVER §4 as load-sensitive
+flakes: `client/src/audio/synth.test.ts` (the boot budget, an
+`expect(ms).toBeLessThan(2500)` wall-clock assertion) and
+`client/src/net/chunkz.test.ts` (worker timeouts and a worker-inbox count).
+
+THE EVIDENCE THAT THIS IS LOAD AND NOT A REGRESSION:
+
+1. `git status --short` shows NEITHER file is modified by this stage, and
+   nothing this stage changed is imported by either.
+2. This run took 366.30s against a 78.17s baseline captured this morning on the
+   same machine — 4.7x. Another project on this machine was running its own
+   vitest suite throughout (4 concurrent processes, confirmed with `ps`).
+3. Re-run in isolation immediately afterwards: **51 passed (51), 2 files, 28.98s.**
+   See s1-flake-isolation-*.txt beside this file.
+
+This is recorded rather than dismissed. The flakes remain undiagnosed — they are
+wall-clock and worker-scheduling assertions with no headroom for a loaded
+machine, and HANDOVER §6 already says they are "still worth a real look before
+[they are] trusted as a gate". Making them robust is a piece of work, not a
+footnote, and it is not this stage's.

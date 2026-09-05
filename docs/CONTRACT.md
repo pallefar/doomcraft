@@ -421,7 +421,7 @@ AMMO_COLORS: Uint32Array  // HUD colour by AmmoType
 `rpm, automatic, spinUpMs, spinDownMs`
 `projectileSpeed, projectileGravity, projectileRadius, projectileLifeMs, projectileColor, projectileLight`
 `splashRadius, splashDamage, selfDamageScale, selfKnockbackScale, terrainDamage`
-`magSize, reserveMax, reloadMs, reloadShellMs` (`reloadShellMs > 0` ⇒ shell-by-shell reload)
+`magSize, reloadMs, reloadShellMs` (`reloadShellMs > 0` ⇒ shell-by-shell reload)
 `meleeRange`
 `recoilPitch, recoilYaw, recoilRecovery` (camera punch, radians and 1/s)
 `shakeAmplitude, shakeMs, shakeFrequency` (screen shake, metres of camera offset)

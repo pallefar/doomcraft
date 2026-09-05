@@ -51,7 +51,7 @@ Locked decisions, each with its reason:
 2. **`over` may name only whitelisted fields.** The whitelist is the 13
    gameplay fields `weaponsFingerprintInputs()` already ratchets
    (`shared/src/version.ts:351-362`: damage, pellets, headshotMultiplier, rpm,
-   magSize, reserveMax, reloadMs, splashRadius, splashDamage, terrainDamage,
+   magSize, reloadMs, splashRadius, splashDamage, terrainDamage,
    spread, spreadMax, spreadPerShot) **plus** the falloff quartet and
    projectileSpeed. Feel fields (recoil, shake, viewkick, muzzle, switch
    times) are NOT variant-able: they are the archetype's identity, they are

@@ -53,6 +53,30 @@ export enum FireKind {
   MELEE = 2,
 }
 
+/**
+ * The hard ceiling on pellets per shot, enforced by BOTH predictors.
+ *
+ * WHY THIS LIVES HERE AND NOT IN THE CLIENT. It used to be declared in
+ * `client/src/game/weapons.ts`, where it sized that module's per-shot report
+ * arrays — and the server had no bound at all: `sim.ts` looped
+ * `for (let i = 0; i < def.pellets; i++)`. Nothing in the shipping table can
+ * reach it (the largest count is the shotgun's 7) and V2's variant band is
+ * 1..12 integer, so this is unreachable content today. But the band is DATA IN
+ * A FILE and a clamp is CODE: the band can be edited by anyone who ships a
+ * pack, and the wire carries a variant's effective values as f64. A constant
+ * that only one of the two predictors obeys is not a clamp, it is a client
+ * courtesy.
+ *
+ * A ceiling ALONE would still not make the two agree, which is the other half
+ * of the same fix. The client reads `def.hot.pellets`, a **uint8**; the server
+ * read `def.pellets`, a JavaScript double. At a pellet count of 256 the client
+ * would see 0 and the server 256, and clamping only the server's double gives
+ * 16 against the client's 0 — a worse disagreement than no clamp. Both sides
+ * must read the same narrowed source AND obey the same ceiling. See
+ * `server/src/sim.ts`'s hitscan loop and `WeaponRuntime.fireHitscan`.
+ */
+export const MAX_PELLETS = 16;
+
 /* ------------------------------------------------------------------------ *
  * Definition
  * ------------------------------------------------------------------------ */
@@ -116,7 +140,6 @@ export interface WeaponDef {
   readonly terrainDamage: number;
 
   readonly magSize: number;
-  readonly reserveMax: number;
   readonly reloadMs: number;
   /** >0 means shell-by-shell reload; this is the time per shell. */
   readonly reloadShellMs: number;
@@ -184,7 +207,7 @@ export const WEAPONS: readonly WeaponDef[] = Object.freeze([
     projectileSpeed: 0, projectileGravity: 0, projectileRadius: 0, projectileLifeMs: 0,
     projectileColor: 0xffe0a0, projectileLight: 0,
     splashRadius: 0, splashDamage: 0, selfDamageScale: 0, selfKnockbackScale: 0, terrainDamage: 0,
-    magSize: 15, reserveMax: 400, reloadMs: 850, reloadShellMs: 0,
+    magSize: 15, reloadMs: 850, reloadShellMs: 0,
     meleeRange: 0,
     recoilPitch: 0.022, recoilYaw: 0.006, recoilRecovery: 9.0,
     shakeAmplitude: 0.05, shakeMs: 60, shakeFrequency: 34,
@@ -206,7 +229,7 @@ export const WEAPONS: readonly WeaponDef[] = Object.freeze([
     projectileSpeed: 0, projectileGravity: 0, projectileRadius: 0, projectileLifeMs: 0,
     projectileColor: 0xffcf90, projectileLight: 0,
     splashRadius: 0, splashDamage: 0, selfDamageScale: 0, selfKnockbackScale: 0, terrainDamage: 0,
-    magSize: 8, reserveMax: 80, reloadMs: 2400, reloadShellMs: 400,
+    magSize: 8, reloadMs: 2400, reloadShellMs: 400,
     meleeRange: 0,
     recoilPitch: 0.075, recoilYaw: 0.012, recoilRecovery: 6.5,
     shakeAmplitude: 0.30, shakeMs: 140, shakeFrequency: 26,
@@ -228,7 +251,7 @@ export const WEAPONS: readonly WeaponDef[] = Object.freeze([
     projectileSpeed: 0, projectileGravity: 0, projectileRadius: 0, projectileLifeMs: 0,
     projectileColor: 0xffe0a0, projectileLight: 0,
     splashRadius: 0, splashDamage: 0, selfDamageScale: 0, selfKnockbackScale: 0, terrainDamage: 0,
-    magSize: 100, reserveMax: 400, reloadMs: 3200, reloadShellMs: 0,
+    magSize: 100, reloadMs: 3200, reloadShellMs: 0,
     meleeRange: 0,
     recoilPitch: 0.012, recoilYaw: 0.005, recoilRecovery: 12.0,
     shakeAmplitude: 0.07, shakeMs: 50, shakeFrequency: 40,
@@ -250,7 +273,7 @@ export const WEAPONS: readonly WeaponDef[] = Object.freeze([
     projectileSpeed: 46, projectileGravity: 0, projectileRadius: 0.22, projectileLifeMs: 4000,
     projectileColor: 0xffa040, projectileLight: 7.0,
     splashRadius: 4.4, splashDamage: 108, selfDamageScale: 0.55, selfKnockbackScale: 1.55, terrainDamage: 2.6,
-    magSize: 5, reserveMax: 40, reloadMs: 2500, reloadShellMs: 0,
+    magSize: 5, reloadMs: 2500, reloadShellMs: 0,
     meleeRange: 0,
     recoilPitch: 0.100, recoilYaw: 0.020, recoilRecovery: 5.5,
     shakeAmplitude: 0.55, shakeMs: 220, shakeFrequency: 22,
@@ -272,7 +295,7 @@ export const WEAPONS: readonly WeaponDef[] = Object.freeze([
     projectileSpeed: 92, projectileGravity: 0, projectileRadius: 0.16, projectileLifeMs: 2500,
     projectileColor: 0x66c8ff, projectileLight: 4.0,
     splashRadius: 0.9, splashDamage: 8, selfDamageScale: 0.0, selfKnockbackScale: 0.0, terrainDamage: 0,
-    magSize: 60, reserveMax: 400, reloadMs: 1900, reloadShellMs: 0,
+    magSize: 60, reloadMs: 1900, reloadShellMs: 0,
     meleeRange: 0,
     recoilPitch: 0.010, recoilYaw: 0.006, recoilRecovery: 11.0,
     shakeAmplitude: 0.05, shakeMs: 40, shakeFrequency: 44,
@@ -294,7 +317,7 @@ export const WEAPONS: readonly WeaponDef[] = Object.freeze([
     projectileSpeed: 32, projectileGravity: 0, projectileRadius: 0.70, projectileLifeMs: 5000,
     projectileColor: 0x8cff3c, projectileLight: 16.0,
     splashRadius: 9.5, splashDamage: 400, selfDamageScale: 0.25, selfKnockbackScale: 0.8, terrainDamage: 5.5,
-    magSize: 3, reserveMax: 400, reloadMs: 3400, reloadShellMs: 0,
+    magSize: 3, reloadMs: 3400, reloadShellMs: 0,
     meleeRange: 0,
     recoilPitch: 0.130, recoilYaw: 0.0, recoilRecovery: 4.0,
     shakeAmplitude: 0.90, shakeMs: 420, shakeFrequency: 15,
@@ -316,7 +339,7 @@ export const WEAPONS: readonly WeaponDef[] = Object.freeze([
     projectileSpeed: 0, projectileGravity: 0, projectileRadius: 0, projectileLifeMs: 0,
     projectileColor: 0xc03020, projectileLight: 0,
     splashRadius: 0, splashDamage: 0, selfDamageScale: 0, selfKnockbackScale: 0, terrainDamage: 0,
-    magSize: 0, reserveMax: 0, reloadMs: 0, reloadShellMs: 0,
+    magSize: 0, reloadMs: 0, reloadShellMs: 0,
     meleeRange: 2.6,
     recoilPitch: 0.004, recoilYaw: 0.010, recoilRecovery: 14.0,
     shakeAmplitude: 0.12, shakeMs: 40, shakeFrequency: 52,

@@ -25,7 +25,7 @@ import {
 } from '@shared/constants';
 import {
   WeaponId, FireKind, AmmoType, AMMO_TYPE_COUNT, AMMO_MAX, AMMO_START,
-  WEAPON_COUNT, WEAPON_AMMO,
+  WEAPON_COUNT, WEAPON_AMMO, MAX_PELLETS,
   getWeapon, ammoTypeOf,
   ownsWeapon, grantWeapon, nextWeapon,
   STARTING_WEAPON_MASK, DEFAULT_WEAPON, weaponFromSlot,
@@ -283,9 +283,6 @@ export const HIT_NONE = 0;
 export const HIT_WORLD = 1;
 export const HIT_BODY = 2;
 export const HIT_HEAD = 3;
-
-/** Largest pellet count any weapon fires. Shotgun is 7; 16 leaves headroom. */
-export const MAX_PELLETS = 16;
 
 /** Per-shot result. One instance is reused for every shot — copy what you keep. */
 export interface ShotReport {

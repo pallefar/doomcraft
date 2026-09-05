@@ -24,9 +24,9 @@ import {
   EntityType,
   TICK_MS,
 } from '@doomcraft/shared';
-import { ModeId, ModePhase } from '@doomcraft/shared/modes';
+import { ModeAction, ModeId, ModePhase } from '@doomcraft/shared/modes';
 import { SessionArsenal } from '@doomcraft/shared/arsenal';
-import { WeaponId, WEAPONS, getWeapon } from '@doomcraft/shared/weapons';
+import { WeaponId, WEAPONS, getWeapon, ownsWeapon } from '@doomcraft/shared/weapons';
 
 import { MonsterManager } from './bots.js';
 import {
@@ -37,6 +37,7 @@ import {
   FortLedger,
   HORDE_ENEMIES,
   HORDE_GATE_COUNT,
+  HORDE_SHOP,
   HORDE_START_CREDITS,
   HordeDirector,
   HordeItem,
@@ -714,5 +715,123 @@ describe('the horde loadout', () => {
     ]);
     const p = hordeWithArsenal(arsenal, 0);
     expect(p.mag[WeaponId.SHOTGUN]).toBe(getWeapon(WeaponId.SHOTGUN).magSize);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The SHOP reads the room's arsenal too
+ *
+ * `equipStart` is one of two places in this file that fills a magazine, and the
+ * test above nails it down. `deliver` is the other one, on the shop path, and
+ * it had no test at all: a weapon bought mid-run is granted and its magazine is
+ * filled right there, and if that fill reads the compiled table then a variant
+ * that pays for its damage with a smaller magazine hands the drawback back the
+ * moment the player buys the gun instead of starting with it. Same bug, second
+ * door, and the first test cannot see through it — `equipStart` only ever
+ * touches weapons in `startWeaponMask`, and the shop's whole point is the ones
+ * that are not.
+ *
+ * WHY THIS IS NOT THE OBVIOUS TEST. The obvious test buys the SHOTGUN and looks
+ * at the magazine. It is green with the fix reverted, and it is worth spelling
+ * out why, because it looks completely convincing while it runs:
+ *
+ *   Horde's `startWeaponMask` is `STARTING_WEAPON_MASK | (1 << SHOTGUN)`. The
+ *   player already OWNS the shotgun. `buy` sees that and quarter-prices it, and
+ *   `deliver`'s weapon branch is guarded by `!ownsWeapon(...)` — so the line
+ *   under test never runs. The purchase still returns true off the ammo branch,
+ *   credits still go down, the shell reserve still goes up, and the magazine
+ *   still reads whatever `equipStart` put there, which is the variant's number,
+ *   because the OTHER fix — the one that is already tested — put it there. The
+ *   assertion passes by borrowing another line's correctness. Every observable
+ *   in that version (purchase result, credits, reserve, magazine) is identical
+ *   with the delivery fix present and reverted. It is a test that cannot fail.
+ *
+ * So this one buys a weapon the player does NOT own: the chaingun. That forces
+ * the `!ownsWeapon` branch, which is the only door to the line, and it starts
+ * from `mag[CHAINGUN] === 0` so the number that ends up there can only have
+ * been written by `deliver`. The unowned chaingun costs 350 against 180 start
+ * credits, which is its own trap: without the grant below, `buy` breaks out of
+ * the loop, `bought` stays 0, `buy` returns false, and every assertion after a
+ * `toBe(false)` is describing a purchase that never happened. Hence the
+ * unconditional `toBe(true)` before the magazine is ever looked at.
+ *
+ * And, as above: with no variant resolved, `statsFor(p, i).magSize` and
+ * `getWeapon(i).magSize` are the same number and the assertion cannot fail. The
+ * setup asserts the variant really resolved before it asserts anything else.
+ * ------------------------------------------------------------------------ */
+
+describe('the horde shop', () => {
+  function shopWithArsenal(arsenal: SessionArsenal, slot: number) {
+    const seed = 4243;
+    const world = new ServerWorld(seed);
+    for (let z = Z0; z <= Z1; z++) {
+      for (let x = X0; x <= X1; x++) column(world, x, z, FLOOR, FLOOR);
+    }
+    const sim = new Simulation(world, seed, arsenal);
+    sim.lagCompensation = false;
+    const monsters = new MonsterManager(sim, seed);
+    const plan = resolveModePlan(joinRequestFor(ModeId.HORDE, '', '', 2, seed));
+    const horde = new HordeDirector({ sim, monsters, plan, seed });
+    const p = sim.addPlayer(1, 'Buyer', 0, false);
+    p.variantSlots.fill(slot);
+    sim.spawnPlayer(p);
+    horde.addPlayer(1);
+    return { sim, horde, p };
+  }
+
+  /**
+   * `creditsOf` is a getter and there is no public setter — the production
+   * wallet is only ever moved by `pay`, off kills, wave clears and purchases.
+   * Earning 350 credits through kills would drag a live wave, the shadow-kill
+   * attribution and the wave-number payout multiplier into a test about a
+   * magazine, and every one of those is a way for the setup to quietly not
+   * happen. So the run record is written directly, and the write is checked
+   * through the public getter on the next line: if the private shape ever moves,
+   * this throws or the `toBe` fails, rather than the test silently sliding into
+   * the "cannot afford it" hole described above.
+   *
+   * It does not weaken anything. Credits are the GATE that lets `buy` reach
+   * `deliver`; they are not the claim. The claim is the number in the magazine,
+   * and the purchase still goes through the real `buy` -> `deliver` path at the
+   * real 350-credit price, which the credit assertion below proves it paid.
+   */
+  function grantCredits(horde: HordeDirector, id: number, credits: number): void {
+    const runs = (horde as unknown as { players: Map<number, { credits: number }> }).players;
+    const run = runs.get(id);
+    if (run === undefined) throw new Error('no run record for player ' + id);
+    run.credits = credits;
+  }
+
+  it('fills a BOUGHT weapon\'s magazine from the ROOM\'s arsenal, not the compiled table', () => {
+    const half = Math.floor(WEAPONS[WeaponId.CHAINGUN].magSize / 2);
+    expect(half).toBeGreaterThan(0);
+    expect(half).not.toBe(getWeapon(WeaponId.CHAINGUN).magSize);
+
+    const arsenal = SessionArsenal.from([
+      { id: 'chaingun-short-belt', base: WeaponId.CHAINGUN, over: { magSize: half } },
+    ]);
+    const { sim, horde, p } = shopWithArsenal(arsenal, 1);
+
+    // The setup really did resolve the variant — otherwise the assertion at the
+    // bottom is an assertion about the base and cannot fail.
+    expect(sim.statsFor(p, WeaponId.CHAINGUN).magSize).toBe(half);
+    // …and the shop path is genuinely the only way this magazine gets filled.
+    expect(ownsWeapon(p.weaponMask, WeaponId.CHAINGUN)).toBe(false);
+    expect(p.mag[WeaponId.CHAINGUN]).toBe(0);
+
+    const price = HORDE_SHOP[HordeItem.WEAPON_CHAINGUN].price;
+    expect(price).toBeGreaterThan(HORDE_START_CREDITS);
+    const wallet = price + 150;
+    grantCredits(horde, 1, wallet);
+    expect(horde.creditsOf(1)).toBe(wallet);
+
+    // Unconditional: a refused purchase would leave the magazine at 0 and every
+    // later assertion would be describing something that never happened.
+    expect(horde.onAction(1, ModeAction.BUY, HordeItem.WEAPON_CHAINGUN, 1, 1)).toBe(true);
+    expect(ownsWeapon(p.weaponMask, WeaponId.CHAINGUN)).toBe(true);
+    expect(horde.creditsOf(1)).toBe(wallet - price);
+
+    // The line under test. Base is 100, this room's chaingun holds `half`.
+    expect(p.mag[WeaponId.CHAINGUN]).toBe(half);
   });
 });

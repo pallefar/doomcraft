@@ -34,6 +34,8 @@ import {
   ownsWeapon,
 } from '@doomcraft/shared';
 import { ModeId, ModePhase } from '@doomcraft/shared/modes';
+import { SessionArsenal } from '@doomcraft/shared/arsenal';
+import { WeaponId, WEAPONS, getWeapon } from '@doomcraft/shared/weapons';
 
 import {
   DM_AUTO_RESPAWN_MS,
@@ -103,6 +105,27 @@ class FakeSim implements DmSim {
   spawns = 0;
   private byId = new Map<number, FakeBody>();
   private nextEnt = 1;
+
+  /**
+   * What this fake room's arsenal answers, per weapon. Seeded from the
+   * compiled table so the fake behaves like a room with no variants installed,
+   * and writable so a test can pin a variant's magazine without dragging a
+   * real `SessionArsenal` and a real `PlayerEntity` in here.
+   *
+   * Note that a fake is exactly where a magazine assertion is WORTHLESS: a
+   * number this class was told to return proves nothing about whether the
+   * production path asks the room. The load-bearing test for that is against
+   * the real `Simulation` at the bottom of this file.
+   */
+  readonly magSizes = new Uint16Array(WEAPON_COUNT);
+
+  constructor() {
+    for (let i = 0; i < WEAPON_COUNT; i++) this.magSizes[i] = getWeapon(i).magSize;
+  }
+
+  statsFor(_body: DmBody, weaponId: number): { readonly magSize: number } {
+    return { magSize: this.magSizes[weaponId] };
+  }
 
   getPlayer(id: number): FakeBody | undefined { return this.byId.get(id); }
 
@@ -519,15 +542,15 @@ describe('pickups', () => {
   it('applies weapon pickups the way the simulation does', () => {
     const b = new FakeBody(1);
     expect(ownsWeapon(b.weaponMask, 1)).toBe(false);
-    expect(applyPickupTo(b, EntityType.PICKUP_WEAPON, 1)).toBe(true);
+    expect(applyPickupTo(b, EntityType.PICKUP_WEAPON, 1, sim)).toBe(true);
     expect(ownsWeapon(b.weaponMask, 1)).toBe(true);
     // Second time: no new weapon, but a top-up of its ammo.
     b.reserve[AmmoType.SHELLS] = 0;
-    expect(applyPickupTo(b, EntityType.PICKUP_WEAPON, 1)).toBe(true);
+    expect(applyPickupTo(b, EntityType.PICKUP_WEAPON, 1, sim)).toBe(true);
     expect(b.reserve[AmmoType.SHELLS]).toBeGreaterThan(0);
 
     b.armor = MAX_ARMOR;
-    expect(applyPickupTo(b, EntityType.PICKUP_ARMOR, 0)).toBe(false);
+    expect(applyPickupTo(b, EntityType.PICKUP_ARMOR, 0, sim)).toBe(false);
   });
 
   it('keeps the arena furnished through a whole match', () => {
@@ -727,5 +750,97 @@ describe('against the real simulation', () => {
       if (sim.entActive[i] === 1 && sim.entId[i] === spot.entityId) found = true;
     }
     expect(found).toBe(false);
+  });
+
+  /* ---------------------------------------------------------------------- *
+   * A weapon crate is filled by the ROOM, not by the compiled table
+   *
+   * `applyPickupTo` mirrors `Simulation.applyPickup`, and the sim's half has
+   * resolved the magazine through `statsFor` all along. This half did not: it
+   * read `getWeapon(w).magSize` in three places — the grant, the grant's `* 2`
+   * reserve, and the top-up. So the two functions that can consume the SAME
+   * crate off the SAME floor disagreed by construction, and which one you got
+   * depended on whether the director's claim or the sim's proximity sweep
+   * reached you first. The client's `WeaponRuntime.grant` was already on the
+   * variant's number too, so the server's director was the odd one out of
+   * three.
+   *
+   * This test runs against the REAL `Simulation` with a REAL `SessionArsenal`,
+   * and it has to. The fake sim above answers `statsFor` out of an array a
+   * test wrote, so an assertion there proves only that the fake returned what
+   * it was told to; nothing about whether `tryTake` asks the room at all. Here
+   * the number can only have come from the room's pinned table, through
+   * `sim.statsFor`, through the parameter.
+   *
+   * The premises are asserted before the act, because each of them is a way
+   * for this test to pass while proving nothing:
+   *
+   *   - with no variant RESOLVED, `statsFor(p, SHOTGUN).magSize` and
+   *     `getWeapon(SHOTGUN).magSize` are the same number and the assertion at
+   *     the bottom cannot fail. `variantSlots` is set, and checked;
+   *   - the `!had` branch is the only door to the grant. A player who already
+   *     owns the shotgun falls into the top-up branch instead and the magazine
+   *     is never touched, so non-ownership AND an empty magazine are asserted
+   *     first — the eight or four that ends up there can only have been
+   *     written by this take;
+   *   - a refused claim leaves every one of those numbers untouched and every
+   *     later assertion describes something that never happened, so the return
+   *     value is asserted unconditionally rather than inside an `if`;
+   *   - the shell reserve is emptied first. `AMMO_START` gives 24 of 80 and
+   *     the grant adds two magazines; at the cap, `Math.min` would flatten the
+   *     base's 16 and the variant's 8 into the same number and the reserve
+   *     assertion would be describing the cap rather than the rule.
+   * ---------------------------------------------------------------------- */
+  it('fills a real weapon crate from the ROOM\'s arsenal, not the compiled table', () => {
+    const half = Math.floor(WEAPONS[WeaponId.SHOTGUN].magSize / 2);
+    expect(half).toBeGreaterThan(0);
+    expect(half).not.toBe(getWeapon(WeaponId.SHOTGUN).magSize);
+
+    const world = new ServerWorld(7331);
+    world.generateAll();
+    const sim = new Simulation(world, 7331, SessionArsenal.from([
+      { id: 'four-shell', base: WeaponId.SHOTGUN, over: { magSize: half } },
+    ]));
+    const dir = new DeathmatchDirector({
+      plan: makePlan(), sim, world, seed: 7331, botFill: 0, pickupCount: 4,
+    });
+    dir.start();
+
+    const spot = dir.pickups.spot(0)!;
+    spot.type = EntityType.PICKUP_WEAPON;
+    spot.variant = WeaponId.SHOTGUN;
+    expect(spot.entityId).toBeGreaterThanOrEqual(0);
+
+    const slots = new Uint8Array(WEAPON_COUNT);
+    slots[WeaponId.SHOTGUN] = 1;
+    const p = sim.addPlayer(1, 'Marine', 0, false, slots);
+    p.pos[0] = spot.x; p.pos[1] = spot.y; p.pos[2] = spot.z;
+    p.dead = false;
+    p.reserve[AmmoType.SHELLS] = 0;
+
+    // The premises, every one of them load-bearing. See the note above.
+    expect(sim.statsFor(p, WeaponId.SHOTGUN).magSize).toBe(half);
+    expect(ownsWeapon(p.weaponMask, WeaponId.SHOTGUN)).toBe(false);
+    expect(p.mag[WeaponId.SHOTGUN]).toBe(0);
+
+    expect(dir.pickups.tryTake(0, p, sim.nowMs, sim)).toBe(DmTake.TAKEN);
+    expect(ownsWeapon(p.weaponMask, WeaponId.SHOTGUN)).toBe(true);
+
+    // The grant. Base is 8, this room's shotgun holds `half`.
+    expect(p.mag[WeaponId.SHOTGUN]).toBe(half);
+    // …and the reserve is two magazines OF THIS ROOM'S SHOTGUN, which is the
+    // rule `Simulation.applyPickup` already follows.
+    expect(p.reserve[AmmoType.SHELLS]).toBe(half * 2);
+
+    /* The TOP-UP is a separate line with the same bug in it, and the grant
+     * above cannot reach it: it is guarded by `had`, which is false exactly
+     * once per weapon per body. Walking back over the same crate after it
+     * respawns is the only way in, so that is what this does. */
+    dir.pickups.update(sim, spot.readyAtMs);
+    expect(spot.entityId).toBeGreaterThanOrEqual(0);
+    expect(dir.pickups.tryTake(0, p, spot.readyAtMs, sim)).toBe(DmTake.TAKEN);
+    expect(p.reserve[AmmoType.SHELLS]).toBe(half * 3);
+    // The magazine is NOT refilled by a crate you already own the gun for.
+    expect(p.mag[WeaponId.SHOTGUN]).toBe(half);
   });
 });

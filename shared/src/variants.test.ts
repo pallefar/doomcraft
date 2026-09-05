@@ -19,12 +19,12 @@ import {
   type VariantField,
 } from './variants.ts';
 import {
-  createVariantTableMessage, decodeVariantTable, encodeVariantTable,
+  bandEdgesFor, createVariantTableMessage, decodeVariantTable, encodeVariantTable,
   MAX_VARIANT_TABLE_BYTES, overlaysFromWire, wireEntriesFor,
 } from './variants.ts';
 import { FireKind, WEAPON_COUNT, WeaponId, WEAPONS } from './weapons.ts';
 import { PacketReader, PacketWriter } from './protocol.ts';
-import { SessionArsenal } from './arsenal.ts';
+import { damageAtDistanceOf, SessionArsenal } from './arsenal.ts';
 
 const IDS = Array.from({ length: WEAPON_COUNT }, (_, i) => i);
 
@@ -553,5 +553,161 @@ describe('the room table on the wire', () => {
     // the same bytes, which is what makes the slot map meaningful at all.
     expect(arsenal.statsFor(m.variants[0].base, 1).variantId).toBe(m.variants[0].id);
     expect(arsenal.statsFor(m.variants[1].base, 2).variantId).toBe(m.variants[1].id);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The wire validates its own numbers
+ *
+ * `decodeVariantTable` validated the row COUNT, the id and the base, and then
+ * read sixteen f64s on trust. An adversarial reviewer encoded rows that
+ * bought an accepted effective `damage: NaN` (measured: `damageAtDistanceOf`
+ * returned NaN at every range) and an accepted `magSize: 7.5` whose
+ * `hot.magSize` narrowed to 7 — the same `EffectiveWeapon` holding two
+ * different magazine sizes for one weapon.
+ *
+ * Every test below asserts the CONSEQUENCE and not merely that decode
+ * returned null, because "returns null" is a fact about a function and "the
+ * predictor still computes a number" is the fact anyone cares about. The
+ * refusal assertion comes last on purpose: with the guard reverted the red
+ * that fires is the cost, not the mechanism.
+ * ------------------------------------------------------------------------ */
+
+/** One row, encoded as a whole message, exactly as a sender would write it. */
+function rowBytes(base: WeaponId, values: Float64Array, id = 'probe-row'): Uint8Array {
+  return encodeVariantTable(
+    new PacketWriter(MAX_VARIANT_TABLE_BYTES),
+    [{ id, base, values }], new Uint8Array(WEAPON_COUNT),
+  ).copy();
+}
+
+/** All 16 fields at the archetype's own value: a row that inherits everything. */
+function baseRow(base: number): Float64Array {
+  const out = new Float64Array(VARIANT_FIELDS.length);
+  for (let i = 0; i < VARIANT_FIELDS.length; i++) out[i] = WEAPONS[base][VARIANT_FIELDS[i]] as number;
+  return out;
+}
+
+/** A receiver that has already adopted a good table — the state a refusal falls back to. */
+function receiverHolding(base: WeaponId, values: Float64Array): ReturnType<typeof createVariantTableMessage> {
+  const out = createVariantTableMessage();
+  expect(decodeVariantTable(new PacketReader(rowBytes(base, values)), out)).not.toBeNull();
+  return out;
+}
+
+function statsOf(out: ReturnType<typeof createVariantTableMessage>, weapon: WeaponId): ReturnType<SessionArsenal['statsFor']> {
+  return SessionArsenal.from(overlaysFromWire(out.variants)).statsFor(weapon, 1);
+}
+
+describe('the wire refuses a value no predictor could run', () => {
+  it('refuses a NaN, so the receiver\'s damage arithmetic stays a number', () => {
+    // NaN compares false against everything, so nothing downstream recovers
+    // from it: `hot.damage` is f32(NaN), `damageAtDistanceOf` is NaN at every
+    // range, and a victim's health goes NaN and never comes back.
+    const { entries } = wire(SLUG);
+    const out = receiverHolding(WeaponId.SHOTGUN, entries[0].values);
+    const before = damageAtDistanceOf(statsOf(out, WeaponId.SHOTGUN), 14);
+    expect(before).toBeGreaterThan(0);
+
+    const poisoned = Float64Array.from(entries[0].values);
+    poisoned[VARIANT_FIELDS.indexOf('damage')] = Number.NaN;
+    // Not caught by the band, which is why finiteness is its own rule:
+    // `NaN < lo` and `NaN > hi` are both false.
+    const [lo, hi] = bandEdgesFor(WEAPONS[WeaponId.SHOTGUN], 'damage');
+    expect(Number.NaN < lo || Number.NaN > hi).toBe(false);
+
+    const m = decodeVariantTable(new PacketReader(rowBytes(WeaponId.SHOTGUN, poisoned, SLUG.id)), out);
+
+    const after = damageAtDistanceOf(statsOf(out, WeaponId.SHOTGUN), 14);
+    expect(Number.isNaN(after), 'the shotgun deals NaN damage at 14 m').toBe(false);
+    expect(Object.is(after, before), 'the receiver kept the table it had').toBe(true);
+    expect(m).toBeNull();
+  });
+
+  it('refuses a fractional magazine, which splits ONE weapon against itself', () => {
+    // The reviewer's second row. `magSize: 7.5` is EXACTLY the pistol band's
+    // floor (15 x 0.5), so the band does not refuse it and the integer rule is
+    // the only thing in the way — which is the point of asserting the floor
+    // here rather than assuming it.
+    expect(bandEdgesFor(WEAPONS[WeaponId.PISTOL], 'magSize')[0]).toBe(7.5);
+
+    const out = receiverHolding(WeaponId.PISTOL, baseRow(WeaponId.PISTOL));
+    const half = baseRow(WeaponId.PISTOL);
+    half[VARIANT_FIELDS.indexOf('magSize')] = 7.5;
+    const m = decodeVariantTable(new PacketReader(rowBytes(WeaponId.PISTOL, half)), out);
+
+    // THE COST: `hot.magSize` is the u16 the client fills the magazine to
+    // (`client/src/game/weapons.ts:594`) and the raw `magSize` is what both
+    // sides test it against (`:748` — `this.mag[id] >= def.magSize`). At
+    // 7 and 7.5 that test is false forever: the weapon reloads a full
+    // magazine for the rest of the match, while the server fills the same
+    // magazine to 7.5 (`server/src/horde.ts:1054`).
+    const stats = statsOf(out, WeaponId.PISTOL);
+    expect(stats.hot.magSize, 'a magazine filled to hot.magSize is not a full magazine').toBe(stats.magSize);
+    expect(stats.hot.magSize >= stats.magSize, 'the reload never completes').toBe(true);
+    expect(m).toBeNull();
+  });
+
+  it('refuses a negative, which the u16 narrowing turns into 65529', () => {
+    const out = receiverHolding(WeaponId.PISTOL, baseRow(WeaponId.PISTOL));
+    const negative = baseRow(WeaponId.PISTOL);
+    negative[VARIANT_FIELDS.indexOf('magSize')] = -7;
+    const m = decodeVariantTable(new PacketReader(rowBytes(WeaponId.PISTOL, negative)), out);
+
+    const stats = statsOf(out, WeaponId.PISTOL);
+    expect(stats.hot.magSize, 'the narrowed magazine wrapped').toBe(stats.magSize);
+    expect(stats.hot.magSize).toBeLessThanOrEqual(WEAPONS[WeaponId.PISTOL].magSize * 2);
+    expect(m).toBeNull();
+  });
+
+  it('has a zero floor on every band, so refusing a negative refuses nothing legal', () => {
+    // The decoder enforces the FLOOR of the band and not its relative edges,
+    // and that is only free while every floor is >= 0. If a band ever gains a
+    // negative floor this is the test that says the wire rule went with it.
+    for (const id of IDS) {
+      for (const f of VARIANT_FIELDS) {
+        expect(bandEdgesFor(WEAPONS[id], f)[0], `${WEAPONS[id].short}/${f}`).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+
+  it('still decodes a legitimate table, inherited fields and all', () => {
+    // A gate that cannot pass is worth exactly what one that cannot fail is
+    // worth. One row per archetype with all 16 fields at the archetype's own
+    // value is the extreme of "inherited", and the row most exposed to a rail
+    // that reasons about the base table.
+    const entries = IDS.map((id) => ({ id: `arch-${id}`, base: id as WeaponId, values: baseRow(id) }));
+    const bytes = encodeVariantTable(
+      new PacketWriter(MAX_VARIANT_TABLE_BYTES), entries, new Uint8Array(WEAPON_COUNT),
+    ).copy();
+    const m = decodeVariantTable(new PacketReader(bytes), createVariantTableMessage());
+    expect(m).not.toBeNull();
+    expect(m!.variants).toHaveLength(WEAPON_COUNT);
+    // And the real, parser-approved ones.
+    const real = decodeVariantTable(new PacketReader(wire(SLUG, RK).bytes), createVariantTableMessage());
+    expect(real).not.toBeNull();
+    expect(real!.variants).toHaveLength(2);
+  });
+
+  it('does NOT refuse on the RELATIVE band, which would desync a rebalance deploy', () => {
+    // Deliberate, and asserted so a later tightening cannot land quietly. The
+    // band's upper edge and relative floor are scaled by the RECEIVER's
+    // compiled WEAPONS table, and this game ships its server (Railway) and
+    // its client (Vercel, outside the release mechanism — VARIANTS.md 2)
+    // separately, so a client on yesterday's weapon table is the normal state
+    // during a rebalance. Band-checking here would turn that from "the ~25
+    // non-variant-able fields mispredict", which is the layout's stated cost,
+    // into "every row refused and both ends desync through the fallback".
+    //
+    // version.test.ts's frozen VARIANT_TABLE vector is exactly such a row —
+    // `base: 1` carrying the pistol's numbers — and it has to keep decoding.
+    const values = baseRow(WeaponId.PISTOL);
+    const [lo, hi] = bandEdgesFor(WEAPONS[WeaponId.SHOTGUN], 'rpm');
+    const rpm = values[VARIANT_FIELDS.indexOf('rpm')];
+    expect(rpm > hi, `rpm ${rpm} is inside the shotgun's ${lo}..${hi} — the row proves nothing`).toBe(true);
+    const m = decodeVariantTable(
+      new PacketReader(rowBytes(WeaponId.SHOTGUN, values)), createVariantTableMessage());
+    expect(m).not.toBeNull();
+    expect(m!.variants[0].values[VARIANT_FIELDS.indexOf('rpm')]).toBe(rpm);
   });
 });

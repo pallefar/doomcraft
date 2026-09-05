@@ -320,16 +320,61 @@ export const CORE_INPUTS: readonly string[] = Object.freeze([
   'terrain=5',
 ]);
 
-export const WEAPONS_PACK_VERSION = 1;
-export const WEAPONS_FINGERPRINT = 0x1834e116;
+/**
+ * WEAPONS@2, 2026-09-05 — the ratchet was watching 13 fields and both
+ * predictors were reading 38.
+ *
+ * `weaponsFingerprintInputs` listed damage, pellets, headshotMultiplier, rpm,
+ * magSize, reserveMax, reloadMs, splashRadius, splashDamage, terrainDamage,
+ * spread, spreadMax and spreadPerShot. Everything else a shot depends on was
+ * outside every ratchet in the tree: a client whose pistol `spreadAir` was
+ * 0.028 against a server's 0.014 fired an airborne cold cone of
+ * 0.03799999977648258 rad against 0.02399999977648258 and nothing anywhere
+ * noticed. Switch timing was in the same hole and it is not cosmetic — it
+ * GATES SHOTS: a shotgun `switchInMs` of 300 against 600 moves first-fire
+ * eligibility from 440 ms to 740 ms. Recoil was in it too, and recoil moves
+ * the camera, which supplies both the firing direction and the look angles
+ * that go on the wire.
+ *
+ * `reserveMax` is GONE rather than widened. Its only reader in the entire
+ * repository was this fingerprint. Reserve ammunition is per AMMO TYPE, out of
+ * `AMMO_START` / `AMMO_MAX`, so the field was not merely unread — it was the
+ * wrong shape, and a field in the ratchet that changes nothing advertises a
+ * reserve-cap change that never happens.
+ *
+ * WHAT STAYS OUT, and the line drawn: the viewmodel kick, the muzzle flash,
+ * screen shake, tracer colour and `crosshairGap` are what the shot LOOKS like;
+ * nothing downstream of them re-enters the simulation. Shake is the closest
+ * call — it moves the rendered camera — but the firing origin comes from the
+ * player driver and the direction from yaw/pitch, so its roll never reaches a
+ * pellet. `slot` is authoring metadata for the hotbar; a predictor command
+ * names a weapon id directly. The `hot` values need no entries of their own:
+ * they are deterministic narrowings of these fields, which is only true
+ * because `kind` and `ammo` are now in the list too.
+ *
+ * The longest line is 140 bytes against MAX_PACK_INPUT_BYTES of 160. That is
+ * 20 bytes of headroom and it is worth knowing before the next field.
+ *
+ * DEPLOYING THIS IS NOT JUST PUSHING THE BINARY. `PackInventory.unsatisfied()`
+ * compares version AND fingerprint, so every stored release naming `weapons@1`
+ * becomes unsatisfiable the moment a v2 host boots — and the failure is quiet:
+ * resolution falls back to revision 0 with the NEWEST installed data packs,
+ * abandoning that document's pins, while `/api/version` still reports an empty
+ * `unsatisfied` list because it asks about the release it already resolved.
+ * A supported player is welcomed onto that fallback with no refusal screen.
+ * The deploy is: ship the binary, then draft -> gate -> approve -> promote a
+ * replacement release, and treat the gap between the two as a real window.
+ */
+export const WEAPONS_PACK_VERSION = 2;
+export const WEAPONS_FINGERPRINT = 0xbfdd37e6;
 export const WEAPONS_INPUTS: readonly string[] = Object.freeze([
-  '0:17/1/2/420/15/400/850/0/0/0/0.01/0.03/0.006',
-  '1:11/7/1.6/75/8/80/2400/0/0/0/0.09/0.11/0.01',
-  '2:9/1/1.8/700/100/400/3200/0/0/0/0.009/0.055/0.0038',
-  '3:92/1/1/88/5/40/2500/4.4/108/2.6/0/0/0',
-  '4:21/1/1.4/660/60/400/1900/0.9/8/0/0.014/0.03/0.0016',
-  '5:240/1/1/40/3/400/3400/9.5/400/5.5/0/0/0',
-  '6:26/1/1.3/480/0/0/0/0/0/0/0/0/0',
+  '0:17/1/2/420/15/850/0/0/0/0.01/0.03/0.006/0/1/0.014/0.1/0.72/true/0/0/200/140/0/0/0/0/0/26/70/0.55/1/0.03/0/0/0.022/0.006/9/0',
+  '1:11/7/1.6/75/8/2400/0/0/0/0.09/0.11/0.01/0/2/0.03/0.14/0.85/false/0/0/300/190/400/0/0/0/0/9/28/0.3/1.35/0.055/0/0/0.075/0.012/6.5/0',
+  '2:9/1/1.8/700/100/3200/0/0/0/0.009/0.055/0.0038/0/1/0.018/0.085/0.7/true/170/320/380/220/0/0/0/0/0/22/64/0.5/1/0.022/0/0/0.012/0.005/12/0',
+  '3:92/1/1/88/5/2500/4.4/108/2.6/0/0/0/1/3/0/0/1/false/0/0/420/240/0/46/0/0.22/4000/999/1000/1/1/0.075/0.55/1.55/0.1/0.02/5.5/0',
+  '4:21/1/1.4/660/60/1900/0.9/8/0/0.014/0.03/0.0016/1/4/0.012/0.06/0.8/true/0/0/320/200/0/92/0/0.16/2500/999/1000/1/1/0.018/0/0/0.01/0.006/11/0',
+  '5:240/1/1/40/3/3400/9.5/400/5.5/0/0/0/1/4/0/0/1/false/0/0/620/320/0/32/0/0.7/5000/999/1000/1/1/0.09/0.25/0.8/0.13/0/4/0',
+  '6:26/1/1.3/480/0/0/0/0/0/0/0/0/2/0/0/0/1/true/90/220/260/160/0/0/0/0/0/2/2.6/0.7/1/0.01/0/0/0.004/0.01/14/2.6',
 ]);
 
 export const CHARACTERS_PACK_VERSION = 1;

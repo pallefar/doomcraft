@@ -28,7 +28,7 @@ import { describe, expect, it } from 'vitest';
 
 import { PLAYER_EYE_HEIGHT } from '@shared/constants';
 import { anglesToForward } from '@shared/math';
-import { ALL_WEAPON_MASK, FireKind, WEAPON_COUNT, WEAPONS, WeaponId } from '@shared/weapons';
+import { ALL_WEAPON_MASK, FireKind, MAX_PELLETS, WEAPON_COUNT, WEAPONS, WeaponId } from '@shared/weapons';
 import { BASE_ARSENAL, BASE_SLOT, SessionArsenal, type SessionArsenal as Arsenal } from '@shared/arsenal';
 import {
   BTN_FIRE, createInputCommand,
@@ -567,5 +567,163 @@ describe('a predicted kill is a kill the server also scores', () => {
     expect(report.hits, 'every pellet must land, or this proves nothing').toBe(7);
     expect(report.totalDamage).toBeLessThan(FULL_HEALTH);
     expect(report.kills, `${report.totalDamage} damage is not ${FULL_HEALTH}`).toBe(0);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * THE PELLET CEILING, AND THE SOURCE BOTH SIDES READ IT FROM
+ *
+ * Two defects, one loop, and each needs its OWN case because the fix for one
+ * hides the other.
+ *
+ *   1. The server had no ceiling at all: `sim.ts` looped
+ *      `for (let i = 0; i < def.pellets; i++)`. The client has always clamped
+ *      to `MAX_PELLETS`, because that is the length of the report arrays a
+ *      pellet writes into.
+ *   2. The two read DIFFERENT REPRESENTATIONS of the same field. The client
+ *      reads `def.hot.pellets`, a uint8; the server read `def.pellets`, a
+ *      JavaScript double. `shared/src/arsenal.ts` keeps both on purpose and
+ *      says so — they are equal for every shipping weapon and they are not
+ *      equal in general.
+ *
+ * WHY TWO CASES AND NOT ONE. At 20 pellets the u8 is also 20, so a clamp on
+ * either representation gives 16 and a source mismatch is invisible. At 260
+ * the u8 is 4, so the clamped double gives 16 against the client's 4 — but
+ * with the SOURCE fixed and the CEILING removed both sides read 4 and agree.
+ * A single case can only ever prove one of the two. Revert either half and
+ * exactly one of these goes red, which is the point.
+ *
+ * None of this is reachable through a variant PACK today: `shared/src/variants.ts`
+ * bands `pellets` at 1..12 and refuses non-integers. But the band is data in a
+ * file that anybody shipping content can edit, the clamp is code, and
+ * `SessionArsenal.from` — which is what the WIRE feeds, not the parser — takes
+ * the overlay as given. So the arithmetic is tested where the arithmetic lives.
+ * ------------------------------------------------------------------------ */
+
+describe('the pellet ceiling holds on both sides', () => {
+  /** Pellets the SERVER actually resolved, counted off the damage events. */
+  function serverPellets(arsenal: Arsenal, overPellets: number): number {
+    const world = flatWorld();
+    const sim = new Simulation(world, SEED, arsenal);
+    sim.lagCompensation = false;
+    sim.fallDamageEnabled = false;
+    sim.hazardsEnabled = false;
+    sim.defaultWeaponMask = ALL_WEAPON_MASK;
+
+    const y = 200;
+    sim.spawnAnchor = { x: 0.5, y, z: 0.5, yaw: 0 };
+    const shooter = sim.addPlayer(OWNER, 'A', 0, false, new Uint8Array(WEAPON_COUNT).fill(1));
+    sim.spawnPlayer(shooter);
+    shooter.yaw = 0; shooter.pitch = 0;
+    shooter.heatSpread = 0;
+    shooter.shotSeq = 0;
+    shooter.nextFireMs = 0;
+    shooter.spawnProtectUntilMs = 0;
+    shooter.onGround = true;
+
+    const aim = new Float64Array(3);
+    anglesToForward(aim, 0, 0, 0);
+
+    // Close and wide, so the pistol's 0.01 rad cone cannot miss it. Every
+    // pellet must land or the count is a count of hits and not of pellets.
+    const victim = sim.addPlayer(OWNER + 1, 'B', 1, false);
+    sim.spawnPlayer(victim);
+    const reach = 1.6;
+    victim.pos[0] = 0.5 + aim[0] * reach;
+    victim.pos[1] = shooter.pos[1] + PLAYER_EYE_HEIGHT + aim[1] * reach - 0.9;
+    victim.pos[2] = 0.5 + aim[2] * reach;
+    victim.health = 1e9;
+    victim.spawnProtectUntilMs = 0;
+    victim.pushHistory(sim.nowMs);
+
+    expect(sim.tryFire(shooter, WeaponId.PISTOL), 'the server fired').toBe(true);
+    // 64 event slots; both cases sit well under it, so a short count is a
+    // short SHOT and never the buffer filling up.
+    expect(sim.damageCount, `${overPellets} pellets must fit the event buffer`)
+      .toBeLessThan(sim.damageEvents.length);
+    return sim.damageCount;
+  }
+
+  /**
+   * Pellets the CLIENT actually RESOLVED — counted off the hits its loop
+   * registered against a real target, never off `report.pellets`.
+   *
+   * The first version of this helper returned `report.pellets`, and a critic
+   * broke it in one line: decouple the loop bound from the field it reports
+   * and all fifteen tests here stayed green while the client resolved 260
+   * pellets against the server's 4. `report.pellets` is a scalar that TRAVELS
+   * WITH the behaviour — this project's rule 21 — so it can be truthful about
+   * a loop that is lying. `report.hits` cannot: it is incremented inside the
+   * loop, once per pellet that found a body, and it is uncapped by
+   * MAX_PELLETS because the ceiling is on the loop and not on the counter.
+   * That is the cost this test exists to measure: a client predicting more
+   * hits and more damage than the server will ever confirm.
+   *
+   * The target is placed the way `fireBoth` places the server's victim — close
+   * and directly on the aim, so the pistol's 0.01 rad cone cannot miss it and
+   * a short count is a short SHOT rather than a stray pellet.
+   */
+  function clientPellets(arsenal: Arsenal): { hits: number; reported: number; damage: number } {
+    const rt = new WeaponRuntime(undefined, undefined, undefined, arsenal);
+    rt.variantSlots.fill(1);
+    rt.resetLoadout(ALL_WEAPON_MASK);
+    rt.current = WeaponId.PISTOL;
+    rt.heat[WeaponId.PISTOL] = 0;
+    rt.shotSeq = 0;
+
+    const targets = createHitTargets();
+    pushPlayerTarget(targets, OWNER + 1, 0.5 + 1.6, 200 + 0.5, 0.5, true, 1, 1e9);
+    const ctx = createFireContext();
+    ctx.ownerId = OWNER;
+    ctx.ox = 0.5; ctx.oy = 200 + PLAYER_EYE_HEIGHT; ctx.oz = 0.5;
+    ctx.dx = 1; ctx.dy = 0; ctx.dz = 0;
+    ctx.world = null;
+    ctx.targets = targets;
+    const report = rt.fireOnce(ctx);
+    return { hits: report.hits, reported: report.pellets, damage: report.totalDamage };
+  }
+
+  function bothAt(overPellets: number) {
+    const arsenal = SessionArsenal.from([
+      { id: 'pellet-storm', base: WeaponId.PISTOL, over: { pellets: overPellets } },
+    ]);
+    // The premise, asserted rather than assumed: the session really is handing
+    // out the overlay, and the two representations really do differ where the
+    // case says they do.
+    const eff = arsenal.statsFor(WeaponId.PISTOL, 1);
+    expect(eff.pellets, 'the overlay reached the session').toBe(overPellets);
+    const client = clientPellets(arsenal);
+    // Every pellet must land or `hits` is a count of luck. The server's helper
+    // makes the same demand of its own victim.
+    expect(client.hits, 'a pellet missed the target — the count is not a pellet count')
+      .toBe(client.reported);
+    return { server: serverPellets(arsenal, overPellets), client: client.hits, reported: client.reported };
+  }
+
+  it('20 pellets: neither side fires more than MAX_PELLETS', () => {
+    const eff = SessionArsenal.from([
+      { id: 'pellet-storm', base: WeaponId.PISTOL, over: { pellets: 20 } },
+    ]).statsFor(WeaponId.PISTOL, 1);
+    expect(eff.hot.pellets, 'at 20 the u8 does NOT wrap — this case is about the CEILING')
+      .toBe(20);
+
+    const { server, client } = bothAt(20);
+    expect(server, 'the server fired more pellets than the report can hold').toBe(MAX_PELLETS);
+    expect(client).toBe(MAX_PELLETS);
+    expect(server).toBe(client);
+  });
+
+  it('260 pellets: both sides read the SAME narrowed count, not one each', () => {
+    const eff = SessionArsenal.from([
+      { id: 'pellet-storm', base: WeaponId.PISTOL, over: { pellets: 260 } },
+    ]).statsFor(WeaponId.PISTOL, 1);
+    expect(eff.pellets, 'the double').toBe(260);
+    expect(eff.hot.pellets, 'the uint8 wraps BELOW the ceiling — this case is about the SOURCE')
+      .toBe(4);
+
+    const { server, client } = bothAt(260);
+    expect(server, 'the server read the double where the client read the uint8').toBe(4);
+    expect(client).toBe(4);
+    expect(server).toBe(client);
   });
 });

@@ -13,7 +13,7 @@
  * THREE GATES, IN ORDER, AND EACH ONE EXISTS BECAUSE THE OTHERS DO NOT CATCH
  * ITS CASE.
  *
- *   1. THE WHITELIST + BANDS. Only 17 fields may move, every one of them has a
+ *   1. THE WHITELIST + BANDS. Only 16 fields may move, every one of them has a
  *      band, and a band is relative to the base wherever that makes sense — so
  *      a weapon with no splash cannot gain any (×anything of 0 is 0) without a
  *      special case.
@@ -120,6 +120,18 @@ export const PAYLOAD_BAND: readonly [number, number] = Object.freeze([0.25, 2.5]
  * when y0 is -1e20 — because `-1e20 + 1 === -1e20`. One projectile from a
  * variant carrying a finite, in-budget, dominance-clean `terrainDamage: 1e20`
  * would have blocked the event loop forever.
+ *
+ * UPDATED 2026-09-05: `carveSphere` is now bounded in its own right, on BOTH
+ * implementations — it refuses non-finite input, clamps to
+ * `TERRAIN_CARVE_MAX_RADIUS` and clamps its three loop ranges to the world box,
+ * which is what actually closes it (a radius clamp alone does not: a centre of
+ * 1e20 with a radius of ONE lands y0 === y1 and hangs just the same). So the
+ * paragraph above is no longer the only thing standing between a pack and a
+ * dead room. It is left standing because its CONCLUSION is unchanged and was
+ * never really about the loop: a field the budget cannot charge for is not a
+ * sidegrade dimension, and `terrainDamage` stays off the whitelist for that
+ * reason first. Defence in depth is the right shape here — the clamp is the
+ * one that has to hold, and the whitelist is the one that has to be argued.
  * ------------------------------------------------------------------------ */
 
 interface Band {
@@ -360,6 +372,109 @@ export function scoreVariant(base: WeaponDef, variant: WeaponDef): BudgetReport 
 }
 
 /* ------------------------------------------------------------------------ *
+ * One value, judged in ONE place
+ *
+ * There are two doors into a variant's numbers — `parseVariantsManifest`,
+ * which reads a pack file, and `decodeVariantTable`, which reads bytes off a
+ * socket — and for most of V3 only the first one judged anything. The second
+ * validated the row's `count`, its `id` and its `base` and then took sixteen
+ * f64s on trust. A hostile row therefore bought an accepted effective
+ * `damage: NaN` (measured: `damageAtDistanceOf` returns NaN at every range,
+ * so a hit subtracts NaN and the victim's health becomes NaN forever) and an
+ * accepted `magSize: 7.5`, whose narrowed `hot.magSize` is 7 while the raw
+ * field stays 7.5 — the SAME `EffectiveWeapon` disagreeing with itself about
+ * one weapon, which is the exact shape of the bug class this whole arc exists
+ * to prevent.
+ *
+ * So the value rules live here, in functions BOTH doors call, and the split
+ * into several of them is not decoration. The parser interleaves a third
+ * refusal (`isInert`) between the shape and the band, and it has to stay
+ * there: an inert field is reported with a value of `base[f] || 1`, so on a
+ * field whose base is 0 — a pistol's `splashRadius`, a chainsaw's `magSize` —
+ * a combined check would fire the band first and answer "outside 0..0" where
+ * "the pistol has no splash to scale" is the true and useful answer. Separate
+ * functions keep that order exactly, with no duplicated check, and let the
+ * wire decoder take the subset of rules it can afford to enforce — which is
+ * NOT all of them, and `decodeVariantTable` argues at length about which.
+ *
+ * Each returns the parser's message TAIL, or null. The parser prepends
+ * `${id}: ` and pushes it; the decoder only asks whether it is null, because
+ * a wire refusal has nowhere to put a sentence. That asymmetry is the whole
+ * awkwardness of sharing these, and it is a smaller price than two copies of
+ * a rule drifting apart — this file already has the scar (`BANDS.toString`)
+ * from a check that existed in one place and was reasoned about in another.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Finite, and whole where the band says counts are counts: everything a value
+ * can get wrong without reference to the archetype it lands on.
+ *
+ * Non-numbers arrive here as NaN, which is the same refusal they always got.
+ */
+function valueShapeError(field: VariantField, v: number): string | null {
+  if (!Number.isFinite(v)) return `${field} is not a finite number`;
+  if (BANDS[field].integer === true && !Number.isInteger(v)) {
+    // `magSize: 7.5` makes a reload transfer half a round, which the typed
+    // arrays resolve as destroying a reserve round and loading nothing.
+    //
+    // The `pellets` half of this argument USED to be the stronger one — 1.5
+    // sits inside 1..12 and made the server fire twice (`i < def.pellets`)
+    // while the client fired once — and it is now dead, because both
+    // predictors read `def.hot.pellets` and u8(1.5) is 1 on both sides
+    // (2026-09-05). The rail stays: a count that is not a count is still
+    // nonsense to store, `magSize` still bites, and a rule kept only while
+    // some other file happens to round the same way is a rule waiting to
+    // break. Recorded rather than deleted so nobody re-derives the old
+    // justification and finds it false.
+    return `${field} must be a whole number, not ${v}`;
+  }
+  return null;
+}
+
+/**
+ * The band of §7 resolved against one archetype. Exported because the wire
+ * decoder enforces the FLOOR of it and nothing else (see
+ * `decodeVariantTable`), and the test that says why has to be able to read
+ * both edges rather than take the claim on trust.
+ */
+export function bandEdgesFor(base: WeaponDef, field: VariantField): readonly [number, number] {
+  const band = BANDS[field];
+  if (band.abs !== undefined) return band.abs as readonly [number, number];
+  const baseValue = base[field] as number;
+  const rel = band.rel as readonly [number, number];
+  return [baseValue * rel[0], baseValue * rel[1]];
+}
+
+/** The band, both edges. The parser's rail; NOT the decoder's — see below. */
+function valueBandError(base: WeaponDef, field: VariantField, v: number): string | null {
+  const [lo, hi] = bandEdgesFor(base, field);
+  if (v < lo - EPS || v > hi + EPS) return `${field} ${v} is outside ${lo}..${hi}`;
+  return null;
+}
+
+/**
+ * The half of the band that does NOT depend on the receiver's copy of the
+ * weapon table: nothing here is ever negative.
+ *
+ * Every band's floor is zero or above on every archetype — the absolute ones
+ * start at 1, 0 and 0.5, and the relative ones are a non-negative multiplier
+ * times a base stat that is itself non-negative — so this refuses strictly
+ * less than the band does and cannot refuse anything the band would allow.
+ * It is stated separately rather than derived because it is the only piece of
+ * the band the wire can enforce without importing the whole coupling the band
+ * carries with it, and `variants.test.ts` walks all 7 x 16 pairs through
+ * `bandEdgesFor` so this cannot quietly become a claim the table stopped
+ * supporting.
+ *
+ * It earns its place on the u16/u8 narrowings: `magSize: -7` keeps the raw
+ * -7 and gives `hot.magSize` 65529, and `pellets: -1` gives `hot.pellets`
+ * 255. Those are the fractional-magazine bug with a bigger number on it.
+ */
+function negativeValueError(field: VariantField, v: number): string | null {
+  return v < 0 ? `${field} ${v} is negative` : null;
+}
+
+/* ------------------------------------------------------------------------ *
  * The parser
  * ------------------------------------------------------------------------ */
 
@@ -442,18 +557,15 @@ export function parseVariantsManifest(text: string): VariantsParseResult {
         bad = true;
         continue;
       }
-      const v = rawOver[key];
-      if (typeof v !== 'number' || !Number.isFinite(v)) {
-        errors.push(`${id}: ${field} is not a finite number`);
-        bad = true;
-        continue;
-      }
-      if (band.integer === true && !Number.isInteger(v)) {
-        // `pellets: 1.5` sits inside 1..12 and makes the SERVER fire twice
-        // (`i < def.pellets`) while the client fires one; `magSize: 7.5` makes
-        // a reload transfer half a round, which the typed arrays resolve as
-        // destroying a reserve round and loading nothing.
-        errors.push(`${id}: ${field} must be a whole number, not ${v}`);
+      // A non-number becomes NaN and is refused by the finiteness rule below,
+      // with the message it has always had. The coercion is what lets ONE
+      // shared function serve both this door and the wire's, where the bytes
+      // are a `Float64Array` and cannot be anything but numbers.
+      const raw = rawOver[key];
+      const v = typeof raw === 'number' ? raw : Number.NaN;
+      const shape = valueShapeError(field, v);
+      if (shape !== null) {
+        errors.push(`${id}: ${shape}`);
         bad = true;
         continue;
       }
@@ -465,11 +577,9 @@ export function parseVariantsManifest(text: string): VariantsParseResult {
         bad = true;
         continue;
       }
-      const baseValue = base[field] as number;
-      const lo = band.abs !== undefined ? band.abs[0] : baseValue * (band.rel as readonly [number, number])[0];
-      const hi = band.abs !== undefined ? band.abs[1] : baseValue * (band.rel as readonly [number, number])[1];
-      if (v < lo - EPS || v > hi + EPS) {
-        errors.push(`${id}: ${field} ${v} is outside ${lo}..${hi}`);
+      const outOfBand = valueBandError(base, field, v);
+      if (outOfBand !== null) {
+        errors.push(`${id}: ${outOfBand}`);
         bad = true;
         continue;
       }
@@ -679,6 +789,91 @@ export function encodeVariantTable(
  * A row whose `base` is not a `WeaponId` refuses the WHOLE message rather
  * than being dropped. Dropping would renumber every later slot, and the slot
  * map that arrives with it was numbered by the sender.
+ *
+ * WHICH OF THE PARSER'S REFUSALS THIS DOOR REPEATS, AND WHICH IT DOES NOT.
+ *
+ * It repeats the rules that are true of a NUMBER IN ITSELF, through the same
+ * functions the pack parser calls rather than a second reading of them:
+ * finite, whole where `BANDS[field].integer` says counts are counts, and not
+ * negative. A single failure refuses the whole message, exactly as a bad
+ * `base` does.
+ *
+ *   - NaN is not a stat line, it is the absence of one. `hot.damage` is
+ *     `f32(NaN)`, `damageAtDistanceOf` returns NaN at every distance, and a
+ *     victim whose health goes NaN never dies and never heals: NaN compares
+ *     false against everything, so no clamp in the game recovers from it.
+ *   - A fractional count splits ONE `EffectiveWeapon` against itself.
+ *     `magSize: 7.5` narrows to `hot.magSize` 7, so the client fills a
+ *     magazine to 7 and then tests `this.mag[id] >= def.magSize` — 7 >= 7.5
+ *     is false — and reloads a full weapon forever, while the server fills
+ *     the same magazine to 7.5 (`server/src/horde.ts:1054`). Neither side is
+ *     wrong about the wire; the value has no coherent reading on either.
+ *   - A negative is the same fault with a wider blast: `magSize: -7` gives
+ *     `hot.magSize` 65529 against a raw -7.
+ *
+ * It does NOT repeat the RELATIVE half of the band, the payload band, the
+ * power budget, the strict-dominance refusal or the inert refusal — and the
+ * line between the two lists is not "whatever is cheap to compute". Every one
+ * of those is computable here; the row carries its own `base`, so
+ * `WEAPONS[base]` and `scoreVariant` are both in reach. The line is what a
+ * refusal COSTS when it is wrong.
+ *
+ * Refusing this message does not stop the sender simulating the table. It
+ * makes the receiver fall back to the base arsenal while the sender keeps
+ * firing the variant — two predictors disagreeing, which is the exact failure
+ * the refusal was meant to prevent. So a decode-time refusal only pays for
+ * itself on a value that NOBODY could simulate coherently, and every check
+ * above is of that kind while none of the checks below it is. A variant 15%
+ * over budget, or better on every axis, or paying in a field its archetype
+ * cannot read, is bad CONTENT — perfectly simulable, and caught at pack-parse
+ * time by the party that has both the authority to judge it and the error
+ * strings to explain itself. It is not a wire fault, and a receiver is not
+ * the authority on what content a room may run.
+ *
+ * The band's upper edge and its relative floor are excluded for a second and
+ * sharper reason: they are scaled by the RECEIVER's compiled `WEAPONS` table,
+ * and this game deploys its two halves separately (the server on Railway, the
+ * static client on Vercel, which VARIANTS.md §2 notes is outside the release
+ * mechanism entirely). A client running yesterday's weapon table is the
+ * NORMAL state during a rebalance, not a hypothetical — and a band check
+ * would turn that from "the ~25 non-variant-able fields mispredict", which is
+ * decision 1's stated and accepted cost, into "every row is refused and both
+ * ends desync through the fallback". The floor of zero is the only part of
+ * the band that carries none of that coupling, because no revision of the
+ * weapon table will ever give a stat a negative value. `version.test.ts`'s
+ * frozen VARIANT_TABLE vector is the standing proof that this door must not
+ * be band-checked: its row declares `base: 1` and then carries the PISTOL's
+ * numbers (rpm 420 against the shotgun's band of 22.5..120), and it has to
+ * keep decoding.
+ *
+ * The inert refusal is different again: it is not declined, it is UNASKABLE.
+ * Decision 1 of the layout is that every row carries all 16 fields at their
+ * effective value whether the variant moved them or not, so "did this row
+ * override `falloffStart`?" is a question the bytes cannot answer — an inert
+ * field arrives holding the archetype's own number, which is what a
+ * well-formed row is supposed to look like. Recasting it as "an inert field
+ * must equal `WEAPONS[base]` exactly" would put the compiled table back in
+ * authority over the very fields decision 1 took it out of, and on the
+ * strictest possible terms: an eighth-digit difference would refuse every
+ * row.
+ *
+ * The hazard the band exists for in the parser does not reach this door
+ * either. `terrainDamage`, the field whose 1e20 would have hung
+ * `world.carveSphere` forever, was deliberately removed from the whitelist
+ * and is not on this wire, and the two remaining distance-driven loops are
+ * capped independently of any stat: `raycastVoxels` stops at 512 steps
+ * (`shared/src/math.ts:556`) and `detonate` iterates players and entities,
+ * not metres. A finite, non-negative, absurd number on this wire buys a
+ * ridiculous match, not a wedged event loop — and on the peer topology it
+ * buys it in a match that `shared/src/trust.ts` already grants nothing for.
+ *
+ * Honest about reach: on the dedicated-server topology the sender is our own
+ * server writing rows from a manifest this module already parsed, so this is
+ * defence in depth. On the WebRTC peer topology the "server" is another
+ * player's browser and can send precisely these bytes. `shared/src/trust.ts`
+ * already grants nothing from a peer-hosted match, so this is not an economy
+ * hole — it is a SIMULATION hole, and the thing it protects is the receiving
+ * client's own predictor.
  */
 export function decodeVariantTable(
   r: PacketReader, out: VariantTableMessage,
@@ -698,6 +893,12 @@ export function decodeVariantTable(
     if (!Number.isInteger(base) || base < 0 || base >= WEAPON_COUNT) return null;
     const values = new Float64Array(VARIANT_FIELDS.length);
     for (let f = 0; f < VARIANT_FIELDS.length; f++) values[f] = r.f64();
+    for (let f = 0; f < VARIANT_FIELDS.length; f++) {
+      const field = VARIANT_FIELDS[f];
+      const v = values[f];
+      if (valueShapeError(field, v) !== null) return null;
+      if (negativeValueError(field, v) !== null) return null;
+    }
     rows.push({ id, base: base as WeaponId, values });
   }
   if (r.remaining < WEAPON_COUNT) return null;

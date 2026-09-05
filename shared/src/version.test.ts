@@ -260,19 +260,110 @@ describe('the content ratchet, per pack', () => {
     expect(lv.fingerprint).toBe(levelsPack([{ id: 'e1m1', hash: 0x1234 }]).fingerprint);
   });
 
-  it('keeps every split input string byte-identical to the joint function it replaced', () => {
+  it('keeps the CORE input strings byte-identical to the joint function it replaced', () => {
     // The split was mechanical: core is the old head, weapons the old tail,
     // and the ONE deliberate addition is `terrain=` at the end of core —
     // the generator was previously in no fingerprint at all.
+    //
+    // The weapons half of this assertion is GONE, and deliberately: at
+    // weapons@2 the line is no longer the old tail. It dropped `reserveMax`
+    // and gained twenty-six fields, so a claim of byte-identity would now be
+    // false, and a test asserting a false claim is worse than no test. What
+    // replaces it is the shape check below and, far more usefully, the
+    // per-field sensitivity suite that follows — which proves the thing the
+    // old regex only gestured at.
     const core = coreFingerprintInputs();
     expect(core.slice(0, 6)).toEqual([
       'tick=50', 'match=480000', 'score=30', 'g=28', 'run=9.5', 'sprint=12.6',
     ]);
     expect(core[6]).toMatch(/^terrain=\d+$/);
-    for (const line of weaponsFingerprintInputs()) {
-      expect(line).toMatch(/^[a-z0-9_-]+:(-?[\d.]+\/){12}-?[\d.]+$/);
+  });
+
+  it('emits one canonical weapons line per weapon, in the shape the console diffs', () => {
+    const lines = weaponsFingerprintInputs();
+    expect(lines).toHaveLength(WEAPONS.length);
+    for (const line of lines) {
+      // `automatic` is a boolean and rides as `true`/`false`. Pack inputs are
+      // opaque canonical STRINGS, not a numeric format — the release console
+      // line-diffs them, and `false` reads better in that diff than `0`.
+      expect(line).toMatch(/^[a-z0-9_-]+:(-?[\d.]+|true|false)(\/(-?[\d.]+|true|false)){37}$/);
+      // 160 is MAX_PACK_INPUT_BYTES and the gate refuses a version forever
+      // once it is exceeded, so the margin is worth failing on here rather
+      // than at release time.
+      expect(Buffer.byteLength(line, 'utf8')).toBeLessThanOrEqual(160);
     }
   });
+});
+
+/* ------------------------------------------------------------------------ *
+ * IS EVERY FIELD IN THE LINE ACTUALLY WATCHED?
+ *
+ * The ratchet's promise is "change a weapon number and this fingerprint
+ * moves". Until now exactly ONE field was ever tested for that — `damage` —
+ * and the promise was false for twenty-six others, which is how a `spreadAir`
+ * divergence of 0.014 rad lived in the tree unseen.
+ *
+ * A regex on the line's SHAPE cannot catch this: a line with the right number
+ * of slashes can still be reading the wrong field twice. So each field is
+ * perturbed on its own and the fingerprint is required to move. The
+ * perturbation has to actually change the STRING — `+1` on a boolean or on an
+ * enum at its ceiling would not — so each field says how it moves.
+ *
+ * This is also the test that fails when somebody drops a field from the list
+ * to make a line fit under 160 bytes. That is the likeliest future mistake
+ * here, and it is the one with no other alarm on it.
+ * ------------------------------------------------------------------------ */
+
+describe('every field in the weapons line moves the fingerprint', () => {
+  /** How to perturb each field so the emitted string is guaranteed to differ. */
+  const PERTURB: Record<string, (v: unknown) => unknown> = {
+    automatic: (v) => !(v as boolean),
+    kind: (v) => ((v as number) + 1) % 3,
+    ammo: (v) => ((v as number) + 1) % 5,
+  };
+  const numeric = (v: unknown) => (v as number) + 1;
+
+  const FIELDS = [
+    'damage', 'pellets', 'headshotMultiplier', 'rpm', 'magSize', 'reloadMs',
+    'splashRadius', 'splashDamage', 'terrainDamage',
+    'spread', 'spreadMax', 'spreadPerShot',
+    'kind', 'ammo',
+    'spreadAir', 'spreadRecovery', 'spreadCrouchScale',
+    'automatic', 'spinUpMs', 'spinDownMs', 'switchInMs', 'switchOutMs',
+    'reloadShellMs',
+    'projectileSpeed', 'projectileGravity', 'projectileRadius', 'projectileLifeMs',
+    'falloffStart', 'falloffEnd', 'falloffMin', 'falloffCurve',
+    'knockback', 'selfDamageScale', 'selfKnockbackScale',
+    'recoilPitch', 'recoilYaw', 'recoilRecovery',
+    'meleeRange',
+  ] as const;
+
+  it('names exactly the fields the line carries, and no others', () => {
+    // Guards the suite against itself: a field added to the line but not to
+    // FIELDS would be untested, and this counts the slashes to catch it.
+    const slashes = weaponsFingerprintInputs()[0].split('/').length;
+    expect(slashes, 'the line carries a different number of fields than this suite tests')
+      .toBe(FIELDS.length);
+  });
+
+  for (const field of FIELDS) {
+    it(`${field}`, () => {
+      const move = PERTURB[field] ?? numeric;
+      // Perturb it on ONE weapon, not all seven: a change that only ever
+      // shows up when every weapon moves together is not a per-weapon ratchet.
+      const edited = WEAPONS.map((w, i) => (
+        i === 0 ? { ...w, [field]: move((w as unknown as Record<string, unknown>)[field]) } : w
+      )) as unknown as typeof WEAPONS;
+
+      const before = weaponsFingerprintInputs()[0];
+      const after = weaponsFingerprintInputs(edited)[0];
+      expect(after, `perturbing ${field} did not change the emitted line`).not.toBe(before);
+      expect(weaponsFingerprint(edited), `${field} is in WeaponDef and not in the ratchet`)
+        .not.toBe(WEAPONS_FINGERPRINT);
+      // And nothing else moved with it — the split's whole point.
+      expect(coreFingerprint()).toBe(CORE_FINGERPRINT);
+    });
+  }
 });
 
 /* ------------------------------------------------------------------------ *

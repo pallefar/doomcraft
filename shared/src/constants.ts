@@ -92,6 +92,25 @@ export function blockInWorld(x: number, y: number, z: number): boolean {
     z >= WORLD_MIN_BLOCK_Z && z <= WORLD_MAX_BLOCK_Z;
 }
 
+/**
+ * Largest sphere any explosion may carve, in blocks.
+ *
+ * This is a SAFETY bound before it is a balance number. A carve turns its
+ * radius into the start and end of a `for` loop, and `for (let y = y0; y <= y1;
+ * y++)` stops being a loop once `y + 1` equals `y` — `-1e20 + 1 === -1e20`, so
+ * one absurd radius pins the counter and the thread never comes back. Sixteen
+ * is chosen to be invisible: the only radii the shipped game passes are weapon
+ * `terrainDamage` values, the largest of which is the BFG's 5.5, and the
+ * largest a test asks for is 6. It lives here rather than beside
+ * `TERRAIN_CARVE_MAX_HARDNESS` in `server/src/world.ts` because there are TWO
+ * carve implementations — the server's and `client/src/world/destruction.ts`'s
+ * — the client cannot import the server's module-private constants, and a
+ * bound that only one of them honours is not a bound. The hardness ceiling
+ * stays server-side because only the server has one; the client decides what
+ * survives a blast with a strength-against-resistance test instead.
+ */
+export const TERRAIN_CARVE_MAX_RADIUS = 16;
+
 /* ------------------------------------------------------------------------ *
  * Terrain shape (worldgen lives on the server, but both sides need the bands)
  * ------------------------------------------------------------------------ */

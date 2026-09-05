@@ -352,10 +352,31 @@ export function weaponsFingerprintInputs(weapons: typeof WEAPONS = WEAPONS): str
   const parts: string[] = [];
   for (const w of weapons) {
     parts.push(
+      // What it hits for, and how often.
       `${w.id}:${w.damage}/${w.pellets}/${w.headshotMultiplier}/${w.rpm}`
-      + `/${w.magSize}/${w.reserveMax}/${w.reloadMs}`
+      + `/${w.magSize}/${w.reloadMs}`
       + `/${w.splashRadius}/${w.splashDamage}/${w.terrainDamage}`
-      + `/${w.spread}/${w.spreadMax}/${w.spreadPerShot}`,
+      + `/${w.spread}/${w.spreadMax}/${w.spreadPerShot}`
+      // Which firing path it takes at all, and out of which reserve.
+      + `/${w.kind}/${w.ammo}`
+      // The rest of the cone. `spreadAir` alone was a 0.014 rad divergence
+      // nothing in the tree could see.
+      + `/${w.spreadAir}/${w.spreadRecovery}/${w.spreadCrouchScale}`
+      // When the trigger is allowed to work. Switch timing GATES SHOTS: a
+      // shotgun switch-in of 300 vs 600 moves first-fire eligibility from
+      // 440 ms to 740 ms, which is a hit or a miss.
+      + `/${w.automatic}/${w.spinUpMs}/${w.spinDownMs}/${w.switchInMs}/${w.switchOutMs}`
+      + `/${w.reloadShellMs}`
+      // Projectile flight. Every one of these is integrated by both sides.
+      + `/${w.projectileSpeed}/${w.projectileGravity}/${w.projectileRadius}/${w.projectileLifeMs}`
+      // The falloff curve, which is the whole of "range".
+      + `/${w.falloffStart}/${w.falloffEnd}/${w.falloffMin}/${w.falloffCurve}`
+      // Impulses applied to bodies — the shooter's included.
+      + `/${w.knockback}/${w.selfDamageScale}/${w.selfKnockbackScale}`
+      // Recoil is NOT presentation: it moves the camera, and the camera
+      // supplies both the firing direction and the look angles on the wire.
+      + `/${w.recoilPitch}/${w.recoilYaw}/${w.recoilRecovery}`
+      + `/${w.meleeRange}`,
     );
   }
   return parts;

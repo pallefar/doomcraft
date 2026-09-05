@@ -1,0 +1,367 @@
+# Codex verdict on the V1-V3 closeout plan (2026-09-05)
+#
+# The plan it reviewed is .verify/plans/S1-closeout.txt, seven numbered
+# clauses put to it BEFORE a line was written. What follows is its
+# judgement, with the ~550 KB of tool-call traces from its own in-memory
+# probes stripped — those were how it convinced itself, not the argument.
+# Every finding below was independently reproduced in this repo before it
+# was acted on (HANDOVER rule 23).
+
+I would not call this closed. **C1, C2 and C4 hold. C3’s shipping no-op claim holds, but its safety explanation overreaches. C5 misses simulation fields and deployment consequences. C6 can still produce a green test with the fix reverted. C7 is false as written.**
+
+I read the source and ran probes using bundles modified only in memory. No repository files were changed.
+
+**C1 — Correct, together with C2.**
+
+Moving `MAX_PELLETS` to shared and retaining the client export preserves the public import path and the client’s array capacities. The client must also import the constant locally: a re-export alone does not bind it for its existing uses.
+
+An upper clamp alone would not resolve the source disagreement: for `pellets: 256`, clamping the server’s double gives **16**, while the client’s uint8 gives **0**. C2 supplies the necessary companion change.
+
+**C2 — Correct; the shipping no-op is demonstrated.**
+
+The shipping pellet counts are `[1, 7, 1, 1, 1, 1, 1]`; every `hot.pellets` value equals its double.
+
+I substituted the server loop bound with `Math.min(def.hot.pellets, 16)` in memory and ran the actual recording harness:
+
+- The **2,341,004-byte** recording remained byte-identical.
+- Its digest remained **`78bf6a5406648098`**.
+- The actual single-shot agreement helper passed all **288 cases / 576 observed pellet directions**.
+
+Neither the lockstep golden nor the cone agreement needs moving for C1–C2.
+
+**C3 — The radius-16 shipping no-op holds; the NaN statement and general boundedness do not.**
+
+The production caller audit is:
+
+| Path | Radius reaching the server carve |
+|---|---|
+| Player projectile → `Simulation.detonate()` | `def.terrainDamage`: rocket **2.6**, BFG **5.5**; zero-valued weapons skip the call |
+| Horde/monster projectile | `MonsterManager.attack()` supplies `BASE_SLOT`. The current projectile-firing monster uses plasma, whose terrain radius is **0** |
+| `scorchCrater()` | Called after carving; it does not call `carveSphere()` recursively. Its largest shipping search radius is **5.5 + 1 = 6.5** |
+
+See [the sole production server call](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:1466), [monster spawning](/Users/karstenhaldan/youtube/doomcraft/server/src/bots.ts:718), and [the scorch expansion](/Users/karstenhaldan/youtube/doomcraft/server/src/world.ts:655). The direct server-world test call in `client/src/modes/horde/economy.test.ts:155` uses **3**.
+
+There is also a separate [client `carveSphere()`](/Users/karstenhaldan/youtube/doomcraft/client/src/world/destruction.ts:489). Its production caller, `explode()` at line 634, also supplies compiled `terrainDamage`; its direct tests use **2.6, 3.2 and 6**. None exceeds 16. The proposed server edit does not bound that separate implementation.
+
+Two concrete corrections:
+
+- **NaN does not enter the loop body.** It passes the existing guard, but produces `y0 = y1 = NaN`; `y <= y1` is false immediately. The current result is **0 removals and 0 iterations**.
+- **A radius clamp does not make this function terminating for arbitrary centers.** With the proposed guard/clamp, `carveSphere(0, 1e20, 0, 1, 0)` still hangs: `y0 === y1 === 1e20`, the height check continues, and `y++` never advances. An isolated in-memory probe exceeded its **100 ms deadline**.
+
+Thus 16 is defensible and preserves shipping radii. If the claim is that the function itself becomes bounded, also bound the iteration coordinates to world extents or reject invalid/out-of-world centers.
+
+**C4 — Correct. Delete it.**
+
+The search across source, content, tooling, console templates and documentation found no additional semantic consumer of `reserveMax`.
+
+[Studio’s draft handler](/Users/karstenhaldan/youtube/doomcraft/server/src/studio.ts:293) saves arbitrary JSON and obtains its reference lines from `weaponsFingerprintInputs()`; it neither reads nor interprets `reserveMax`. Historical drafts containing that key are therefore not runtime dependencies.
+
+Update the stale `WeaponDef` documentation in `docs/CONTRACT.md:424` and whitelist discussion in `docs/VARIANTS.md:51`.
+
+V4 changing `magSize` does not justify introducing per-weapon reserve caps. Pistol and chaingun share the same bullets reserve. Making their individual `reserveMax` values “real” would require a new rule deciding which weapon controls that shared balance. Deleting the misleading field preserves the existing model.
+
+**C5 — Wrong: the proposed list remains incomplete.**
+
+**(a) `true`/`false` is correct.** These are deterministic ASCII strings, and pack inputs are opaque canonical strings, not a numeric-only format. `1`/`0` would also work, but is not required.
+
+The existing numeric-only regex in `shared/src/version.test.ts:273` must change. Its restriction does not make boolean serialization incorrect.
+
+**(b) Eleven more `WeaponDef` fields belong in the simulation fingerprint.**
+
+Every mutation below remains invisible to the proposed 27-field fingerprint:
+
+| Missing field | Classification and concrete consequence |
+|---|---|
+| `kind` | **SIMULATION.** Change rocket from `PROJECTILE` to `HITSCAN`: firing creates **0 projectiles instead of 1**. |
+| `ammo` | **SIMULATION.** Change shotgun from shells to bullets: a shell reload decrements bullets **120→119**, leaving shells at **24**, instead of shells **24→23**. |
+| `projectileGravity` | **SIMULATION.** Rocket gravity **0→10**, starting with zero vertical velocity: after 50 ms, vertical velocity is **−0.5 instead of 0**. |
+| `projectileRadius` | **SIMULATION.** Rocket radius **0.22→0.5** expands a player’s horizontal collision half-width from **0.52→0.8**. A parallel ray offset by **0.6 m** changes from missing to hitting. |
+| `projectileLifeMs` | **SIMULATION.** Rocket lifetime **4000→1000** causes expiry on the twentieth 50 ms step, with **0 ms remaining**, where the original still has **3000 ms**. |
+| `spinDownMs` | **SIMULATION.** Fully spun chaingun, trigger released for 160 ms: changing **320→640** leaves server spin-up at **127.5 instead of 85 ms**, and client spin at **0.75 instead of 0.5**. |
+| `switchInMs` | **SIMULATION.** Pistol→shotgun at time zero: shotgun switch-in **300→600** changes server firing eligibility from **440→740 ms**. |
+| `switchOutMs` | **SIMULATION.** The same switch, pistol switch-out **140→280**, changes eligibility from **440→580 ms**. |
+| `recoilPitch` | **SIMULATION/input formation.** Pistol kick **0.022→0.044** produces **0.044 rad instead of 0.022 rad** of initial vertical aim displacement. |
+| `recoilYaw` | **SIMULATION/input formation.** First pistol kick **0.006→0.012** doubles initial horizontal aim displacement. |
+| `recoilRecovery` | **SIMULATION/input formation.** Recovery **9→18**, 100 ms after a 0.022-rad kick, leaves approximately **0.0036366 instead of 0.0089445 rad**. |
+
+The projectile reads are at [sim.ts:1291](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:1291) and [sim.ts:1328](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:1328); switch timing and spin are at [sim.ts:938](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:938) and [sim.ts:988](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:988).
+
+**The “feel field” comments do not make switch timing or recoil presentation-only.** Switch timing gates shots. Recoil reaches [camera view angles and forward direction](/Users/karstenhaldan/youtube/doomcraft/client/src/player/camera.ts:347), which supply both [the firing direction and transmitted look angles](/Users/karstenhaldan/youtube/doomcraft/client/src/game/game.ts:1671).
+
+The remaining omissions can stay outside this simulation fingerprint:
+
+- **PRESENTATION:** `viewKickX/Y/Z`, `viewKickPitch/Yaw/Roll`, `viewKickRecovery`; all four muzzle fields; `projectileColor`, `projectileLight`; `crosshairGap`; `name`, `short`.
+- **PRESENTATION:** `shakeAmplitude`, `shakeMs`, `shakeFrequency`. Shake changes rendered position/roll/FOV. The firing origin comes from the player driver, and firing direction comes from yaw/pitch, excluding shake roll.
+- **Not a predictor-state read:** authoring `slot`, which populates the hotbar mapping. Predictor commands select weapon IDs directly.
+- `id` is already represented by the canonical line prefix.
+- The `hot` fields need no duplicate entries: they are deterministic narrowings of the corresponding source fields, provided `kind` and `ammo` are included too.
+
+I reproduced the proposed lengths exactly: **91, 96, 100, 86, 100, 85, 73**. Appending the eleven missing simulation fields gives **125, 132, 137, 125, 140, 119, 109**. The complete list still fits 160 today.
+
+**(c) The same-commit obligations extend beyond the three declarations.**
+
+| Artifact | Required action or consequence |
+|---|---|
+| `shared/src/packs.ts:323–333` | Update version, fingerprint and all seven input literals together. |
+| `shared/src/version.test.ts:263–274` | Replace the obsolete “byte-identical to the joint function” assertion and its 13-number regex. The new schema violates both the assertion’s premise and regex. |
+| `server/src/gate.test.ts:78` | Change the expected diagnostic label **`weapons@1`→`weapons@2`**. |
+| `server/src/releases.test.ts:106` | Change the installed-pack expectation to **`weapons@2`**. |
+| `shared/src/packs.test.ts:62` | Its existing self-consistency/input-equality checks must pass. Missing or stale literals make these fail; the test itself needs no new expected hash. |
+| `shared/src/version.test.ts:247` | The existing computed-fingerprint check must pass. Add sensitivity cases for every included simulation field; the current independence test mutates only damage. |
+| Documentation | Correct `CONTRACT.md` and `VARIANTS.md`’s obsolete field descriptions and closeout claims. |
+
+**No existing wire golden needs changing for this bump.** HELLO, WELCOME, UPDATE_REQUIRED, SESSION_CONFIG and VARIANT_TABLE vectors use explicit fixture values. In particular, SESSION_CONFIG’s `0xdeadbeef` remains `0xdeadbeef`. The lockstep golden and digest also remain unchanged. `CONTENT_VERSION` and protocol versions do not become 2 merely because the weapons pack does.
+
+`BUILTIN_CONTENT_HASH` changes automatically. For the **incomplete proposed schema**, I measured fingerprint **`0x3cc88f82`** and builtin hash **`0xbd7bf33f→0x4469796a`**. Those are diagnostic results, not the final literals to adopt after fixing the omissions.
+
+Both gate implementations already call `checkPacksDeclared()`, so the wider producer reaches both. But their existing guarantees are weaker than the comments:
+
+- [The shared declaration check](/Users/karstenhaldan/youtube/doomcraft/server/src/gate.ts:198) compares the computed hash with `p.fingerprint`, **not with the supplied `p.inputs`**. I supplied `inputs: ['0:lies']` while retaining the correct fingerprint: `packs.declared.weapons` passed, and `ReleaseService.runGate()` returned **`ok: true`**.
+- The offline gate lacks the online gate’s input-length check. A **161-byte** declared line passed `runReleaseVerify()`; the service gate refused it with **`packs.inputs`**.
+- The declaration check does not enforce the declared pack version. A draft carrying the current fingerprint under an incompatible version can gate green and later fail inventory satisfaction.
+
+Any additional validation must reach both assembled gates. Updating their common helper helps both; adding a check only inside one orchestration method does not.
+
+**(d) Yes—stored LIVE documents naming `weapons@1` become unsatisfiable under the v2 binary.**
+
+[Inventory satisfaction](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:495) requires both version and fingerprint equality. The existing JSON remains structurally readable; its requested build pack becomes unavailable.
+
+Concrete failure scenario:
+
+1. The durable document names LIVE revision **7**, ordinal **8**, containing `weapons@1`.
+2. Deploy the v2 binary without publishing a replacement release.
+3. [Release resolution](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:664) serves fallback revision **0**, ordinal **1**, using the new build and **newest installed data packs**, potentially abandoning the document’s older data-pack pins.
+4. `/api/version` can report **`unsatisfied: []`**: [releaseView()](/Users/karstenhaldan/youtube/doomcraft/server/src/index.ts:843) asks about the already-resolved fallback.
+5. A supported player is welcomed and adopts that fallback identity. There is no weapons-version refusal screen: [HELLO checks protocol compatibility](/Users/karstenhaldan/youtube/doomcraft/server/src/net.ts:605), and [SESSION_CONFIG adopts content identity](/Users/karstenhaldan/youtube/doomcraft/client/src/net/client.ts:1584).
+
+The plan needs a deployment migration: preserve intended data-pack selections, create/gate/approve/promote a replacement release containing `weapons@2`, and explicitly handle the interval between binary deployment and promotion. Keep historical releases intact; rollback to `weapons@1` requires the corresponding binary.
+
+There is no tracked `releases.json` fixture to rewrite. Railway’s durable document is a separate operational obligation. Its endpoint was inaccessible from this environment, so I cannot verify its actual current LIVE revision.
+
+**C6 — The proposed test is insufficiently constrained. I reproduced a green-with-revert case.**
+
+Use a shotgun variant with `magSize: 4`, then perform the ordinary Horde join. `equipStart()` already supplies four shells and grants shotgun ownership.
+
+Buy `HordeItem.WEAPON_SHOTGUN`:
+
+| Observation | Fix present | Delivery fix reverted |
+|---|---:|---:|
+| Purchase result | `true` | `true` |
+| Credits | **180→130** | **180→130** |
+| Shell reserve | **24→52** | **24→52** |
+| Magazine | **4→4** | **4→4** |
+
+The test passes even if it asserts successful purchase and money spent. [Already-owned weapons become quarter-price ammunition purchases](/Users/karstenhaldan/youtube/doomcraft/server/src/horde.ts:2029); line 2054 is never executed.
+
+Other exact vacuity routes:
+
+- An unowned chaingun costs **350**, but starting credits are **180**. `bought` stays **0**, purchase returns `false`, and a conditional magazine assertion is never reached.
+- An owned shotgun with **80 reserve shells** has nothing deliverable: purchase returns `false` and its existing four-round magazine remains unchanged.
+- An unknown/unregistered player, dead player or wrong item ID can similarly bypass delivery.
+- **Wave state is not the weapon-shop blocker here.** All five weapon entries have `buildPhaseOnly: false`; repair and extra-life purchases have the BUILD restriction.
+
+The decisive setup is an **unowned chaingun**, variant magazine **50**, initial magazine **0**, and **350 credits**. Assert variant resolution and non-ownership before purchase; then unconditionally assert success, ownership, credit deduction and magazine size. I reproduced:
+
+- Fix present: magazine **50**, credits **0**.
+- Fix reverted: magazine **100**, credits **0**.
+
+That is the required red: **expected 100 to be 50**.
+
+**C7 — Wrong, beyond the omissions already listed.**
+
+1. **A fingerprint does not enforce client/server build compatibility.** Even after correctly ratcheting `spreadAir`, an older supported client can connect to a newer server. SESSION_CONFIG adopts a hash without replacing or comparing the compiled base table. The stated **0.03799999977648258 versus 0.02399999977648258** airborne-cone discrepancy remains possible between separately valid builds. C5 makes edits visible at author time; it does not close this runtime disagreement.
+
+2. **Matching cones for a supplied shot number is not sustained predictor agreement.** I ran the existing switching script: server burst counts were **[4, 7]**, client counts **[3, 6]**. The second burst began at server sequence **5**, magazine **95**, versus client sequence **4**, magazine **96**. The existing comparison permits this and stays green. This is the harness’s **20 ms** clock, not a production 50 ms measurement.
+
+3. **The wire decoder does not enforce the parser’s numeric guarantees.** [decodeVariantTable()](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:683) reads f64 values without finite/count validation. I encoded and decoded rows yielding accepted effective **`damage: NaN`**, and accepted **`magSize: 7.5` / `hot.magSize: 7`**. The pack parser refuses such values; the wire boundary does not. C1–C6 do not change that.
+
+4. **Terrain carving was already removed from the validated variant surface.** [variants.ts:64](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:64) explicitly documents that removal. C3 hardens a server primitive; it does not newly close that parser exposure, and radius-only clamping leaves the center-coordinate nontermination described above.
+
+The stage can claim those specific repairs and regression protections. It cannot yet claim complete simulation fingerprint coverage or elimination of predictor disagreement.
+
+## CLAUSES I JUDGE CORRECT
+
+- **C1**
+- **C2**
+- **C4**
+- **C5(a)** — `true`/`false` is valid canonical serialization; C5 overall is incorrect.
+tokens used
+180,246
+I would not call this closed. **C1, C2 and C4 hold. C3’s shipping no-op claim holds, but its safety explanation overreaches. C5 misses simulation fields and deployment consequences. C6 can still produce a green test with the fix reverted. C7 is false as written.**
+
+I read the source and ran probes using bundles modified only in memory. No repository files were changed.
+
+**C1 — Correct, together with C2.**
+
+Moving `MAX_PELLETS` to shared and retaining the client export preserves the public import path and the client’s array capacities. The client must also import the constant locally: a re-export alone does not bind it for its existing uses.
+
+An upper clamp alone would not resolve the source disagreement: for `pellets: 256`, clamping the server’s double gives **16**, while the client’s uint8 gives **0**. C2 supplies the necessary companion change.
+
+**C2 — Correct; the shipping no-op is demonstrated.**
+
+The shipping pellet counts are `[1, 7, 1, 1, 1, 1, 1]`; every `hot.pellets` value equals its double.
+
+I substituted the server loop bound with `Math.min(def.hot.pellets, 16)` in memory and ran the actual recording harness:
+
+- The **2,341,004-byte** recording remained byte-identical.
+- Its digest remained **`78bf6a5406648098`**.
+- The actual single-shot agreement helper passed all **288 cases / 576 observed pellet directions**.
+
+Neither the lockstep golden nor the cone agreement needs moving for C1–C2.
+
+**C3 — The radius-16 shipping no-op holds; the NaN statement and general boundedness do not.**
+
+The production caller audit is:
+
+| Path | Radius reaching the server carve |
+|---|---|
+| Player projectile → `Simulation.detonate()` | `def.terrainDamage`: rocket **2.6**, BFG **5.5**; zero-valued weapons skip the call |
+| Horde/monster projectile | `MonsterManager.attack()` supplies `BASE_SLOT`. The current projectile-firing monster uses plasma, whose terrain radius is **0** |
+| `scorchCrater()` | Called after carving; it does not call `carveSphere()` recursively. Its largest shipping search radius is **5.5 + 1 = 6.5** |
+
+See [the sole production server call](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:1466), [monster spawning](/Users/karstenhaldan/youtube/doomcraft/server/src/bots.ts:718), and [the scorch expansion](/Users/karstenhaldan/youtube/doomcraft/server/src/world.ts:655). The direct server-world test call in `client/src/modes/horde/economy.test.ts:155` uses **3**.
+
+There is also a separate [client `carveSphere()`](/Users/karstenhaldan/youtube/doomcraft/client/src/world/destruction.ts:489). Its production caller, `explode()` at line 634, also supplies compiled `terrainDamage`; its direct tests use **2.6, 3.2 and 6**. None exceeds 16. The proposed server edit does not bound that separate implementation.
+
+Two concrete corrections:
+
+- **NaN does not enter the loop body.** It passes the existing guard, but produces `y0 = y1 = NaN`; `y <= y1` is false immediately. The current result is **0 removals and 0 iterations**.
+- **A radius clamp does not make this function terminating for arbitrary centers.** With the proposed guard/clamp, `carveSphere(0, 1e20, 0, 1, 0)` still hangs: `y0 === y1 === 1e20`, the height check continues, and `y++` never advances. An isolated in-memory probe exceeded its **100 ms deadline**.
+
+Thus 16 is defensible and preserves shipping radii. If the claim is that the function itself becomes bounded, also bound the iteration coordinates to world extents or reject invalid/out-of-world centers.
+
+**C4 — Correct. Delete it.**
+
+The search across source, content, tooling, console templates and documentation found no additional semantic consumer of `reserveMax`.
+
+[Studio’s draft handler](/Users/karstenhaldan/youtube/doomcraft/server/src/studio.ts:293) saves arbitrary JSON and obtains its reference lines from `weaponsFingerprintInputs()`; it neither reads nor interprets `reserveMax`. Historical drafts containing that key are therefore not runtime dependencies.
+
+Update the stale `WeaponDef` documentation in `docs/CONTRACT.md:424` and whitelist discussion in `docs/VARIANTS.md:51`.
+
+V4 changing `magSize` does not justify introducing per-weapon reserve caps. Pistol and chaingun share the same bullets reserve. Making their individual `reserveMax` values “real” would require a new rule deciding which weapon controls that shared balance. Deleting the misleading field preserves the existing model.
+
+**C5 — Wrong: the proposed list remains incomplete.**
+
+**(a) `true`/`false` is correct.** These are deterministic ASCII strings, and pack inputs are opaque canonical strings, not a numeric-only format. `1`/`0` would also work, but is not required.
+
+The existing numeric-only regex in `shared/src/version.test.ts:273` must change. Its restriction does not make boolean serialization incorrect.
+
+**(b) Eleven more `WeaponDef` fields belong in the simulation fingerprint.**
+
+Every mutation below remains invisible to the proposed 27-field fingerprint:
+
+| Missing field | Classification and concrete consequence |
+|---|---|
+| `kind` | **SIMULATION.** Change rocket from `PROJECTILE` to `HITSCAN`: firing creates **0 projectiles instead of 1**. |
+| `ammo` | **SIMULATION.** Change shotgun from shells to bullets: a shell reload decrements bullets **120→119**, leaving shells at **24**, instead of shells **24→23**. |
+| `projectileGravity` | **SIMULATION.** Rocket gravity **0→10**, starting with zero vertical velocity: after 50 ms, vertical velocity is **−0.5 instead of 0**. |
+| `projectileRadius` | **SIMULATION.** Rocket radius **0.22→0.5** expands a player’s horizontal collision half-width from **0.52→0.8**. A parallel ray offset by **0.6 m** changes from missing to hitting. |
+| `projectileLifeMs` | **SIMULATION.** Rocket lifetime **4000→1000** causes expiry on the twentieth 50 ms step, with **0 ms remaining**, where the original still has **3000 ms**. |
+| `spinDownMs` | **SIMULATION.** Fully spun chaingun, trigger released for 160 ms: changing **320→640** leaves server spin-up at **127.5 instead of 85 ms**, and client spin at **0.75 instead of 0.5**. |
+| `switchInMs` | **SIMULATION.** Pistol→shotgun at time zero: shotgun switch-in **300→600** changes server firing eligibility from **440→740 ms**. |
+| `switchOutMs` | **SIMULATION.** The same switch, pistol switch-out **140→280**, changes eligibility from **440→580 ms**. |
+| `recoilPitch` | **SIMULATION/input formation.** Pistol kick **0.022→0.044** produces **0.044 rad instead of 0.022 rad** of initial vertical aim displacement. |
+| `recoilYaw` | **SIMULATION/input formation.** First pistol kick **0.006→0.012** doubles initial horizontal aim displacement. |
+| `recoilRecovery` | **SIMULATION/input formation.** Recovery **9→18**, 100 ms after a 0.022-rad kick, leaves approximately **0.0036366 instead of 0.0089445 rad**. |
+
+The projectile reads are at [sim.ts:1291](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:1291) and [sim.ts:1328](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:1328); switch timing and spin are at [sim.ts:938](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:938) and [sim.ts:988](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:988).
+
+**The “feel field” comments do not make switch timing or recoil presentation-only.** Switch timing gates shots. Recoil reaches [camera view angles and forward direction](/Users/karstenhaldan/youtube/doomcraft/client/src/player/camera.ts:347), which supply both [the firing direction and transmitted look angles](/Users/karstenhaldan/youtube/doomcraft/client/src/game/game.ts:1671).
+
+The remaining omissions can stay outside this simulation fingerprint:
+
+- **PRESENTATION:** `viewKickX/Y/Z`, `viewKickPitch/Yaw/Roll`, `viewKickRecovery`; all four muzzle fields; `projectileColor`, `projectileLight`; `crosshairGap`; `name`, `short`.
+- **PRESENTATION:** `shakeAmplitude`, `shakeMs`, `shakeFrequency`. Shake changes rendered position/roll/FOV. The firing origin comes from the player driver, and firing direction comes from yaw/pitch, excluding shake roll.
+- **Not a predictor-state read:** authoring `slot`, which populates the hotbar mapping. Predictor commands select weapon IDs directly.
+- `id` is already represented by the canonical line prefix.
+- The `hot` fields need no duplicate entries: they are deterministic narrowings of the corresponding source fields, provided `kind` and `ammo` are included too.
+
+I reproduced the proposed lengths exactly: **91, 96, 100, 86, 100, 85, 73**. Appending the eleven missing simulation fields gives **125, 132, 137, 125, 140, 119, 109**. The complete list still fits 160 today.
+
+**(c) The same-commit obligations extend beyond the three declarations.**
+
+| Artifact | Required action or consequence |
+|---|---|
+| `shared/src/packs.ts:323–333` | Update version, fingerprint and all seven input literals together. |
+| `shared/src/version.test.ts:263–274` | Replace the obsolete “byte-identical to the joint function” assertion and its 13-number regex. The new schema violates both the assertion’s premise and regex. |
+| `server/src/gate.test.ts:78` | Change the expected diagnostic label **`weapons@1`→`weapons@2`**. |
+| `server/src/releases.test.ts:106` | Change the installed-pack expectation to **`weapons@2`**. |
+| `shared/src/packs.test.ts:62` | Its existing self-consistency/input-equality checks must pass. Missing or stale literals make these fail; the test itself needs no new expected hash. |
+| `shared/src/version.test.ts:247` | The existing computed-fingerprint check must pass. Add sensitivity cases for every included simulation field; the current independence test mutates only damage. |
+| Documentation | Correct `CONTRACT.md` and `VARIANTS.md`’s obsolete field descriptions and closeout claims. |
+
+**No existing wire golden needs changing for this bump.** HELLO, WELCOME, UPDATE_REQUIRED, SESSION_CONFIG and VARIANT_TABLE vectors use explicit fixture values. In particular, SESSION_CONFIG’s `0xdeadbeef` remains `0xdeadbeef`. The lockstep golden and digest also remain unchanged. `CONTENT_VERSION` and protocol versions do not become 2 merely because the weapons pack does.
+
+`BUILTIN_CONTENT_HASH` changes automatically. For the **incomplete proposed schema**, I measured fingerprint **`0x3cc88f82`** and builtin hash **`0xbd7bf33f→0x4469796a`**. Those are diagnostic results, not the final literals to adopt after fixing the omissions.
+
+Both gate implementations already call `checkPacksDeclared()`, so the wider producer reaches both. But their existing guarantees are weaker than the comments:
+
+- [The shared declaration check](/Users/karstenhaldan/youtube/doomcraft/server/src/gate.ts:198) compares the computed hash with `p.fingerprint`, **not with the supplied `p.inputs`**. I supplied `inputs: ['0:lies']` while retaining the correct fingerprint: `packs.declared.weapons` passed, and `ReleaseService.runGate()` returned **`ok: true`**.
+- The offline gate lacks the online gate’s input-length check. A **161-byte** declared line passed `runReleaseVerify()`; the service gate refused it with **`packs.inputs`**.
+- The declaration check does not enforce the declared pack version. A draft carrying the current fingerprint under an incompatible version can gate green and later fail inventory satisfaction.
+
+Any additional validation must reach both assembled gates. Updating their common helper helps both; adding a check only inside one orchestration method does not.
+
+**(d) Yes—stored LIVE documents naming `weapons@1` become unsatisfiable under the v2 binary.**
+
+[Inventory satisfaction](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:495) requires both version and fingerprint equality. The existing JSON remains structurally readable; its requested build pack becomes unavailable.
+
+Concrete failure scenario:
+
+1. The durable document names LIVE revision **7**, ordinal **8**, containing `weapons@1`.
+2. Deploy the v2 binary without publishing a replacement release.
+3. [Release resolution](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:664) serves fallback revision **0**, ordinal **1**, using the new build and **newest installed data packs**, potentially abandoning the document’s older data-pack pins.
+4. `/api/version` can report **`unsatisfied: []`**: [releaseView()](/Users/karstenhaldan/youtube/doomcraft/server/src/index.ts:843) asks about the already-resolved fallback.
+5. A supported player is welcomed and adopts that fallback identity. There is no weapons-version refusal screen: [HELLO checks protocol compatibility](/Users/karstenhaldan/youtube/doomcraft/server/src/net.ts:605), and [SESSION_CONFIG adopts content identity](/Users/karstenhaldan/youtube/doomcraft/client/src/net/client.ts:1584).
+
+The plan needs a deployment migration: preserve intended data-pack selections, create/gate/approve/promote a replacement release containing `weapons@2`, and explicitly handle the interval between binary deployment and promotion. Keep historical releases intact; rollback to `weapons@1` requires the corresponding binary.
+
+There is no tracked `releases.json` fixture to rewrite. Railway’s durable document is a separate operational obligation. Its endpoint was inaccessible from this environment, so I cannot verify its actual current LIVE revision.
+
+**C6 — The proposed test is insufficiently constrained. I reproduced a green-with-revert case.**
+
+Use a shotgun variant with `magSize: 4`, then perform the ordinary Horde join. `equipStart()` already supplies four shells and grants shotgun ownership.
+
+Buy `HordeItem.WEAPON_SHOTGUN`:
+
+| Observation | Fix present | Delivery fix reverted |
+|---|---:|---:|
+| Purchase result | `true` | `true` |
+| Credits | **180→130** | **180→130** |
+| Shell reserve | **24→52** | **24→52** |
+| Magazine | **4→4** | **4→4** |
+
+The test passes even if it asserts successful purchase and money spent. [Already-owned weapons become quarter-price ammunition purchases](/Users/karstenhaldan/youtube/doomcraft/server/src/horde.ts:2029); line 2054 is never executed.
+
+Other exact vacuity routes:
+
+- An unowned chaingun costs **350**, but starting credits are **180**. `bought` stays **0**, purchase returns `false`, and a conditional magazine assertion is never reached.
+- An owned shotgun with **80 reserve shells** has nothing deliverable: purchase returns `false` and its existing four-round magazine remains unchanged.
+- An unknown/unregistered player, dead player or wrong item ID can similarly bypass delivery.
+- **Wave state is not the weapon-shop blocker here.** All five weapon entries have `buildPhaseOnly: false`; repair and extra-life purchases have the BUILD restriction.
+
+The decisive setup is an **unowned chaingun**, variant magazine **50**, initial magazine **0**, and **350 credits**. Assert variant resolution and non-ownership before purchase; then unconditionally assert success, ownership, credit deduction and magazine size. I reproduced:
+
+- Fix present: magazine **50**, credits **0**.
+- Fix reverted: magazine **100**, credits **0**.
+
+That is the required red: **expected 100 to be 50**.
+
+**C7 — Wrong, beyond the omissions already listed.**
+
+1. **A fingerprint does not enforce client/server build compatibility.** Even after correctly ratcheting `spreadAir`, an older supported client can connect to a newer server. SESSION_CONFIG adopts a hash without replacing or comparing the compiled base table. The stated **0.03799999977648258 versus 0.02399999977648258** airborne-cone discrepancy remains possible between separately valid builds. C5 makes edits visible at author time; it does not close this runtime disagreement.
+
+2. **Matching cones for a supplied shot number is not sustained predictor agreement.** I ran the existing switching script: server burst counts were **[4, 7]**, client counts **[3, 6]**. The second burst began at server sequence **5**, magazine **95**, versus client sequence **4**, magazine **96**. The existing comparison permits this and stays green. This is the harness’s **20 ms** clock, not a production 50 ms measurement.
+
+3. **The wire decoder does not enforce the parser’s numeric guarantees.** [decodeVariantTable()](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:683) reads f64 values without finite/count validation. I encoded and decoded rows yielding accepted effective **`damage: NaN`**, and accepted **`magSize: 7.5` / `hot.magSize: 7`**. The pack parser refuses such values; the wire boundary does not. C1–C6 do not change that.
+
+4. **Terrain carving was already removed from the validated variant surface.** [variants.ts:64](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:64) explicitly documents that removal. C3 hardens a server primitive; it does not newly close that parser exposure, and radius-only clamping leaves the center-coordinate nontermination described above.
+
+The stage can claim those specific repairs and regression protections. It cannot yet claim complete simulation fingerprint coverage or elimination of predictor disagreement.
+
+## CLAUSES I JUDGE CORRECT
+
+- **C1**
+- **C2**
+- **C4**
+- **C5(a)** — `true`/`false` is valid canonical serialization; C5 overall is incorrect.

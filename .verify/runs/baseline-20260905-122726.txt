@@ -1,0 +1,60 @@
+ ✓ server/src/patch.test.ts (22 tests) 32385ms
+   ✓ the protocol is a supported window, not an equality test > serves a client one protocol version behind 2642ms
+   ✓ the protocol is a supported window, not an equality test > gives that older client a real playable session, not just a WELCOME 1877ms
+   ✓ the protocol is a supported window, not an equality test > serves the current version, obviously 1353ms
+   ✓ the protocol is a supported window, not an equality test > refuses a client below the window, with a reason it can act on 1429ms
+   ✓ the protocol is a supported window, not an equality test > tells a client from the FUTURE that the server is the old one 1624ms
+   ✓ the protocol is a supported window, not an equality test > sends UPDATE_REQUIRED BEFORE the close, or the client never sees it 2115ms
+   ✓ the protocol is a supported window, not an equality test > agrees with `checkProtocol`, which is the only place the rule is written 9235ms
+   ✓ content is per-room and pinned at construction > tells every joiner the room content, not the build content 1478ms
+   ✓ content is per-room and pinned at construction > records what the client claimed, without trusting it 1370ms
+   ✓ content is per-room and pinned at construction > reads 0 from a client too old to declare one, and carries on 1172ms
+   ✓ content is per-room and pinned at construction > names the build for a bug report, and never gates on it 954ms
+   ✓ feature flags are resolved by the server and transmitted > lands a half-built feature dark by default 854ms
+   ✓ feature flags are resolved by the server and transmitted > switches one on for everybody without a deploy 845ms
+   ✓ feature flags are resolved by the server and transmitted > resolves per player, from the identity the ledger already uses 761ms
+   ✓ feature flags are resolved by the server and transmitted > stamps the resolved bits onto the connection, for logs and for the room 683ms
+   ✓ a message id added after the window opened > goes to a client from BEFORE it existed without disturbing the session 674ms
+   ✓ a draining room refuses new players and keeps the ones it has > turns a new HELLO away with HOST_DRAINING 754ms
+   ✓ a draining room refuses new players and keeps the ones it has > does not touch the player who was already in the match 705ms
+   ✓ a client that cannot decode the table is not given variants > resolves every claim to the base, and says nothing it cannot decode 603ms
+   ✓ a client that cannot decode the table is not given variants > and DOES resolve them for a client that set the bit 622ms
+   ✓ a client that cannot decode the table is not given variants > a room with no variants pack sends an empty table, not silence 629ms
+ ✓ client/src/game/lockstep.test.ts (11 tests) 14977ms
+   ✓ lockstep determinism > is stable inside one process 3289ms
+   ✓ the gate can fail > an equipped variant that does nothing changes nothing, on either predictor 2612ms
+   ✓ the gate can fail > moves both predictors when the room's pistol does one more point of damage 1836ms
+   ✓ the gate can fail > moves both predictors when the room's chaingun cycles faster 1605ms
+   ✓ the gate can fail > moves the server on a splash radius change of one centimetre 1505ms
+   ✓ the gate can fail > moves the client on a spread change the server never sees a shot of 1400ms
+   ✓ the gate can fail > leaves BOTH tracks alone when a module table moves — the seam is live 1378ms
+   ✓ the gate can fail > restores every table it perturbed 1340ms
+ ✓ server/src/releases.test.ts (28 tests) 77176ms
+   ✓ PackInventory > behaves exactly as an unconfigured deploy with no packs root 1685ms
+   ✓ PackInventory > discovers versioned pack directories, and one changed byte splits the versions 3348ms
+   ✓ PackInventory > hands a room a frozen view that a disk edit cannot change (8.9 / 8.12 for rooms) 1792ms
+   ✓ PackInventory > reports what it cannot satisfy, per pack (8.6) 1835ms
+   ✓ PackInventory > carries an installed variants pack in the boot identity 1961ms
+   ✓ the production gate and pack kind 7 > REFUSES a draft whose variants pack is gone by the time the gate runs 3012ms
+   ✓ the production gate and pack kind 7 > passes a draft naming a variants pack it DOES have, and says how many parsed 2765ms
+   ✓ the production gate and pack kind 7 > refuses to DRAFT a variants version this host does not have 1644ms
+   ✓ ReleaseService > walks draft → review → staged → live, and a new room resolves the promoted release 2990ms
+   ✓ ReleaseService > refuses a stale write with 409 and CHANGES NOTHING 2468ms
+   ✓ ReleaseService > survives a restart: a reconstructed service reads back an identical document 4077ms
+   ✓ ReleaseService > refuses approve without a gate run, with a failed gate, and without a note 2903ms
+   ✓ ReleaseService > refuses the intermediate rollout rungs unless the request says so in words 4205ms
+   ✓ ReleaseService > promote requires 10000, deliberately 3658ms
+   ✓ ReleaseService > a release this host cannot satisfy is refused at promote and skipped at resolve (8.6) 4605ms
+   ✓ ReleaseService > rollback returns to the base release and refuses when the gate said schemaTouching 3462ms
+   ✓ ReleaseService > caps history without ever evicting the live release or its base chain (8.3/D6) 24064ms
+   ✓ ReleaseService > a corrupt document degrades to the builtin release instead of bricking the host (8.3) 726ms
+   ✓ ReleaseService > writes one audit line per accepted transition to release.jsonl 1363ms
+   ✓ items in the release machine > counts dormanted ids when a new items version drops one (docs/PACKS.md §7) 1969ms
+   ✓ the expansion one-click (S3): a draft from PICKED versions > drafts the picked older version, carries the name, and refuses the uninstalled 1455ms
+   ✓ the release routes on the real binary > runs draft → gate → approve → stage → promote → rollback over HTTP, and /api/version follows 999ms
+
+ Test Files  105 passed (105)
+      Tests  2525 passed | 3 skipped (2528)
+   Start at  12:27:26
+   Duration  78.17s (transform 4.50s, setup 0ms, collect 20.38s, tests 503.78s, environment 14ms, prepare 5.84s)
+

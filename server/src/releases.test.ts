@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import {
+  BUILTIN_PACKS,
   PackKind,
   type GateReport,
   type PackVersion,
@@ -109,8 +110,17 @@ describe('PackInventory', () => {
     expect(inv.levelsVersions()).toEqual([1]);
     expect(inv.campaignVersions()).toEqual([1]);
     const packs = inv.installedPacks();
-    expect(packs.map((p) => p.label).sort())
-      .toEqual(['campaign@1', 'characters@1', 'core@1', 'items@1', 'levels@1', 'quests@1', 'weapons@1']);
+    // The build packs carry their declared VERSIONS, which move whenever a
+    // ratchet fires — `weapons@2` since the fingerprint widened on 2026-09-05.
+    // Spelling them out here made a legitimate pack bump fail a test about
+    // whether an unconfigured deploy finds its data packs, which is a
+    // different claim. The KINDS are the claim; the versions come from the
+    // declaration.
+    const declared = new Map(BUILTIN_PACKS.map((p) => [p.key, p.label]));
+    expect(packs.map((p) => p.label).sort()).toEqual([
+      'campaign@1', declared.get('characters'), declared.get('core'),
+      'items@1', 'levels@1', 'quests@1', declared.get('weapons'),
+    ].sort());
     expect(packs.find((p) => p.label === 'levels@1')?.digest).toMatch(/^[0-9a-f]{64}$/);
   });
 
