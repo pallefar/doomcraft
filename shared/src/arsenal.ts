@@ -87,6 +87,25 @@ export interface EffectiveWeapon extends WeaponDef {
 /** The base slot. A revoked, dormant or mode-denied claim resolves here. */
 export const BASE_SLOT = 0;
 
+/**
+ * One entry of a room's pinned variant table, ASSEMBLED — not validated.
+ *
+ * The whitelist, the per-field bands, the power budget and the
+ * strict-dominance refusal all belong to the pack parser (V2,
+ * `shared/src/variants.ts`), which is the only thing that will ever construct
+ * these from bytes. This type is the handoff between that parser and this
+ * assembly step, and keeping the two apart is deliberate: a room must not be
+ * able to widen the whitelist by handing the arsenal a richer object.
+ */
+export interface WeaponOverlay {
+  /** Content id of the variant. */
+  readonly id: string;
+  /** The archetype it modifies. */
+  readonly base: number;
+  /** Fields to override. */
+  readonly over: Readonly<Partial<WeaponDef>>;
+}
+
 /* ------------------------------------------------------------------------ *
  * Narrowing, done the way the module does it
  * ------------------------------------------------------------------------ */
@@ -145,15 +164,45 @@ export class SessionArsenal {
   }
 
   /**
+   * The compiled table plus one slot per overlay, in the order given: overlay
+   * `i` becomes slot `i + 1`, and slot 0 stays the untouched archetype.
+   *
+   * Nothing is validated here — see `WeaponOverlay`. An overlay naming an
+   * unknown base is dropped rather than throwing, because a room resolving a
+   * release must not be able to take the process down; the parser is where a
+   * bad table is refused, loudly, before it ever reaches a room.
+   */
+  static from(overlays: readonly WeaponOverlay[]): SessionArsenal {
+    const table: EffectiveWeapon[] = [];
+    for (let i = 0; i < WEAPON_COUNT; i++) table.push(effectiveFor(WEAPONS[i], BASE_SLOT, ''));
+
+    let slot = BASE_SLOT;
+    for (const o of overlays) {
+      const base = Number.isInteger(o.base) && o.base >= 0 && o.base < WEAPON_COUNT
+        ? WEAPONS[o.base] : null;
+      if (base === null) continue;
+      slot++;
+      // Every weapon exists in every slot. A player holding the shotgun in a
+      // room whose slot 2 is a pistol variant fires the BASE shotgun, not a
+      // hole — the same answer the clamp gives, reached without a branch on
+      // the firing path.
+      for (let i = 0; i < WEAPON_COUNT; i++) {
+        const isTarget = i === o.base;
+        const d = isTarget ? { ...base, ...o.over, id: base.id } as WeaponDef : WEAPONS[i];
+        table.push(effectiveFor(d, slot, isTarget ? o.id : ''));
+      }
+    }
+    return new SessionArsenal(Object.freeze(table), slot + 1);
+  }
+
+  /**
    * The compiled table and nothing else. This is what the local Worker builds
    * from (VARIANTS.md §2: the static Vercel build is outside the release
    * mechanism and must keep working with zero fetches), and what every room
    * builds from until a variants pack exists.
    */
   static compiled(): SessionArsenal {
-    const table: EffectiveWeapon[] = [];
-    for (let i = 0; i < WEAPON_COUNT; i++) table.push(effectiveFor(WEAPONS[i], BASE_SLOT, ''));
-    return new SessionArsenal(Object.freeze(table), 1);
+    return SessionArsenal.from([]);
   }
 
   /**

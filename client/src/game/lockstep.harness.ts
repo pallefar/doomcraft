@@ -38,6 +38,7 @@ import {
 import {
   BTN_CROUCH, BTN_FIRE, BTN_JUMP, BTN_RELOAD, createInputCommand,
 } from '@shared/protocol';
+import { BASE_ARSENAL, BASE_SLOT, type SessionArsenal } from '@shared/arsenal';
 import { ALL_WEAPON_MASK, ammoTypeOf, WEAPON_COUNT, WeaponId } from '@shared/weapons';
 
 import { Simulation } from '@doomcraft/server/src/sim.js';
@@ -211,11 +212,15 @@ export interface ServerTrackOptions {
   readonly immortalVictim: boolean;
   /** Which weapon segments to run. Defaults to all seven. */
   readonly weapons?: readonly number[];
+  /** The room's arsenal. Defaults to the compiled one. */
+  readonly arsenal?: SessionArsenal;
+  /** The shooter's equipped variant slot, on every weapon. Defaults to base. */
+  readonly variantSlot?: number;
 }
 
 export function recordServer(arena: Arena, opts: ServerTrackOptions): string[] {
   const lines: string[] = [];
-  const sim = new Simulation(arena.world, SEED);
+  const sim = new Simulation(arena.world, SEED, opts.arsenal ?? BASE_ARSENAL);
   sim.lagCompensation = false;      // rewind reads a live RTT; off is the deterministic path
   sim.fallDamageEnabled = false;    // isolate the weapon tables from the movement tables
   sim.hazardsEnabled = false;
@@ -223,6 +228,10 @@ export function recordServer(arena: Arena, opts: ServerTrackOptions): string[] {
   sim.spawnAnchor = { x: arena.ax, y: arena.ay, z: arena.az, yaw: arena.yaw };
 
   const shooter = sim.addPlayer(1, 'A', 0, false);
+  // Before the spawn, not after: `spawnPlayer` fills the magazines through the
+  // arsenal, so a claim set afterwards would give the first magazine of every
+  // weapon the base's size and every later one the variant's.
+  shooter.variantSlots.fill(opts.variantSlot ?? BASE_SLOT);
   sim.spawnPlayer(shooter);
   const victim = sim.addPlayer(2, 'B', 1, false);
   sim.spawnPlayer(victim);
@@ -518,4 +527,20 @@ export function stats(text: string): RecordingStats {
 function note(into: Set<number>, line: string): void {
   const m = /\bweapon=(\d+)/.exec(line);
   if (m) into.add(Number(m[1]));
+}
+
+/**
+ * A server track under a GIVEN arsenal — the lever the failure proof needs.
+ *
+ * Once both predictors read the seam, perturbing `WEAPON_DAMAGE` proves
+ * nothing: the arsenal snapshots the compiled table at construction and never
+ * looks at it again, which is the design. So the way to show the recording is
+ * still watching the numbers is to change the numbers WHERE THE SESSION READS
+ * THEM — hand it a room whose pinned table differs, equip the claim, and watch
+ * the shots move. That also exercises the per-player `variantSlots` path,
+ * which a compiled-only recording never touches.
+ */
+export function recordServerWith(arsenal: SessionArsenal, variantSlot: number): string {
+  const arena = buildArena(7);
+  return recordServer(arena, { immortalVictim: true, arsenal, variantSlot }).join('\n');
 }

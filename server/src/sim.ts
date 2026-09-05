@@ -75,13 +75,9 @@ import {
   aabbHitsSolid,
   ammoTypeOf,
   anglesToForward,
-  applyShotSpread,
   clamp,
   coneSpread,
   createVoxelHit,
-  currentSpread,
-  damageAtDistance,
-  fireIntervalMs,
   getWeapon,
   grantWeapon,
   hash3i,
@@ -91,9 +87,6 @@ import {
   ownsWeapon,
   rayAABB,
   raycastVoxels,
-  recoverSpread,
-  splashDamageAt,
-  knockbackImpulse,
 } from '@doomcraft/shared';
 import {
   BTN_CROUCH,
@@ -124,6 +117,21 @@ import {
   RemoveReason,
   Rng,
 } from '@doomcraft/shared';
+import {
+  applyShotSpreadOf,
+  BASE_ARSENAL,
+  BASE_SLOT,
+  createVariantSlots,
+  currentSpreadOf,
+  damageAtDistanceOf,
+  fireIntervalMsOf,
+  knockbackImpulseOf,
+  recoverSpreadOf,
+  splashDamageAtOf,
+  type EffectiveWeapon,
+  type SessionArsenal,
+  type VariantSlots,
+} from '@doomcraft/shared/arsenal';
 import { LEGACY_AVATAR_BY_SKIN } from '@doomcraft/shared/saves';
 import type { InputCommand, SolidAt, VoxelHit } from '@doomcraft/shared';
 import type { ServerWorld } from './world.js';
@@ -398,6 +406,14 @@ export class PlayerEntity implements MoveState {
 
   readonly pos = new Float64Array(3);
   readonly vel = new Float64Array(3);
+  /**
+   * Equipped variant slot per weapon — VARIANTS.md §4's `inventory.variants`
+   * claim, resolved. All zeros is "no variants equipped", which is every
+   * player in phase V1; the room will fill it at spawn from the profile's
+   * claims checked against ITS pinned release, in the same place it already
+   * resolves loadout masks.
+   */
+  readonly variantSlots: VariantSlots = createVariantSlots();
   yaw = 0;
   pitch = 0;
   height = PLAYER_HEIGHT;
@@ -484,8 +500,12 @@ export class PlayerEntity implements MoveState {
     this.breath = BREATH_SECONDS; this.envDamageAccum = 0;
     this.weapon = DEFAULT_WEAPON;
     this.weaponMask = STARTING_WEAPON_MASK;
+    this.variantSlots.fill(0);
     this.mag.fill(0);
     this.reserve.set(AMMO_START);
+    // The compiled magazine, deliberately: a pooled body is being wiped and
+    // has no session yet. `Simulation.spawnPlayer` refills through the room's
+    // arsenal a moment later, and that is the fill a variant changes.
     for (let i = 0; i < WEAPON_COUNT; i++) {
       if (ownsWeapon(this.weaponMask, i)) this.mag[i] = getWeapon(i).magSize;
     }
@@ -613,6 +633,14 @@ const SCRATCH_HIST = new Float64Array(4);
 
 export class Simulation {
   readonly world: ServerWorld;
+  /**
+   * The stats this room fires with — VARIANTS.md §2's seam. Rooms already pin
+   * a release per `roomInstanceId`, so an arsenal is per-room by construction
+   * and two variant tables can never meet in one match. Defaulted to the
+   * compiled one because that is what a room with no variants release, the
+   * local Worker and every test all want.
+   */
+  readonly arsenal: SessionArsenal;
   seed: number;
   /** Server clock in milliseconds since the room started. */
   nowMs = 0;
@@ -685,6 +713,8 @@ export class Simulation {
   readonly projGen = new Uint16Array(MAX_PROJECTILES);
   readonly projOwner = new Uint16Array(MAX_PROJECTILES);
   readonly projWeapon = new Uint8Array(MAX_PROJECTILES);
+  /** Variant slot the shot was fired with. See `spawnProjectile`. */
+  readonly projVariant = new Uint8Array(MAX_PROJECTILES);
   readonly projX = new Float64Array(MAX_PROJECTILES);
   readonly projY = new Float64Array(MAX_PROJECTILES);
   readonly projZ = new Float64Array(MAX_PROJECTILES);
@@ -722,8 +752,9 @@ export class Simulation {
    */
   spawnAnchor: { x: number; y: number; z: number; yaw: number } | null = null;
 
-  constructor(world: ServerWorld, seed: number) {
+  constructor(world: ServerWorld, seed: number, arsenal: SessionArsenal = BASE_ARSENAL) {
     this.world = world;
+    this.arsenal = arsenal;
     this.seed = seed >>> 0;
     for (let i = 0; i < 64; i++) this.damageEvents.push(makeDamageEvent());
     for (let i = 0; i < 32; i++) this.killEvents.push(makeKillEvent());
@@ -780,6 +811,16 @@ export class Simulation {
 
   getPlayer(id: number): PlayerEntity | undefined { return this.playerById.get(id); }
 
+  /**
+   * The stats `p` fires `weaponId` with. One lookup, one place: every reader on
+   * the firing path goes through here rather than importing a module table, so
+   * a variant that a room revoked resolves to the base without any caller
+   * knowing it happened (`statsFor` clamps an unknown slot to BASE_SLOT).
+   */
+  statsFor(p: PlayerEntity, weaponId: number): EffectiveWeapon {
+    return this.arsenal.statsFor(weaponId, p.variantSlots[weaponId] ?? BASE_SLOT);
+  }
+
   /** Place a player at a fresh spawn point with a full loadout. */
   spawnPlayer(p: PlayerEntity): void {
     let n = 0;
@@ -818,7 +859,7 @@ export class Simulation {
     p.reserve.set(AMMO_START);
     p.mag.fill(0);
     for (let i = 0; i < WEAPON_COUNT; i++) {
-      if (ownsWeapon(p.weaponMask, i)) p.mag[i] = getWeapon(i).magSize;
+      if (ownsWeapon(p.weaponMask, i)) p.mag[i] = this.statsFor(p, i).magSize;
     }
     p.heatSpread = 0;
     p.nextFireMs = this.nowMs;
@@ -873,6 +914,8 @@ export class Simulation {
     if (cmd.slot <= 6) {
       const want = cmd.slot | 0;
       if (want !== p.weapon && ownsWeapon(p.weaponMask, want)) {
+        // Switch times are FEEL fields and deliberately outside the variant
+        // whitelist (VARIANTS.md §1.2), so these read the archetype.
         const outMs = getWeapon(p.weapon).switchOutMs;
         const inMs = getWeapon(want).switchInMs;
         p.weapon = want;
@@ -887,7 +930,7 @@ export class Simulation {
       p.buildMode = true;
     }
 
-    const def = getWeapon(p.weapon);
+    const def = this.statsFor(p, p.weapon);
     const ammoType = ammoTypeOf(p.weapon);
 
     // Reload, either as a block or shell by shell.
@@ -951,12 +994,12 @@ export class Simulation {
     // client/src/game/weapons.ts: the client predicts its own cone and this
     // reproduces it, so the two rules must not drift apart.
     if (!wantFire || p.reloading || now < p.switchEndMs) {
-      p.heatSpread = recoverSpread(p.weapon, p.heatSpread, dtMs / 1000);
+      p.heatSpread = recoverSpreadOf(def, p.heatSpread, dtMs / 1000);
     }
   }
 
   startReload(p: PlayerEntity): void {
-    const def = getWeapon(p.weapon);
+    const def = this.statsFor(p, p.weapon);
     if (def.kind === FireKind.MELEE) return;
     if (p.reloading) return;
     if (p.mag[p.weapon] >= def.magSize) return;
@@ -975,7 +1018,7 @@ export class Simulation {
     const now = this.nowMs;
     if (p.dead) return false;
     if (now < p.nextFireMs) return false;             // fire-rate enforcement
-    const def = getWeapon(weapon);
+    const def = this.statsFor(p, weapon);
     if (def.kind !== FireKind.MELEE) {
       if (p.mag[weapon] <= 0) {
         this.startReload(p);
@@ -984,8 +1027,8 @@ export class Simulation {
       p.mag[weapon]--;
     }
 
-    p.nextFireMs = now + fireIntervalMs(weapon);
-    p.heatSpread = applyShotSpread(weapon, p.heatSpread);
+    p.nextFireMs = now + fireIntervalMsOf(def);
+    p.heatSpread = applyShotSpreadOf(def, p.heatSpread);
     p.shotSeq = (p.shotSeq + 1) & 0xffff;
     // Spread is reproducible from (player, shot) so a client that wants to draw
     // its own tracers gets the same pattern the server resolved.
@@ -1000,20 +1043,20 @@ export class Simulation {
 
     switch (def.kind) {
       case FireKind.HITSCAN: {
-        const spread = currentSpread(weapon, p.heatSpread, !p.onGround, p.crouching);
+        const spread = currentSpreadOf(def, p.heatSpread, !p.onGround, p.crouching);
         for (let i = 0; i < def.pellets; i++) {
           anglesToForward(SCRATCH_DIR, 0, p.yaw, p.pitch);
           if (spread > 0) {
             coneSpread(SCRATCH_DIR, 0, SCRATCH_DIR[0], SCRATCH_DIR[1], SCRATCH_DIR[2], spread, this.rng.next(), this.rng.next());
           }
-          this.resolveHitscan(p, weapon, ex, ey, ez, SCRATCH_DIR[0], SCRATCH_DIR[1], SCRATCH_DIR[2]);
+          this.resolveHitscan(p, def, ex, ey, ez, SCRATCH_DIR[0], SCRATCH_DIR[1], SCRATCH_DIR[2]);
         }
         break;
       }
       case FireKind.PROJECTILE: {
         anglesToForward(SCRATCH_DIR, 0, p.yaw, p.pitch);
         this.spawnProjectile(
-          p.id, weapon,
+          p.id, weapon, p.variantSlots[weapon] ?? BASE_SLOT,
           ex + SCRATCH_DIR[0] * 0.5, ey + SCRATCH_DIR[1] * 0.5, ez + SCRATCH_DIR[2] * 0.5,
           SCRATCH_DIR[0] * def.projectileSpeed + p.vel[0] * 0.25,
           SCRATCH_DIR[1] * def.projectileSpeed + p.vel[1] * 0.25,
@@ -1024,7 +1067,7 @@ export class Simulation {
       }
       case FireKind.MELEE: {
         anglesToForward(SCRATCH_DIR, 0, p.yaw, p.pitch);
-        this.resolveMelee(p, weapon, ex, ey, ez, SCRATCH_DIR[0], SCRATCH_DIR[1], SCRATCH_DIR[2], def.meleeRange);
+        this.resolveMelee(p, def, ex, ey, ez, SCRATCH_DIR[0], SCRATCH_DIR[1], SCRATCH_DIR[2], def.meleeRange);
         break;
       }
       default:
@@ -1040,7 +1083,7 @@ export class Simulation {
   }
 
   private resolveHitscan(
-    shooter: PlayerEntity, weapon: number,
+    shooter: PlayerEntity, def: EffectiveWeapon,
     ox: number, oy: number, oz: number,
     dx: number, dy: number, dz: number,
   ): void {
@@ -1100,28 +1143,27 @@ export class Simulation {
     }
 
     if (monster >= 0) {
-      const dmg = damageAtDistance(weapon, bestT);
+      const dmg = damageAtDistanceOf(def, bestT);
       this.damageEntity(monster, shooter.id, dmg, dx, dy, dz);
       return;
     }
     if (!victim) return;
 
-    let dmg = damageAtDistance(weapon, bestT);
+    let dmg = damageAtDistanceOf(def, bestT);
     let flags = 0;
     if (headshot) {
-      const def = getWeapon(weapon);
       dmg *= def.headshotMultiplier > 0 ? def.headshotMultiplier : HEADSHOT_MULTIPLIER;
       flags |= DMG_HEADSHOT;
     }
-    this.damagePlayer(victim, shooter.id, dmg, weapon, flags, dx, dy, dz);
-    const imp = knockbackImpulse(weapon, dmg);
+    this.damagePlayer(victim, shooter.id, dmg, def.id, flags, dx, dy, dz);
+    const imp = knockbackImpulseOf(def, dmg);
     victim.vel[0] += dx * imp;
     victim.vel[1] += Math.max(0, dy) * imp + imp * 0.25;
     victim.vel[2] += dz * imp;
   }
 
   private resolveMelee(
-    attacker: PlayerEntity, weapon: number,
+    attacker: PlayerEntity, def: EffectiveWeapon,
     ox: number, oy: number, oz: number,
     dx: number, dy: number, dz: number,
     range: number,
@@ -1137,9 +1179,9 @@ export class Simulation {
       const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (d > range + PLAYER_HALF_WIDTH) continue;
       if (d > 1e-4 && (cx * dx + cy * dy + cz * dz) / d < cosLimit) continue;
-      const dmg = damageAtDistance(weapon, d);
-      this.damagePlayer(o, attacker.id, dmg, weapon, 0, dx, dy, dz);
-      const imp = knockbackImpulse(weapon, dmg);
+      const dmg = damageAtDistanceOf(def, d);
+      this.damagePlayer(o, attacker.id, dmg, def.id, 0, dx, dy, dz);
+      const imp = knockbackImpulseOf(def, dmg);
       o.vel[0] += dx * imp; o.vel[1] += imp * 0.5; o.vel[2] += dz * imp;
     }
     for (let e = 0; e < this.entCapacity; e++) {
@@ -1150,7 +1192,7 @@ export class Simulation {
       const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (d > range + this.entHalfW[e]) continue;
       if (d > 1e-4 && (cx * dx + cy * dy + cz * dz) / d < cosLimit) continue;
-      this.damageEntity(e, attacker.id, damageAtDistance(weapon, d), dx, dy, dz);
+      this.damageEntity(e, attacker.id, damageAtDistanceOf(def, d), dx, dy, dz);
     }
   }
 
@@ -1158,8 +1200,15 @@ export class Simulation {
    * Projectiles
    * -------------------------------------------------------------- */
 
+  /**
+   * `variantSlot` is the shooter's equipped slot AT THE MOMENT OF FIRING, kept
+   * on the projectile rather than re-read at detonation. A rocket in flight
+   * outlives a weapon switch, a death and a respawn, and its blast is the shot
+   * that was taken — re-resolving the slot later would let a player change the
+   * splash of a round already in the air.
+   */
   spawnProjectile(
-    ownerId: number, weapon: number,
+    ownerId: number, weapon: number, variantSlot: number,
     x: number, y: number, z: number,
     vx: number, vy: number, vz: number,
     damage: number, fromMonster: boolean,
@@ -1174,9 +1223,10 @@ export class Simulation {
     this.projGen[slot] = (this.projGen[slot] + 1) & 0xffff;
     this.projOwner[slot] = ownerId;
     this.projWeapon[slot] = weapon;
+    this.projVariant[slot] = variantSlot;
     this.projX[slot] = x; this.projY[slot] = y; this.projZ[slot] = z;
     this.projVX[slot] = vx; this.projVY[slot] = vy; this.projVZ[slot] = vz;
-    const def = getWeapon(weapon);
+    const def = this.arsenal.statsFor(weapon, variantSlot);
     this.projLife[slot] = def.projectileLifeMs > 0 ? def.projectileLifeMs : 3000;
     this.projFromMonster[slot] = fromMonster ? 1 : 0;
     this.projDamage[slot] = damage;
@@ -1206,7 +1256,7 @@ export class Simulation {
     for (let i = 0; i < MAX_PROJECTILES; i++) {
       if (this.projActive[i] === 0) continue;
       const weapon = this.projWeapon[i];
-      const def = getWeapon(weapon);
+      const def = this.arsenal.statsFor(weapon, this.projVariant[i]);
 
       this.projLife[i] -= dt * 1000;
       if (this.projLife[i] <= 0) {
@@ -1272,7 +1322,7 @@ export class Simulation {
           // player who happens to share the monster's id.
           const attacker = this.projFromMonster[i] === 1 ? 0 : this.projOwner[i];
           this.damagePlayer(hitPlayer, attacker, direct, weapon, 0, ndx, ndy, ndz);
-          const imp = knockbackImpulse(weapon, direct);
+          const imp = knockbackImpulseOf(def, direct);
           hitPlayer.vel[0] += ndx * imp; hitPlayer.vel[1] += imp * 0.4; hitPlayer.vel[2] += ndz * imp;
         } else if (hitEntity >= 0) {
           this.damageEntity(hitEntity, this.projOwner[i], this.projDamage[i], ndx, ndy, ndz);
@@ -1290,7 +1340,7 @@ export class Simulation {
   /** Splash damage, self-knockback and terrain carving. */
   private detonate(slot: number, x: number, y: number, z: number, reason: number): void {
     const weapon = this.projWeapon[slot];
-    const def = getWeapon(weapon);
+    const def = this.arsenal.statsFor(weapon, this.projVariant[slot]);
     const ownerId = this.projOwner[slot];
     const fromMonster = this.projFromMonster[slot] === 1;
     this.removeProjectile(slot, reason);
@@ -1307,7 +1357,7 @@ export class Simulation {
         // Walls stop a blast — a rocket round the corner should not kill.
         if (d > 1.0 && this.blockedLineOfSight(x, y, z, o.pos[0], o.pos[1] + o.height * 0.5, o.pos[2])) continue;
 
-        let dmg = splashDamageAt(weapon, d);
+        let dmg = splashDamageAtOf(def, d);
         const self = !fromMonster && o.id === ownerId;
         if (self) dmg *= def.selfDamageScale;
         if (dmg > 0.5 && (!self || def.selfDamageScale > 0)) {
@@ -1325,7 +1375,7 @@ export class Simulation {
 
         // The rocket jump. Self-knockback is scaled separately from self-damage
         // so riding a rocket survives even when the damage is turned down.
-        const raw = splashDamageAt(weapon, d);
+        const raw = splashDamageAtOf(def, d);
         const push = self
           ? raw * SELF_KNOCKBACK_SCALE * def.selfKnockbackScale
           : raw * KNOCKBACK_SCALE;
@@ -1343,7 +1393,7 @@ export class Simulation {
         const cz = this.entZ[e] - z;
         const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
         if (d >= def.splashRadius) continue;
-        const dmg = splashDamageAt(weapon, d);
+        const dmg = splashDamageAtOf(def, d);
         if (dmg > 0.5 && !fromMonster) {
           const inv = d > 1e-4 ? 1 / d : 0;
           this.damageEntity(e, ownerId, dmg, cx * inv, cy * inv, cz * inv);
@@ -1411,6 +1461,10 @@ export class Simulation {
 
     let killFlags = 0;
     if (dmgFlags & DMG_HEADSHOT) killFlags |= KILL_HEADSHOT;
+    // `getWeapon`, not the arsenal, and on purpose: FireKind is not a
+    // variant-able field (VARIANTS.md §1.5 — a variant that needs a new
+    // FireKind is BUILD-class), so the archetype answers this and no lookup of
+    // the killer's equipped slot is needed to know a chainsaw was a chainsaw.
     if (getWeapon(weaponId).kind === FireKind.MELEE) killFlags |= KILL_MELEE;
 
     let streak = 0;
@@ -1608,15 +1662,16 @@ export class Simulation {
         const w = variant % WEAPON_COUNT;
         const had = ownsWeapon(p.weaponMask, w);
         p.weaponMask = grantWeapon(p.weaponMask, w);
+        const mag = this.statsFor(p, w).magSize;
         if (!had) {
-          p.mag[w] = getWeapon(w).magSize;
+          p.mag[w] = mag;
           const t = ammoTypeOf(w);
-          if (t !== AmmoType.NONE) p.reserve[t] = Math.min(AMMO_MAX[t], p.reserve[t] + getWeapon(w).magSize * 2);
+          if (t !== AmmoType.NONE) p.reserve[t] = Math.min(AMMO_MAX[t], p.reserve[t] + mag * 2);
           return true;
         }
         const t = ammoTypeOf(w);
         if (t !== AmmoType.NONE && p.reserve[t] < AMMO_MAX[t]) {
-          p.reserve[t] = Math.min(AMMO_MAX[t], p.reserve[t] + getWeapon(w).magSize);
+          p.reserve[t] = Math.min(AMMO_MAX[t], p.reserve[t] + mag);
           return true;
         }
         return false;

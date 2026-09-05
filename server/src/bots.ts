@@ -53,6 +53,7 @@ import {
   wrapAngle,
 } from '@doomcraft/shared';
 import type { InputCommand } from '@doomcraft/shared';
+import { BASE_SLOT } from '@doomcraft/shared/arsenal';
 import { ES_ALERT, ES_ATTACK, ES_FLYING, ES_MOVING, ES_PAIN, ES_WINDUP, PlayerEntity, Simulation } from './sim.js';
 
 /* ------------------------------------------------------------------------ *
@@ -716,7 +717,9 @@ export class MonsterManager {
 
     if (a.projectileWeapon >= 0) {
       sim.spawnProjectile(
-        0, a.projectileWeapon,
+        // A monster fires the archetype: nothing equips a variant on a demon,
+        // and BASE_SLOT is what `statsFor` would clamp to anyway.
+        0, a.projectileWeapon, BASE_SLOT,
         ex + dx * (a.halfW + 0.4), ey + dy * 0.4, ez + dz * (a.halfW + 0.4),
         dx * a.projectileSpeed, dy * a.projectileSpeed, dz * a.projectileSpeed,
         a.projectileDamage, true,

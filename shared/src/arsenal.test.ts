@@ -11,7 +11,7 @@ import {
   applyShotSpreadOf, BASE_ARSENAL, BASE_SLOT, createVariantSlots,
   currentSpreadOf, damageAtDistanceOf, damageFalloffScaleOf, fireIntervalMsOf,
   isAutomaticOf, knockbackImpulseOf, recoverSpreadOf, SessionArsenal,
-  splashDamageAtOf,
+  splashDamageAtOf, type WeaponOverlay,
 } from './arsenal.ts';
 import {
   applyShotSpread, currentSpread, damageAtDistance, damageFalloffScale,
@@ -157,5 +157,100 @@ describe('the arsenal-taking functions agree with the id-taking ones', () => {
       expect(fireIntervalMsOf(w)).toBe(fireIntervalMs(id));
       expect(isAutomaticOf(w)).toBe(isAutomatic(id));
     }
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * Assembly
+ *
+ * `from` is the seam's other half: the room's pinned table, laid into slots.
+ * Validation is NOT here (see WeaponOverlay) — this is the step that has to be
+ * right about slot arithmetic, about leaving untouched weapons untouched, and
+ * about never widening what an overlay may reach.
+ * ------------------------------------------------------------------------ */
+
+describe('assembling a pinned table', () => {
+  const slugShotgun: WeaponOverlay = {
+    id: 'shotgun-slug',
+    base: WeaponId.SHOTGUN,
+    over: { pellets: 1, damage: 62, spread: 0.012, spreadMax: 0.03, falloffEnd: 44, rpm: 42 },
+  };
+  const burstPistol: WeaponOverlay = {
+    id: 'pistol-burst',
+    base: WeaponId.PISTOL,
+    over: { rpm: 640, damage: 9 },
+  };
+
+  it('an empty table is the compiled table, exactly', () => {
+    const a = SessionArsenal.from([]);
+    expect(a.slotCount).toBe(1);
+    for (const id of IDS) {
+      expect(JSON.stringify(a.statsFor(id, 0))).toBe(
+        JSON.stringify(BASE_ARSENAL.statsFor(id, 0)));
+    }
+  });
+
+  it('lays overlays into slots 1..N, in the order given', () => {
+    const a = SessionArsenal.from([slugShotgun, burstPistol]);
+    expect(a.slotCount).toBe(3);
+    expect(a.statsFor(WeaponId.SHOTGUN, 1).variantId).toBe('shotgun-slug');
+    expect(a.statsFor(WeaponId.PISTOL, 2).variantId).toBe('pistol-burst');
+  });
+
+  it('overrides only the fields the overlay names, and re-narrows the hot record', () => {
+    const a = SessionArsenal.from([slugShotgun]);
+    const w = a.statsFor(WeaponId.SHOTGUN, 1);
+    const base = WEAPONS[WeaponId.SHOTGUN];
+
+    expect(w.pellets).toBe(1);
+    expect(w.damage).toBe(62);
+    expect(w.falloffEnd).toBe(44);
+    expect(w.rpm).toBe(42);
+    // Untouched fields are the archetype's.
+    expect(w.magSize).toBe(base.magSize);
+    expect(w.reloadShellMs).toBe(base.reloadShellMs);
+    expect(w.switchInMs).toBe(base.switchInMs);
+    // And the hot record follows the OVERRIDE, not the base — the whole point.
+    expect(w.hot.pellets).toBe(1);
+    expect(w.hot.damage).toBe(62);
+    expect(w.hot.fireIntervalMs).toBe(Math.fround(60000 / 42));
+    expect(w.hot.fireIntervalMs).not.toBe(BASE_ARSENAL.statsFor(WeaponId.SHOTGUN, 0).hot.fireIntervalMs);
+  });
+
+  it('never lets an overlay change the weapon id it claims to be', () => {
+    // A variant is never a new WeaponId (§1.1) — the ownership mask, the wire
+    // and eleven typed arrays all depend on that.
+    const liar = SessionArsenal.from([{
+      id: 'liar', base: WeaponId.SHOTGUN, over: { id: WeaponId.BFG } as Partial<typeof WEAPONS[0]>,
+    }]);
+    expect(liar.statsFor(WeaponId.SHOTGUN, 1).id).toBe(WeaponId.SHOTGUN);
+  });
+
+  it('leaves every OTHER weapon in the slot as its base', () => {
+    const a = SessionArsenal.from([slugShotgun]);
+    for (const id of IDS) {
+      if (id === WeaponId.SHOTGUN) continue;
+      const inSlot = a.statsFor(id, 1);
+      expect(inSlot.variantId).toBe('');
+      expect(JSON.stringify({ ...inSlot, variantSlot: 0 })).toBe(
+        JSON.stringify(BASE_ARSENAL.statsFor(id, 0)));
+    }
+  });
+
+  it('drops an overlay naming a base that does not exist, without throwing', () => {
+    // A room resolving a release must not be able to take the process down;
+    // the parser is where a bad table is refused, loudly, well before here.
+    const a = SessionArsenal.from([
+      { id: 'nowhere', base: 99, over: { damage: 1 } },
+      burstPistol,
+    ]);
+    expect(a.slotCount).toBe(2);
+    expect(a.statsFor(WeaponId.PISTOL, 1).variantId).toBe('pistol-burst');
+  });
+
+  it('freezes assembled entries too', () => {
+    const w = SessionArsenal.from([slugShotgun]).statsFor(WeaponId.SHOTGUN, 1);
+    expect(Object.isFrozen(w)).toBe(true);
+    expect(Object.isFrozen(w.hot)).toBe(true);
   });
 });
