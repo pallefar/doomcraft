@@ -195,11 +195,19 @@ THE PROOFS
    is. `release:verify` is 16 checks now and reports
    `variants.validate — no variants manifest installed`.
 
-   **V3 is the wire** (a new S2C opcode carrying the room's pinned table, a
-   golden vector for it, and a mixed-version harness), then **V4 is the first
-   content** — `content/variants.json`, `ItemKind.WEAPON_VARIANT` tokens, the
-   equip claim, the craft recipe, and the two-browser bar. Two things V4 owes
-   that V2 deliberately did not build:
+   **V3 IS DONE and deployed** (`6529e82`, `aeff8e2`, 2026-09-05):
+   `S2C.VARIANT_TABLE = 13` and `CAP_VARIANTS = 1 << 5`, both additive; the
+   room's table at effective values in f64 plus the player's resolved slot
+   map; both ends building their arsenal from the decoded bytes; the pinned
+   manifest resolved in the room factory; a golden vector; and a live deploy
+   gate that a real origin passes. The authoritative shot number that was
+   planned as its second half was CUT — see §6, where the three findings are.
+
+   **V4 is the first content** — `content/variants.json`,
+   `ItemKind.WEAPON_VARIANT` tokens, the equip claim (it feeds
+   `RoomOptions.variantClaims`, which V3 built and left returning nothing),
+   the craft recipe, and the two-browser bar. Two things V4 owes that V2
+   deliberately did not build, plus the four §6 items V3 added:
 
    - **the admin console cannot see variants.** `PackInventory`'s summary maps
      items and quests into the packs screen and variants is not in it, so an
