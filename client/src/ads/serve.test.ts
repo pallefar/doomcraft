@@ -11,7 +11,7 @@ import { SurfaceId, type AdFill } from '@doomcraft/shared/sponsor';
 
 import {
   MENU_DECIDE_SURFACES, createAdPipeline, interCardModel, mustReleaseBefore,
-  interstitialModel, interstitialWanted, skipAllowedAt,
+  interstitialModel, interstitialWanted, rewardOffer, rewardSecondsLeft, skipAllowedAt,
   staleCompletion, textFillOrNull, writesOwnCreative,
 } from './serve';
 
@@ -271,5 +271,53 @@ describe('the interstitial refuses more than it accepts', () => {
   it('waits for the death threshold', () => {
     expect(interstitialWanted(false, true, 2, 3)).toBe(false);
     expect(interstitialWanted(false, true, 3, 3)).toBe(true);
+  });
+});
+
+/**
+ * S11 — the rewarded offer.
+ *
+ * §1a, on the ad-free player: "Do not simply remove it. If ad-free removes the
+ * reward, the $4.99 purchase makes you strictly worse off — the worst possible
+ * shape for a monetisation design."
+ */
+describe('the rewarded offer', () => {
+  /**
+   * RED WITHOUT THE FIX: drop the `adsRemoved` branch from `rewardOffer`. The
+   * ad-free player then falls through to the fill path, gets no offer when no
+   * campaign is booked, and the purchase silently costs them the reward.
+   */
+  it('offers an ad-free player an INSTANT grant with nothing to watch', () => {
+    const o = rewardOffer(null, true);
+    expect(o.instant, 'the ad-free player was sent to watch a video').toBe(true);
+    expect(o.imgUrl).toBe('');
+    expect(o.text).toBe('');
+  });
+
+  it('offers the creative to everyone else', () => {
+    const o = rewardOffer(fill({
+      surface: SurfaceId.REWARDED, source: 'direct', kind: 'display',
+      assetUrl: '/cdn/crv/x', altText: 'art', label: 'Ad',
+    }), false);
+    expect(o.instant).toBe(false);
+    expect(o.imgUrl).toBe('/cdn/crv/x');
+    expect(o.altText).toBe('art');
+  });
+
+  /**
+   * HOUSE is fine here, unlike the interstitial: the reward is the GRANT, not
+   * the ad, so an unsold rewarded watch still pays and is still worth offering.
+   */
+  it('accepts a house fill, because the reward is the grant and not the ad', () => {
+    const o = rewardOffer(fill({ surface: SurfaceId.REWARDED, source: 'house', kind: 'text', text: 'Doomcraft' }), false);
+    expect(o.instant).toBe(false);
+    expect(o.text).toBe('Doomcraft');
+  });
+
+  it('counts the watch down to zero and no further', () => {
+    expect(rewardSecondsLeft(0, 15_000)).toBe(15);
+    expect(rewardSecondsLeft(14_100, 15_000)).toBe(1);
+    expect(rewardSecondsLeft(15_000, 15_000)).toBe(0);
+    expect(rewardSecondsLeft(99_000, 15_000)).toBe(0);
   });
 });

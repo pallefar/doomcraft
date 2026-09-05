@@ -131,6 +131,8 @@ export interface QuestIntermissionOptions {
    * offline run, a test) the panel is exactly what it was before S12 existed.
    */
   sponsorCard?(mount: HTMLElement): () => void;
+  /** S11: the rewarded button. Same panel, above the results card. */
+  sponsorReward?(mount: HTMLElement): () => void;
 }
 
 /** Percentage points per second while a percentage row counts. */
@@ -227,6 +229,7 @@ export class QuestIntermission {
   private readonly shown: number[] = [];
   private disposed = false;
   private disposeSponsor: (() => void) | null = null;
+  private disposeReward: (() => void) | null = null;
   private shareBtn: MatchShareButton | null = null;
 
   private readonly onKey: (e: KeyboardEvent) => void;
@@ -290,6 +293,14 @@ export class QuestIntermission {
     // S12: the results card, below the actions where it can never sit between
     // the player and the Next button. The mount is built either way; empty it
     // costs zero pixels, and the shell decides whether anything fills it.
+    /* S11 first: the rewarded button is an ACTION the player may take, so it
+     * belongs with the actions rather than below the results card — but still
+     * under the Next button, which must never have an ad between it and the
+     * player. */
+    const rewardMount = div('dcqi-reward');
+    panel.appendChild(rewardMount);
+    this.disposeReward = opts.sponsorReward?.(rewardMount) ?? null;
+
     const sponsorMount = div('dcqi-sponsor');
     panel.appendChild(sponsorMount);
     this.disposeSponsor = opts.sponsorCard?.(sponsorMount) ?? null;
@@ -448,6 +459,8 @@ export class QuestIntermission {
     this.disposed = true;
     try { this.disposeSponsor?.(); } catch { /* a card must never break teardown */ }
     this.disposeSponsor = null;
+    try { this.disposeReward?.(); } catch { /* nor a button */ }
+    this.disposeReward = null;
     try { this.shareBtn?.dispose(); } catch { /* same rule */ }
     this.shareBtn = null;
     window.removeEventListener('keydown', this.onKey);

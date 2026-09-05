@@ -334,7 +334,17 @@ describe('the Gate 5 routes on the real binary', () => {
       expect(early.reason).toBe('too-soon');
       expect(early.scrap).toBe(0);
     } finally {
+      /* WAIT for it to go. The child writes into the temp dir this suite
+       * removes in afterAll, and killing without waiting raced it: a file
+       * created between readdir and rmdir makes rmSync throw ENOTEMPTY and
+       * fails the whole FILE, not the test. Deterministic beats tolerant —
+       * swallowing the error would have hidden a real leak just as well. */
       child.kill('SIGTERM');
+      await new Promise<void>((done) => {
+        if (child.exitCode !== null) { done(); return; }
+        const t = setTimeout(done, 10_000);
+        child.on('exit', () => { clearTimeout(t); done(); });
+      });
     }
   }, 60_000);
 });

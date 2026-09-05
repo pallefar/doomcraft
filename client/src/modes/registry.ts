@@ -314,6 +314,8 @@ export interface ModeHost {
    * closes. With ads off/removed the disposer is a working no-op and nothing
    * renders. `interactive` is false for a mount inside `#hud`.
    */
+  /** S11: render the rewarded button into an INTERACTIVE mount. */
+  sponsorReward?(mount: HTMLElement): () => void;
   sponsorCard?(mount: HTMLElement, options: {
     mode: ModeId; interactive: boolean; active: () => boolean;
   }): () => void;

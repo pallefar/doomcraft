@@ -1056,6 +1056,7 @@ class QuestMode implements ModeInstance {
       // click; the active gate is "this intermission is still the screen".
       // The disposer disconnects the meter at destroy, so "this intermission"
       // and "the intermission phase" are the same gate.
+      sponsorReward: (mount): (() => void) => this.ctx.host.sponsorReward?.(mount) ?? ((): void => {}),
       sponsorCard: (mount): (() => void) => this.ctx.host.sponsorCard?.(mount, {
         mode: ModeId.QUEST,
         interactive: true,

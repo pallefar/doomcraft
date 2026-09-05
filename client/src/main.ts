@@ -575,6 +575,7 @@ const adPipeline = createAdPipeline({
    * defaultOn:false and stays off in production until it is deliberately
    * flipped; the pipeline re-asks the server anyway (rule 15). */
   interstitialEnabled: () => flagOn(game.net.flagBits, 'sponsor_interstitial'),
+  rewardedEnabled: () => flagOn(game.net.flagBits, 'sponsor_rewarded'),
   deathsSinceInterstitial: () => Math.max(0, progress.deaths - deathsAtLastInterstitial),
   onInterstitial: (open) => {
     // Reset the death counter when one OPENS, so the "after 3 deaths" gate
@@ -1421,6 +1422,14 @@ const host: ModeHost = {
   suppressAutoPause(on: boolean): void { autoPauseSuppressed = on; },
   sponsorCard(mount, options): () => void {
     return adPipeline.intermissionCard(mount, options);
+  },
+  /* S11 — the rewarded button. Offered on the QUEST intermission, which lives
+   * in `#ui` and can take a click; the deathmatch scoreboard is in `#hud`,
+   * which is pointer-events:none, so it deliberately gets none. */
+  sponsorReward(mount): () => void {
+    return adPipeline.rewardButton(mount, (r) => {
+      if (r.ok && r.scrap > 0) game.hud.pushFeed('+' + String(r.scrap) + ' Scrap', 's');
+    });
   },
 };
 

@@ -42,12 +42,12 @@ export const PHASE_ONE_SURFACES: readonly SurfaceId[] = Object.freeze([
  * something specific — DOM that already exists on screens where the renderer is
  * idle — and the interstitial is not that.
  *
- * `REWARDED` is deliberately still absent: it needs the Gate 5 handshake and
- * durable per-day grant caps, which are P2c. A surface that is asked for and
- * not servable is REFUSED WITH A REASON, never dropped in silence.
+ * `REWARDED` joined it in P2c, once the Gate 5 handshake and the durable
+ * per-day grant caps existed to stand behind it. A surface that is asked for
+ * and not servable is REFUSED WITH A REASON, never dropped in silence.
  */
 export const SERVABLE_SURFACES: readonly SurfaceId[] = Object.freeze([
-  ...PHASE_ONE_SURFACES, SurfaceId.INTERSTITIAL,
+  ...PHASE_ONE_SURFACES, SurfaceId.INTERSTITIAL, SurfaceId.REWARDED,
 ]);
 
 /** The platform's own ceiling on interstitials per device per UTC day. */

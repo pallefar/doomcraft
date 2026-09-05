@@ -152,6 +152,47 @@ export function interstitialWanted(
   return deathsSinceLast >= afterDeaths;
 }
 
+/**
+ * What the S11 rewarded prompt offers, or null to refuse.
+ *
+ * Unlike the interstitial, a HOUSE fill is fine here and an absent fill is
+ * fine too — because the reward is not the ad, it is the grant, and §1a is
+ * explicit that a player who bought ads off must still see the button and be
+ * paid ("included with your purchase — no video required"). Removing the
+ * reward with the ads would make the $4.99 purchase leave them strictly worse
+ * off, which is the worst possible shape for a monetisation design.
+ */
+export interface RewardOffer {
+  /** Empty for the ad-free path: there is nothing to show, only a grant. */
+  text: string;
+  imgUrl: string;
+  altText: string;
+  label: string;
+  /** True when the player owns ads-off and is paid without watching. */
+  instant: boolean;
+}
+
+export function rewardOffer(fill: AdFill | null | undefined, adsRemoved: boolean): RewardOffer {
+  if (adsRemoved) {
+    return { text: '', imgUrl: '', altText: '', label: '', instant: true };
+  }
+  const f = fill ?? null;
+  if (f === null) return { text: '', imgUrl: '', altText: '', label: '', instant: false };
+  const isDisplay = f.kind === 'display' && f.assetUrl.length > 0;
+  return {
+    text: f.text,
+    imgUrl: isDisplay ? f.assetUrl : '',
+    altText: f.altText,
+    label: f.label || 'Sponsored',
+    instant: false,
+  };
+}
+
+/** Seconds still to watch, for the countdown the player is promised. */
+export function rewardSecondsLeft(elapsedMs: number, minMs: number): number {
+  return Math.max(0, Math.ceil((minMs - elapsedMs) / 1000));
+}
+
 export interface AdPipelineOptions {
   /** '' = static build with no server: the pipeline never activates. */
   serverBase: string;
@@ -187,6 +228,8 @@ export interface AdPipelineOptions {
   deathsSinceInterstitial?: () => number;
   /** S10: called when the overlay opens and closes, for render throttling. */
   onInterstitial?: (open: boolean) => void;
+  /** S11: the server-resolved `sponsor_rewarded` kill switch. */
+  rewardedEnabled?: () => boolean;
 }
 
 /**
@@ -266,6 +309,11 @@ export interface AdPipeline {
    * a branch and without a try.
    */
   maybeInterstitial(): Promise<boolean>;
+  /**
+   * S11 — render the rewarded button into `mount`; the disposer removes it.
+   * Refusals (flag off, offline) render nothing and return a working no-op.
+   */
+  rewardButton(mount: HTMLElement, onResult?: (r: { ok: boolean; reason: string; scrap: number }) => void): () => void;
   /** Close an open interstitial from outside (pause, teardown, route change). */
   closeInterstitial(): void;
 }
@@ -665,6 +713,169 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
     closeInterstitial();
   }
 
+  /* ---- S11: the rewarded watch ------------------------------------------ */
+
+  async function postJson(path: string, body: unknown): Promise<Record<string, unknown>> {
+    try {
+      const res = await fetch(api(path), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body), keepalive: true,
+      });
+      if (!res.ok) return {};
+      return await res.json() as Record<string, unknown>;
+    } catch { return {}; }
+  }
+
+  /**
+   * Run one rewarded watch, start to grant.
+   *
+   * The client never asserts that it watched: it opens a session, sends
+   * heartbeats the server may refuse, and asks. Every early exit resolves with
+   * a reason, so the caller renders an outcome rather than a silence.
+   */
+  async function runReward(): Promise<{ ok: boolean; reason: string; scrap: number }> {
+    const adsRemoved = opts.adsRemoved();
+    const started = await postJson('/api/sponsor/reward/start', { deviceId: opts.deviceId() });
+    if (started.ok !== true) return { ok: false, reason: 'unavailable', scrap: 0 };
+    const rewardId = String(started.rewardId ?? '');
+    const minMs = typeof started.minMs === 'number' ? started.minMs : 15_000;
+    const beatMs = typeof started.beatMs === 'number' ? started.beatMs : 2_000;
+
+    /* The ad-free path claims IMMEDIATELY. There is no video, so there is
+     * nothing to watch and nothing to wait for; the server still applies every
+     * cap, so this is faster, not freer. */
+    if (adsRemoved) {
+      const paid = await postJson('/api/sponsor/reward/claim', { deviceId: opts.deviceId(), rewardId });
+      return {
+        ok: paid.ok === true,
+        reason: String(paid.reason ?? ''),
+        scrap: typeof paid.scrap === 'number' ? paid.scrap : 0,
+      };
+    }
+
+    const fills = await decide([SurfaceId.REWARDED]).catch(() => []);
+    const offer = rewardOffer(fills[0], false);
+    const watched = await openReward(offer, fills[0] ?? null, minMs, beatMs, rewardId);
+    if (!watched) return { ok: false, reason: 'cancelled', scrap: 0 };
+
+    const paid = await postJson('/api/sponsor/reward/claim', { deviceId: opts.deviceId(), rewardId });
+    return {
+      ok: paid.ok === true,
+      reason: String(paid.reason ?? ''),
+      scrap: typeof paid.scrap === 'number' ? paid.scrap : 0,
+    };
+  }
+
+  /**
+   * Show the watch and resolve true only if it ran to the end.
+   *
+   * A CANCEL control is present throughout and never disabled. This is
+   * player-initiated, so requiring the full watch to be PAID is legitimate —
+   * but requiring it to be endured is not, and a modal with no way out is a
+   * trap whatever it is offering.
+   */
+  function openReward(
+    offer: RewardOffer, fill: AdFill | null, minMs: number, beatMs: number, rewardId: string,
+  ): Promise<boolean> {
+    const host = document.getElementById(AD_OVERLAY_ID);
+    if (host === null || interOpen) return Promise.resolve(false);
+    interOpen = true;
+    interSkipReady = false;
+    interReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    while (host.firstChild) host.removeChild(host.firstChild);
+    host.setAttribute('role', 'dialog');
+    host.setAttribute('aria-modal', 'true');
+    host.setAttribute('aria-label', 'Rewarded ad — press Escape to cancel');
+    host.setAttribute('aria-hidden', 'false');
+
+    const card = document.createElement('div');
+    card.className = 'dc-inter';
+    if (offer.label.length > 0) {
+      const tag = document.createElement('b');
+      tag.className = 'dc-inter-label';
+      tag.textContent = offer.label;
+      card.appendChild(tag);
+    }
+    const body = document.createElement('div');
+    body.className = 'dc-inter-body';
+    if (offer.imgUrl.length > 0) {
+      const img = document.createElement('img');
+      img.className = 'dc-inter-img';
+      img.alt = offer.altText;
+      img.decoding = 'async';
+      img.src = api(offer.imgUrl);
+      body.appendChild(img);
+    } else {
+      body.textContent = offer.text.length > 0 ? offer.text : 'Your reward is on its way.';
+    }
+    card.appendChild(body);
+
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'dc-inter-skip';
+    cancel.textContent = 'Cancel';
+    card.appendChild(cancel);
+
+    const note = document.createElement('div');
+    note.className = 'dc-inter-auto';
+    card.appendChild(note);
+
+    host.appendChild(card);
+    host.dataset.open = '1';
+    host.tabIndex = -1;
+    host.focus();
+    opts.onInterstitial?.(true);
+
+    if (fill !== null) interWatched = watch(host, fill, () => true);
+
+    return new Promise<boolean>((resolve) => {
+      const startedMs = Date.now();
+      let seq = 0;
+      let settled = false;
+      const finish = (paid: boolean): void => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('keydown', onRewardKey, true);
+        cancel.removeEventListener('click', onCancel);
+        closeInterstitial();
+        resolve(paid);
+      };
+      const onCancel = (): void => { finish(false); };
+      function onRewardKey(e: KeyboardEvent): void {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        finish(false);
+      }
+      cancel.addEventListener('click', onCancel);
+      window.addEventListener('keydown', onRewardKey, true);
+
+      const tick = (): void => {
+        const elapsed = Date.now() - startedMs;
+        const left = rewardSecondsLeft(elapsed, minMs);
+        note.textContent = left > 0 ? 'Reward in ' + String(left) + 's' : 'Claiming…';
+        if (elapsed >= minMs) { if (interTimer !== 0) { clearInterval(interTimer); interTimer = 0; } finish(true); }
+      };
+      interTimer = window.setInterval(tick, 250) as unknown as number;
+      tick();
+
+      /* Heartbeats the SERVER may refuse. `visible && focused` is reported, not
+       * asserted: the server counts how many beats said yes and applies its own
+       * threshold. */
+      const beat = window.setInterval(() => {
+        if (settled) { clearInterval(beat); return; }
+        seq++;
+        void postJson('/api/sponsor/reward/beat', {
+          rewardId, deviceId: opts.deviceId(), seq,
+          visible: document.visibilityState === 'visible',
+          focused: document.hasFocus(),
+        });
+      }, beatMs);
+      window.setTimeout(() => { clearInterval(beat); }, minMs + 10_000);
+    });
+  }
+
   function menuDecide(): void {
     if (menuDecided || offline() || opts.adsRemoved()) return;
     void enabledNow().then((on) => {
@@ -706,6 +917,45 @@ export function createAdPipeline(opts: AdPipelineOptions): AdPipeline {
 
     /** Close it from outside — the pause menu, a route change, a teardown. */
     closeInterstitial(): void { closeInterstitial(); },
+
+    /**
+     * S11 — render the rewarded button into `mount`, returning a disposer.
+     *
+     * The button is shown to a player who bought ads off as well; §1a is
+     * explicit that removing the reward with the ads makes the purchase leave
+     * them strictly worse off. Their claim skips the video and pays instantly,
+     * and the server still applies every cap.
+     */
+    rewardButton(mount: HTMLElement, onResult?: (r: { ok: boolean; reason: string; scrap: number }) => void): () => void {
+      let disposed = false;
+      let btn: HTMLButtonElement | null = null;
+      void flagOnNow('sponsor_rewarded', opts.rewardedEnabled?.() ?? false).then((on) => {
+        if (!on || disposed || offline()) return;
+        const b = document.createElement('button');
+        btn = b;
+        b.type = 'button';
+        b.className = 'dc-reward-btn';
+        b.textContent = opts.adsRemoved() ? 'Claim bonus Scrap' : 'Watch for bonus Scrap';
+        b.addEventListener('click', () => {
+          if (b.disabled) return;
+          b.disabled = true;
+          b.textContent = 'Working…';
+          void runReward().then((r) => {
+            if (disposed) return;
+            b.disabled = false;
+            b.textContent = r.ok
+              ? '+' + String(r.scrap) + ' Scrap'
+              : (r.reason === 'cancelled' ? 'Watch for bonus Scrap' : 'Not available');
+            onResult?.(r);
+          });
+        });
+        mount.appendChild(b);
+      });
+      return (): void => {
+        disposed = true;
+        if (btn !== null && btn.parentNode !== null) btn.parentNode.removeChild(btn);
+      };
+    },
 
     onMenuEnter(): void {
       // The boot line's run ends where the menu begins, whatever else happens.
