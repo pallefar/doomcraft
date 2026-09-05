@@ -18,9 +18,10 @@
  * SERVER will resolve, field for field.
  */
 import { describe, expect, it } from 'vitest';
-import { ALL_WEAPON_MASK, PacketReader, S2C, WEAPON_COUNT, WeaponId, readMessageId } from '@shared';
+import { ALL_WEAPON_MASK, PacketReader, S2C, WEAPON_COUNT, WEAPONS, WeaponId, readMessageId } from '@shared';
 import {
-  createVariantTableMessage, decodeVariantTable, parseVariantsManifest,
+  bandEdgesFor, createVariantTableMessage, decodeVariantTable, parseVariantsManifest,
+  type VariantsManifest,
 } from '@shared/variants';
 import { Room } from '@doomcraft/server/src/room.js';
 import type { NetTransport } from '@doomcraft/server/src/net.js';
@@ -204,4 +205,117 @@ describe('a room tells its clients which table it pinned', () => {
       expect(rt.stats(WeaponId.SHOTGUN).damage).toBe(11);
     } finally { room.stop(); }
   });
+});
+
+/* ------------------------------------------------------------------------ *
+ * A MANIFEST THE PARSER ACCEPTS MUST REACH A REAL ROOM
+ *
+ * Moved here from `shared/src/variants.test.ts` on 2026-09-05, and the move is
+ * the point: that file is in `shared`, and reaching for `Room` pulled ELEVEN
+ * server modules into shared's composite program to typecheck one test. A
+ * package that everything else depends on should not depend on the server, and
+ * this file already drives a real `Room` over a pumped link for exactly this
+ * kind of end-to-end claim — it already pays the cost, so the test belongs
+ * where the cost already is.
+ *
+ * What it proves is the invariant the codec sweep in `shared` cannot see: the
+ * parser, the release gate, the wire and the ROOM all accept the same set. The
+ * regression that produced it — a row the parser blessed and the wire refused,
+ * leaving a published pack serving an empty table — is described in full at
+ * the head of the sweep in `shared/src/variants.test.ts`.
+ * ------------------------------------------------------------------------ */
+
+const NEAR_ZERO = {
+  id: 'near-zero', base: WeaponId.SHOTGUN, name: 'Near Zero',
+  over: { magSize: 4, damage: 10, spreadPerShot: -1e-10 },
+};
+
+/** The shipped pair from `server/src/releases.test.ts:43-51` — known good. */
+const SHIPPED = [
+  {
+    id: 'shotgun-slug', base: WeaponId.SHOTGUN, name: 'Slug Shotgun',
+    over: { pellets: 1, damage: 62, spread: 0.012, spreadMax: 0.03, falloffEnd: 44, rpm: 42 },
+  },
+  { id: 'pistol-burst', base: WeaponId.PISTOL, name: 'Burst Pistol', over: { rpm: 620, damage: 12 } },
+];
+
+function roomFor(manifest: VariantsManifest): Room {
+  return new Room({
+    seed: 4242, botFill: 0, enemies: 0, eagerWorld: false, store: null,
+    clock: () => 0, name: 'variants-e2e', allWeapons: true, variants: manifest,
+  });
+}
+
+/** The same row with the sign taken off. Legal, and it has to stay legal. */
+const NEAR_ZERO_LEGAL = { ...NEAR_ZERO, id: 'near-zero-legal', over: { ...NEAR_ZERO.over, spreadPerShot: 1e-10 } };
+
+describe('a manifest the parser accepts reaches a real Room', () => {
+  it('THE REGRESSION: the near-zero row is refused at the door, because a room silently empties it', () => {
+    /*
+     * THE COST FIRST, and measured through the real thing rather than argued.
+     * The manifest is hand-built here — the parser is deliberately out of the
+     * loop — so this half stays true whatever the parser decides, and says
+     * what the room DOES with a row the wire will refuse:
+     * `decodeRoomVariantTable` reads `decoded === null ? [] : ...`
+     * (`server/src/room.ts:137`), so the operator gets a published variants
+     * pack, a green `variants.validate`, an empty table, and no error
+     * anywhere. That is strictly worse than a refused manifest, which is loud
+     * and fixable.
+     */
+    const room = roomFor({ variants: [NEAR_ZERO] });
+    try {
+      expect(room.variantTable, 'a room CAN serve an empty table for a row the wire refuses')
+        .toHaveLength(0);
+      expect(room.sim.arsenal.slotCount, 'every player is on the base arsenal').toBe(1);
+      expect(room.sim.arsenal.statsFor(WeaponId.SHOTGUN, 1).variantId).toBe('');
+    } finally { room.stop(); }
+
+    // So the parser — the door that has both the authority to judge and the
+    // error strings to explain itself — must never bless it.
+    const parsed = parseVariantsManifest(JSON.stringify({ variants: [NEAR_ZERO] }));
+    expect(
+      parsed.manifest,
+      'the parser blessed a row this test just measured a room to serve as NOTHING',
+    ).toBeNull();
+    expect(parsed.errors.join(' | ')).toContain('spreadPerShot -1e-10 is negative');
+  });
+
+  it('the near-zero row really is inside the EPS hole and not merely small', () => {
+    // Otherwise the case above could be biting for some unrelated reason.
+    // -1e-10 is negative, and it is inside the band's tolerance of its own
+    // floor — which is the whole disagreement: `valueBandError` forgives it
+    // and `negativeValueError` does not.
+    const [lo] = bandEdgesFor(WEAPONS[WeaponId.SHOTGUN], 'spreadPerShot');
+    expect(lo).toBe(0);
+    expect(-1e-10 < 0).toBe(true);
+    expect(-1e-10 < lo - 1e-9, 'the band would have caught it without the EPS slack').toBe(false);
+  });
+
+  for (const [label, variants] of [
+    ['the shipped pair', SHIPPED],
+    ['the same near-zero row with the sign off', [NEAR_ZERO_LEGAL]],
+    ['all three together', [...SHIPPED, NEAR_ZERO_LEGAL]],
+  ] as [string, { id: string; base: number }[]][]) {
+    it(`${label}: parses, and the room fires exactly what the pack declares`, () => {
+      // The other half of the bar. A rail that refuses everything is worth
+      // what one that refuses nothing is worth, and `+1e-10` proves the fix
+      // is about the SIGN and not about small numbers.
+      const parsed = parseVariantsManifest(JSON.stringify({ variants }));
+      // The release gate is this one line — `server/src/gate.ts:462`. If it
+      // says ok, an operator has been told the pack is publishable.
+      expect(parsed.errors, 'the fixture must parse; the gate would say ok').toEqual([]);
+      expect(parsed.manifest).not.toBeNull();
+
+      const room = roomFor(parsed.manifest!);
+      try {
+        expect(room.variantTable, 'the room published a pack and pinned NOTHING')
+          .toHaveLength(variants.length);
+        expect(room.sim.arsenal.slotCount).toBe(variants.length + 1);
+        for (let i = 0; i < variants.length; i++) {
+          expect(room.variantTable[i].id).toBe(variants[i].id);
+          expect(room.sim.arsenal.statsFor(variants[i].base, i + 1).variantId).toBe(variants[i].id);
+        }
+      } finally { room.stop(); }
+    });
+  }
 });

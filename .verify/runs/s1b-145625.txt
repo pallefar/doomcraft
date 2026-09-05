@@ -1,0 +1,40 @@
+   ✓ the gate can fail > moves the server on a splash radius change of one centimetre 1580ms
+   ✓ the gate can fail > moves the client on a spread change the server never sees a shot of 1612ms
+   ✓ the gate can fail > leaves BOTH tracks alone when a module table moves — the seam is live 1615ms
+   ✓ the gate can fail > restores every table it perturbed 1608ms
+ ✓ server/src/releases.test.ts (35 tests) 95744ms
+   ✓ PackInventory > behaves exactly as an unconfigured deploy with no packs root 1734ms
+   ✓ PackInventory > discovers versioned pack directories, and one changed byte splits the versions 3398ms
+   ✓ PackInventory > hands a room a frozen view that a disk edit cannot change (8.9 / 8.12 for rooms) 1713ms
+   ✓ PackInventory > reports what it cannot satisfy, per pack (8.6) 1871ms
+   ✓ PackInventory > carries an installed variants pack in the boot identity 1804ms
+   ✓ the production gate and pack kind 7 > REFUSES a draft whose variants pack is gone by the time the gate runs 3695ms
+   ✓ the production gate and pack kind 7 > passes a draft naming a variants pack it DOES have, and says how many parsed 2827ms
+   ✓ the production gate and pack kind 7 > REFUSES the gate when an installed variants version does not parse 2780ms
+   ✓ the production gate and pack kind 7 > keeps the newest variants version that DOES parse in the boot identity 1719ms
+   ✓ the production gate and pack kind 7 > has the same hole for items, and the same check closes it 2678ms
+   ✓ the production gate and pack kind 7 > still gates GREEN, and still serves kind 7, when the newest version is valid 3100ms
+   ✓ the production gate and pack kind 7 > refuses to DRAFT a variants version this host does not have 2080ms
+   ✓ the ONLINE gate checks the declared input lines, not only the number > REFUSES a draft whose weapons fingerprint is right and whose input lines lie 3347ms
+   ✓ the ONLINE gate checks the declared input lines, not only the number > REFUSES a 161-byte input line, and passes the 160-byte one beside it 8375ms
+   ✓ the ONLINE gate checks the declared input lines, not only the number > reports packs.inputs GREEN on an honest draft, so the check is seen to pass 3328ms
+   ✓ ReleaseService > walks draft → review → staged → live, and a new room resolves the promoted release 3949ms
+   ✓ ReleaseService > refuses a stale write with 409 and CHANGES NOTHING 2619ms
+   ✓ ReleaseService > survives a restart: a reconstructed service reads back an identical document 1952ms
+   ✓ ReleaseService > refuses approve without a gate run, with a failed gate, and without a note 1708ms
+   ✓ ReleaseService > refuses the intermediate rollout rungs unless the request says so in words 1721ms
+   ✓ ReleaseService > promote requires 10000, deliberately 1469ms
+   ✓ ReleaseService > a release this host cannot satisfy is refused at promote and skipped at resolve (8.6) 3320ms
+   ✓ ReleaseService > rollback returns to the base release and refuses when the gate said schemaTouching 1511ms
+   ✓ ReleaseService > caps history without ever evicting the live release or its base chain (8.3/D6) 24735ms
+   ✓ ReleaseService > a corrupt document degrades to the builtin release instead of bricking the host (8.3) 769ms
+   ✓ ReleaseService > writes one audit line per accepted transition to release.jsonl 1446ms
+   ✓ items in the release machine > counts dormanted ids when a new items version drops one (docs/PACKS.md §7) 1905ms
+   ✓ the expansion one-click (S3): a draft from PICKED versions > drafts the picked older version, carries the name, and refuses the uninstalled 2109ms
+   ✓ the release routes on the real binary > runs draft → gate → approve → stage → promote → rollback over HTTP, and /api/version follows 1737ms
+
+ Test Files  107 passed (107)
+      Tests  2622 passed | 3 skipped (2625)
+   Start at  14:56:25
+   Duration  96.88s (transform 4.03s, setup 0ms, collect 20.40s, tests 544.98s, environment 16ms, prepare 4.94s)
+

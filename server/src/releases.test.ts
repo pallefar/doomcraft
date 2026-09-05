@@ -282,6 +282,102 @@ describe('the production gate and pack kind 7', () => {
     expect(json).toContain('2 variant(s) parse, band and budget');
   });
 
+  /*
+   * An INVALID NEWEST version of a data kind.
+   *
+   * `installedPacks()` resolved each data kind by trying only the newest
+   * installed version and omitting the kind entirely when it failed to parse.
+   * Install a good variants@1 and a bad variants@2 and an ordinary draft
+   * therefore carried NO kind 7 at all — so `runGate`'s whole variants block,
+   * `variants.dormanted` included, was skipped, and the gate returned OK for a
+   * release that serves no variants and loses the perfectly good variants@1.
+   *
+   * That is the exact failure the "the pack disappears after drafting" test
+   * above cannot see: this one happens BEFORE the draft is assembled.
+   */
+  const BROKEN_VARIANTS_JSON = JSON.stringify({
+    variants: [{ id: 'cheat', base: 0, name: 'Cheat', over: { damage: 40 } }],
+  });
+
+  it('REFUSES the gate when an installed variants version does not parse', async () => {
+    const root = packsRoot(false, true);
+    installVariants(root, 2, BROKEN_VARIANTS_JSON);
+    const { svc, inv } = service(root);
+    // The premise: version 2 is on disk, is listed, and cannot be read.
+    expect(inv.variantsVersions()).toEqual([1, 2]);
+    expect(inv.variantsAt(2)).toBeNull();
+
+    let doc = svc.document();
+    expect((await svc.createDraft(doc.revision)).ok).toBe(true);   // no picks: the ORDINARY draft
+    doc = svc.document();
+    const gated = await svc.gateDraft(doc.revision);
+    const report = gated.ok ? gated.release?.gate : null;
+    expect(report?.ok, `the gate must not go green over an unreadable pack: ${JSON.stringify(report?.checks)}`).toBe(false);
+    const parse = report?.checks.find((c) => c.id === 'packs.parse');
+    expect(parse?.ok).toBe(false);
+    expect(parse?.detail).toContain('variants@2');
+  });
+
+  it('keeps the newest variants version that DOES parse in the boot identity', () => {
+    const root = packsRoot(false, true);
+    installVariants(root, 2, BROKEN_VARIANTS_JSON);
+    const inv = new PackInventory({ packsRoot: root, log: () => {} });
+    /*
+     * Dropping kind 7 would leave an unconfigured host — and every Rule E
+     * fallback — serving NO variants at all, which is a bigger loss than the
+     * version that failed to install. The good version is what this host can
+     * actually serve, so it is what it reports serving.
+     */
+    const labels = inv.installedPacks().map((p) => p.label);
+    expect(labels).toContain('variants@1');
+    expect(labels).not.toContain('variants@2');
+  });
+
+  it('has the same hole for items, and the same check closes it', async () => {
+    const root = packsRoot();
+    mkdirSync(join(root, 'items', '2'), { recursive: true });
+    writeFileSync(join(root, 'items', '2', 'items.json'), '{ not json', 'utf8');
+    const { svc, inv } = service(root);
+    expect(inv.itemsVersions()).toEqual([1, 2]);
+    expect(inv.itemsAt(2)).toBeNull();
+    expect(inv.installedPacks().map((p) => p.label)).toContain('items@1');
+
+    let doc = svc.document();
+    expect((await svc.createDraft(doc.revision)).ok).toBe(true);
+    doc = svc.document();
+    const gated = await svc.gateDraft(doc.revision);
+    const report = gated.ok ? gated.release?.gate : null;
+    expect(report?.ok).toBe(false);
+    expect(report?.checks.find((c) => c.id === 'packs.parse')?.detail).toContain('items@2');
+  });
+
+  it('still gates GREEN, and still serves kind 7, when the newest version is valid', async () => {
+    /*
+     * A gate that cannot pass is worth what one that cannot fail is worth.
+     * Two valid versions installed: the draft must pick the newest, the gate
+     * must go green, and `unsatisfied` must agree the host can serve exactly
+     * what the draft names — the check above refuses ambiguity, not variants.
+     */
+    const root = packsRoot(false, true);
+    installVariants(root, 2);
+    const { svc, inv } = service(root);
+    let doc = svc.document();
+    expect((await svc.createDraft(doc.revision)).ok).toBe(true);
+    doc = svc.document();
+    const draft = doc.history.find((r) => r.state === 'draft');
+    expect(draft?.packs.map((p) => p.label)).toContain('variants@2');
+
+    const gated = await svc.gateDraft(doc.revision);
+    const report = gated.ok ? gated.release?.gate : null;
+    expect(report?.ok, JSON.stringify(report?.checks)).toBe(true);
+    expect(report?.checks.find((c) => c.id === 'packs.parse')?.ok).toBe(true);
+    const json = JSON.stringify(report?.checks);
+    expect(json).toContain('2 variant(s) parse, band and budget');
+
+    const reviewed = svc.document().history.find((r) => r.state === 'review');
+    expect(inv.unsatisfied(reviewed as Release)).toEqual([]);
+  });
+
   it('refuses to DRAFT a variants version this host does not have', async () => {
     const { svc } = service(packsRoot());
     const doc = svc.document();

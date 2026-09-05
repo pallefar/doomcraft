@@ -1,0 +1,512 @@
+# Codex verdict on the V4 plan (2026-09-05)
+#
+# The plan it reviewed is .verify/plans/S2-v4.txt — eleven numbered clauses
+# put to it BEFORE a line was written. It judged D1 and D9 correct and broke
+# the other nine, and it found a REGRESSION in 9f3b472, committed an hour
+# earlier: the parser tolerates EPS on a band floor while the decoder refuses
+# negatives exactly, so a gate-green manifest served a room with zero
+# variants. Every finding was reproduced here before it was acted on
+# (HANDOVER rule 23); two of its numbers were wrong and are corrected in the
+# commit that answers it.
+#
+# ~600 KB of tool-call traces from its own in-memory probes are stripped —
+# those were how it convinced itself, not the argument.
+
+I would not approve V4 as written. I read the implementation and design sections, ran `runReleaseVerify`, and exercised the codecs, parser, arsenal and `Room` with in-memory probes. Today’s gate passes **17 checks and emits 7 packs**. I made no repository edits.
+
+**D1 — CORRECT: one manifest is the right release unit.**
+
+The release names one version per pack kind, and manifest order determines wire slots. Rejecting the whole manifest prevents partial acceptance from renumbering subsequent variants. Splitting the authoring source into several files would still require assembling and validating one release manifest. See [whole-file refusal](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:634) and [slot ordering](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:758).
+
+If entry 5 of 8 fails, the operator should keep/select the preceding valid version, fix the rejected entry, and publish a new complete version. The defective automatic-selection behavior discussed under D10 is a separate problem; smaller manifests would not fix it.
+
+Also, the proposed initial coverage is **four entries**: three HITSCAN archetypes plus one projectile.
+
+**D2 — WRONG/incomplete: changing the offline producer does not make production serve its output.**
+
+The current [offline gate](/Users/karstenhaldan/youtube/doomcraft/server/src/gate.ts:605) already includes `variants.validate`. Adding default discovery and pack emission should leave the count at **17**, with **8 packs**. A new item-to-variant reference check would make **18 checks**.
+
+The two implementations require different work:
+
+- Offline: resolve `DEFAULT_VARIANTS_FILE`, parse it, construct `variantsPack` with canonical inputs and digest, and include it **before** `checkPackInputs`.
+- Production: make bundled content discoverable through `PackInventory` if that is the shipping mechanism. Adding only the offline producer leaves `variantsVersions()` empty and production rooms at **slot 0**.
+- Both gates need validation of the **items/variants pairing they actually release**. Independent parsing does not validate `ItemDef.variantId`. Production already has the variants parse/digest/dormancy block; adding another copy is unnecessary.
+
+Adding kind 7 changes the emitted set’s `packSetHash`. My valid four-shell fixture changed the ordinal-1 hash from **2251357389 to 1491019016**. It does **not** change `BUILTIN_CONTENT_HASH`, which folds only the three build packs, nor automatically modify a stored release. An existing live document without kind 7 remains without it until a new release is assembled and promoted. See [hash construction](/Users/karstenhaldan/youtube/doomcraft/shared/src/packs.ts:151).
+
+For fallback precedence, **packsRoot must win**, as it does for items. A fallback-first implementation can replace an installed four-shell `variants@1` with a bundled six-shell definition: the host serves **6 instead of 4**. With packsRoot-first precedence, the fallback itself is fine—but offline verification of bundled content does not verify the host’s different `variants@1`.
+
+**D3 — WRONG/incomplete: an enum and interface field do not establish the token’s link.**
+
+The omitted parser mapping is immediately fatal. Appending the enum and `ITEM_KIND_NAMES` without changing [`KIND_BY_NAME`](/Users/karstenhaldan/youtube/doomcraft/shared/src/items.ts:123) produces:
+
+`weapon_variant-slug: unknown kind "weapon_variant"`
+
+The parser must also retain and validate `variantId`, enforce the uncommon floor, and reject malformed variant-token definitions. Release-level validation must establish that the referenced variant exists in the paired variants pack.
+
+The fingerprint premise needs correction:
+
+- **There are no `ITEMS_PACK_VERSION`, `ITEMS_FINGERPRINT` or `ITEMS_INPUTS` literals in current `shared/src/packs.ts`.** Items are a dynamically fingerprinted data pack.
+- Adding a TypeScript field alone changes **no fingerprint inputs**. Forgetting serialization would allow a token’s `variantId` to change while its fingerprint and digest remain identical.
+- Appending `/variantId` unconditionally changes every old item line, including nonvariants. That also changes recomputed digests of already-installed historical items versions, potentially making stored releases unsatisfied. Preserve legacy serialization for nonvariants or explicitly handle that compatibility change.
+- The byte cap is real. With 48-byte item ID, name and variant ID, the straightforward new line is **177 bytes**, exceeding **160**, even without colours. Both gates now reject it. See [item serialization](/Users/karstenhaldan/youtube/doomcraft/shared/src/items.ts:208).
+
+Dormant-kind inference requires an ID such as **`weapon_variant-shotgun-slug`**. `weapon-variant-shotgun-slug` is guessed as kind **0**, rendering under **“Skins.”** Underscores are explicitly legal in [`sanitiseContentId`](/Users/karstenhaldan/youtube/doomcraft/shared/src/modes.ts:654); there is no conflict.
+
+The enumeration audit also needs distinctions:
+
+- `KIND_ORDER` actually hides a sixth-kind bucket; `SECTION_TITLES` needs its label.
+- `SLOT_FOR_KIND` needs a dynamic weapon-specific resolution, not one fixed slot for the whole kind.
+- Both `CRAFTABLE_KINDS` sets need the new recipe policy.
+- Match-drop exclusion must exclude variants.
+- **Do not add variants to the untradable pair.** Server trades currently check `def.tradable`; the client’s title/trophy pair only explains a refusal. Tradable variants already fit that policy.
+- Console lines 358 and 769 are stale explanatory prose, not rendering dispatch tables.
+
+**D4 — WRONG/incomplete: kind validation is insufficient, and the claimed atomicity proof is weak.**
+
+Bound storage to the **seven canonical keys `"0"` through `"6"`**. Reject noncanonical route slots; discard malformed stored keys and invalid refs during sanitation. Do not let aliases such as `"01"`, `"1e0"` or `"1.0"` become additional claims.
+
+A syntactically valid dormant ref should remain stored. Dormancy is derived against a release; sanitizing it away makes a temporary release change permanently unequip the player.
+
+[`equipVerdict`](/Users/karstenhaldan/youtube/doomcraft/server/src/persistence.ts:1082) currently learns only an item’s kind. That cannot establish whether a variant belongs to the requested weapon. A player can own a shotgun token, submit it for `variant:0`, pass a sixth-kind-only check and receive **HTTP 200**, while the arsenal still resolves pistol damage **17**. Validation must follow `ref → ItemDef.variantId → VariantDef.base` and compare the base with the requested weapon.
+
+Variable-length requests can retain atomicity by validating **every assignment before applying any**, inside the same update callback. But the existing test does not adequately prove that:
+
+- The test requests an invalid skin and a valid title unequip.
+- The route always visits **skin first**.
+- A broken implementation that validates and immediately writes each slot still refuses before writing anything.
+- Therefore **“refuses the unowned, and a mixed request writes NEITHER slot” stays green**.
+
+I reproduced that ordering weakness. Add the reverse case: valid skin unequip followed by invalid title/variant. The broken implementation returns 400 but leaves `equippedSkin` as **`''` instead of the previous ref**. See [test](/Users/karstenhaldan/youtube/doomcraft/server/src/equipRoutes.test.ts:144).
+
+Both trade removal and crafting must clear every matching variant claim when its last exact-ref copy disappears. Missing cleanup leaves `inventory.variants["1"]` pointing at an item with **0 owned copies**. Spawn-time ownership revalidation is still necessary independently.
+
+**D5 — WRONG about proof and completeness; the asynchronous prefetch approach itself is workable.**
+
+The room is already known before ticket redemption: [`router.route`](/Users/karstenhaldan/youtube/doomcraft/server/src/index.ts:4087) returns `{key, room}` before the await at 4116. There is no need to guess the destination.
+
+Resolve against that room’s pinned **items definitions and variant ordering**, not `releases.live()`:
+
+- Old room: slot 1 = `four-shell`, slot 2 = `six-shell`.
+- New release reverses those rows.
+- A live-release prefetch resolves the owned `four-shell` token to slot **2**.
+- The old room accepts that in-range slot and grants **6 shells instead of 4**.
+
+Both fixtures parse. I also verified that reversing their order preserves the current variant fingerprint and digest, so comparing pack identity alone cannot repair an incorrectly resolved index.
+
+`arsenal.slotCount` comes from the room constructor’s decoded entries through `SessionArsenal.from`, which returns **accepted overlay count + 1**. See [construction](/Users/karstenhaldan/youtube/doomcraft/server/src/room.ts:510).
+
+For the remaining paths and checks:
+
+- No ticket, no profile, missing prefetch and local/peer Worker paths should resolve to zeros. The current Worker supplies neither a manifest nor claims. A supplied capability bit is not ownership evidence.
+- Cache the authenticated profile information before installing the message handler. Handle load failure explicitly.
+- A connection can delay HELLO after prefetch while its token is traded or revoked. A permanently cached `Uint8Array` then grants **slot 1 despite ownership count 0**. Prefetch needs a freshness/invalidation rule, not merely storage.
+- Out-of-range fallback to base is correct. The player should see that the claim is unavailable in this room; it should not continue displaying the requested variant as effective.
+
+The policy column must be read **before `sim.addPlayer`**, from the policy selected using the same server mode/origin/intent facts as `sealSessionTrust`. It must also govern later spawn/mode transitions. `DENY_ALL` must deny variants.
+
+The claimed scan protection is false. Its [regex](/Users/karstenhaldan/youtube/doomcraft/shared/src/trust.test.ts:414) contains no `variant` term. This line in `room.ts` passes it:
+
+`const variantsAllowed = this.plan.modeId !== ModeId.DEATHMATCH;`
+
+It wrongly denies casual Deathmatch, and **“never pairs a mode literal with a reward verdict anywhere in the tree” stays green**.
+
+Finally, source scanning is neither the only available proof nor sufficient proof. Keep `variantClaims,` in the factory but make the callback return zeros: the proposed scan stays green while the first shotgun magazine is **8 instead of 4**. A behavioral production test can boot the actual server, equip through HTTP, obtain/redeem a ticket, join through WebSocket and assert the resolved slot and first magazine. The existing fixture-based `variantWire.test.ts` bypasses this factory and cannot substitute for that test.
+
+**D6 — WRONG as a display fix: all three named helpers currently have no callers.**
+
+Repository-wide search finds their definitions, but no imports or calls. Moving them cannot change the live HUD.
+
+The actual remaining readers include:
+
+- [`hud.ts:2126`](/Users/karstenhaldan/youtube/doomcraft/client/src/hud/hud.ts:2126): compiled magazine capacity.
+- `hud.ts:352`: compiled weapon name.
+- [`game.ts:1949`](/Users/karstenhaldan/youtube/doomcraft/client/src/game/game.ts:1949): compiled reload duration.
+
+Equip the valid four-shell fixture and perform exactly D6: the HUD still allocates **8 pips** and names it **“SHOTGUN.”**
+
+Moving `currentAmmoType` is a **no-op for valid runtime weapon IDs**. Ammo is absent from both the parser whitelist and variant wire. Reading `stats().hot.ammo` preserves the previous representation.
+
+For damage, use the arithmetic the relevant display describes. A predicted shot total should use firing-path values, including falloff and headshots; the crosshair should use the actual cone, which already goes through `liveSpreadFraction`. There is no general rule to replace all doubles with `hot`.
+
+A concrete rounding difference exists. This accepted shotgun overlay:
+
+`{ magSize: 4, damage: 10.21428571 }`
+
+has raw payload **71.49999997**, rounding to **71**, but firing-path payload **71.50000095367432**, rounding to **72**.
+
+**No existing test goes red merely from reverting those three unused-helper changes.** An assertion using the base shotgun’s 77 damage cannot distinguish the two implementations. Add a variant-backed test of the actual HUD inputs/rendering, plus a helper test only if those helpers become used.
+
+**D7 — WRONG about names and shot identity; appending an optional kill byte is compatible.**
+
+The client does **not** hold variant display names. [`VariantWireEntry`](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:722) contains only ID, base and values. `overlaysFromWire` supplies no name override, so `EffectiveWeapon.name` remains the archetype’s name. A slot lookup still returns **“Shotgun” instead of “Four Shell.”** The separate additive name message remains necessary.
+
+Compatibility findings:
+
+- There is one shared `decodeKill`, called through `NetClient.onKill`. It reads eight bytes.
+- The client dispatches one message per transport message; it does not interpret trailing bytes as another opcode.
+- I appended slot 2 to an eight-byte kill. The old decoder returned all five original fields correctly and left **1 byte unread**.
+- Therefore an old client safely ignores the extension.
+- A **new decoder must accept old eight-byte messages**, explicitly resetting the reused event’s slot to 0 when absent. An unconditional ninth-byte read throws; failing to reset can retain the preceding kill’s **slot 2 instead of 0**.
+- I found **no frozen KILL byte vector** in the current tree. The lockstep recording lists existing kill fields but omits variants, so it would remain green on lost slot identity. Add eight-byte compatibility and nine-byte extension vectors.
+
+The opcode-13 corruption example also contains a stale number. Inserting `str "Slug"` after the ID made the current f64 reader see base **4** and first value **2.979569589e-314**, not `1.1589780174433289e24`. The latter is the f32 reading of the letters. The current decoder rejected the resulting message. This correction does not make changing the frozen layout acceptable.
+
+Shot identity needs propagation, not a late lookup:
+
+- Hitscan already has `EffectiveWeapon.variantSlot`.
+- Projectiles already retain `projVariant`.
+- Both projectile damage paths discard that identity when calling `damagePlayer`.
+- `killPlayer` cannot reliably reconstruct firing-time identity after ownership changes or disconnection.
+
+There is also a **second kill producer**, [`damageEntity`](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:1668). Fire a rocket, switch to chainsaw, and let the rocket kill a demon: it records weapon **6 instead of 3** because it reads `attacker.weapon`. Updating only the player-kill producer leaves this failure intact.
+
+Self-kills are not weaponless: a variant rocket suicide should retain its firing slot. Environmental/nonvariant damage uses slot 0.
+
+A capable late joiner receives the table on HELLO; KILL and the table use reliable delivery. It needs the room’s separately delivered name mapping, not necessarily a name repeated in every kill. Also, changing only the current `aria-label` leaves sighted players seeing identical glyphs.
+
+**D8 — WRONG as an acquisition plan: the initial supply is unreachable.**
+
+The bootstrap proof is simple:
+
+- Initial variant supply: **0**.
+- Drops and floor pickups supply none.
+- Trading conserves supply.
+- Every proposed craft requires three variants.
+
+After any sequence of available actions, variant supply remains **0**.
+
+Define a distinct entry recipe, for example **three eligible common cosmetic duplicates + 50 Scrap → a chosen uncommon variant**. Specify the eligible materials and target validation; retain escrow, journal and idempotency behavior.
+
+That extends the existing same-kind recipe. It does **not** contradict §7.2: acquisition still happens at the craft bench and the output floor remains uncommon. A common variant tier or ordinary match drop would contradict the decision.
+
+**D9 — CORRECT as a UI proposal; no Rule 12 violation follows from it.**
+
+A summary entry, detail section and select require neither backticks, static `${` interpolation nor client-side balance arithmetic. Compute counts, effective comparisons and refusal diagnostics server-side.
+
+The empty state must explicitly render **“no variants installed.”** There is a concrete implementation trap: the existing [`fillSelect`](/Users/karstenhaldan/youtube/doomcraft/server/src/admin/console.ts:1735) labels an empty list as `label + ': bundled v1'`. Reusing that fallback unchanged would lie with **“variants: bundled v1.”** Give variants an accurate empty option and omit the selection from the draft request.
+
+The design itself is sound; those are implementation acceptance conditions, not evidence that the proposed controls violate the template rules.
+
+**D10 — WRONG: the stage claim still exceeds the plan.**
+
+Four additional failures remain beyond the earlier clauses.
+
+1. **Removing a stat definition does not currently dormant its token.**  
+   [`itemStateFor`](/Users/karstenhaldan/youtube/doomcraft/shared/src/items.ts:102) checks only live **item IDs** and revocations. Remove `four-shell` from the variants pack but retain its token in items: loadout state remains **`"active"`**. The player can attempt to craft or trade that apparently active token. Variant availability must participate consistently in the catalogue used by equip, craft, trade and display.
+
+2. **Clearing persistence does not revoke the live body.**  
+   Equip, join, trade the final copy away, then die and respawn. [`onRespawnRequest`](/Users/karstenhaldan/youtube/doomcraft/server/src/room.ts:1245) calls `spawnPlayer`, which reuses `p.variantSlots`; it does not revisit the profile. Ownership becomes **0**, but the respawned player retains **slot 1**. The same applies to revocation. A connection-time snapshot does not fulfill the decided spawn-time check.
+
+3. **An invalid newest pack can disappear before the production gate sees it.**  
+   Install valid variants@1 and invalid variants@2. [`installedPacks`](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:399) tries only the newest version and omits kind 7 when parsing returns null. An ordinary draft therefore contains no variants pack. `runGate` skips its variants block, including `variants.dormanted`, and can return **`ok: true`**. The existing “pack disappears after drafting” regression test stays green: this failure occurs **before drafting**.
+
+4. **Display-name changes are invisible to variant pack identity.**  
+   [`variantsFingerprintInputs`](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:670) omits `name`. In my two-variant fixture, renaming “Four Shell” to “Renamed” preserved fingerprint **568724430** and the entire SHA-256 digest. Once V4 displays that name, an operator can approve one string and serve another with no fingerprint-input diff.
+
+The console proposal also supplies no per-player resolution reason or per-room effective claim view. An operator still cannot distinguish “unowned,” “revoked,” “missing from this pin,” “mode denied” and “client incapable” from the resulting slot **0**.
+
+**D11 — WRONG as a blanket justification; the narrow argument against receiver-relative balance checks is correct.**
+
+The deployment-skew argument is real. The client adopts `SESSION_CONFIG.contentHash`; it does not establish equality of compiled weapon tables.
+
+A concrete hypothetical rebalance demonstrates the problem without the impossible golden:
+
+- Server shotgun base RPM changes **75 → 76**.
+- Server variant uses RPM **121.6** and damage **8**.
+- Those overrides satisfy the new bands; its measured budget is **0.9813346144455908**, without dominance.
+- Yesterday’s client upper RPM band is **120**.
+
+A receiver-relative check rejects that legitimate row. The present null path silently keeps the base arsenal, turning server damage **8** into client damage **11**. Thus V4 should not casually add receiver-relative balance validation.
+
+But three further claims fail.
+
+**First, finite/nonnegative/integral does not mean representable or simulable.** These are measured decoder results:
+
+| Wire value | Accepted result |
+|---|---|
+| `magSize: 65536` | `hot.magSize = 0` |
+| `pellets: 256` | `hot.pellets = 0` |
+| `damage: 1e40` | `hot.damage = Infinity` |
+| `rpm: 0` | `hot.fireIntervalMs = Infinity` |
+| `rpm: 1e308` | `hot.fireIntervalMs = 0` |
+
+These failures do not depend on yesterday’s balance table. Representation limits and finite, positive derived firing intervals are a separate contract. With `damage: 1e40` and `falloffMin: 0`, distant damage becomes **NaN** through `Infinity × 0`.
+
+The existing pellet and terrain loop clamps mean I am **not** claiming the old unbounded-loop failures. The actual wrong values above are sufficient.
+
+**Second, the parser and decoder already disagree on supposedly shared validity.** This manifest passes:
+
+```json
+{"variants":[{"id":"near-zero","base":1,"name":"Near Zero","over":{"magSize":4,"damage":10,"spreadPerShot":-1e-10}}]}
+```
+
+The parser’s band comparison tolerates `EPS = 1e-9`; the decoder rejects every negative exactly. I measured:
+
+- Parser errors: **0**
+- `variants.validate`: **`ok: true`**
+- Real `Room.variantTable.length`: **0**
+- Real arsenal `slotCount`: **1**
+
+See [epsilon comparison](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:449), [decoder refusal](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:896) and [room fallback](/Users/karstenhaldan/youtube/doomcraft/server/src/room.ts:129). V4 needs a parser-to-wire-to-room acceptance invariant, including these boundaries.
+
+**Third, the impossible golden proves codec layout, not deployment compatibility.** The existing test titled [“does NOT refuse on the RELATIVE band, which would desync a rebalance deploy”](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.test.ts:692) does not simulate two compiled tables. It relabels pistol values as shotgun values. It stays green while the representability failures and parser/decoder disagreement above remain.
+
+Keep the historical byte fixture as a clearly labelled codec fixture, and add a frozen **parser-valid** content fixture plus a genuine mixed-table compatibility test. Changing fixture data or adding a fixture is not changing opcode layout. It requires review, but no deployed client migration. Re-freezing the actual layout is a different, compatibility-bearing change.
+
+Real V4 content increases the importance of those distinctions. Reject unsafe wire data with an explicit session failure/recovery path; silently retaining base stats while continuing the match is not a successful compatibility strategy.
+
+## CLAUSES I JUDGE CORRECT
+
+- **D1** — One complete, atomically validated manifest per variants-pack version.
+- **D9** — The proposed summary, inventory section and expansion selector; with explicit empty-state rendering and server-computed diagnostics.
+tokens used
+220,297
+I would not approve V4 as written. I read the implementation and design sections, ran `runReleaseVerify`, and exercised the codecs, parser, arsenal and `Room` with in-memory probes. Today’s gate passes **17 checks and emits 7 packs**. I made no repository edits.
+
+**D1 — CORRECT: one manifest is the right release unit.**
+
+The release names one version per pack kind, and manifest order determines wire slots. Rejecting the whole manifest prevents partial acceptance from renumbering subsequent variants. Splitting the authoring source into several files would still require assembling and validating one release manifest. See [whole-file refusal](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:634) and [slot ordering](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:758).
+
+If entry 5 of 8 fails, the operator should keep/select the preceding valid version, fix the rejected entry, and publish a new complete version. The defective automatic-selection behavior discussed under D10 is a separate problem; smaller manifests would not fix it.
+
+Also, the proposed initial coverage is **four entries**: three HITSCAN archetypes plus one projectile.
+
+**D2 — WRONG/incomplete: changing the offline producer does not make production serve its output.**
+
+The current [offline gate](/Users/karstenhaldan/youtube/doomcraft/server/src/gate.ts:605) already includes `variants.validate`. Adding default discovery and pack emission should leave the count at **17**, with **8 packs**. A new item-to-variant reference check would make **18 checks**.
+
+The two implementations require different work:
+
+- Offline: resolve `DEFAULT_VARIANTS_FILE`, parse it, construct `variantsPack` with canonical inputs and digest, and include it **before** `checkPackInputs`.
+- Production: make bundled content discoverable through `PackInventory` if that is the shipping mechanism. Adding only the offline producer leaves `variantsVersions()` empty and production rooms at **slot 0**.
+- Both gates need validation of the **items/variants pairing they actually release**. Independent parsing does not validate `ItemDef.variantId`. Production already has the variants parse/digest/dormancy block; adding another copy is unnecessary.
+
+Adding kind 7 changes the emitted set’s `packSetHash`. My valid four-shell fixture changed the ordinal-1 hash from **2251357389 to 1491019016**. It does **not** change `BUILTIN_CONTENT_HASH`, which folds only the three build packs, nor automatically modify a stored release. An existing live document without kind 7 remains without it until a new release is assembled and promoted. See [hash construction](/Users/karstenhaldan/youtube/doomcraft/shared/src/packs.ts:151).
+
+For fallback precedence, **packsRoot must win**, as it does for items. A fallback-first implementation can replace an installed four-shell `variants@1` with a bundled six-shell definition: the host serves **6 instead of 4**. With packsRoot-first precedence, the fallback itself is fine—but offline verification of bundled content does not verify the host’s different `variants@1`.
+
+**D3 — WRONG/incomplete: an enum and interface field do not establish the token’s link.**
+
+The omitted parser mapping is immediately fatal. Appending the enum and `ITEM_KIND_NAMES` without changing [`KIND_BY_NAME`](/Users/karstenhaldan/youtube/doomcraft/shared/src/items.ts:123) produces:
+
+`weapon_variant-slug: unknown kind "weapon_variant"`
+
+The parser must also retain and validate `variantId`, enforce the uncommon floor, and reject malformed variant-token definitions. Release-level validation must establish that the referenced variant exists in the paired variants pack.
+
+The fingerprint premise needs correction:
+
+- **There are no `ITEMS_PACK_VERSION`, `ITEMS_FINGERPRINT` or `ITEMS_INPUTS` literals in current `shared/src/packs.ts`.** Items are a dynamically fingerprinted data pack.
+- Adding a TypeScript field alone changes **no fingerprint inputs**. Forgetting serialization would allow a token’s `variantId` to change while its fingerprint and digest remain identical.
+- Appending `/variantId` unconditionally changes every old item line, including nonvariants. That also changes recomputed digests of already-installed historical items versions, potentially making stored releases unsatisfied. Preserve legacy serialization for nonvariants or explicitly handle that compatibility change.
+- The byte cap is real. With 48-byte item ID, name and variant ID, the straightforward new line is **177 bytes**, exceeding **160**, even without colours. Both gates now reject it. See [item serialization](/Users/karstenhaldan/youtube/doomcraft/shared/src/items.ts:208).
+
+Dormant-kind inference requires an ID such as **`weapon_variant-shotgun-slug`**. `weapon-variant-shotgun-slug` is guessed as kind **0**, rendering under **“Skins.”** Underscores are explicitly legal in [`sanitiseContentId`](/Users/karstenhaldan/youtube/doomcraft/shared/src/modes.ts:654); there is no conflict.
+
+The enumeration audit also needs distinctions:
+
+- `KIND_ORDER` actually hides a sixth-kind bucket; `SECTION_TITLES` needs its label.
+- `SLOT_FOR_KIND` needs a dynamic weapon-specific resolution, not one fixed slot for the whole kind.
+- Both `CRAFTABLE_KINDS` sets need the new recipe policy.
+- Match-drop exclusion must exclude variants.
+- **Do not add variants to the untradable pair.** Server trades currently check `def.tradable`; the client’s title/trophy pair only explains a refusal. Tradable variants already fit that policy.
+- Console lines 358 and 769 are stale explanatory prose, not rendering dispatch tables.
+
+**D4 — WRONG/incomplete: kind validation is insufficient, and the claimed atomicity proof is weak.**
+
+Bound storage to the **seven canonical keys `"0"` through `"6"`**. Reject noncanonical route slots; discard malformed stored keys and invalid refs during sanitation. Do not let aliases such as `"01"`, `"1e0"` or `"1.0"` become additional claims.
+
+A syntactically valid dormant ref should remain stored. Dormancy is derived against a release; sanitizing it away makes a temporary release change permanently unequip the player.
+
+[`equipVerdict`](/Users/karstenhaldan/youtube/doomcraft/server/src/persistence.ts:1082) currently learns only an item’s kind. That cannot establish whether a variant belongs to the requested weapon. A player can own a shotgun token, submit it for `variant:0`, pass a sixth-kind-only check and receive **HTTP 200**, while the arsenal still resolves pistol damage **17**. Validation must follow `ref → ItemDef.variantId → VariantDef.base` and compare the base with the requested weapon.
+
+Variable-length requests can retain atomicity by validating **every assignment before applying any**, inside the same update callback. But the existing test does not adequately prove that:
+
+- The test requests an invalid skin and a valid title unequip.
+- The route always visits **skin first**.
+- A broken implementation that validates and immediately writes each slot still refuses before writing anything.
+- Therefore **“refuses the unowned, and a mixed request writes NEITHER slot” stays green**.
+
+I reproduced that ordering weakness. Add the reverse case: valid skin unequip followed by invalid title/variant. The broken implementation returns 400 but leaves `equippedSkin` as **`''` instead of the previous ref**. See [test](/Users/karstenhaldan/youtube/doomcraft/server/src/equipRoutes.test.ts:144).
+
+Both trade removal and crafting must clear every matching variant claim when its last exact-ref copy disappears. Missing cleanup leaves `inventory.variants["1"]` pointing at an item with **0 owned copies**. Spawn-time ownership revalidation is still necessary independently.
+
+**D5 — WRONG about proof and completeness; the asynchronous prefetch approach itself is workable.**
+
+The room is already known before ticket redemption: [`router.route`](/Users/karstenhaldan/youtube/doomcraft/server/src/index.ts:4087) returns `{key, room}` before the await at 4116. There is no need to guess the destination.
+
+Resolve against that room’s pinned **items definitions and variant ordering**, not `releases.live()`:
+
+- Old room: slot 1 = `four-shell`, slot 2 = `six-shell`.
+- New release reverses those rows.
+- A live-release prefetch resolves the owned `four-shell` token to slot **2**.
+- The old room accepts that in-range slot and grants **6 shells instead of 4**.
+
+Both fixtures parse. I also verified that reversing their order preserves the current variant fingerprint and digest, so comparing pack identity alone cannot repair an incorrectly resolved index.
+
+`arsenal.slotCount` comes from the room constructor’s decoded entries through `SessionArsenal.from`, which returns **accepted overlay count + 1**. See [construction](/Users/karstenhaldan/youtube/doomcraft/server/src/room.ts:510).
+
+For the remaining paths and checks:
+
+- No ticket, no profile, missing prefetch and local/peer Worker paths should resolve to zeros. The current Worker supplies neither a manifest nor claims. A supplied capability bit is not ownership evidence.
+- Cache the authenticated profile information before installing the message handler. Handle load failure explicitly.
+- A connection can delay HELLO after prefetch while its token is traded or revoked. A permanently cached `Uint8Array` then grants **slot 1 despite ownership count 0**. Prefetch needs a freshness/invalidation rule, not merely storage.
+- Out-of-range fallback to base is correct. The player should see that the claim is unavailable in this room; it should not continue displaying the requested variant as effective.
+
+The policy column must be read **before `sim.addPlayer`**, from the policy selected using the same server mode/origin/intent facts as `sealSessionTrust`. It must also govern later spawn/mode transitions. `DENY_ALL` must deny variants.
+
+The claimed scan protection is false. Its [regex](/Users/karstenhaldan/youtube/doomcraft/shared/src/trust.test.ts:414) contains no `variant` term. This line in `room.ts` passes it:
+
+`const variantsAllowed = this.plan.modeId !== ModeId.DEATHMATCH;`
+
+It wrongly denies casual Deathmatch, and **“never pairs a mode literal with a reward verdict anywhere in the tree” stays green**.
+
+Finally, source scanning is neither the only available proof nor sufficient proof. Keep `variantClaims,` in the factory but make the callback return zeros: the proposed scan stays green while the first shotgun magazine is **8 instead of 4**. A behavioral production test can boot the actual server, equip through HTTP, obtain/redeem a ticket, join through WebSocket and assert the resolved slot and first magazine. The existing fixture-based `variantWire.test.ts` bypasses this factory and cannot substitute for that test.
+
+**D6 — WRONG as a display fix: all three named helpers currently have no callers.**
+
+Repository-wide search finds their definitions, but no imports or calls. Moving them cannot change the live HUD.
+
+The actual remaining readers include:
+
+- [`hud.ts:2126`](/Users/karstenhaldan/youtube/doomcraft/client/src/hud/hud.ts:2126): compiled magazine capacity.
+- `hud.ts:352`: compiled weapon name.
+- [`game.ts:1949`](/Users/karstenhaldan/youtube/doomcraft/client/src/game/game.ts:1949): compiled reload duration.
+
+Equip the valid four-shell fixture and perform exactly D6: the HUD still allocates **8 pips** and names it **“SHOTGUN.”**
+
+Moving `currentAmmoType` is a **no-op for valid runtime weapon IDs**. Ammo is absent from both the parser whitelist and variant wire. Reading `stats().hot.ammo` preserves the previous representation.
+
+For damage, use the arithmetic the relevant display describes. A predicted shot total should use firing-path values, including falloff and headshots; the crosshair should use the actual cone, which already goes through `liveSpreadFraction`. There is no general rule to replace all doubles with `hot`.
+
+A concrete rounding difference exists. This accepted shotgun overlay:
+
+`{ magSize: 4, damage: 10.21428571 }`
+
+has raw payload **71.49999997**, rounding to **71**, but firing-path payload **71.50000095367432**, rounding to **72**.
+
+**No existing test goes red merely from reverting those three unused-helper changes.** An assertion using the base shotgun’s 77 damage cannot distinguish the two implementations. Add a variant-backed test of the actual HUD inputs/rendering, plus a helper test only if those helpers become used.
+
+**D7 — WRONG about names and shot identity; appending an optional kill byte is compatible.**
+
+The client does **not** hold variant display names. [`VariantWireEntry`](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:722) contains only ID, base and values. `overlaysFromWire` supplies no name override, so `EffectiveWeapon.name` remains the archetype’s name. A slot lookup still returns **“Shotgun” instead of “Four Shell.”** The separate additive name message remains necessary.
+
+Compatibility findings:
+
+- There is one shared `decodeKill`, called through `NetClient.onKill`. It reads eight bytes.
+- The client dispatches one message per transport message; it does not interpret trailing bytes as another opcode.
+- I appended slot 2 to an eight-byte kill. The old decoder returned all five original fields correctly and left **1 byte unread**.
+- Therefore an old client safely ignores the extension.
+- A **new decoder must accept old eight-byte messages**, explicitly resetting the reused event’s slot to 0 when absent. An unconditional ninth-byte read throws; failing to reset can retain the preceding kill’s **slot 2 instead of 0**.
+- I found **no frozen KILL byte vector** in the current tree. The lockstep recording lists existing kill fields but omits variants, so it would remain green on lost slot identity. Add eight-byte compatibility and nine-byte extension vectors.
+
+The opcode-13 corruption example also contains a stale number. Inserting `str "Slug"` after the ID made the current f64 reader see base **4** and first value **2.979569589e-314**, not `1.1589780174433289e24`. The latter is the f32 reading of the letters. The current decoder rejected the resulting message. This correction does not make changing the frozen layout acceptable.
+
+Shot identity needs propagation, not a late lookup:
+
+- Hitscan already has `EffectiveWeapon.variantSlot`.
+- Projectiles already retain `projVariant`.
+- Both projectile damage paths discard that identity when calling `damagePlayer`.
+- `killPlayer` cannot reliably reconstruct firing-time identity after ownership changes or disconnection.
+
+There is also a **second kill producer**, [`damageEntity`](/Users/karstenhaldan/youtube/doomcraft/server/src/sim.ts:1668). Fire a rocket, switch to chainsaw, and let the rocket kill a demon: it records weapon **6 instead of 3** because it reads `attacker.weapon`. Updating only the player-kill producer leaves this failure intact.
+
+Self-kills are not weaponless: a variant rocket suicide should retain its firing slot. Environmental/nonvariant damage uses slot 0.
+
+A capable late joiner receives the table on HELLO; KILL and the table use reliable delivery. It needs the room’s separately delivered name mapping, not necessarily a name repeated in every kill. Also, changing only the current `aria-label` leaves sighted players seeing identical glyphs.
+
+**D8 — WRONG as an acquisition plan: the initial supply is unreachable.**
+
+The bootstrap proof is simple:
+
+- Initial variant supply: **0**.
+- Drops and floor pickups supply none.
+- Trading conserves supply.
+- Every proposed craft requires three variants.
+
+After any sequence of available actions, variant supply remains **0**.
+
+Define a distinct entry recipe, for example **three eligible common cosmetic duplicates + 50 Scrap → a chosen uncommon variant**. Specify the eligible materials and target validation; retain escrow, journal and idempotency behavior.
+
+That extends the existing same-kind recipe. It does **not** contradict §7.2: acquisition still happens at the craft bench and the output floor remains uncommon. A common variant tier or ordinary match drop would contradict the decision.
+
+**D9 — CORRECT as a UI proposal; no Rule 12 violation follows from it.**
+
+A summary entry, detail section and select require neither backticks, static `${` interpolation nor client-side balance arithmetic. Compute counts, effective comparisons and refusal diagnostics server-side.
+
+The empty state must explicitly render **“no variants installed.”** There is a concrete implementation trap: the existing [`fillSelect`](/Users/karstenhaldan/youtube/doomcraft/server/src/admin/console.ts:1735) labels an empty list as `label + ': bundled v1'`. Reusing that fallback unchanged would lie with **“variants: bundled v1.”** Give variants an accurate empty option and omit the selection from the draft request.
+
+The design itself is sound; those are implementation acceptance conditions, not evidence that the proposed controls violate the template rules.
+
+**D10 — WRONG: the stage claim still exceeds the plan.**
+
+Four additional failures remain beyond the earlier clauses.
+
+1. **Removing a stat definition does not currently dormant its token.**  
+   [`itemStateFor`](/Users/karstenhaldan/youtube/doomcraft/shared/src/items.ts:102) checks only live **item IDs** and revocations. Remove `four-shell` from the variants pack but retain its token in items: loadout state remains **`"active"`**. The player can attempt to craft or trade that apparently active token. Variant availability must participate consistently in the catalogue used by equip, craft, trade and display.
+
+2. **Clearing persistence does not revoke the live body.**  
+   Equip, join, trade the final copy away, then die and respawn. [`onRespawnRequest`](/Users/karstenhaldan/youtube/doomcraft/server/src/room.ts:1245) calls `spawnPlayer`, which reuses `p.variantSlots`; it does not revisit the profile. Ownership becomes **0**, but the respawned player retains **slot 1**. The same applies to revocation. A connection-time snapshot does not fulfill the decided spawn-time check.
+
+3. **An invalid newest pack can disappear before the production gate sees it.**  
+   Install valid variants@1 and invalid variants@2. [`installedPacks`](/Users/karstenhaldan/youtube/doomcraft/server/src/packs.ts:399) tries only the newest version and omits kind 7 when parsing returns null. An ordinary draft therefore contains no variants pack. `runGate` skips its variants block, including `variants.dormanted`, and can return **`ok: true`**. The existing “pack disappears after drafting” regression test stays green: this failure occurs **before drafting**.
+
+4. **Display-name changes are invisible to variant pack identity.**  
+   [`variantsFingerprintInputs`](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:670) omits `name`. In my two-variant fixture, renaming “Four Shell” to “Renamed” preserved fingerprint **568724430** and the entire SHA-256 digest. Once V4 displays that name, an operator can approve one string and serve another with no fingerprint-input diff.
+
+The console proposal also supplies no per-player resolution reason or per-room effective claim view. An operator still cannot distinguish “unowned,” “revoked,” “missing from this pin,” “mode denied” and “client incapable” from the resulting slot **0**.
+
+**D11 — WRONG as a blanket justification; the narrow argument against receiver-relative balance checks is correct.**
+
+The deployment-skew argument is real. The client adopts `SESSION_CONFIG.contentHash`; it does not establish equality of compiled weapon tables.
+
+A concrete hypothetical rebalance demonstrates the problem without the impossible golden:
+
+- Server shotgun base RPM changes **75 → 76**.
+- Server variant uses RPM **121.6** and damage **8**.
+- Those overrides satisfy the new bands; its measured budget is **0.9813346144455908**, without dominance.
+- Yesterday’s client upper RPM band is **120**.
+
+A receiver-relative check rejects that legitimate row. The present null path silently keeps the base arsenal, turning server damage **8** into client damage **11**. Thus V4 should not casually add receiver-relative balance validation.
+
+But three further claims fail.
+
+**First, finite/nonnegative/integral does not mean representable or simulable.** These are measured decoder results:
+
+| Wire value | Accepted result |
+|---|---|
+| `magSize: 65536` | `hot.magSize = 0` |
+| `pellets: 256` | `hot.pellets = 0` |
+| `damage: 1e40` | `hot.damage = Infinity` |
+| `rpm: 0` | `hot.fireIntervalMs = Infinity` |
+| `rpm: 1e308` | `hot.fireIntervalMs = 0` |
+
+These failures do not depend on yesterday’s balance table. Representation limits and finite, positive derived firing intervals are a separate contract. With `damage: 1e40` and `falloffMin: 0`, distant damage becomes **NaN** through `Infinity × 0`.
+
+The existing pellet and terrain loop clamps mean I am **not** claiming the old unbounded-loop failures. The actual wrong values above are sufficient.
+
+**Second, the parser and decoder already disagree on supposedly shared validity.** This manifest passes:
+
+```json
+{"variants":[{"id":"near-zero","base":1,"name":"Near Zero","over":{"magSize":4,"damage":10,"spreadPerShot":-1e-10}}]}
+```
+
+The parser’s band comparison tolerates `EPS = 1e-9`; the decoder rejects every negative exactly. I measured:
+
+- Parser errors: **0**
+- `variants.validate`: **`ok: true`**
+- Real `Room.variantTable.length`: **0**
+- Real arsenal `slotCount`: **1**
+
+See [epsilon comparison](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:449), [decoder refusal](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.ts:896) and [room fallback](/Users/karstenhaldan/youtube/doomcraft/server/src/room.ts:129). V4 needs a parser-to-wire-to-room acceptance invariant, including these boundaries.
+
+**Third, the impossible golden proves codec layout, not deployment compatibility.** The existing test titled [“does NOT refuse on the RELATIVE band, which would desync a rebalance deploy”](/Users/karstenhaldan/youtube/doomcraft/shared/src/variants.test.ts:692) does not simulate two compiled tables. It relabels pistol values as shotgun values. It stays green while the representability failures and parser/decoder disagreement above remain.
+
+Keep the historical byte fixture as a clearly labelled codec fixture, and add a frozen **parser-valid** content fixture plus a genuine mixed-table compatibility test. Changing fixture data or adding a fixture is not changing opcode layout. It requires review, but no deployed client migration. Re-freezing the actual layout is a different, compatibility-bearing change.
+
+Real V4 content increases the importance of those distinctions. Reject unsafe wire data with an explicit session failure/recovery path; silently retaining base stats while continuing the match is not a successful compatibility strategy.
+
+## CLAUSES I JUDGE CORRECT
+
+- **D1** — One complete, atomically validated manifest per variants-pack version.
+- **D9** — The proposed summary, inventory section and expansion selector; with explicit empty-state rendering and server-computed diagnostics.

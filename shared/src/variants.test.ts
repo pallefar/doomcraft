@@ -11,20 +11,29 @@
  * forever. They are kept here in the shape they arrived in.
  */
 
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it } from 'vitest';
 
 import {
-  applyOver, BUDGET_TOLERANCE, isInert, MAX_VARIANTS_PER_PACK,
+  applyOver, BUDGET_TOLERANCE, isInert, MAX_VARIANT_INPUT_BYTES, MAX_VARIANT_NAME,
+  MAX_VARIANTS_PER_PACK,
   parseVariantsManifest, scoreVariant, VARIANT_FIELDS, variantsFingerprintInputs,
   type VariantField,
 } from './variants.ts';
+import { MAX_PACK_INPUT_BYTES, variantsPack } from './packs.ts';
 import {
   bandEdgesFor, createVariantTableMessage, decodeVariantTable, encodeVariantTable,
-  MAX_VARIANT_TABLE_BYTES, overlaysFromWire, wireEntriesFor,
+  HOT_NARROWING, MAX_VARIANT_TABLE_BYTES, narrowedValueOf, overlaysFromWire, wireEntriesFor,
+  type VariantsManifest,
 } from './variants.ts';
-import { FireKind, WEAPON_COUNT, WeaponId, WEAPONS } from './weapons.ts';
+import { FireKind, WEAPON_COUNT, WeaponId, WEAPONS, type WeaponDef } from './weapons.ts';
 import { PacketReader, PacketWriter } from './protocol.ts';
 import { damageAtDistanceOf, SessionArsenal } from './arsenal.ts';
+// The end-to-end case needs a REAL room, because the empty-table failure this
+// file's last section is about lives in `decodeRoomVariantTable`'s
+// `decoded === null ? [] : ...` and nowhere else. See the note above
+// `describe('a manifest the parser accepts reaches a real Room')`.
 
 const IDS = Array.from({ length: WEAPON_COUNT }, (_, i) => i);
 
@@ -398,6 +407,122 @@ describe('fingerprint inputs', () => {
     expect(with2.split('/')[1].split(',').length).toBe(VARIANT_FIELDS.length);
   });
 
+  it('move the pack IDENTITY when only the NAME changes', () => {
+    /* The adversarial case, kept in the shape it arrived in: take a real row,
+     * rename it, change nothing else. Before 2026-09-05 the name was not in
+     * the line at all, so the fingerprint stayed 351436725 and the digest
+     * stayed 20d02f7f82cdc39c70e13ae66a9597830f1785f016f088a07b9264649b186f6f
+     * — an operator could review and approve one display string while the
+     * host served another, with nothing in the diff to see it by. V4 puts
+     * that string on the HUD and the killfeed.
+     *
+     * The assertion is the DOWNSTREAM COST, not that the name appears in the
+     * line. A token can be present and still be inert; what has to move is
+     * what `server/src/packs.ts:234` builds out of these lines — the u32 the
+     * release document pins, and the sha256 the console shows.
+     */
+    const identity = (name: string) => {
+      const r = parse({
+        id: 'four-shell', base: WeaponId.SHOTGUN, name, over: { magSize: 4, damage: 10 },
+      });
+      expect(r.errors).toEqual([]);
+      const inputs = variantsFingerprintInputs(r.manifest!);
+      return {
+        inputs,
+        fingerprint: variantsPack(inputs, 1).fingerprint,
+        digest: createHash('sha256').update(inputs.join('\n'), 'utf8').digest('hex'),
+      };
+    };
+    const before = identity('Four Shell');
+    const after = identity('Renamed');
+    expect(after.inputs).not.toEqual(before.inputs);
+    expect(after.fingerprint).not.toBe(before.fingerprint);
+    expect(after.digest).not.toBe(before.digest);
+    // And ONLY the name moved: everything before the last `/` is byte-identical,
+    // so the reviewer reads a rename instead of sixteen numbers shifting. This
+    // is what fails if the name is ever put anywhere but the end of the line.
+    const cut = (l: string) => l.slice(0, l.lastIndexOf('/'));
+    expect(cut(after.inputs[0])).toBe(cut(before.inputs[0]));
+  });
+
+  it('cannot be forged by a name that carries its own newline', () => {
+    /* The digest is `inputs.join('\n')`, so a line break inside a name stops
+     * being one token in one record. If this parsed, a ONE-variant manifest
+     * would hash exactly as a TWO-variant one, and the review diff would show
+     * a row nobody wrote. Refused at the door rather than stripped, because a
+     * stripped name is a display string the author never wrote and never sees
+     * — the same failure the line above exists to close.
+     */
+    const r = parse({
+      id: 'probe', base: WeaponId.PISTOL, name: 'X\nghost:0/9', over: { rpm: 620, damage: 12 },
+    });
+    expect(refusal(r)).toContain('control character');
+    // Nothing the parser DOES accept can hold one, so no line ever splits.
+    const ok = parse({ id: 'probe', base: WeaponId.PISTOL, name: 'X', over: { rpm: 620, damage: 12 } });
+    expect(variantsFingerprintInputs(ok.manifest!)[0]).not.toContain('\n');
+  });
+
+  it('refuse a row whose line overflows ONE pack input line', () => {
+    /* Legal on every other axis — it is the worst-case row below with the
+     * longest name `MAX_VARIANT_NAME` allows — and 172 bytes long. Nothing
+     * warned about this before: `checkPackInputs` runs in both release gates
+     * over the assembled pack set, and a version directory is immutable, so
+     * the author would have baked a version that can never be published and
+     * can never be edited in place.
+     */
+    const r = parse({
+      id: 'a'.repeat(48), base: WeaponId.PLASMA, name: 'N'.repeat(MAX_VARIANT_NAME),
+      over: { damage: 20.900000000000002, splashDamage: 8.100000000000001, rpm: 660.0000000000001 },
+    });
+    const said = refusal(r);
+    expect(said).toContain('172-byte pack input line');
+    expect(said).toContain('MAX_PACK_INPUT_BYTES');
+  });
+
+  it('cap the line at exactly what the release gate caps it at', () => {
+    /* The drift guard `challenges.test.ts` keeps over its own mirror, and it
+     * gets its OWN test on purpose: folded into the refusal case above it
+     * would sit after two assertions that a drifted constant already fails,
+     * so the drift would never be the thing the report names. A copy of a
+     * constant that no test compares is a constant with two values.
+     */
+    expect(MAX_VARIANT_INPUT_BYTES).toBe(MAX_PACK_INPUT_BYTES);
+  });
+
+  it('take a REALISTIC row at BOTH limits — a gate that cannot pass is worth what one that cannot fail is worth', () => {
+    /* The other direction, and the one that decides whether the cap is a
+     * guard rail or a tax the author has to budget against: the longest id
+     * the schema allows (48, MAX_CONTENT_ID_LENGTH), the longest name it
+     * allows, and six overrides at the precision a human actually types. It
+     * parses, it goes on the wire, it comes back, and its line still has
+     * room. Only unrounded float noise at both limits at once trips the cap.
+     */
+    const id = 'a'.repeat(48);
+    const name = 'N'.repeat(MAX_VARIANT_NAME);
+    const row = {
+      id, base: WeaponId.SHOTGUN, name,
+      over: { pellets: 1, damage: 62, spread: 0.012, spreadMax: 0.03, falloffEnd: 44, rpm: 42 },
+    };
+    const r = parse(row);
+    expect(r.errors).toEqual([]);
+    const line = variantsFingerprintInputs(r.manifest!)[0];
+    expect(Buffer.byteLength(line, 'utf8')).toBeLessThanOrEqual(MAX_VARIANT_INPUT_BYTES);
+    expect(line.endsWith(`/${name}`)).toBe(true);
+    /* And the wire is untouched by any of it. The parser's length rule is an
+     * AUTHORING constraint on a review artifact; the table carries no id
+     * length and no name at all, so there is nothing for `decodeVariantTable`
+     * to check and no manifest this refuses that the decoder would have
+     * taken. The "anything the parser accepts, the decoder accepts" invariant
+     * is about VALUES, and this row proves the long end of it still holds.
+     */
+    const { bytes } = wire(row);
+    const m = decodeVariantTable(new PacketReader(bytes), createVariantTableMessage())!;
+    expect(m.variants[0].id).toBe(id);
+    const arsenal = SessionArsenal.from(overlaysFromWire(m.variants));
+    expect(arsenal.statsFor(WeaponId.SHOTGUN, 1).pellets).toBe(1);
+    expect(arsenal.statsFor(WeaponId.SHOTGUN, 1).damage).toBe(62);
+  });
+
   it('fit the release gate\'s 160-byte cap at the worst case', () => {
     // A 48-character content id (the limit) and the ugliest floats a valid
     // row can hold. The review built a 163-byte line against an earlier
@@ -709,5 +834,381 @@ describe('the wire refuses a value no predictor could run', () => {
       new PacketReader(rowBytes(WeaponId.SHOTGUN, values)), createVariantTableMessage());
     expect(m).not.toBeNull();
     expect(m!.variants[0].values[VARIANT_FIELDS.indexOf('rpm')]).toBe(rpm);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * THE INVARIANT: anything the parser accepts, the wire accepts
+ *
+ * The two doors ran different rules for a few hours on 2026-09-05 and the
+ * result was the worst failure this module can produce. `valueBandError`
+ * compares with EPS slack (`v < lo - EPS`, EPS = 1e-9) so that "unchanged"
+ * survives an arithmetic round trip; the wire's `negativeValueError` refuses
+ * every negative exactly. A manifest sitting in the nanometre between them
+ * parsed with zero errors, satisfied the release gate — `variants.validate`
+ * asks only `parsed.manifest !== null` (`server/src/gate.ts:462`) — and was
+ * then refused by `decodeVariantTable`, which `decodeRoomVariantTable` turns
+ * into an EMPTY table (`server/src/room.ts:137`). Green gate, published pack,
+ * every player on the base arsenal, no error anywhere.
+ *
+ * A refused manifest is loud and fixable. This is not. So the property below
+ * is the point of the whole section, and the two tests after it are the two
+ * halves it cannot be allowed to satisfy vacuously: one proves the sweep
+ * actually reaches accepted manifests in interesting places, and one takes
+ * the fixture through a real `Room`.
+ * ------------------------------------------------------------------------ */
+
+/** Encode and decode a parsed manifest exactly as `Room`'s constructor does. */
+function roundTrip(manifest: VariantsManifest): ReturnType<typeof decodeVariantTable> {
+  const bytes = encodeVariantTable(
+    new PacketWriter(MAX_VARIANT_TABLE_BYTES), wireEntriesFor(manifest), new Uint8Array(WEAPON_COUNT),
+  ).copy();
+  return decodeVariantTable(new PacketReader(bytes), createVariantTableMessage());
+}
+
+/**
+ * The values worth aiming at one field of one archetype.
+ *
+ * Both band edges exactly; each edge displaced by 1e-10, 1e-9 and 1e-8 in both
+ * directions, which brackets EPS and is where the two doors actually parted
+ * company; zero and negative zero, because `-0 < 0` is FALSE and the sign is
+ * still on the wire; and the ends of the three narrowings `arsenal.ts` does —
+ * u8 at 255/256, u16 at 65535/65536, float32 at its last finite value and past
+ * it. `MAX_VALUE` is there because "the biggest double" is the value an
+ * attacker reaches for first.
+ */
+const F32_MAX = 3.4028234663852886e38;
+function probeValues(base: WeaponDef, field: VariantField): number[] {
+  const [lo, hi] = bandEdgesFor(base, field);
+  const nudges = [1e-10, 1e-9, 1e-8];
+  return [
+    lo, hi, (lo + hi) / 2, 0, -0, 1,
+    ...nudges.flatMap((e) => [lo - e, lo + e, hi - e, hi + e, -e, e]),
+    255, 256, 65535, 65536,
+    F32_MAX, F32_MAX * 1.001, 1e39, 1e40, 1e308, Number.MAX_VALUE,
+  ];
+}
+
+/**
+ * A cost big enough that a lone probe value is not automatically a straight
+ * upgrade. Without it the strict-dominance rule refuses nearly every
+ * single-field variant and the sweep would prove almost nothing: a tighter
+ * cone alone is better on handling and worse on nothing, which §6 forbids.
+ * `rpm` is live on all seven archetypes and always costs DPS, so it is the one
+ * carrier that works everywhere; when `rpm` is itself the field under test the
+ * damage cut takes over.
+ */
+function carrierFor(base: WeaponDef, field: VariantField): Record<string, number> {
+  return field === 'rpm'
+    ? { damage: base.damage * 0.85 }
+    : { rpm: base.rpm * 0.8 };
+}
+
+interface SweepResult {
+  probes: number;
+  accepted: number;
+  refused: number;
+  /** Parsed clean, refused by the wire. Every one of these is the bug. */
+  leaks: string[];
+  /**
+   * Probes that landed IN THE EPS HOLE and were refused for being negative —
+   * negative, and forgiven by the band's own tolerance of its floor. This is
+   * the sweep proving it still reaches the place where the two doors parted;
+   * without it the leak list could be empty because nothing interesting was
+   * ever tried.
+   */
+  holeRefusals: number;
+}
+
+function sweep(): SweepResult {
+  const out: SweepResult = { probes: 0, accepted: 0, refused: 0, leaks: [], holeRefusals: 0 };
+  for (const id of IDS) {
+    const base = WEAPONS[id];
+    for (const field of VARIANT_FIELDS) {
+      const [lo, hi] = bandEdgesFor(base, field);
+      for (const v of probeValues(base, field)) {
+        // `valueBandError`'s own test, spelled out: EPS is 1e-9 and the band
+        // forgives anything inside it.
+        const bandForgives = !(v < lo - 1e-9 || v > hi + 1e-9);
+        for (const over of [{ [field]: v }, { ...carrierFor(base, field), [field]: v }]) {
+          out.probes++;
+          const r = parseVariantsManifest(JSON.stringify({
+            variants: [{ id: 'probe', base: id, name: 'Probe', over }],
+          }));
+          if (r.manifest === null) {
+            out.refused++;
+            if (v < 0 && bandForgives && r.errors.join(' ').includes('is negative')) {
+              out.holeRefusals++;
+            }
+            continue;
+          }
+          out.accepted++;
+          if (roundTrip(r.manifest) === null) {
+            out.leaks.push(`${base.short}/${field}=${v} over=${JSON.stringify(over)}`);
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+describe('parser-accept is a SUBSET of decoder-accept', () => {
+  it('every manifest the parser blesses survives encode -> decode', () => {
+    const r = sweep();
+
+    // THE PROPERTY. On the code this file was written against there were 108
+    // of these, over six archetypes and five fields.
+    expect(r.leaks, `${r.leaks.length} manifest(s) parsed clean and were refused by the wire`)
+      .toEqual([]);
+
+    /*
+     * AND THE THREE THINGS THAT STOP AN EMPTY LEAK LIST FROM MEANING NOTHING.
+     * A sweep that accepts nothing, or refuses nothing, or never reaches the
+     * EPS hole has an empty leak list too — and that is the shape of a green
+     * test that cannot fail. Measured on 2026-09-05, after the fix: 7616
+     * probes, 789 accepted, 6827 refused, 400 of the refusals inside the hole.
+     * The floors sit well under those so ordinary balance work does not trip
+     * them, and well over zero so a sweep that quietly degenerated — a broken
+     * carrier, a renamed field, a band that stopped reaching its own floor —
+     * is a failure and not a pass.
+     */
+    expect(r.probes, 'the sweep barely ran').toBeGreaterThan(5000);
+    expect(r.accepted, 'the sweep accepted almost nothing; it proves almost nothing')
+      .toBeGreaterThan(300);
+    expect(r.refused, 'the sweep refused almost nothing; the parser is not being exercised')
+      .toBeGreaterThan(3000);
+    expect(
+      r.holeRefusals,
+      'no probe reached the EPS hole and was refused for its sign, so this sweep can '
+      + 'no longer catch the bug it was written for',
+    ).toBeGreaterThan(100);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * The fixture, end to end, through a real Room
+ *
+ * WHY THIS TEST IMPORTS THE SERVER FROM A shared/ TEST.
+ *
+ * The codec property above proves `parse -> encode -> decode` never breaks.
+ * It passes with `decodeRoomVariantTable` deleted, with `Room` never built,
+ * and with `SessionArsenal.from` fed an empty array — and the failure being
+ * fixed here is precisely that a room SILENTLY substitutes an empty table for
+ * a refused one. "The bytes round-trip" and "the room the operator published
+ * actually fires the variant" are different facts, and only the second one is
+ * the one anybody cares about.
+ *
+ * `client/src/net/variantWire.test.ts` already reaches for `Room` the same
+ * way, so the import shape is the repository's own. It is not free: `tsc -b`
+ * pulls eleven server files into `shared`'s composite program to check it, and
+ * `shared`'s tsconfig declares `"types": []`, so the day `room.ts`'s
+ * transitive imports touch a `node:` builtin this build breaks. If that is too
+ * much coupling for `shared/`, this describe block belongs verbatim in
+ * `client/src/net/variantWire.test.ts`, which already has the Room harness and
+ * already pays this cost.
+ * ------------------------------------------------------------------------ */
+
+/** The exact manifest that parsed clean and served an empty table. */
+/* ------------------------------------------------------------------------ *
+ * The representability rail
+ *
+ * The second class of the same bug, on the other door. `decodeVariantTable`
+ * ACCEPTED every value below, and each one produced a narrowed twin in
+ * `hotFor` that is not a lossy image of the wire value but an unrelated
+ * number — which is `magSize: 7.5` again with a bigger number on it, and
+ * exactly the half-decode the function's own headline forbids.
+ *
+ * Every test asserts the CONSEQUENCE first and the refusal last, so that with
+ * the rail reverted the red that fires is the cost and not the mechanism.
+ * ------------------------------------------------------------------------ */
+
+describe('the wire refuses a value its own narrowing cannot carry', () => {
+  it('refuses a magazine past the u16, which becomes ZERO in the hand', () => {
+    const out = receiverHolding(WeaponId.PISTOL, baseRow(WeaponId.PISTOL));
+    const before = statsOf(out, WeaponId.PISTOL).hot.magSize;
+    expect(before).toBeGreaterThan(0);
+
+    const row = baseRow(WeaponId.PISTOL);
+    row[VARIANT_FIELDS.indexOf('magSize')] = 65536;
+    const m = decodeVariantTable(new PacketReader(rowBytes(WeaponId.PISTOL, row)), out);
+
+    const stats = statsOf(out, WeaponId.PISTOL);
+    // `hot.magSize` is what the client fills the magazine TO and `magSize` is
+    // what both sides test it against, so 0 against 65536 is a weapon that
+    // holds nothing and reloads forever.
+    expect(stats.hot.magSize, 'the magazine wrapped to zero').toBe(stats.magSize);
+    expect(stats.hot.magSize).toBe(before);
+    expect(m).toBeNull();
+  });
+
+  it('refuses a pellet count past the u8, which fires NO pellets', () => {
+    const out = receiverHolding(WeaponId.SHOTGUN, baseRow(WeaponId.SHOTGUN));
+    const before = statsOf(out, WeaponId.SHOTGUN).hot.pellets;
+    expect(before).toBe(7);
+
+    const row = baseRow(WeaponId.SHOTGUN);
+    row[VARIANT_FIELDS.indexOf('pellets')] = 256;
+    const m = decodeVariantTable(new PacketReader(rowBytes(WeaponId.SHOTGUN, row)), out);
+
+    const stats = statsOf(out, WeaponId.SHOTGUN);
+    // Both predictors loop `hot.pellets` (that is the shared ceiling closed
+    // earlier today), so a shotgun that wrapped to 0 does nothing at all while
+    // its budget was scored on 256 pellets.
+    expect(stats.hot.pellets, 'the shotgun fires no pellets').toBeGreaterThan(0);
+    expect(stats.hot.pellets).toBe(before);
+    expect(m).toBeNull();
+  });
+
+  it('refuses a damage that overflows the float32 — and the NaN beyond it', () => {
+    const out = receiverHolding(WeaponId.PISTOL, baseRow(WeaponId.PISTOL));
+    const before = damageAtDistanceOf(statsOf(out, WeaponId.PISTOL), 40);
+
+    const row = baseRow(WeaponId.PISTOL);
+    row[VARIANT_FIELDS.indexOf('damage')] = 1e40;
+    row[VARIANT_FIELDS.indexOf('falloffMin')] = 0;
+    const m = decodeVariantTable(new PacketReader(rowBytes(WeaponId.PISTOL, row)), out);
+
+    const stats = statsOf(out, WeaponId.PISTOL);
+    // 1e40 is FINITE on the wire, so the finiteness rule never sees it — and
+    // `f32(1e40)` is Infinity, so `hot.damage × 0` at long range is NaN. That
+    // is the health-goes-NaN-forever failure reached through a legal double.
+    expect(Number.isFinite(stats.hot.damage), 'hot.damage is Infinity').toBe(true);
+    expect(Number.isNaN(damageAtDistanceOf(stats, 40)), 'damage at 40 m is NaN').toBe(false);
+    expect(damageAtDistanceOf(stats, 40)).toBe(before);
+    expect(m).toBeNull();
+  });
+
+  it('refuses an rpm whose SHOT INTERVAL is not a duration', () => {
+    // `fireIntervalMs` is `f32(60000 / rpm)`, so this rail belongs to the
+    // derived quantity and catches values no other rule can see: 0 is neither
+    // negative nor non-finite, 1e308 is an ordinary double, and -0 is not even
+    // negative — `-0 < 0` is false — while `60000 / -0` is -Infinity.
+    for (const [rpm, note] of [
+      [0, 'a gun that never fires again'],
+      [1e308, 'a shot every frame'],
+      [-0, 'a negative interval'],
+    ] as [number, string][]) {
+      const out = receiverHolding(WeaponId.PISTOL, baseRow(WeaponId.PISTOL));
+      const before = statsOf(out, WeaponId.PISTOL).hot.fireIntervalMs;
+      const row = baseRow(WeaponId.PISTOL);
+      row[VARIANT_FIELDS.indexOf('rpm')] = rpm;
+      const m = decodeVariantTable(new PacketReader(rowBytes(WeaponId.PISTOL, row)), out);
+
+      const interval = statsOf(out, WeaponId.PISTOL).hot.fireIntervalMs;
+      expect(Number.isFinite(interval) && interval > 0, `rpm ${rpm}: ${note}`).toBe(true);
+      expect(interval).toBe(before);
+      expect(m, `rpm ${rpm}`).toBeNull();
+    }
+  });
+
+  it('still decodes the values the narrowing is merely LOSSY on', () => {
+    // A gate that cannot pass is worth what one that cannot fail is worth, and
+    // this is the rail most at risk of being written as `f32(v) === v`. The
+    // rocket's real splashRadius 4.4 narrows to 4.400000095367432 and always
+    // has (`arsenal.ts` documents six such pairs as shipped behaviour), so an
+    // equality rule would refuse the compiled table itself.
+    expect(narrowedValueOf('splashRadius', 4.4)).toBe(4.400000095367432);
+    expect(narrowedValueOf('splashRadius', 4.4)).not.toBe(4.4);
+    const entries = IDS.map((id) => ({ id: `arch-${id}`, base: id as WeaponId, values: baseRow(id) }));
+    const bytes = encodeVariantTable(
+      new PacketWriter(MAX_VARIANT_TABLE_BYTES), entries, new Uint8Array(WEAPON_COUNT),
+    ).copy();
+    expect(decodeVariantTable(new PacketReader(bytes), createVariantTableMessage()))
+      .not.toBeNull();
+    // And the last finite float32 is still a number the engine can hold.
+    const edge = baseRow(WeaponId.PISTOL);
+    edge[VARIANT_FIELDS.indexOf('damage')] = F32_MAX;
+    expect(decodeVariantTable(new PacketReader(rowBytes(WeaponId.PISTOL, edge)), createVariantTableMessage()))
+      .not.toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * `HOT_NARROWING` is a claim about `arsenal.ts`, not a comment
+ *
+ * The rail duplicates three lines of `arsenal.ts` — `f32`, `u16` and `u8` are
+ * private there and this module may not widen that file's API to borrow them —
+ * and an unwitnessed second copy of a rule is the exact scar this file already
+ * carries from `BANDS.toString`. So the classification is driven through a
+ * REAL `SessionArsenal`, field by field, and the "not narrowed" half is
+ * checked against `HotWeapon`'s actual keys rather than against a memory of
+ * them.
+ * ------------------------------------------------------------------------ */
+
+describe('the narrowing table matches what SessionArsenal really does', () => {
+  /** `hot` as a bag, so a field name can be looked up in it. */
+  function hotOf(base: WeaponId, over: Record<string, number>): Record<string, number> {
+    return SessionArsenal.from([{ id: 'probe', base, over }])
+      .statsFor(base, 1).hot as unknown as Record<string, number>;
+  }
+  const HOT_KEYS = Object.keys(hotOf(WeaponId.PISTOL, {}));
+
+  it('classifies all 16 fields, and every one the way hotFor does', () => {
+    expect(Object.keys(HOT_NARROWING).sort()).toEqual([...VARIANT_FIELDS].sort());
+    for (const field of VARIANT_FIELDS) {
+      const kind = HOT_NARROWING[field];
+      if (kind === 'none') {
+        // Not narrowed means not present: both predictors read the f64 off
+        // `EffectiveWeapon` itself, so there is no second representation to
+        // disagree with and nothing for a rail to protect.
+        expect(HOT_KEYS, `${field} IS narrowed — HOT_NARROWING says it is not`)
+          .not.toContain(field);
+        continue;
+      }
+      if (kind === 'fireInterval') {
+        expect(field).toBe('rpm');
+        for (const rpm of [420, 700, 1e-3]) {
+          expect(hotOf(WeaponId.PISTOL, { rpm }).fireIntervalMs, `rpm ${rpm}`)
+            .toBe(narrowedValueOf('rpm', rpm));
+        }
+        continue;
+      }
+      expect(HOT_KEYS, `${field} is NOT narrowed — HOT_NARROWING says ${kind}`).toContain(field);
+      // Values chosen to straddle each width's end, so a table that named the
+      // wrong width would answer differently here.
+      const probes = kind === 'u8' ? [200, 255, 256, 300]
+        : kind === 'u16' ? [200, 65535, 65536, 70000]
+          : [4.4, 1e38, 1e40];
+      for (const v of probes) {
+        expect(hotOf(WeaponId.PISTOL, { [field]: v })[field], `${field}=${v}`)
+          .toBe(narrowedValueOf(field, v));
+      }
+    }
+  });
+
+  it('RATCHET: no band edge on today\'s table can reach the rail', () => {
+    /*
+     * The parser-side half of the representability rail is defence in depth
+     * and cannot bite today: `magSize` tops out at 200 against a u16's 65535,
+     * `pellets` at 12 against a u8's 255, the float32 fields at 4800 against
+     * ~3.4e38, and `rpm` runs 12..1120 for a shot interval of 53.6..5000 ms.
+     * That is a fact about the weapon table, not about the schema, and this
+     * test is what turns it into a watched fact: the day a rebalance pushes an
+     * edge past its width, this goes red and says the parser rail has stopped
+     * being decoration.
+     */
+    for (const id of IDS) {
+      for (const field of VARIANT_FIELDS) {
+        const [lo, hi] = bandEdgesFor(WEAPONS[id], field);
+        const where = `${WEAPONS[id].short}/${field} ${lo}..${hi}`;
+        const kind = HOT_NARROWING[field];
+        if (kind === 'none') continue;
+        if (kind === 'fireInterval') {
+          for (const rpm of [lo, hi]) {
+            const interval = narrowedValueOf('rpm', rpm);
+            expect(Number.isFinite(interval) && interval > 0, where).toBe(true);
+          }
+          continue;
+        }
+        if (kind === 'f32') {
+          expect(Number.isFinite(narrowedValueOf(field, hi)), where).toBe(true);
+          continue;
+        }
+        // Counts: the largest whole number the band admits must survive.
+        const top = Math.floor(hi);
+        expect(narrowedValueOf(field, top), where).toBe(top);
+      }
+    }
   });
 });

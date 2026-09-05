@@ -105,6 +105,26 @@ export const MAX_VARIANTS_PER_PACK = 64;
 
 export const MAX_VARIANT_NAME = 40;
 
+/**
+ * Mirrors `MAX_PACK_INPUT_BYTES` (shared/src/packs.ts), which `checkPackInputs`
+ * (server/src/gate.ts) enforces in BOTH release gates over the assembled pack
+ * set — this pack included. Declared here rather than imported to keep this
+ * module free of the pack registry, the same split `shared/src/challenges.ts`
+ * makes for `MAX_CHALLENGE_INPUT_BYTES`; the test asserts the two agree, so
+ * they cannot drift.
+ */
+export const MAX_VARIANT_INPUT_BYTES = 160;
+
+/** UTF-8 byte length without node:Buffer — this module runs in the browser too. */
+function utf8Bytes(s: string): number {
+  let n = 0;
+  for (const ch of s) {
+    const c = ch.codePointAt(0) ?? 0;
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+  }
+  return n;
+}
+
 /** The band ±12% of §7.1, as a fraction. */
 export const BUDGET_TOLERANCE = 0.12;
 
@@ -387,15 +407,62 @@ export function scoreVariant(base: WeaponDef, variant: WeaponDef): BudgetReport 
  * to prevent.
  *
  * So the value rules live here, in functions BOTH doors call, and the split
- * into several of them is not decoration. The parser interleaves a third
- * refusal (`isInert`) between the shape and the band, and it has to stay
- * there: an inert field is reported with a value of `base[f] || 1`, so on a
- * field whose base is 0 — a pistol's `splashRadius`, a chainsaw's `magSize` —
- * a combined check would fire the band first and answer "outside 0..0" where
- * "the pistol has no splash to scale" is the true and useful answer. Separate
- * functions keep that order exactly, with no duplicated check, and let the
- * wire decoder take the subset of rules it can afford to enforce — which is
- * NOT all of them, and `decodeVariantTable` argues at length about which.
+ * into several of them is not decoration. The parser interleaves a further
+ * refusal (`isInert`) between the archetype-free rules and the band, and it
+ * has to stay there: an inert field is reported with a value of
+ * `base[f] || 1`, so on a field whose base is 0 — a pistol's `splashRadius`,
+ * a chainsaw's `magSize` — a combined check would fire the band first and
+ * answer "outside 0..0" where "the pistol has no splash to scale" is the true
+ * and useful answer. Separate functions keep that order exactly, with no
+ * duplicated check, and let the wire decoder take the subset of rules it can
+ * afford to enforce — which is NOT all of them, and `decodeVariantTable`
+ * argues at length about which.
+ *
+ * THE INVARIANT BETWEEN THE TWO DOORS, AND THE DAY IT WAS FALSE.
+ *
+ * Anything `parseVariantsManifest` accepts, `decodeVariantTable` MUST accept.
+ * Not the other way round — the decoder is deliberately the looser door, and
+ * the long note on it says why — but this direction is not a preference, it
+ * is the difference between a loud failure and a silent one.
+ *
+ * It was broken for a few hours on 2026-09-05, by the commit that gave the
+ * decoder its negative rail. The parser's band compares with a tolerance
+ * (`v < lo - EPS`, EPS = 1e-9) so that "unchanged" survives an arithmetic
+ * round trip; the decoder's `negativeValueError` refuses every negative
+ * EXACTLY. The gap between them is the interval [-1e-9, 0), and a manifest
+ * sitting in it was accepted by the parser, passed the release gate's
+ * `variants.validate` — which asks only whether `parsed.manifest !== null` —
+ * and was then refused by the wire. Measured, on
+ * `{"magSize":4,"damage":10,"spreadPerShot":-1e-10}` against the shotgun:
+ * parser 0 errors and 1 variant, gate ok, `decodeVariantTable` null, and
+ * `Room.variantTable.length` 0 with an arsenal `slotCount` of 1 — because
+ * `decodeRoomVariantTable` reads `decoded === null ? [] : ...`.
+ *
+ * That last line is the whole argument for the invariant. A refused manifest
+ * is loud and fixable: the operator sees the errors and edits a number. A
+ * manifest the parser blesses and the wire refuses is a room that publishes a
+ * variants pack, serves an EMPTY table, and hands every player the base
+ * arsenal with no error anywhere — green gate, published pack, nothing
+ * happens. There is no worse outcome available in this module.
+ *
+ * So the fix is not "widen the decoder to match the parser's tolerance", which
+ * would put a negative on the wire and make `hot.pellets` 255 out of -1. It is
+ * that the parser runs the decoder's rules FIRST and IN THE DECODER'S ORDER,
+ * as one contiguous block, before it reaches anything that mentions the
+ * archetype. Two lists that must agree agree by construction when one of them
+ * is literally the prefix of the other, and by coincidence otherwise — and
+ * this file already knows what coincidence costs (`BANDS.toString`).
+ *
+ * The ordering principle that falls out of it is better than the one it
+ * replaces, too. The shared block is exactly the rules that are true of a
+ * NUMBER IN ITSELF — finite, whole, non-negative, representable — and the
+ * parser-only rules that follow are exactly the ones that need an archetype
+ * to even be asked. The one message this reorders is a negative on an inert
+ * field, which now reads "splashRadius -1 is negative" rather than
+ * "splashRadius does nothing on Pistol". That is a fair trade and not the
+ * same fault as the one `isInert`-before-band exists to avoid: "outside 0..0"
+ * is MISLEADING about why the field is wrong, while "is negative" is simply a
+ * second true thing about the same number.
  *
  * Each returns the parser's message TAIL, or null. The parser prepends
  * `${id}: ` and pushes it; the decoder only asks whether it is null, because
@@ -474,6 +541,149 @@ function negativeValueError(field: VariantField, v: number): string | null {
   return v < 0 ? `${field} ${v} is negative` : null;
 }
 
+/**
+ * How `arsenal.ts`'s `hotFor` narrows each whitelisted field — the third and
+ * last of the archetype-free rules, and the one that says a value has to be
+ * SIMULABLE and not merely well-formed.
+ *
+ * WHY A VALUE THAT DECODES IS NOT YET A VALUE THAT RUNS.
+ *
+ * `hotFor` reproduces the narrowing `weapons.ts` does at module load, because
+ * the shipping code reads both representations of the same weapon — the def's
+ * double and the typed-array read, sometimes three lines apart. That is
+ * deliberate and it is not going away. But a narrowing is a function, and a
+ * function has a domain: past the end of it the narrowed twin stops being a
+ * lossy version of the wire value and becomes an unrelated number.
+ *
+ * Measured on values `decodeVariantTable` accepted the day this was written:
+ *
+ *     magSize   65536   ->  hot.magSize        0
+ *     pellets     256   ->  hot.pellets        0
+ *     damage     1e40   ->  hot.damage         Infinity
+ *     rpm           0   ->  hot.fireIntervalMs Infinity
+ *     rpm       1e308   ->  hot.fireIntervalMs 0
+ *
+ * and with `damage: 1e40` beside `falloffMin: 0`, `damageAtDistanceOf` returns
+ * NaN at long range — `Infinity × 0` — which is the health-goes-NaN-forever
+ * failure the finiteness rule already exists to prevent, reached through a
+ * value that IS finite on the wire.
+ *
+ * Every one of those is half a decode. `decodeVariantTable`'s own headline is
+ * "Decode, or refuse — never half of one", and a row whose magazine is 65536
+ * on the wire and 0 in the hand is exactly half of one: it is the
+ * `magSize: 7.5` bug — one `EffectiveWeapon` disagreeing with itself about one
+ * weapon — with a bigger number on it. A weapon with `hot.magSize` 0 and
+ * `magSize` 65536 can never finish a reload; `hot.pellets` 0 fires no pellets
+ * at all while the budget was scored on 256 of them; `fireIntervalMs` 0 is a
+ * shot every frame and Infinity is a gun that never fires again.
+ *
+ * WHERE THE LINE IS DRAWN, AND WHY IT IS NOT `f32(v) === v`.
+ *
+ * "Survive its own narrowing" cannot mean equality for the float32 fields.
+ * The rocket's real `splashRadius` 4.4 narrows to 4.400000095367432, the
+ * pistol's `60000/rpm` to 142.85714721679688, and `arsenal.ts` documents those
+ * six lossy pairs as SHIPPED BEHAVIOUR that a seam must not quietly unify.
+ * Demanding equality would refuse the compiled table itself. So the rule per
+ * width is the strongest one that still admits every value the narrowing is a
+ * faithful lossy image of:
+ *
+ *   - `u8` / `u16` are exact on their whole domain, so equality is the right
+ *     test and it is free: it refuses only what is out of range (a
+ *     non-integer is already gone at `valueShapeError`, a negative at
+ *     `negativeValueError`).
+ *   - `f32` is lossy everywhere and total until it overflows, so the test is
+ *     that the narrowed twin is still FINITE. Below ~3.4e38 the twin is a
+ *     rounding of the wire value; above it, it is Infinity, which is not.
+ *   - `rpm` is not narrowed at all — it is CONSUMED. `fireIntervalMs` is
+ *     `f32(60000 / rpm)`, so the rule belongs to the derived quantity: it must
+ *     be finite and strictly greater than zero, which is what "a shot interval"
+ *     means. This is the only field whose rail catches a value neither of the
+ *     others would: `rpm: 0` is not negative and is perfectly finite, and
+ *     `rpm: -0` is not even negative (`-0 < 0` is false) while `60000 / -0` is
+ *     -Infinity.
+ *
+ * THE NINE FIELDS WITH NO RAIL, AND THE ARGUMENT FOR LEAVING THEM ALONE.
+ *
+ * `headshotMultiplier`, `reloadMs`, `spread`, `spreadMax`, `spreadPerShot`,
+ * `falloffStart`, `falloffEnd`, `falloffMin`, `falloffCurve` are not in
+ * `HotWeapon` at all. Both predictors read them as the f64 that came off the
+ * wire, through `EffectiveWeapon`'s own fields, and do the same arithmetic on
+ * them — so there is no narrowing to survive and no second representation to
+ * disagree with. A finite non-negative double is already fully representable
+ * for them, and inventing a ceiling here would be a BAND, which this file
+ * refuses to put on the wire for reasons `decodeVariantTable` spends two
+ * paragraphs on. They can still buy a ridiculous match; that is decision 1's
+ * accepted cost, and it is the same cost the base arsenal already carries.
+ *
+ * The rail is scoped to CONSTRUCTION — what `SessionArsenal.from` computes
+ * once when it builds the table — and not to every quantity the firing path
+ * later derives. That is a real boundary and not a convenience: a construction
+ * result is stored and read forever by both sides, while a firing-path
+ * quantity is recomputed identically on both sides from the same stored
+ * numbers, so an absurd one is a bad match rather than a split predictor.
+ *
+ * The map is exported so `variants.test.ts` can drive every field through a
+ * real `SessionArsenal` and prove this classification is what `hotFor`
+ * actually does — the narrowers below are a second copy of three lines of
+ * `arsenal.ts` (they are private there and this module may not widen that
+ * file's API to borrow them), and an unwitnessed second copy of a rule is the
+ * exact scar this file already carries.
+ */
+export const HOT_NARROWING: Readonly<Record<VariantField, 'u8' | 'u16' | 'f32' | 'fireInterval' | 'none'>> =
+  Object.freeze({
+    damage: 'f32',
+    pellets: 'u8',
+    headshotMultiplier: 'none',
+    rpm: 'fireInterval',
+    magSize: 'u16',
+    reloadMs: 'none',
+    splashRadius: 'f32',
+    splashDamage: 'f32',
+    spread: 'none',
+    spreadMax: 'none',
+    spreadPerShot: 'none',
+    falloffStart: 'none',
+    falloffEnd: 'none',
+    falloffMin: 'none',
+    falloffCurve: 'none',
+    projectileSpeed: 'f32',
+  });
+
+const F32_VIEW = new Float32Array(1);
+const U16_VIEW = new Uint16Array(1);
+const U8_VIEW = new Uint8Array(1);
+
+/** The narrowed twin `arsenal.ts` will hold for this field, or `v` if none. */
+export function narrowedValueOf(field: VariantField, v: number): number {
+  switch (HOT_NARROWING[field]) {
+    case 'f32': F32_VIEW[0] = v; return F32_VIEW[0];
+    case 'u16': U16_VIEW[0] = v; return U16_VIEW[0];
+    case 'u8': U8_VIEW[0] = v; return U8_VIEW[0];
+    case 'fireInterval': F32_VIEW[0] = 60000 / v; return F32_VIEW[0];
+    default: return v;
+  }
+}
+
+/** The value has a narrowed twin the engine can actually run with. */
+function representabilityError(field: VariantField, v: number): string | null {
+  const kind = HOT_NARROWING[field];
+  if (kind === 'none') return null;
+  const n = narrowedValueOf(field, v);
+  if (kind === 'fireInterval') {
+    return Number.isFinite(n) && n > 0
+      ? null
+      : `rpm ${v} gives a shot interval of ${n} ms, which is not a duration`;
+  }
+  if (kind === 'f32') {
+    return Number.isFinite(n)
+      ? null
+      : `${field} ${v} overflows the float32 hot.${field}, which becomes ${n}`;
+  }
+  return n === v
+    ? null
+    : `${field} ${v} does not survive the ${kind} narrowing of hot.${field}, which becomes ${n}`;
+}
+
 /* ------------------------------------------------------------------------ *
  * The parser
  * ------------------------------------------------------------------------ */
@@ -531,6 +741,24 @@ export function parseVariantsManifest(text: string): VariantsParseResult {
 
     const name = typeof e.name === 'string' ? e.name.slice(0, MAX_VARIANT_NAME) : '';
     if (name.length === 0) { errors.push(`${id}: no display name`); continue; }
+    // The name is IN the fingerprint line now (see `variantsFingerprintInputs`)
+    // and the review digest is those lines joined with '\n'. A name carrying
+    // its own newline therefore stops being one token in one record: it prints
+    // as an extra line in the diff that no variant owns, and it lets a
+    // one-variant manifest reproduce the joined bytes of a two-variant one —
+    // an operator approving a single row over a digest that means something
+    // else. Tab and the rest of C0 are the same defect with a quieter
+    // symptom: invisible in a diff, so two names that read identically to the
+    // reviewer can carry different identities.
+    //
+    // REFUSED, NOT STRIPPED. Stripping would mint a display string the author
+    // never wrote and never sees, which is the exact "approve one string,
+    // serve another" failure putting the name in the line is here to close.
+    if (/[\u0000-\u001f\u007f]/.test(name)) {
+      errors.push(`${id}: display name has a control character — one fingerprint `
+        + 'line is one variant, and a newline or tab inside it forges the review diff');
+      continue;
+    }
 
     const rawOver = (e.over ?? null) as Record<string, unknown> | null;
     if (rawOver === null || typeof rawOver !== 'object' || Array.isArray(rawOver)) {
@@ -563,9 +791,36 @@ export function parseVariantsManifest(text: string): VariantsParseResult {
       // are a `Float64Array` and cannot be anything but numbers.
       const raw = rawOver[key];
       const v = typeof raw === 'number' ? raw : Number.NaN;
+      // THE WIRE'S RULES, IN THE WIRE'S ORDER, BEFORE ANYTHING ARCHETYPE-AWARE.
+      //
+      // These three lines are the same three `decodeVariantTable` runs, and
+      // they are kept as a contiguous prefix on purpose: the invariant is that
+      // anything this parser accepts the decoder accepts, and the only way to
+      // hold it by construction rather than by coincidence is for one list to
+      // BE the prefix of the other. The long note above them has the measured
+      // cost of the day they diverged — a manifest with `spreadPerShot: -1e-10`
+      // that parsed clean, passed the release gate, and served a room an empty
+      // variant table.
+      //
+      // In particular the band below must NOT be relied on to catch a
+      // negative. It compares with EPS slack so an arithmetic round trip does
+      // not read as a change, and that slack is a hole exactly one nanometre
+      // wide that the wire does not have.
       const shape = valueShapeError(field, v);
       if (shape !== null) {
         errors.push(`${id}: ${shape}`);
+        bad = true;
+        continue;
+      }
+      const negative = negativeValueError(field, v);
+      if (negative !== null) {
+        errors.push(`${id}: ${negative}`);
+        bad = true;
+        continue;
+      }
+      const unrepresentable = representabilityError(field, v);
+      if (unrepresentable !== null) {
+        errors.push(`${id}: ${unrepresentable}`);
         bad = true;
         continue;
       }
@@ -631,6 +886,49 @@ export function parseVariantsManifest(text: string): VariantsParseResult {
     variants.push(Object.freeze({ id, base: baseId as WeaponId, name, over: Object.freeze(over) }));
   }
 
+  /* Every variant must fit ONE pack input line. `checkPackInputs` caps input
+   * lines at MAX_PACK_INPUT_BYTES in BOTH release gates now, and a version
+   * directory is immutable, so a manifest that parses but overflows the line
+   * mints a pack that can never pass a gate and can never be edited in place
+   * — an editor that accepts what the machine will refuse forever. The parser
+   * owns the cap because every door into this pack goes through it, which is
+   * the same reasoning and the same shape as `parseChallengesManifest`.
+   *
+   * THIS WAS ALREADY BROKEN BEFORE THE NAME WENT IN. Measured on the encoding
+   * as it stood: the shipped two-row fixture's longest line is 56 bytes, but
+   * a 48-character id (`MAX_CONTENT_ID_LENGTH`) with all sixteen fields
+   * overridden at float-noise precision is 354 — over the cap, with nothing
+   * anywhere saying so until release time. The name adds 41 to that, 395.
+   *
+   * WHERE IT ACTUALLY BITES. At the worst-case id and name the line spends
+   * 48 + 1 + 1 + 1 on the prefix and 1 + 40 on the name, leaving 68 bytes for
+   * sixteen columns and fifteen commas: 31 + k*(len - 1) <= 68 for k
+   * overrides of `len` characters each. Seventeen-character float noise
+   * (`20.900000000000002`) buys k = 2; six-character values (`0.0123`) buy 7;
+   * three-character ones fit all sixteen. At the twelve-character ids real
+   * variants have (`shotgun-slug`) it is 4 and 14. Realistic rows override
+   * two to six fields, so this refuses only the extreme — a maximum-length id
+   * AND a maximum-length name AND unrounded floats, together. It is a guard
+   * rail, not a budget an author has to think about.
+   *
+   * It is deliberately NOT mirrored into `decodeVariantTable`. The invariant
+   * that anything the parser accepts the decoder accepts is about VALUES —
+   * the three wire rules run as a contiguous prefix above for exactly that
+   * reason. This is not a value rule. The wire carries no id length and no
+   * name at all (the table is base + 16 f64s and a slot), so there is no
+   * decoder-side quantity to check and no manifest this refuses that the
+   * decoder would have taken. Adding a length check to the decoder would
+   * invent a rule the wire cannot express.
+   */
+  for (const line of variantsFingerprintInputs({ variants })) {
+    const bytes = utf8Bytes(line);
+    if (bytes > MAX_VARIANT_INPUT_BYTES) {
+      errors.push(`${line.slice(0, line.indexOf(':'))}: its id, overrides and name make a `
+        + `${bytes}-byte pack input line, over the ${MAX_VARIANT_INPUT_BYTES}-byte cap `
+        + '(MAX_PACK_INPUT_BYTES — the release gate would refuse the version forever)');
+    }
+  }
+
   if (errors.length > 0) return { manifest: null, errors };
   return { manifest: Object.freeze({ variants: Object.freeze(variants) }), errors };
 }
@@ -663,15 +961,46 @@ function inertReason(base: WeaponDef, field: VariantField): string {
  * — present or not — so the console diff shows exactly which number moved and
  * a removed override reads as a change rather than as nothing.
  *
- * Fields are emitted in `VARIANT_FIELDS` order and an absent one is `-`, which
- * keeps a line short enough for the release gate's 160-byte cap on input lines
- * even at the 48-character content-id limit.
+ * Fields are emitted in `VARIANT_FIELDS` order and an absent one is `-`.
+ *
+ * THE NAME IS LAST, AND THAT POSITION IS THE ARGUMENT.
+ *
+ * Until 2026-09-05 the name was not in the line at ALL. Renaming "Four Shell"
+ * to "Renamed" left the fingerprint at 351436725 and the sha256 digest
+ * byte-identical, so an operator could review and approve one display string
+ * while the host served another, with nothing in the diff to see it by —
+ * against a file (shared/src/packs.ts) whose whole reason for checking the
+ * input LISTS in is that "the reviewable artifact is the diff, never the
+ * number". V4 puts that string on the HUD and the killfeed, so it is not
+ * cosmetic metadata; it is what a player is told they are holding.
+ *
+ * It goes at the END because it is the only FREE-FORM token in the line. `id`
+ * is a `sanitiseContentId` slug (`[a-z0-9_-]`), `base` is a digit, and the
+ * sixteen columns are `-` or `String(number)` — none of them can contain `/`
+ * or `,`. A free-form token is unambiguous only where it is terminal: the
+ * reader takes everything after the second `/` and stops. Anywhere else and a
+ * name holding a `,` forges a column boundary while a name holding a `/`
+ * shifts every field one place, so renaming a variant would print as sixteen
+ * numbers moving — the precise opposite of what a field-level line diff is
+ * for. Terminal position also leaves the positional block byte-identical to
+ * what it was before the name existed, so a pure rename diffs as one token
+ * appended-side and nothing else. `challengesFingerprintInputs` already
+ * trails its free text (`/${c.name}/${c.blurb}`); the two data packs now read
+ * alike.
+ *
+ * A name cannot smuggle a line break past this: `parseVariantsManifest`
+ * refuses C0 controls, and it also refuses a line over
+ * `MAX_VARIANT_INPUT_BYTES`. The claim this comment used to make — that the
+ * positional encoding "keeps a line short enough for the release gate's
+ * 160-byte cap even at the 48-character content-id limit" — was measurably
+ * FALSE and is gone; see the parser.
  */
 export function variantsFingerprintInputs(manifest: VariantsManifest): string[] {
   return [...manifest.variants]
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((v) => `${v.id}:${v.base}/`
-      + VARIANT_FIELDS.map((f) => (v.over[f] === undefined ? '-' : String(v.over[f]))).join(','));
+      + VARIANT_FIELDS.map((f) => (v.over[f] === undefined ? '-' : String(v.over[f]))).join(',')
+      + `/${v.name}`);
 }
 
 /* ------------------------------------------------------------------------ *
@@ -794,9 +1123,17 @@ export function encodeVariantTable(
  *
  * It repeats the rules that are true of a NUMBER IN ITSELF, through the same
  * functions the pack parser calls rather than a second reading of them:
- * finite, whole where `BANDS[field].integer` says counts are counts, and not
- * negative. A single failure refuses the whole message, exactly as a bad
- * `base` does.
+ * finite, whole where `BANDS[field].integer` says counts are counts, not
+ * negative, and representable — with a narrowed twin in `hotFor` that is
+ * still a lossy image of the wire value rather than an unrelated number. A
+ * single failure refuses the whole message, exactly as a bad `base` does.
+ *
+ * Those four are also, in that order, the FIRST four things
+ * `parseVariantsManifest` does to a field, and the ordering is load-bearing
+ * rather than tidy: the invariant that anything the parser accepts this door
+ * accepts holds by construction only while one list is the literal prefix of
+ * the other. The note on `negativeValueError` above has the measurement from
+ * the day it was not.
  *
  *   - NaN is not a stat line, it is the absence of one. `hot.damage` is
  *     `f32(NaN)`, `damageAtDistanceOf` returns NaN at every distance, and a
@@ -810,6 +1147,13 @@ export function encodeVariantTable(
  *     wrong about the wire; the value has no coherent reading on either.
  *   - A negative is the same fault with a wider blast: `magSize: -7` gives
  *     `hot.magSize` 65529 against a raw -7.
+ *   - And a value past the END of its narrowing is the same fault again with
+ *     no sign on it: `magSize: 65536` gives `hot.magSize` 0, `pellets: 256`
+ *     gives `hot.pellets` 0, `damage: 1e40` gives `hot.damage` Infinity, and
+ *     `rpm: 0` and `rpm: 1e308` give a shot interval of Infinity and 0. See
+ *     `HOT_NARROWING` for the full argument, including why the rule for the
+ *     float32 fields is finiteness and not equality — `splashRadius` 4.4
+ *     narrows to 4.400000095367432 and always has.
  *
  * It does NOT repeat the RELATIVE half of the band, the payload band, the
  * power budget, the strict-dominance refusal or the inert refusal — and the
@@ -898,6 +1242,7 @@ export function decodeVariantTable(
       const v = values[f];
       if (valueShapeError(field, v) !== null) return null;
       if (negativeValueError(field, v) !== null) return null;
+      if (representabilityError(field, v) !== null) return null;
     }
     rows.push({ id, base: base as WeaponId, values });
   }

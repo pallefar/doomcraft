@@ -14,13 +14,23 @@ import {
   BlockAction,
   BlockId,
   CHUNK_HEIGHT,
+  type DamageEvent,
+  EntityType,
   GameMode,
+  KILL_MELEE,
+  type KillEvent,
   PLAYER_HEIGHT,
+  PacketReader,
   PacketWriter,
   REACH_BREAK,
   S2C,
   SPEED_RUN,
   TICK_MS,
+  WeaponId,
+  createDamageEvent,
+  createKillEvent,
+  decodeDamage,
+  decodeKill,
   encodeBlockEdit,
   encodeHello,
   encodeInput,
@@ -669,6 +679,167 @@ describe('doom mechanics', () => {
     // And it carved the ground it went off.
     expect(room.world.getBlock(Math.floor(spot.x), Math.floor(spot.y) - 1, Math.floor(spot.z)))
       .toBe(BlockId.AIR);
+    room.stop();
+  });
+
+  it('credits the kill to the weapon that FIRED, not the one held when the rocket lands', () => {
+    /*
+     * Two producers write kill events. `killPlayer` takes the firing weapon as
+     * a parameter and has always been right. The entity branch of
+     * `damageEntity` used to read `attacker.weapon` at the moment the demon
+     * died, which is a different number whenever the killing shot was in
+     * flight: the rocket's `projectileLifeMs` is 4000 and a weapon switch takes
+     * a fraction of that.
+     *
+     * NON-VACUITY. The attacker is HOLDING the chainsaw when the rocket lands,
+     * so the two candidate answers are different numbers (3 against 6) and the
+     * assertion below can only be satisfied by one of them. The read is off the
+     * WIRE, decoded, because the wire is what the killfeed and every stat
+     * consumer actually sees.
+     */
+    const room = makeRoom(24680);
+    const client = join(room, 'Switcher');
+    const spot = findFlatSpot(room);
+    placeAt(client.player, spot);
+    for (let i = 0; i < 20; i++) room.step();
+    placeAt(client.player, spot);
+
+    // A demon standing beside the shooter, inside the blast but well outside
+    // the chainsaw's reach — nothing but the rocket can have killed it.
+    const demon = room.sim.spawnEntity(EntityType.IMP, spot.x + 1.2, spot.y, spot.z, 20, 0.4, 1.7, false);
+    expect(demon).toBeGreaterThanOrEqual(0);
+
+    const p = client.player;
+    p.weaponMask = 0xff;
+    p.weapon = WeaponId.ROCKET;
+    p.mag[WeaponId.ROCKET] = 5;
+    p.nextFireMs = 0;
+    p.spawnProtectUntilMs = 0;
+    p.pitch = -Math.PI / 2;                        // straight down, at his own feet
+    expect(room.sim.tryFire(p, WeaponId.ROCKET)).toBe(true);
+
+    // The switch, while the round is in the air. This line is the test.
+    p.weapon = WeaponId.CHAINSAW;
+
+    for (let i = 0; i < 20; i++) room.step();
+    expect(p.weapon, 'the attacker must still be holding the other weapon at impact')
+      .toBe(WeaponId.CHAINSAW);
+    expect(p.kills, 'the rocket has to have actually killed the demon').toBe(1);
+
+    // victimId 0 is how an ENTITY kill is written; a player kill carries an id.
+    const kills: KillEvent[] = client.socket.packets
+      .filter((pk) => pk[0] === S2C.KILL)
+      .map((pk) => decodeKill(new PacketReader(pk), createKillEvent()))
+      .filter((e) => e.victimId === 0);
+    expect(kills.length).toBe(1);
+    expect(kills[0].killerId).toBe(p.id);
+    expect(kills[0].weaponId).toBe(WeaponId.ROCKET);
+    room.stop();
+  });
+
+  it('tells the attacker WHICH weapon hit the demon, not a flat pistol', () => {
+    /*
+     * `damageEntity` pushed its damage event with a literal 0 in the weapon
+     * slot, so every hit on a monster arrived at the attacker's client naming
+     * the PISTOL. It survived because no client reader touches the field —
+     * `Game.onDamage` uses amount, flags and the direction, and the hitmarker
+     * takes flags and amount — but the server was still stating something
+     * false on the wire in a field whose whole job is to name the weapon.
+     *
+     * NON-VACUITY, three ways. The demon SURVIVES, so no kill event is written
+     * and neither of the kill-event fixes can move this test. The weapon that
+     * fired (rocket, 3) differs from the literal that used to be sent (0) AND
+     * from the weapon the attacker is holding when the splash lands
+     * (chainsaw, 6), so the assertion is satisfied by one rule only. The id is
+     * read by `decodeDamage` off the packet the attacker's socket received.
+     */
+    const room = makeRoom(13579);
+    const client = join(room, 'Marker');
+    const spot = findFlatSpot(room);
+    placeAt(client.player, spot);
+    for (let i = 0; i < 20; i++) room.step();
+    placeAt(client.player, spot);
+
+    // Enough health to walk away from a rocket: this test is about the packet,
+    // not the corpse.
+    const demon = room.sim.spawnEntity(EntityType.BARON, spot.x + 1.2, spot.y, spot.z, 4000, 0.4, 1.7, false);
+    expect(demon).toBeGreaterThanOrEqual(0);
+
+    const p = client.player;
+    p.weaponMask = 0xff;
+    p.weapon = WeaponId.ROCKET;
+    p.mag[WeaponId.ROCKET] = 5;
+    p.nextFireMs = 0;
+    p.spawnProtectUntilMs = 0;
+    p.pitch = -Math.PI / 2;
+    expect(room.sim.tryFire(p, WeaponId.ROCKET)).toBe(true);
+    p.weapon = WeaponId.CHAINSAW;
+
+    for (let i = 0; i < 20; i++) room.step();
+    expect(p.kills, 'the demon must survive, so no kill event exists to confuse this').toBe(0);
+
+    // victimId 0 is entity damage; attackerId is us, which excludes the
+    // demon's own swings back at the player.
+    const hits: DamageEvent[] = client.socket.packets
+      .filter((pk) => pk[0] === S2C.DAMAGE)
+      .map((pk) => decodeDamage(new PacketReader(pk), createDamageEvent()))
+      .filter((e) => e.victimId === 0 && e.attackerId === p.id);
+    expect(hits.length).toBeGreaterThan(0);
+    for (const h of hits) expect(h.weaponId).toBe(WeaponId.ROCKET);
+    room.stop();
+  });
+
+  it('marks a chainsawed demon as a MELEE kill, exactly as a chainsawed player', () => {
+    /*
+     * The entity branch wrote a flat `e.flags = 0` while `killPlayer` derived
+     * KILL_MELEE from the weapon, so one swing of one chainsaw produced two
+     * different kill events depending on what it hit — and the killfeed picks
+     * its glyph out of these bits. Both producers now read the one rule,
+     * `weaponKillFlags`.
+     *
+     * The attacker HOLDS the chainsaw here, deliberately: the weapon is then
+     * the same number under either kill-weapon rule, so this test moves for
+     * the flags and nothing else.
+     */
+    const room = makeRoom(97531);
+    const client = join(room, 'Sawyer');
+    const prey = join(room, 'Prey');
+    const spot = findFlatSpot(room);
+    placeAt(client.player, spot);                  // yaw 0 faces -Z
+    for (let i = 0; i < 20; i++) room.step();
+    placeAt(client.player, spot);
+
+    // BOTH producers in ONE swing: a player and a demon inside the same 2.6 m
+    // reach and the same 44-degree cone. `killPlayer` writes the first event
+    // and `damageEntity` the second, and the point of the test is that the two
+    // now say the same thing about the same swing.
+    placeAt(prey.player, { x: spot.x, y: spot.y, z: spot.z - 1.0 });
+    prey.player.spawnProtectUntilMs = 0;
+    prey.player.health = 5;
+    const demon = room.sim.spawnEntity(EntityType.IMP, spot.x, spot.y, spot.z - 1.6, 4, 0.4, 1.7, false);
+    expect(demon).toBeGreaterThanOrEqual(0);
+
+    const p = client.player;
+    p.weaponMask = 0xff;
+    p.weapon = WeaponId.CHAINSAW;
+    p.nextFireMs = 0;
+    p.spawnProtectUntilMs = 0;
+    expect(room.sim.tryFire(p, WeaponId.CHAINSAW)).toBe(true);
+    for (let i = 0; i < 4; i++) room.step();
+    expect(p.kills, 'the chainsaw has to have actually killed both of them').toBe(2);
+
+    const kills: KillEvent[] = client.socket.packets
+      .filter((pk) => pk[0] === S2C.KILL)
+      .map((pk) => decodeKill(new PacketReader(pk), createKillEvent()));
+    // victimId 0 is the demon; the player carries an id.
+    const demonKill = kills.find((e) => e.victimId === 0);
+    const playerKill = kills.find((e) => e.victimId === prey.player.id);
+    expect(demonKill).toBeDefined();
+    expect(playerKill).toBeDefined();
+    expect(demonKill?.weaponId).toBe(WeaponId.CHAINSAW);
+    expect(playerKill?.weaponId).toBe(WeaponId.CHAINSAW);
+    expect((playerKill?.flags ?? 0) & KILL_MELEE, 'killPlayer has always set this').toBe(KILL_MELEE);
+    expect((demonKill?.flags ?? 0) & KILL_MELEE, 'a chainsaw kill is a melee kill whatever it kills').toBe(KILL_MELEE);
     room.stop();
   });
 

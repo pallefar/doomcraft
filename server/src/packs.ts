@@ -376,33 +376,86 @@ export class PackInventory {
    */
   installedPacks(): PackVersion[] {
     const out: PackVersion[] = [...BUILTIN_PACKS];
-    const lv = this.levelsVersions();
-    if (lv.length > 0) {
-      const p = this.levelsPackAt(lv[lv.length - 1]);
-      if (p !== null) out.push(p);
+    const levels = this.newestParsing(this.levelsVersions(), (v) => this.levelsPackAt(v));
+    if (levels !== null) out.push(levels);
+    const campaign = this.newestParsing(this.campaignVersions(), (v) => this.campaignAt(v));
+    if (campaign !== null) out.push(campaign.pack);
+    const items = this.newestParsing(this.itemsVersions(), (v) => this.itemsAt(v));
+    if (items !== null) out.push(items.pack);
+    const quests = this.newestParsing(this.questsVersions(), (v) => this.questsAt(v));
+    if (quests !== null) out.push(quests.pack);
+    // The NEWEST installed variants pack, exactly as every other data kind.
+    // Omitting it meant an ordinary draft — which starts from this set —
+    // silently dropped a live variants pack from the next release.
+    const variants = this.newestParsing(this.variantsVersions(), (v) => this.variantsAt(v));
+    if (variants !== null) out.push(variants.pack);
+    return out;
+  }
+
+  /**
+   * The newest installed version of a data kind that ACTUALLY PARSES — not
+   * simply the newest installed one.
+   *
+   * The difference is a real defect this closed. Each kind used to try the
+   * highest version number on disk and, when it came back null, emit no pack
+   * of that kind at all. So a good variants@1 beside a schema-refused
+   * variants@2 produced a set with NO kind 7 in it, and everything downstream
+   * read that as "this host has no variants": an ordinary draft carried no
+   * kind 7, `runGate` skipped its entire variants block — `variants.validate`
+   * and `variants.dormanted` included — and the gate returned OK for a release
+   * that serves no variants at all. A green gate over a release that will
+   * serve something else is the worst outcome this system has.
+   *
+   * Skipping to the newest readable version is the honest answer for THIS
+   * method, because this method's whole job is to say what this host can
+   * serve — and it can still serve variants@1. It must also stay total:
+   * `hostFallback()` sits on the never-throws room-resolution path (8.3), so
+   * an unreadable file on disk must not be able to make a room unresolvable.
+   * A content typo is not an outage.
+   *
+   * The LOUD half of the answer lives where a refusal is affordable instead:
+   * `unparseable()` below, read by the publish gate. Falling back silently
+   * would ship variants@1 under a green gate while the operator believed they
+   * were shipping the variants@2 they had just installed, which is the same
+   * lie wearing a different hat.
+   */
+  private newestParsing<T>(versions: number[], at: (version: number) => T | null): T | null {
+    for (let i = versions.length - 1; i >= 0; i--) {
+      const got = at(versions[i]);
+      if (got !== null) return got;
     }
-    const cv = this.campaignVersions();
-    if (cv.length > 0) {
-      const c = this.campaignAt(cv[cv.length - 1]);
-      if (c !== null) out.push(c.pack);
-    }
-    const iv = this.itemsVersions();
-    if (iv.length > 0) {
-      const i = this.itemsAt(iv[iv.length - 1]);
-      if (i !== null) out.push(i.pack);
-    }
-    const qv = this.questsVersions();
-    if (qv.length > 0) {
-      const q = this.questsAt(qv[qv.length - 1]);
-      if (q !== null) out.push(q.pack);
-    }
-    const vv = this.variantsVersions();
-    if (vv.length > 0) {
-      // The NEWEST installed variants pack, exactly as every other data kind.
-      // Omitting it meant an ordinary draft — which starts from this set —
-      // silently dropped a live variants pack from the next release.
-      const v = this.variantsAt(vv[vv.length - 1]);
-      if (v !== null) out.push(v.pack);
+    return null;
+  }
+
+  /**
+   * Every installed data-pack version whose bytes are on disk and whose
+   * manifest does not parse. The gate refuses on a non-empty answer.
+   *
+   * WHY THIS REFUSES FOR EVERY INSTALLED VERSION AND NOT ONLY THE ONE THE
+   * DRAFT NAMES. Scoping it to the draft would leave the hole open in the one
+   * case that matters most: when EVERY installed version of a kind is
+   * unreadable, the draft names no version of that kind, so a draft-scoped
+   * check has nothing to fire on and the gate goes green over a kind the host
+   * has content for and cannot read. A version kept on disk is also a
+   * rollback target — `unsatisfied()` re-parses it — so an unparseable one is
+   * not merely unshippable, it is unrollbackable-to, and there is no state in
+   * which keeping it is worth anything. The remedy is one action (fix the
+   * file or delete the directory) and the row names the exact label.
+   */
+  unparseable(): { kind: PackKind; version: number; label: string }[] {
+    const out: { kind: PackKind; version: number; label: string }[] = [];
+    const kinds: Array<[PackKind, number[], (v: number) => unknown | null]> = [
+      [PackKind.LEVELS, this.levelsVersions(), (v) => this.levelsPackAt(v)],
+      [PackKind.CAMPAIGN, this.campaignVersions(), (v) => this.campaignAt(v)],
+      [PackKind.ITEMS, this.itemsVersions(), (v) => this.itemsAt(v)],
+      [PackKind.QUESTS, this.questsVersions(), (v) => this.questsAt(v)],
+      [PackKind.VARIANTS, this.variantsVersions(), (v) => this.variantsAt(v)],
+    ];
+    for (const [kind, versions, at] of kinds) {
+      for (const version of versions) {
+        if (at(version) !== null) continue;
+        out.push({ kind, version, label: `${PACKS[kind]?.key ?? 'pack'}@${version}` });
+      }
     }
     return out;
   }
@@ -935,6 +988,40 @@ export class ReleaseService {
      * caps were measured rather than showing nothing at all.
      */
     checks.push(...checkPackInputs(draft.packs));
+
+    /*
+     * packs.parse — no installed version of any data kind is unreadable.
+     *
+     * The hazard is not that an unreadable pack ships; it cannot ship, because
+     * nothing can name it. The hazard is that it makes the KIND vanish.
+     * `installedPacks()` — which every ordinary draft starts from — used to
+     * drop a kind whose newest version failed to parse, so a good variants@1
+     * beside a refused variants@2 produced a draft with no kind 7, and the
+     * variants block below (validate AND dormanted) never ran. The gate said
+     * OK about a release that served no variants at all, and the operator who
+     * had just installed variants@2 was told everything was fine.
+     * `newestParsing` now keeps variants@1, which fixes what gets SERVED; this
+     * check is what makes the situation visible instead of merely survivable,
+     * because the operator's intent was variants@2 and a silent downgrade
+     * under a green gate is the same lie in the other direction.
+     *
+     * Not in `runReleaseVerify()` deliberately: that gate runs over the TREE
+     * (content/), which has no versioned pack root to scan, so there is no
+     * second copy of this check to drift from. Every check that CAN live in
+     * both still does — see the `packs.inputs` note above.
+     */
+    const unreadable = this.inventory.unparseable();
+    checks.push(unreadable.length === 0
+      ? { id: 'packs.parse', ok: true, detail: '' }
+      : {
+        id: 'packs.parse',
+        ok: false,
+        detail: `installed but unreadable: ${unreadable.map((u) => u.label).join(', ')} — `
+          + `this host cannot serve or roll back to ${unreadable.length === 1 ? 'it' : 'them'}, `
+          + `and while ${unreadable.length === 1 ? 'it is' : 'they are'} on disk the newest version `
+          + `of ${unreadable.length === 1 ? 'that kind' : 'those kinds'} is not what a draft names. `
+          + `Fix the manifest or remove the version directory.`,
+      });
 
     const levelsDecl = draft.packs.find((p) => p.kind === PackKind.LEVELS);
     let installedIds = new Set<string>();

@@ -1215,7 +1215,7 @@ export class Simulation {
 
     if (monster >= 0) {
       const dmg = damageAtDistanceOf(def, bestT);
-      this.damageEntity(monster, shooter.id, dmg, dx, dy, dz);
+      this.damageEntity(monster, shooter.id, dmg, def.id, dx, dy, dz);
       return;
     }
     if (!victim) return;
@@ -1263,7 +1263,7 @@ export class Simulation {
       const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (d > range + this.entHalfW[e]) continue;
       if (d > 1e-4 && (cx * dx + cy * dy + cz * dz) / d < cosLimit) continue;
-      this.damageEntity(e, attacker.id, damageAtDistanceOf(def, d), dx, dy, dz);
+      this.damageEntity(e, attacker.id, damageAtDistanceOf(def, d), def.id, dx, dy, dz);
     }
   }
 
@@ -1396,7 +1396,7 @@ export class Simulation {
           const imp = knockbackImpulseOf(def, direct);
           hitPlayer.vel[0] += ndx * imp; hitPlayer.vel[1] += imp * 0.4; hitPlayer.vel[2] += ndz * imp;
         } else if (hitEntity >= 0) {
-          this.damageEntity(hitEntity, this.projOwner[i], this.projDamage[i], ndx, ndy, ndz);
+          this.damageEntity(hitEntity, this.projOwner[i], this.projDamage[i], weapon, ndx, ndy, ndz);
         }
         this.detonate(i, px, py, pz, hitWorld ? RemoveReason.HIT_WORLD : RemoveReason.HIT_ENTITY);
         continue;
@@ -1467,7 +1467,7 @@ export class Simulation {
         const dmg = splashDamageAtOf(def, d);
         if (dmg > 0.5 && !fromMonster) {
           const inv = d > 1e-4 ? 1 / d : 0;
-          this.damageEntity(e, ownerId, dmg, cx * inv, cy * inv, cz * inv);
+          this.damageEntity(e, ownerId, dmg, weapon, cx * inv, cy * inv, cz * inv);
         }
       }
     }
@@ -1521,6 +1521,27 @@ export class Simulation {
     if (fatal) this.killPlayer(victim, attackerId, weaponId, flags);
   }
 
+  /**
+   * The kill-event flags a WEAPON implies, and the ONLY place either producer
+   * derives them.
+   *
+   * It is a method rather than two copies of one line because the two copies
+   * is what went wrong: `killPlayer` set KILL_MELEE from the weapon and the
+   * entity branch of `damageEntity` wrote a flat `flags = 0`, so chainsawing a
+   * player was a melee kill on the wire and chainsawing a demon was not. The
+   * killfeed draws its glyph from exactly these bits
+   * (client/src/modes/deathmatch/killfeed.ts), so the same swing rendered two
+   * different ways depending on what it hit.
+   *
+   * `getWeapon`, not the arsenal, and on purpose: FireKind is not a
+   * variant-able field (VARIANTS.md §1.5 — a variant that needs a new FireKind
+   * is BUILD-class), so the archetype answers this and no lookup of the
+   * killer's equipped slot is needed to know a chainsaw was a chainsaw.
+   */
+  private weaponKillFlags(weaponId: number): number {
+    return getWeapon(weaponId).kind === FireKind.MELEE ? KILL_MELEE : 0;
+  }
+
   private killPlayer(victim: PlayerEntity, killerId: number, weaponId: number, dmgFlags: number): void {
     victim.health = 0;
     victim.dead = true;
@@ -1530,13 +1551,8 @@ export class Simulation {
     victim.reloading = false;
     victim.respawnAtMs = this.nowMs + RESPAWN_DELAY_MS;
 
-    let killFlags = 0;
+    let killFlags = this.weaponKillFlags(weaponId);
     if (dmgFlags & DMG_HEADSHOT) killFlags |= KILL_HEADSHOT;
-    // `getWeapon`, not the arsenal, and on purpose: FireKind is not a
-    // variant-able field (VARIANTS.md §1.5 — a variant that needs a new
-    // FireKind is BUILD-class), so the archetype answers this and no lookup of
-    // the killer's equipped slot is needed to know a chainsaw was a chainsaw.
-    if (getWeapon(weaponId).kind === FireKind.MELEE) killFlags |= KILL_MELEE;
 
     let streak = 0;
     const killer = killerId !== 0 && killerId !== victim.id ? this.playerById.get(killerId) : undefined;
@@ -1640,7 +1656,22 @@ export class Simulation {
     }
   }
 
-  damageEntity(slot: number, attackerId: number, amount: number, dirX: number, dirY: number, dirZ: number): void {
+  /**
+   * `weaponId` is a PARAMETER for the same reason it is one on `damagePlayer`
+   * and `killPlayer`: the weapon that fired is not the weapon the attacker is
+   * holding when the damage lands. This block used to write
+   * `e.weaponId = attacker.weapon`, read at the moment the entity died, and a
+   * rocket has `projectileLifeMs` 4000 to be in the air across a weapon
+   * switch — fire at a demon, switch to the chainsaw, let the rocket land, and
+   * the kill event named the chainsaw. Hitscan and melee resolve inside
+   * `tryFire` and never noticed; every projectile and every splash did.
+   *
+   * The projectile already keeps its firing identity for exactly this reason
+   * (`projWeapon` / `projVariant`, see `spawnProjectile`), so the value is
+   * sitting there at both projectile call sites — it only had to be carried
+   * the last step, to the event.
+   */
+  damageEntity(slot: number, attackerId: number, amount: number, weaponId: number, dirX: number, dirY: number, dirZ: number): void {
     if (this.entActive[slot] !== 1 || amount <= 0) return;
     if (this.entType[slot] >= EntityType.PICKUP_HEALTH) return;
     this.entHealth[slot] -= amount;
@@ -1656,7 +1687,15 @@ export class Simulation {
     this.entVZ[slot] += dirZ * k;
 
     const attacker = this.playerById.get(attackerId);
-    this.pushDamage(attackerId, 0, Math.round(amount), 0, 0, dirX, dirY, dirZ, Math.max(0, this.entHealth[slot]), 0);
+    // `weaponId`, where a literal 0 used to sit — so every hit on a monster
+    // told the attacker's client it had been dealt by the PISTOL. Nothing on
+    // the client reads this field today (`Game.onDamage` uses amount, flags
+    // and the direction; the hitmarker takes flags and amount), which is the
+    // only reason it was never seen. A wire field that names a weapon and
+    // always says the same wrong weapon is a trap for the first reader that
+    // does look, and the right value is now a parameter away. Same layout,
+    // same u8, same offset: a value fix, not a format change.
+    this.pushDamage(attackerId, 0, Math.round(amount), weaponId, 0, dirX, dirY, dirZ, Math.max(0, this.entHealth[slot]), 0);
 
     if (this.entHealth[slot] <= 0) {
       this.entState[slot] |= ES_DEAD;
@@ -1669,8 +1708,8 @@ export class Simulation {
           const e = this.killEvents[this.killCount++];
           e.killerId = attacker.id;
           e.victimId = 0;
-          e.weaponId = attacker.weapon;
-          e.flags = 0;
+          e.weaponId = weaponId;
+          e.flags = this.weaponKillFlags(weaponId);
           e.killerStreak = attacker.streak;
         }
       }
