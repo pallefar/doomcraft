@@ -65,8 +65,8 @@ import { BUILTIN_CONTENT_HASH } from '@doomcraft/shared/packs';
 import {
   MAX_VARIANT_TABLE_BYTES,
   createVariantTableMessage, decodeVariantTable, encodeVariantTable,
-  overlaysFromWire, wireEntriesFor,
-  type VariantWireEntry, type VariantsManifest,
+  overlaysFromWire, variantNamesFor, wireEntriesFor,
+  type VariantNameEntry, type VariantWireEntry, type VariantsManifest,
 } from '@doomcraft/shared/variants';
 import { BASE_SLOT, SessionArsenal } from '@doomcraft/shared/arsenal';
 import { defaultFlagBits, flagOn } from '@doomcraft/shared/flags';
@@ -355,6 +355,18 @@ export class Room implements NetHost {
    * beside them on the wire is written in.
    */
   readonly variantEntries: readonly VariantWireEntry[];
+  /**
+   * The DISPLAY NAMES for those rows, in that order (V4d).
+   *
+   * Built from `variantEntries` rather than from the manifest's own array, so
+   * the thing that carries the name is the thing that carries the slot: index
+   * `i` here is row `i` there is slot `i + 1` in the arsenal. The manifest is
+   * consulted for a string and for nothing else. `variantEntries` is what the
+   * wire will carry and what `variantSlotsFor` resolves a claim against, and
+   * a name resolved through any OTHER ordering is the V4c failure again with a
+   * label instead of a gun.
+   */
+  readonly variantNames: readonly VariantNameEntry[];
   private readonly variantClaims?: (conn: Connection) => Uint8Array;
 
   seed: number;
@@ -508,6 +520,7 @@ export class Room implements NetHost {
      * and tells its clients count 0, so the two sides still agree — agreement
      * over content, every time. */
     this.variantEntries = decodeRoomVariantTable(options.variants ?? null);
+    this.variantNames = variantNamesFor(options.variants ?? null, this.variantEntries);
     this.sim = new Simulation(
       this.world, this.seed, SessionArsenal.from(overlaysFromWire(this.variantEntries)),
     );
@@ -1177,6 +1190,8 @@ export class Room implements NetHost {
 
   /** `NetHost.variantTable` — what every joiner is told this room fires with. */
   get variantTable(): readonly VariantWireEntry[] { return this.variantEntries; }
+  /** `NetHost.variantNameTable` — what those rows are CALLED. Display only. */
+  get variantNameTable(): readonly VariantNameEntry[] { return this.variantNames; }
 
   onHello(conn: Connection, name: string, skin: number, caps: number): number {
     const humans = this.humanCount;

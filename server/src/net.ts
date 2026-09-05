@@ -93,7 +93,8 @@ import {
   rleMaxBytes,
 } from '@doomcraft/shared';
 import {
-  encodeVariantTable, type VariantWireEntry,
+  encodeVariantNames, encodeVariantTable,
+  type VariantNameEntry, type VariantWireEntry,
 } from '@doomcraft/shared/variants';
 import {
   C2S_MODE,
@@ -296,6 +297,12 @@ export interface NetHost {
    * arsenal — the browser Worker and every older test harness.
    */
   readonly variantTable?: readonly VariantWireEntry[];
+  /**
+   * The display names for those rows, in that order (V4d). Absent = a host
+   * that sends the table and no names, which is every client that then falls
+   * back to the archetype's name — the documented degradation, not a fault.
+   */
+  readonly variantNameTable?: readonly VariantNameEntry[];
 }
 
 export interface ConnectionStats {
@@ -693,6 +700,21 @@ export class NetHub {
     if (table !== undefined && (conn.caps & CAP_VARIANTS) !== 0) {
       encodeVariantTable(w, table, conn.player?.variantSlots ?? this.emptySlots);
       conn.send(w.copy());
+
+      /* AND WHAT THOSE ROWS ARE CALLED, immediately after the table (V4d).
+       *
+       * A second message rather than a wider one: `VARIANT_TABLE`'s layout is
+       * frozen behind a golden vector in shared/src/version.test.ts. Same
+       * lifetime, same gate — a bundle without `CAP_VARIANTS` has had every
+       * claim resolved to the base and would have nothing to name.
+       *
+       * Nothing simulates from it. A client that never sees it renders the
+       * archetype's name, which is what every client renders today. */
+      const names = this.host.variantNameTable;
+      if (names !== undefined && names.length > 0) {
+        encodeVariantNames(w, names);
+        conn.send(w.copy());
+      }
     }
   }
 
@@ -963,7 +985,9 @@ export class NetHub {
 
     for (let i = 0; i < sim.killCount; i++) {
       const e = sim.killEvents[i];
-      encodeKill(w, e.killerId, e.victimId, e.weaponId, e.flags, e.killerStreak);
+      encodeKill(
+        w, e.killerId, e.victimId, e.weaponId, e.flags, e.killerStreak, e.variantSlot,
+      );
       const packet = w.copy();
       for (let c = 0; c < this.connections.length; c++) {
         const conn = this.connections[c];

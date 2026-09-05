@@ -154,6 +154,28 @@ export enum S2C {
    * 1.1589780174433289e24, and never know.
    */
   VARIANT_TABLE = 13,
+  /**
+   * The DISPLAY NAMES for the rows this room pinned: `id -> name`, in the same
+   * order `VARIANT_TABLE` sent them. Sent once, immediately after it.
+   *
+   * A SEPARATE MESSAGE RATHER THAN A WIDER `VARIANT_TABLE`, and the reason is
+   * two lines up: that layout is FROZEN and `shared/src/version.test.ts` pins
+   * a golden vector for it. Appending `str name` after the id would move the
+   * golden for a reason unrelated to the table's contents, and a v3 decoder
+   * handed those bytes would read "Slug"'s length byte as `base` and its four
+   * letters as the first float, 1.1589780174433289e24, and never know.
+   *
+   * Additive, and therefore NOT a protocol bump, on the same two grounds as
+   * `VARIANT_TABLE`: `protocolFingerprint()` names the ids frozen at v3 and
+   * stops at `s2c.chunkz`, and `client/src/net/client.ts` has always had
+   * `default: break` on an unknown id.
+   *
+   * NOTHING SIMULATES FROM THIS. A name is what a player is TOLD they are
+   * holding; every number a shot uses arrives on `VARIANT_TABLE`. That is why
+   * a client that never receives this message is not degraded — it renders
+   * the base weapon's name, which is exactly what it renders today.
+   */
+  VARIANT_NAMES = 14,
 }
 
 /* ------------------------------------------------------------------------ *
@@ -1157,12 +1179,27 @@ export interface KillEvent {
   flags: number;
   /** The killer's streak after this kill. */
   killerStreak: number;
+  /**
+   * The variant slot the KILLING SHOT WAS FIRED WITH — 0 for the base weapon.
+   *
+   * Phase V4d, and it is a ninth byte rather than a lookup for the same reason
+   * `Simulation.projVariant` exists: by the time a kill resolves the killer may
+   * have switched weapons, and a rocket outlives the switch. Shot identity
+   * propagates from the firing path; nothing reads an equipped slot here.
+   *
+   * 0 FROM AN EIGHT-BYTE MESSAGE, EXPLICITLY. `decodeKill` mutates a
+   * caller-owned object in place and every caller in the tree reuses one, so an
+   * absent byte that merely left the field alone would make a base-weapon kill
+   * inherit the PREVIOUS kill's slot and name the wrong gun in the feed.
+   */
+  variantSlot: number;
 }
 export function createKillEvent(): KillEvent {
-  return { killerId: 0, victimId: 0, weaponId: 0, flags: 0, killerStreak: 0 };
+  return { killerId: 0, victimId: 0, weaponId: 0, flags: 0, killerStreak: 0, variantSlot: 0 };
 }
 export function encodeKill(
-  w: PacketWriter, killerId: number, victimId: number, weaponId: number, flags: number, killerStreak: number,
+  w: PacketWriter, killerId: number, victimId: number, weaponId: number, flags: number,
+  killerStreak: number, variantSlot = 0,
 ): PacketWriter {
   w.reset();
   w.u8(S2C.KILL);
@@ -1171,6 +1208,10 @@ export function encodeKill(
   w.u8(weaponId & 0xff);
   w.u8(flags & 0xff);
   w.u8(killerStreak > 255 ? 255 : killerStreak);
+  // The ninth byte. An old decoder reads its five fields, leaves this unread,
+  // and is unaffected: the client resets its reader per message, so a trailing
+  // byte can never be mistaken for the next message's opcode.
+  w.u8(variantSlot & 0xff);
   return w;
 }
 export function decodeKill(r: PacketReader, out: KillEvent): KillEvent {
@@ -1180,6 +1221,10 @@ export function decodeKill(r: PacketReader, out: KillEvent): KillEvent {
   out.weaponId = r.u8();
   out.flags = r.u8();
   out.killerStreak = r.u8();
+  // An eight-byte KILL is an OLD SERVER or a replayed capture, and `out` is
+  // reused: the reset is the point, not the read. Without it the last kill by
+  // a variant renames every base-weapon kill after it.
+  out.variantSlot = r.remaining >= 1 ? r.u8() : 0;
   return out;
 }
 

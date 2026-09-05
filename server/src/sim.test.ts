@@ -628,7 +628,7 @@ describe('room lifecycle', () => {
     placeAt(victim.player, { x: spot.x + 3, y: spot.y, z: spot.z });
     victim.player.spawnProtectUntilMs = 0;
 
-    room.sim.damagePlayer(victim.player, attacker.player.id, 250, 0, 0, 1, 0, 0);
+    room.sim.damagePlayer(victim.player, attacker.player.id, 250, 0, 0, 1, 0, 0, 0);
     expect(victim.player.dead).toBe(true);
     expect(attacker.player.kills).toBe(1);
     room.step();
@@ -644,7 +644,7 @@ describe('room lifecycle', () => {
     const room = makeRoom(1010);
     const client = join(room, 'Phoenix');
     client.player.spawnProtectUntilMs = 0;
-    room.sim.damagePlayer(client.player, 0, 500, 0, 0, 0, 1, 0);
+    room.sim.damagePlayer(client.player, 0, 500, 0, 0, 0, 1, 0, 0);
     expect(client.player.dead).toBe(true);
     for (let i = 0; i < 60; i++) room.step();
     expect(client.player.dead).toBe(false);
@@ -852,7 +852,7 @@ describe('doom mechanics', () => {
     client.player.kills = 3;
 
     // attackerId 0 is how a monster, lava or a long fall deals damage.
-    room.sim.damagePlayer(client.player, 0, 500, 0, 0, 0, 1, 0);
+    room.sim.damagePlayer(client.player, 0, 500, 0, 0, 0, 1, 0, 0);
     expect(client.player.dead).toBe(true);
     expect(client.player.deaths).toBe(1);
     expect(client.player.kills).toBe(3);
@@ -866,7 +866,7 @@ describe('doom mechanics', () => {
     p.spawnProtectUntilMs = 0;
     p.health = 100;
     p.armor = 100;
-    room.sim.damagePlayer(p, 0, 100, 0, 0, 0, 1, 0);
+    room.sim.damagePlayer(p, 0, 100, 0, 0, 0, 1, 0, 0);
     // ARMOR_ABSORB is 0.33: 33 to the vest, 67 to the ribs.
     expect(p.armor).toBeCloseTo(67, 3);
     expect(p.health).toBeCloseTo(33, 3);

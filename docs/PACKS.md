@@ -486,7 +486,7 @@ A `u32` hash tested against zero. A host running an edited `e1m1-hangar.json` an
 
 Append after `buildId`: `u8 packCount`, then `packCount × (u8 kind, u16 version)` = **1 + 3n bytes**, 15 bytes for five packs, once per join on an already-open socket.
 
-- `PROTOCOL_VERSION` does **not** move. `protocolFingerprint()` (`shared/src/version.ts:307-322`) lists frozen ids **by name** and does not fold `SESSION_CONFIG`'s layout. `S2C.MATCH_AWARD = 12` just proved this in the working tree. Ids **13, 14, 15** are free; `isModeMessage` hard-codes 16–18 (`shared/src/modes.ts:595`).
+- `PROTOCOL_VERSION` does **not** move. `protocolFingerprint()` (`shared/src/version.ts:307-322`) lists frozen ids **by name** and does not fold `SESSION_CONFIG`'s layout. `S2C.MATCH_AWARD = 12` just proved this in the working tree. Id **15** is free — 13 is `VARIANT_TABLE` (V3) and 14 is `VARIANT_NAMES` (V4d); `isModeMessage` hard-codes 16–18 (`shared/src/modes.ts:595`).
 - **The trap is the decoder.** `decodeSessionConfig` (`shared/src/protocol.ts:858-867`) reads **every field unconditionally** — no `r.remaining >=` guard anywhere, unlike `decodeHello` (`:574`). That is safe only because the message shipped whole at protocol 3. A new client reading an old host's 20-byte message would run off the end.
 - **And the existing golden vector cannot catch a missing guard**, because an additive change leaves it passing *by design*. So the change costs: the guard, a **second** golden vector for the extended message, a truncated-buffer decode test, and keeping the old vector as the assertion that the change was additive. Neither vector alone is a test.
 

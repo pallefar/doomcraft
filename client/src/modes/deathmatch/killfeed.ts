@@ -263,6 +263,16 @@ export interface KillfeedOptions {
   nameOf: (id: number) => string;
   /** True when this id is a bot, so the feed can grey it. */
   isBot?: (id: number) => boolean;
+  /**
+   * What to CALL the gun a shot was fired with (V4d).
+   *
+   * Injected rather than imported, because the answer depends on the table
+   * THIS ROOM pinned and this module must not reach for a live or compiled
+   * one. Absent = the archetype's name, which is what this feed said before
+   * variants existed and what it still says when the names message never
+   * arrives.
+   */
+  weaponLabel?: (weaponId: number, variantSlot: number) => string;
   maxRows?: number;
   /** How long a row stays before it fades. */
   rowLifeMs?: number;
@@ -275,6 +285,8 @@ export interface KillfeedEvent {
   weaponId: number;
   flags: number;
   killerStreak: number;
+  /** The variant slot the killing shot was FIRED with; 0 is the base (V4d). */
+  variantSlot: number;
 }
 
 interface Row {
@@ -376,7 +388,9 @@ export class Killfeed {
       row.lastWeapon = e.weaponId;
       row.lastFlags = e.flags;
     }
-    const gunTitle = world ? 'Hell' : weaponName(e.weaponId);
+    const gunTitle = world
+      ? 'Hell'
+      : this.opts.weaponLabel?.(e.weaponId, e.variantSlot) ?? weaponName(e.weaponId);
     row.gun.setAttribute('aria-label', gunTitle);
 
     if (victimName !== row.lastVictim) {

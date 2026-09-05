@@ -623,13 +623,22 @@ export interface SimDamageEvent {
 }
 export interface SimKillEvent {
   killerId: number; victimId: number; weaponId: number; flags: number; killerStreak: number;
+  /**
+   * The variant slot the KILLING SHOT WAS FIRED WITH. 0 is the base weapon.
+   *
+   * V4d. It is a parameter on every damage path for the same reason `weaponId`
+   * is one (see `damageEntity`): the gun that fired is not the gun the killer
+   * is holding when the damage lands, and a rocket has `projectileLifeMs` 4000
+   * to be in the air across a weapon switch.
+   */
+  variantSlot: number;
 }
 
 function makeDamageEvent(): SimDamageEvent {
   return { attackerId: 0, victimId: 0, amount: 0, weaponId: 0, flags: 0, dirX: 0, dirY: 0, dirZ: 0, healthAfter: 0, armorAfter: 0 };
 }
 function makeKillEvent(): SimKillEvent {
-  return { killerId: 0, victimId: 0, weaponId: 0, flags: 0, killerStreak: 0 };
+  return { killerId: 0, victimId: 0, weaponId: 0, flags: 0, killerStreak: 0, variantSlot: 0 };
 }
 
 const SCRATCH_DIR = new Float64Array(3);
@@ -922,7 +931,11 @@ export class Simulation {
 
     if (this.fallDamageEnabled && p.landImpact > FALL_DAMAGE_MIN_SPEED) {
       const dmg = Math.min(FALL_DAMAGE_MAX, (p.landImpact - FALL_DAMAGE_MIN_SPEED) * FALL_DAMAGE_PER_MPS);
-      if (dmg >= 1) this.damagePlayer(p, 0, dmg, WeaponId.PISTOL, DMG_FALL | DMG_ENVIRONMENT, 0, -1, 0);
+      if (dmg >= 1) {
+        this.damagePlayer(
+          p, 0, dmg, WeaponId.PISTOL, DMG_FALL | DMG_ENVIRONMENT, 0, -1, 0, BASE_SLOT,
+        );
+      }
     }
   }
 
@@ -1215,7 +1228,7 @@ export class Simulation {
 
     if (monster >= 0) {
       const dmg = damageAtDistanceOf(def, bestT);
-      this.damageEntity(monster, shooter.id, dmg, def.id, dx, dy, dz);
+      this.damageEntity(monster, shooter.id, dmg, def.id, dx, dy, dz, def.variantSlot);
       return;
     }
     if (!victim) return;
@@ -1226,7 +1239,7 @@ export class Simulation {
       dmg *= def.headshotMultiplier > 0 ? def.headshotMultiplier : HEADSHOT_MULTIPLIER;
       flags |= DMG_HEADSHOT;
     }
-    this.damagePlayer(victim, shooter.id, dmg, def.id, flags, dx, dy, dz);
+    this.damagePlayer(victim, shooter.id, dmg, def.id, flags, dx, dy, dz, def.variantSlot);
     const imp = knockbackImpulseOf(def, dmg);
     victim.vel[0] += dx * imp;
     victim.vel[1] += Math.max(0, dy) * imp + imp * 0.25;
@@ -1251,7 +1264,7 @@ export class Simulation {
       if (d > range + PLAYER_HALF_WIDTH) continue;
       if (d > 1e-4 && (cx * dx + cy * dy + cz * dz) / d < cosLimit) continue;
       const dmg = damageAtDistanceOf(def, d);
-      this.damagePlayer(o, attacker.id, dmg, def.id, 0, dx, dy, dz);
+      this.damagePlayer(o, attacker.id, dmg, def.id, 0, dx, dy, dz, def.variantSlot);
       const imp = knockbackImpulseOf(def, dmg);
       o.vel[0] += dx * imp; o.vel[1] += imp * 0.5; o.vel[2] += dz * imp;
     }
@@ -1263,7 +1276,9 @@ export class Simulation {
       const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
       if (d > range + this.entHalfW[e]) continue;
       if (d > 1e-4 && (cx * dx + cy * dy + cz * dz) / d < cosLimit) continue;
-      this.damageEntity(e, attacker.id, damageAtDistanceOf(def, d), def.id, dx, dy, dz);
+      this.damageEntity(
+        e, attacker.id, damageAtDistanceOf(def, d), def.id, dx, dy, dz, def.variantSlot,
+      );
     }
   }
 
@@ -1392,11 +1407,16 @@ export class Simulation {
           // See detonate(): monster projectiles must not be credited to the
           // player who happens to share the monster's id.
           const attacker = this.projFromMonster[i] === 1 ? 0 : this.projOwner[i];
-          this.damagePlayer(hitPlayer, attacker, direct, weapon, 0, ndx, ndy, ndz);
+          this.damagePlayer(
+            hitPlayer, attacker, direct, weapon, 0, ndx, ndy, ndz, this.projVariant[i],
+          );
           const imp = knockbackImpulseOf(def, direct);
           hitPlayer.vel[0] += ndx * imp; hitPlayer.vel[1] += imp * 0.4; hitPlayer.vel[2] += ndz * imp;
         } else if (hitEntity >= 0) {
-          this.damageEntity(hitEntity, this.projOwner[i], this.projDamage[i], weapon, ndx, ndy, ndz);
+          this.damageEntity(
+            hitEntity, this.projOwner[i], this.projDamage[i], weapon, ndx, ndy, ndz,
+            this.projVariant[i],
+          );
         }
         this.detonate(i, px, py, pz, hitWorld ? RemoveReason.HIT_WORLD : RemoveReason.HIT_ENTITY);
         continue;
@@ -1440,7 +1460,8 @@ export class Simulation {
             // kills belong to the world.
             const attacker = fromMonster ? 0 : ownerId;
             this.damagePlayer(o, attacker, dmg, weapon, DMG_SPLASH | (self ? DMG_SELF : 0),
-              d > 1e-4 ? cx / d : 0, d > 1e-4 ? cy / d : 1, d > 1e-4 ? cz / d : 0);
+              d > 1e-4 ? cx / d : 0, d > 1e-4 ? cy / d : 1, d > 1e-4 ? cz / d : 0,
+              def.variantSlot);
           }
         }
 
@@ -1467,7 +1488,9 @@ export class Simulation {
         const dmg = splashDamageAtOf(def, d);
         if (dmg > 0.5 && !fromMonster) {
           const inv = d > 1e-4 ? 1 / d : 0;
-          this.damageEntity(e, ownerId, dmg, weapon, cx * inv, cy * inv, cz * inv);
+          this.damageEntity(
+            e, ownerId, dmg, weapon, cx * inv, cy * inv, cz * inv, def.variantSlot,
+          );
         }
       }
     }
@@ -1492,9 +1515,19 @@ export class Simulation {
    * Damage
    * -------------------------------------------------------------- */
 
+  /**
+   * `variantSlot` is REQUIRED, and that is the guard.
+   *
+   * A default of `BASE_SLOT` would let the next firing path added to this file
+   * forget to propagate and compile clean, reporting slot 0 for a variant kill
+   * with nothing anywhere saying so — the same silence V4c's `+ 1` had. Making
+   * it a parameter with no default turns that into a type error at the call
+   * site, which is where the answer is known. The environment paths pass
+   * `BASE_SLOT` explicitly because a lava pool really does fire the base.
+   */
   damagePlayer(
     victim: PlayerEntity, attackerId: number, amount: number, weaponId: number, flags: number,
-    dirX: number, dirY: number, dirZ: number,
+    dirX: number, dirY: number, dirZ: number, variantSlot: number,
   ): void {
     if (victim.dead || amount <= 0 || !victim.active) return;
     if (victim.spawnProtectUntilMs > this.nowMs && (flags & (DMG_SELF | DMG_FALL | DMG_ENVIRONMENT)) === 0) return;
@@ -1518,7 +1551,7 @@ export class Simulation {
     this.pushDamage(attackerId, victim.id, Math.round(amount), weaponId, flags, dirX, dirY, dirZ,
       Math.max(0, Math.round(victim.health)), Math.round(victim.armor));
 
-    if (fatal) this.killPlayer(victim, attackerId, weaponId, flags);
+    if (fatal) this.killPlayer(victim, attackerId, weaponId, flags, variantSlot);
   }
 
   /**
@@ -1542,7 +1575,10 @@ export class Simulation {
     return getWeapon(weaponId).kind === FireKind.MELEE ? KILL_MELEE : 0;
   }
 
-  private killPlayer(victim: PlayerEntity, killerId: number, weaponId: number, dmgFlags: number): void {
+  private killPlayer(
+    victim: PlayerEntity, killerId: number, weaponId: number, dmgFlags: number,
+    variantSlot: number,
+  ): void {
     victim.health = 0;
     victim.dead = true;
     victim.deaths++;
@@ -1582,6 +1618,12 @@ export class Simulation {
       e.weaponId = weaponId;
       e.flags = killFlags;
       e.killerStreak = streak;
+      // ASSIGNED ON EVERY PATH, INCLUDING THE ZERO. `killEvents` is a pool of
+      // 32 objects built once at construction and handed out again on the next
+      // round; a field this producer skips keeps the value the PREVIOUS
+      // occupant left in it, so a base-weapon kill would inherit the last
+      // variant kill's slot and the feed would name a gun nobody fired.
+      e.variantSlot = variantSlot;
     }
   }
 
@@ -1671,7 +1713,10 @@ export class Simulation {
    * sitting there at both projectile call sites — it only had to be carried
    * the last step, to the event.
    */
-  damageEntity(slot: number, attackerId: number, amount: number, weaponId: number, dirX: number, dirY: number, dirZ: number): void {
+  damageEntity(
+    slot: number, attackerId: number, amount: number, weaponId: number,
+    dirX: number, dirY: number, dirZ: number, variantSlot: number,
+  ): void {
     if (this.entActive[slot] !== 1 || amount <= 0) return;
     if (this.entType[slot] >= EntityType.PICKUP_HEALTH) return;
     this.entHealth[slot] -= amount;
@@ -1711,6 +1756,9 @@ export class Simulation {
           e.weaponId = weaponId;
           e.flags = this.weaponKillFlags(weaponId);
           e.killerStreak = attacker.streak;
+          // The second producer. See the note in `killPlayer`: both of them
+          // write into the same pool, so both of them must write every field.
+          e.variantSlot = variantSlot;
         }
       }
     }
@@ -1882,7 +1930,11 @@ export class Simulation {
         moveStep(p, 0, 0, 0, dt, this.world);
         if (p.landImpact > FALL_DAMAGE_MIN_SPEED) {
           const dmg = Math.min(FALL_DAMAGE_MAX, (p.landImpact - FALL_DAMAGE_MIN_SPEED) * FALL_DAMAGE_PER_MPS);
-          if (dmg >= 1) this.damagePlayer(p, 0, dmg, WeaponId.PISTOL, DMG_FALL | DMG_ENVIRONMENT, 0, -1, 0);
+          if (dmg >= 1) {
+        this.damagePlayer(
+          p, 0, dmg, WeaponId.PISTOL, DMG_FALL | DMG_ENVIRONMENT, 0, -1, 0, BASE_SLOT,
+        );
+      }
         }
       }
       p.hadInputThisTick = false;
@@ -1907,7 +1959,9 @@ export class Simulation {
       if (p.envDamageAccum >= 1) {
         const whole = Math.floor(p.envDamageAccum);
         p.envDamageAccum -= whole;
-        this.damagePlayer(p, 0, whole, WeaponId.PISTOL, DMG_ENVIRONMENT, 0, 1, 0);
+        this.damagePlayer(
+          p, 0, whole, WeaponId.PISTOL, DMG_ENVIRONMENT, 0, 1, 0, BASE_SLOT,
+        );
       }
     } else if (p.envDamageAccum > 0) {
       p.envDamageAccum = 0;
@@ -1920,7 +1974,9 @@ export class Simulation {
         if (p.envDamageAccum >= 1) {
           const whole = Math.floor(p.envDamageAccum);
           p.envDamageAccum -= whole;
-          this.damagePlayer(p, 0, whole, WeaponId.PISTOL, DMG_ENVIRONMENT, 0, 1, 0);
+          this.damagePlayer(
+            p, 0, whole, WeaponId.PISTOL, DMG_ENVIRONMENT, 0, 1, 0, BASE_SLOT,
+          );
         }
       }
     } else if (p.breath < BREATH_SECONDS) {

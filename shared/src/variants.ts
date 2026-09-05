@@ -51,7 +51,7 @@ import {
   type PacketReader, type PacketWriter, S2C,
 } from './protocol.ts';
 import {
-  FireKind, WEAPON_COUNT, WeaponId, WEAPONS, type WeaponDef,
+  FireKind, WEAPON_COUNT, weaponName, WeaponId, WEAPONS, type WeaponDef,
 } from './weapons.ts';
 
 /* ------------------------------------------------------------------------ *
@@ -1269,4 +1269,188 @@ export function overlaysFromWire(
     for (let f = 0; f < VARIANT_FIELDS.length; f++) over[VARIANT_FIELDS[f]] = e.values[f];
     return { id: e.id, base: e.base, over };
   });
+}
+
+/* ------------------------------------------------------------------------ *
+ * The wire — S2C.VARIANT_NAMES
+ *
+ * Phase V4d. The killfeed cannot tell two shotgun variants apart, because
+ * `VariantWireEntry` carries an id, an archetype and sixteen numbers and no
+ * NAME. This is the name, and it is a separate message rather than a wider
+ * `VARIANT_TABLE` for the reason `S2C.VARIANT_NAMES` states: that layout is
+ * frozen behind a golden vector, and widening it would move the golden for a
+ * reason that has nothing to do with the table's contents.
+ *
+ * FOUR THINGS ABOUT THIS MESSAGE, EACH ONE A DECISION.
+ *
+ * 1. IT KEYS BY ID, AND IT IS STILL RESOLVED THROUGH THE ROOM'S ORDERING.
+ *    `variantDisplayName` goes slot -> `entries[slot - 1]` -> that row's id ->
+ *    this map. The ordering that resolves a slot is therefore the one the room
+ *    pinned and sent, never `releases.live()` — the same refusal
+ *    `variantSlotsFor` makes one level up (server/src/variantClaims.ts) and
+ *    for the same measured reason: two tables holding the same rows in the
+ *    opposite order would name the OTHER gun with no error anywhere.
+ *
+ * 2. AN ABSENT NAME IS THE BASE WEAPON'S NAME, NEVER A BLANK AND NEVER AN ID.
+ *    A client that never receives this message — an old server, a dropped
+ *    packet, a room with no variants — renders exactly what it renders today.
+ *    Nothing on this wire is load-bearing for simulation, so degrading to the
+ *    archetype's name is a complete answer rather than a placeholder.
+ *
+ * 3. NAMES ARE MEASURED IN BYTES, NOT IN CODE UNITS. `MAX_VARIANT_NAME` is 40
+ *    UTF-16 code units and `parseVariantsManifest` slices to it, so a name of
+ *    forty BMP characters outside Latin-1 is up to 120 UTF-8 bytes. Budgeting
+ *    40 would silently truncate every non-Latin display name mid-word — the
+ *    same units mistake that cost V4b its 160-byte item-line cap. The bound
+ *    below is 10 882 bytes at the maximum row count and the maximum name,
+ *    under `MAX_VARIANT_TABLE_BYTES`, so nothing has to be truncated.
+ *
+ * 4. THE DECODER DROPS A NAME IT WOULD NOT RENDER RATHER THAN REFUSING THE
+ *    MESSAGE. `parseVariantsManifest` REFUSES a control character in a name,
+ *    because a newline forges the review diff — but that is the authority over
+ *    content, and this is a renderer's front door. On the peer topology the
+ *    "server" is another player's browser (shared/src/trust.ts) and can send
+ *    precisely these bytes; refusing the whole message there would blank every
+ *    OTHER row's name too, and a display string is not something a receiver
+ *    should ever invent by stripping. So a name that fails the display rules
+ *    becomes '' and that row falls back to the archetype, which is decision 2.
+ * ------------------------------------------------------------------------ */
+
+/** One row's display name, keyed by the same id `VARIANT_TABLE` sent. */
+export interface VariantNameEntry {
+  readonly id: string;
+  readonly name: string;
+}
+
+export interface VariantNamesMessage {
+  names: VariantNameEntry[];
+}
+
+export function createVariantNamesMessage(): VariantNamesMessage {
+  return { names: [] };
+}
+
+/**
+ * The byte budget for one display name: `MAX_VARIANT_NAME` UTF-16 code units,
+ * every one of which can be three UTF-8 bytes.
+ *
+ * Stated as arithmetic rather than as a literal so it cannot drift away from
+ * the constant it is made of, and asserted in the tests. A surrogate pair is
+ * two code units and four bytes, i.e. cheaper per unit than the BMP worst
+ * case, so 3x is the real bound and not an approximation.
+ */
+export const MAX_VARIANT_NAME_BYTES = MAX_VARIANT_NAME * 3;
+
+/**
+ * Worst case on the wire: 1 opcode + 1 count + 64 rows of
+ * (1 + 48 id bytes + 1 + 120 name bytes) = 10 882.
+ */
+export const MAX_VARIANT_NAMES_BYTES =
+  2 + MAX_VARIANTS_PER_PACK * (1 + MAX_CONTENT_ID_LENGTH + 1 + MAX_VARIANT_NAME_BYTES);
+
+/**
+ * The names for a room's rows, IN THE ROW ORDER, from the manifest those rows
+ * were built from.
+ *
+ * `entries` is the authority on order and membership — it is what the room
+ * encoded and will send — and the manifest is consulted only for the string.
+ * A row whose id the manifest does not know gets '', which resolves to the
+ * archetype's name rather than to a blank.
+ */
+export function variantNamesFor(
+  manifest: VariantsManifest | null,
+  entries: readonly VariantWireEntry[],
+): VariantNameEntry[] {
+  const byId = new Map<string, string>();
+  if (manifest !== null) for (const v of manifest.variants) byId.set(v.id, v.name);
+  return entries.map((e) => ({ id: e.id, name: byId.get(e.id) ?? '' }));
+}
+
+export function encodeVariantNames(
+  w: PacketWriter, names: readonly VariantNameEntry[],
+): PacketWriter {
+  w.reset();
+  w.u8(S2C.VARIANT_NAMES);
+  const n = names.length > MAX_VARIANTS_PER_PACK ? MAX_VARIANTS_PER_PACK : names.length;
+  w.u8(n);
+  for (let i = 0; i < n; i++) {
+    w.str(names[i].id, MAX_CONTENT_ID_LENGTH);
+    w.str(names[i].name, MAX_VARIANT_NAME_BYTES);
+  }
+  return w;
+}
+
+/** A display name this renderer will show, or '' — see decision 4 above. */
+function displayName(raw: string): string {
+  const s = raw.slice(0, MAX_VARIANT_NAME);
+  if (s.length === 0) return '';
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(s)) return '';
+  return s;
+}
+
+/**
+ * Decode, or refuse — never half of one, and `out` is untouched until every
+ * byte has been read, exactly as `decodeVariantTable` is.
+ *
+ * A short buffer or a count over the cap refuses the message and leaves the
+ * receiver's existing names where they were. An individual name it would not
+ * render becomes '' (decision 4); an entry whose id is not a canonical slug is
+ * dropped, because it can key nothing — every id this will ever be asked
+ * about came off `VARIANT_TABLE` and was sanitised there by this same
+ * function.
+ */
+export function decodeVariantNames(
+  r: PacketReader, out: VariantNamesMessage,
+): VariantNamesMessage | null {
+  if (r.remaining < 2) return null;
+  r.u8();
+  const count = r.u8();
+  if (count > MAX_VARIANTS_PER_PACK) return null;
+  const rows: VariantNameEntry[] = [];
+  for (let i = 0; i < count; i++) {
+    if (r.remaining < 1) return null;
+    const idLen = r.bytes[r.offset];
+    if (r.remaining < 1 + idLen + 1) return null;
+    const id = sanitiseContentId(r.str());
+    const nameLen = r.bytes[r.offset];
+    if (r.remaining < 1 + nameLen) return null;
+    const name = displayName(r.str());
+    if (id.length === 0) continue;
+    rows.push({ id, name });
+  }
+  out.names = rows;
+  return out;
+}
+
+/**
+ * What the feed should call the gun a shot was fired with.
+ *
+ * `slot` is `KillEvent.variantSlot` — the slot the shot was FIRED with, not
+ * anything the killer is holding now — and `entries` is the table the ROOM
+ * pinned. Row `i` occupies slot `i + 1` (`SessionArsenal.from`), which is the
+ * numbering the sender used when it wrote the slot map, so the two agree by
+ * construction rather than by convention.
+ *
+ * THE BASE CHECK IS NOT DECORATION. Every slot holds every weapon, so a slot
+ * number naming a row for a DIFFERENT archetype is not a hole: the arsenal
+ * serves the base weapon for it (`SessionArsenal.from`'s `isTarget` branch),
+ * and naming that row would print a shotgun variant's name over a rocket kill
+ * that fired plain rocket numbers. `variantSlotsFor` refuses to write such a
+ * slot, but `resolveVariantSlots` clamps by COUNT alone and on the peer
+ * topology the sender is another player's browser — so the receiver checks
+ * what it is about to say.
+ */
+export function variantDisplayName(
+  entries: readonly VariantWireEntry[],
+  names: ReadonlyMap<string, string>,
+  weaponId: number,
+  slot: number,
+): string {
+  const fallback = weaponName(weaponId);
+  if (!Number.isInteger(slot) || slot <= 0 || slot > entries.length) return fallback;
+  const row = entries[slot - 1];
+  if (row.base !== weaponId) return fallback;
+  const name = names.get(row.id);
+  return name === undefined || name === '' ? fallback : name;
 }
