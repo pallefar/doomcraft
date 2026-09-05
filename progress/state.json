@@ -1,7 +1,7 @@
 {
-  "updated": "2026-09-05T16:07:59Z",
-  "phase": "V4b under review; THE GAUNTLET IS RUNNING",
-  "phaseNote": "The gauntlet has a blind A/B in flight on GUNFEEL for the first time — headed, prod build, 1440x900, in an isolated git worktree so its builders cannot collide with V4. Setting it up found two apparatus defects: a blanket node_modules symlink resolved @doomcraft/shared back to the MAIN tree (the worktree would have compiled against the wrong source), and capture-ours reuses whatever already holds its port, so a capture could silently photograph the other tree. Both closed. V4b went to Codex as 16 numbered clauses and was REFUSED: 12 correct, 4 broken. Every finding reproduced here in both directions. It found a LIVE defect in shipped code — items kind/rarity lookups admit Object.prototype members, so kind:\"constructor\" parses clean, ItemDef.kind becomes a FUNCTION, and kind:\"constructor\" and kind:\"toString\" emit the identical fingerprint line: two different manifests, one digest. Same bug 8c6f196 fixed in variants, never fixed in items.",
+  "updated": "2026-09-05T16:35:02Z",
+  "phase": "Gunfeel built and capturing; V4b building",
+  "phaseNote": "THE GAUNTLET IS RUNNING for the first time. Round 1 of GUNFEEL is built and the blind pair is being captured. The builder confirmed the code fact it was handed and overturned it in the right direction: the fatal hitmarker was not missing, it was CANCELLED — the client predicts the kill ring on the frame it fires, Hud.hitMarker was a plain assignment, and the server's flagless echo of the PREVIOUS shot repainted it white ~one RTT later, on every demon kill in the game. And a monster headshot was never COMPUTED, so the client drew a gold marker and a doubled damage number while the server applied single damage — a live predictor desync. 14 tests, each red-proved by reverting its own fix alone; suite 2640 up from 2626. Meanwhile V4b was refused by Codex three times running (12/16, then 3/6, then 1/3) and every finding reproduced here in both directions: a LIVE prototype-pollution defect in the items parser, and FIVE separate paths that mint inventory of which three would have handed out weapon variants on day one.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -65,10 +65,10 @@
     {
       "id": "gunfeel",
       "name": "Gunfeel",
-      "rounds": 0,
+      "rounds": 1,
       "verdict": "building",
-      "gap": "Not built yet.",
-      "note": "IN FLIGHT — the first blind A/B this project has ever run. Bar has no muzzle flash, no kick, no shake. Verified code fact handed to the builder: sim.ts passes a literal 0 for flags on entity damage, so a monster kill never raises the fatal hitmarker."
+      "gap": "Awaiting the first blind verdict. Not fixed and named honestly: the Lost Soul has THREE sizes — spawned 0.9 m, client hit target 0.7 m, rendered 0.5 m — so you can hit it where nothing is drawn. That belongs to the enemies piece.",
+      "note": "Round 1 BUILT, capture in flight. Server: damageEntity carries real flags (DMG_FATAL, DMG_HEADSHOT from a real head-box test the client already predicted with, DMG_SPLASH) and the killfeed ORs in KILL_HEADSHOT. Client: the hitmarker is a monotone merge inside its own lifetime instead of an assignment, so a truthful echo can no longer cancel a predicted kill ring. Fx.hitConfirm finally reads the hits/pellets coverage its interface documented and nothing consumed."
     },
     {
       "id": "enemies",
