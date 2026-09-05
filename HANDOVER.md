@@ -256,6 +256,29 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
     person can tell what it can and cannot answer. Before trusting any A/B, ask
     what the BAR's frames actually contain for the specific question.
 
+38. **NEW — A CLEAN REVIEW VALIDATES THE CLAUSES; WHETHER A PROOF OBLIGATION
+    CAN DISCRIMINATE IS A SEPARATE PROPERTY, AND NOBODY WAS CHECKING IT.** The
+    V4d plan passed an adversarial review 10 of 10, "BROKEN: None" — and one of
+    its own proof obligations could not have caught the bug it was written for.
+    It asked for "a pooled event reused across two kills with DIFFERENT SLOTS".
+    The real defect is `if (variantSlot !== BASE_SLOT) e.variantSlot = slot`,
+    and two NONZERO slots pass straight through it: 1 then 2 reports 1 then 2,
+    correctly. The zero is the whole test — a base-weapon kill inheriting the
+    previous variant kill's slot. Proven both ways in thirty seconds of node.
+
+    This is the THIRD instance in one session of the instrument meant to catch a
+    bug being unable to. The others: a 434-byte example offered as proof of a
+    UTF-8 byte cap, which BOTH candidate caps reject and which therefore
+    discriminates nothing (the row that separates them is 237 bytes / 93 code
+    units); and `/\bvariant/i` proposed as the trust-scan term, which cannot
+    match `ItemKind.WEAPON_VARIANT` because `_` is a regex word character.
+
+    THE CHECK, and it is cheap: for every assertion, name the WEAKEST INPUT that
+    still satisfies the predicate, then ask whether the defect survives it. If
+    the defective implementation and the correct one produce the same value on
+    your chosen input, the test is decoration. Write the input where they
+    DIFFER, and say in the test why that input and not the obvious one.
+
 ## 1. What this session shipped (all pushed, green, deployed)
 
 | Commit | What |

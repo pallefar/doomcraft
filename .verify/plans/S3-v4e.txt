@@ -1,0 +1,125 @@
+Doomcraft phase V4e — the last of the V4 arc. Reviewed BEFORE a line is written.
+Refuse it if it is wrong.
+
+Output shape:
+  * For each clause you judge BROKEN: a CONCRETE FAILURE — the exact input or
+    sequence and the specific WRONG VALUE it produces.
+  * A closing section headed CORRECT listing by number every clause you judge
+    correct as written.
+
+**AND ONE EXTRA THING THIS TIME.** The V4d plan passed your review 10/10 and one
+of its proof obligations was VACUOUS — it asked for "two kills with different
+slots", and the real defect (`if (slot !== BASE_SLOT) e.slot = slot`) passes
+two NONZERO slots unchanged. So for clause 9 below, do not only judge whether
+the obligations are correct: **say for each whether the DEFECTIVE implementation
+and the CORRECT one would produce the same value on the input as specified.** If
+they would, the obligation is decoration and I need the input where they differ.
+
+Facts below were read out of the tree at commit 2f47842. Read them yourself.
+
+================================================================================
+BACKGROUND
+================================================================================
+
+V4a-V4d are shipped. A player can own a weapon-variant token, equip it, fire it,
+and see it named in the killfeed. **Supply is still exactly zero**, deliberately.
+
+- `docs/VARIANTS.md` §7.2: variants start at **uncommon**, there is no common
+  tier, and "the only acquisition route in this arc is the craft bench (N
+  duplicates + fee, per the craft fee table in `server/src/craft.ts`); trading
+  follows from `tradable: true` and needs no new route." Floor pickups are out
+  of scope.
+- `server/src/craft.ts`: `CRAFT_COPIES = 3`;
+  `CRAFTABLE_KINDS = {SKIN, EMBLEM, TRAIL}` (no WEAPON_VARIANT);
+  `CRAFT_FEES = {UNCOMMON: 50, RARE: 150, EPIC: 400, RELIC: 1000}`.
+  `craftVerdict` refuses unless: the source kind is in CRAFTABLE_KINDS; the
+  player holds `CRAFT_COPIES` FREE copies (escrow-reserved copies do not count);
+  `sourceDef.rarity < RELIC`; **`targetDef.kind === sourceDef.kind`**; and
+  **`targetDef.rarity === sourceDef.rarity + 1`**.
+- `server/src/persistence.ts:865,903-908` (V4b):
+      const TRANSFER_SOURCES = new Set(['trade']);
+      const minting = !TRANSFER_SOURCES.has(source);
+      ...
+      if (minting && refIsWeaponVariant(ref)) continue;
+  So `grantDrops` with source `'craft'` currently REFUSES to mint a variant.
+- §7.2's rule is therefore circular as written: a variant craft needs three
+  variants, and there are none. `docs/VARIANTS.md` §5a already records this:
+  "As written that is unreachable: initial supply 0, drops supply none, trading
+  conserves, and every craft needs three variants, so supply stays 0 forever."
+
+================================================================================
+THE PLAN — V4e, "acquisition"
+================================================================================
+
+ 1. **The ENTRY recipe is a cross-KIND craft, and only that.** Three duplicates
+    of one COMMON cosmetic (a skin, emblem or trail — the existing
+    CRAFTABLE_KINDS) plus the existing uncommon fee of 50 Scrap yields one
+    chosen UNCOMMON weapon-variant token. Every other rule of `craftVerdict` is
+    untouched: three FREE copies of the SAME ref, the rarity must still go up
+    by exactly one, and the fee still comes from the same table.
+
+ 2. The kind rule bends in ONE direction only: a cosmetic may craft into a
+    weapon variant; a weapon variant may never craft into a cosmetic, and a
+    weapon variant may not craft into another weapon variant. The second
+    refusal is what keeps §7.2's "N duplicates" ladder from becoming a variant
+    duplication machine once supply exists.
+
+ 3. `CRAFTABLE_KINDS` gains WEAPON_VARIANT as a legal TARGET only. It must NOT
+    become a legal SOURCE — the existing check `CRAFTABLE_KINDS.has(sourceDef.kind)`
+    is a SOURCE check, so adding the kind to that set alone would silently make
+    variants craftable into each other, which clause 2 forbids. Source and
+    target need separate sets.
+
+ 4. `grantDrops` must open exactly one door: source `'craft'` may mint a weapon
+    variant. `'drop'`, `'challenge'` and `'prize'` keep refusing. This is the
+    deliberate opening the V4b commit anticipated, and the allow-list stays an
+    allow-list — a sixth call site still inherits the refusal.
+
+ 5. Supply after V4e is therefore: entry craft only, bounded by the cosmetic
+    duplicates a player actually holds and by 50 Scrap per token, plus trading
+    which conserves. Drops, challenges and competition prizes still mint none.
+
+ 6. The rarity floor holds by construction rather than by a new check: the entry
+    source must be COMMON (rarity 0) and the existing `targetDef.rarity ===
+    sourceDef.rarity + 1` then forces the target to be UNCOMMON (rarity 1). A
+    rare or epic variant is unreachable by craft, which matches §7.2's "the
+    ladder can grow upward later".
+
+ 7. The client craft UI already computes `craftTargetsFor(def, state, copies,
+    pack)` in `client/src/ui/loadoutModel.ts`. It must offer variant targets for
+    a common cosmetic with three copies, and must NOT offer a cosmetic target
+    for a variant. Whatever the server refuses, the UI must not offer — the two
+    lists have to agree, and the test is that the set the UI offers is a subset
+    of the set the server accepts, checked over the real bundled pack.
+
+ 8. Nothing about mode gating changes: §7.3's `variantsAllowed` column decides
+    where a variant may be FIRED. Crafting is an API route, not a room, so it is
+    not mode-gated and must not become so.
+
+ 9. Proof obligations. Each proven RED with its own fix reverted, and for each
+    the input must be one where the defective and correct implementations
+    DIFFER (HANDOVER rule 38):
+    (a) three common skins + 50 Scrap yields a variant token — and the assertion
+        is that the token LANDS IN THE INVENTORY, not that the verdict was ok,
+        because `grantDrops` can refuse after a green verdict;
+    (b) a variant source is refused as a craft SOURCE — with the target also a
+        variant, so that adding the kind to one set cannot pass it;
+    (c) an UNCOMMON cosmetic source is refused for a variant target — the
+        rarity+1 rule would make that a RARE variant, so the input must be
+        uncommon and not common, or the refusal being tested is the kind rule
+        instead;
+    (d) `'drop'`, `'challenge'` and `'prize'` still cannot mint a variant, each
+        asserted separately, because one shared helper could regress all three
+        while a single-source test stays green;
+    (e) three copies where one is reserved by a live trade escrow is refused —
+        the free-copy count, not the raw count;
+    (f) the UI's offered target set is a subset of the server-accepted set over
+        the real bundled pack.
+
+10. Out of scope: floor pickups (§3's `EF_SPAWN` byte), any rarity above
+    uncommon, and any change to the variants pack itself.
+
+================================================================================
+Which clauses are broken, with a concrete failure and a specific wrong value;
+then the CORRECT list; then the per-obligation discrimination check clause 9
+asks for.

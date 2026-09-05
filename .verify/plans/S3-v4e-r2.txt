@@ -1,0 +1,77 @@
+Doomcraft V4e, repair round. You judged 1,3,4,5,6,8,10 CORRECT and 2,7,9 BROKEN,
+and — for the first time on this project — you were asked whether each PROOF
+OBLIGATION discriminates, and found that four of six did not. Both live findings
+were reproduced here independently before this rewrite:
+
+  - `server/src/index.ts:3251` really is `crafted = landed[0]?.ref ?? v.plan.targetRef`.
+  - `craftTargetsFor` (`client/src/ui/loadoutModel.ts:236`) really takes
+    `(def, state, copies, pack)` — RAW copies, no reservations, no Scrap balance.
+
+Same output shape, plus the same discrimination check on every obligation:
+for each, say whether the DEFECTIVE and the CORRECT implementation produce the
+same asserted value on the input as specified.
+
+11. (repairs 2.) The prohibition on variant -> variant crafting STANDS, but my
+    justification was wrong and is withdrawn. It is not a "duplication machine":
+    a trade-up consumes three tokens and grants one, so supply moves 3 -> 1, a
+    delta of MINUS TWO, and Scrap 150 -> 0. That is contraction. The real reason
+    to refuse it in V4e is narrower and honest: a variant ladder above uncommon
+    is out of scope (clause 10), and every bundled token is uncommon, so a
+    variant trade-up has no legal target anyway. The refusal is an explicit
+    scope boundary, not an economic argument.
+
+12. (repairs 7.) The UI/server disagreement is a LIVE BUG, not a V4e risk, and
+    V4e fixes it because V4e is the change that makes it matter.
+    `craftTargetsFor` gets the free-copy count and the Scrap balance, exactly
+    what `craftVerdict` uses. Reproduced today, unchanged tree: own three
+    `skin-rust-marine`, hold 50 Scrap, reserve one copy in a live trade — the UI
+    offers `skin-void-hazard` with the button enabled while the server returns
+    400 "1 copy is on a trade table — crafting needs 3 free copies". Three
+    unreserved copies with 49 Scrap does the same against the fee.
+    The test is SET EQUALITY under matched conditions, not a subset: a subset
+    assertion is vacuously true when the UI offers too little, which is exactly
+    the V4e failure it was supposed to catch. It must also assert POSITIVE
+    membership of both variant targets by name.
+
+13. (repairs 9(a).) The assertion is the INVENTORY after the whole craft path,
+    never the route's `crafted` field, because `crafted = landed[0]?.ref ??
+    v.plan.targetRef` reports the requested ref when nothing landed.
+    AND V4e FIXES THAT FALLBACK: a craft whose grant mints nothing must refuse
+    or fail loudly, not answer with the ref it did not deliver. Today it is
+    unreachable — every craft target is a cosmetic that `grantDrops` accepts —
+    but V4e is precisely the change that makes a refused mint reachable, and the
+    failure mode is that the player pays three copies plus the fee and is told
+    it worked.
+    Discrimination: with the mint gate unopened, defective gives Slug count 0
+    while Rust and Scrap both go to 0; correct gives Slug count 1. Different.
+
+14. (repairs 9(b).) Both bundled tokens are uncommon, so "three Slug copies,
+    target Swift" is refused by the RARITY rule whether or not the source-kind
+    bug is present — `ok: false` either way. The separating input needs a RARE
+    variant target fixture (the existing craft test fixture already supplies a
+    rarity pair): three uncommon Slug copies, 150 Scrap, a rare Swift target.
+    Defective (variants added to the SOURCE set) accepts; correct refuses.
+
+15. (repairs 9(c).) Same masking, and BOTH rarities must be pinned, not just the
+    source's. Three uncommon `skin-void-hazard` copies, 150 Scrap, and a RARE
+    variant target: defective (common-source restriction removed) accepts;
+    correct refuses. Naming only the source rarity is insufficient.
+
+16. (repairs 9(d).) Enumerating 'drop', 'challenge' and 'prize' catches removal
+    of the shared guard, but a defective DENY-LIST containing exactly those
+    three strings passes all three tests. Add a fourth call with source
+    'sponsor': the deny-list mints 1, the correct allow-list mints 0. That is
+    what proves the allow-list is an allow-list. Note also that reverting only
+    V4e's craft exemption gives 0/0 on all three named sources and is therefore
+    not a red proof of anything.
+
+17. 9(e) and 9(f) as repaired: (e) stands as written and does discriminate —
+    three copies with exactly one reserved by an established live escrow gives
+    available 3 / ok true when the count is raw, and available 2 / ok false when
+    it is free. Keep the entry recipe ENABLED during that mutation, or the old
+    kind refusal masks the count defect. (f) is replaced by clause 12's equality
+    assertion.
+
+Which are broken, with a concrete failure and a specific wrong value; then the
+CORRECT list; then the per-obligation discrimination check for 13, 14, 15, 16
+and 17.
