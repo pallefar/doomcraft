@@ -18,8 +18,12 @@ keeps earning it — rules 25–28 are new and all four cost real time today.
   **github.com/pallefar/doomcraft** — `main`.
 - Owner seat claimed and durable: creds in `~/youtube/doomcraft-owner-credentials.txt`.
 - CI: `tsc -b` + `vitest run` + `release:verify` on every push; all pushes green.
-  Suite: **103 files / 2453 tests + 3 deliberate skips**. `release:verify` runs
-  15 checks and emits 7 packs.
+  Suite: **107 files / 2622 tests + 3 deliberate skips** (2026-09-05, third
+  session). `release:verify` runs **17 checks** and emits 7 packs.
+- **The live origin serves `weapons@2`** — the weapons ratchet widened from 13
+  fields to 38 and the pack version moved. The live release is `revision 0,
+  ordinal 1`, i.e. the COMPILED-IN builtin: no stored release document has ever
+  been promoted, which is why the weapons bump orphaned nothing (§0 rule 34).
 - Sponsors phase 2 (P2a log+report, P2b interstitial, P2c rewarded + Gate 5) is
   DONE and deployed; `sponsor_interstitial` / `sponsor_rewarded` are
   deliberately OFF, and flipping them is the user's launch call.
@@ -138,6 +142,66 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
     arrays are Float32Arrays — the client's OBSERVATION channel is lossy even
     where its arithmetic is not. Only the third reading was about pellets.
     Before believing a small discrepancy, check the instrument.
+
+29. **NEW — TWO DOORS ONTO THE SAME DATA MUST BE PROVEN TO ACCEPT THE SAME SET,
+    and "each one refuses bad input" is not that proof.** A strict `< 0` rail
+    went onto the variant WIRE DECODER while the PARSER's band check tolerated
+    `EPS = 1e-9`. So `spreadPerShot: -1e-10` parsed with zero errors,
+    `variants.validate` said ok, and a real Room served **0 variant rows with
+    slotCount 1** — a published pack serving nothing, no error anywhere. Every
+    test exercised one door or the other; none tested the agreement. **The fix
+    is not duplicating the checks: two copies drift.** The archetype-free rules
+    now run as a CONTIGUOUS PREFIX in the same order on both sides — two lists
+    agree by construction only when one is literally the prefix of the other.
+    The invariant is a sweep over band edges, the epsilon boundary, zero, −0 and
+    the representability limits (7616 probes; it named 108 leaks on the old code).
+
+30. **NEW — rank failure modes before choosing which side to tighten. A gate
+    that says GREEN while the runtime serves something else is the worst outcome
+    available** — worse than a refusal, which is loud and fixable. That ordering
+    made the PARSER the side that had to move. It is also why an unparseable
+    newest pack now fails the gate instead of silently vanishing from the pack
+    set — and why refusing to ASSEMBLE was rejected: `installedPacks()` feeds
+    `hostFallback()` on the never-throws room path, and a content typo must not
+    become an outage. Refuse where it is affordable — at publish, not at room
+    build.
+
+31. **NEW — a fix you order can open the hole next door.** Putting a variant's
+    display `name` into its fingerprint inputs closed "approve one string, serve
+    another" — and the pack digest is `inputs.join('\n')`, so a name carrying a
+    NEWLINE would let a one-variant manifest hash exactly as a two-variant one.
+    When you add a field to any serialized identity, ask what the SEPARATOR is,
+    whether the new field can contain it, and what it makes newly reachable.
+    Related: a free-form token in a delimited line is unambiguous only where it
+    is TERMINAL, and that placement must be ASSERTED or the next person moves it.
+
+32. **NEW — "I cannot prove this red" is an answer; faking one is not.** A rail
+    unreachable on today's data has no red proof, and contriving an input the
+    product cannot produce does not make one. Say so, keep the guard if it makes
+    two paths agree by construction, and add a RATCHET test that fires the day
+    the data moves close enough to make it live.
+
+33. **NEW — write briefs from the CODE, not from a review. FIVE OF SIX briefs
+    written on 2026-09-05 contained a claim the builder correctly overturned:**
+    "sandbox and the tutorial call `grantAllWeapons`" (no caller exists);
+    "hitscan is unaffected" (melee was wrong SYNCHRONOUSLY — a punch fires as
+    `tryFire(p, CHAINSAW)` while you hold something else); "a value must survive
+    its own narrowing" (false for f32 — `f32(4.4)` is 4.400000095367432, so the
+    rule would refuse the compiled table itself); "the hitmarkers read this
+    field" (they read flags and amount); plus two Codex constants relayed
+    unchecked. Every brief now ends with an explicit instruction to report
+    anything in it that is wrong, and that sentence is the highest-yield line in
+    the template.
+
+34. **NEW — read the code to find a MECHANISM; read the RUNNING SYSTEM to find
+    out whether it APPLIES.** The `weapons@2` bump was called a blocking deploy
+    hazard all session: a stored release naming `weapons@1` becomes
+    unsatisfiable and the fallback is silent. The mechanism is real. But
+    `/api/version` said `revision 0, ordinal 1`, and revision 0 is the
+    compiled-in builtin that no document can ever assign — **no stored release
+    was live, so there was nothing to orphan.** One `curl` would have settled it
+    hours earlier. The hazard stays documented: it bites the first time somebody
+    promotes a stored release and then ships a build-pack bump.
 
 ## 1. What this session shipped (all pushed, green, deployed)
 
@@ -295,6 +359,34 @@ THE PROOFS
   and a plain `npm run build` DOES match it. Both were verified this way today
   — Vercel `index-1hTZaGmG.js`, Railway `index-Bc3PgK_D.js`, each equal to the
   local build made with the same define.
+
+- **CORRECTION 2026-09-05 (third session) — THE VERCEL HASH RULE DID NOT PASS,
+  AND NOT FOR THE REASON ABOVE.** The define was reproduced correctly: the
+  served bundle contains this commit's build id `50ad6594c3d5`. The two bundles
+  are the same byte length and share a byte-identical vendor chunk
+  (`three-CmnXx9-3.js`); they differ ONLY in the hashes of our own chunks
+  (`level-B2xvsNXZ` vs `level-Dhl7N7Nz`, `room-CaXatawB` vs `room-DO7X7EBO`).
+  The local build is deterministic across repeated runs and identical for
+  `npx vite build` and `npm run build`, so this is **Rollup chunk hashing
+  differing between Vercel's Linux builder and arm64 macOS** — not a
+  build-input difference, and not reproducible from this machine.
+
+  **USE THIS INSTEAD, and it is a better proof:** read the commit's build id out
+  of the SERVED bundle.
+
+      B=$(git rev-parse HEAD | cut -c1-12)
+      S=$(curl -s https://doomcraft.vercel.app/ | grep -o 'a/index-[A-Za-z0-9_-]*\.js')
+      curl -s "https://doomcraft.vercel.app/$S" | grep -c "$B"
+
+  The id is injected from the build environment, so a stale build cannot contain
+  it. That names the COMMIT directly instead of proving it by proxy.
+
+- **THE ORIGIN HAS A BETTER TELL THAN ANY HASH: a pack version only this commit
+  declares.** With the weapons ratchet widened, `curl /api/version` showing
+  **`weapons@2`** in the pack set is direct, falsifiable proof the new binary is
+  live. Whenever a deploy moves a content version, probe THAT rather than
+  `build.id` (which lies) or a bundle hash (which may not reproduce).
+
 - **Flag changes**: update the Railway env `DOOMCRAFT_FLAGS` with the FULL
   document (rule 14). Currently forces the five economy flags.
   `sponsor_interstitial` / `sponsor_rewarded` are deliberately OFF — flipping
