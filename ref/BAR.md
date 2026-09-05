@@ -79,7 +79,18 @@ UI floating on top. Not a static JPEG: it is the renderer running.
   Grass = saturated green top, brown dirt sides. Water = flat mid-blue plane, slightly darker than sky,
   no reflection, no transparency. Sky = flat light blue, **no gradient, no fog** at mid range.
   Simple directional light — top faces bright, side faces stepped darker. No shadows. No AO.
-- **HUD**, corners only, centre is clean:
+- **HUD** — **"corners only" is STALE, corrected 2026-09-05.** Re-captured live in
+  Capture The Gems with a rifle, the bar also has a **TOP-CENTRE** element: a
+  three-cell score/timer strip ("9 | 07:33 | 12") with two lines of mode rules
+  under it. That matters directly to the gauntlet's HUD question, which is
+  "without cluttering the centre" — the bar now clutters it too. Also **the
+  minimap caption is "Press `M` for full map", not `Tab`** (the old string is
+  still hard-coded as an in-game detector in `tools/capture-ref-gunfight.mjs`,
+  which logged INGAME false for twelve polls while the player was demonstrably
+  in the world). And the ammo readout is WEAPON-DEPENDENT: no line on the
+  shovel or the block slots, `Ammo: 30 / 150` on the rifle, `Ammo: 12 / 96` on
+  the pistol — so a HUD comparison against the old shovel frame understates the
+  bar. The rest of the corner description below still holds:
   - Top-left: round-cornered minimap (~200 px) with terrain colours + a white circled arrow for the player;
     caption "Press `Tab` for full map".
   - Top-left under it: three dark pill chips — players alive (person icon, "2"), kills (skull, "0"), timer (clock, "00:00").
