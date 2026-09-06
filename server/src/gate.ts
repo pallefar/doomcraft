@@ -89,7 +89,7 @@ export const DEFAULT_VARIANTS_FILE = join(repoRoot, 'content', 'variants.json');
  * rolled back (docs/PACKS.md §7, GateReport.schemaTouching), and that
  * property must be chosen, not discovered.
  */
-export const DECLARED_PERSIST_VERSION = 7;
+export const DECLARED_PERSIST_VERSION = 8;
 export const DECLARED_SAVES_VERSION = 4;
 
 /* ------------------------------------------------------------------------ *

@@ -17,6 +17,8 @@ import {
   rollMatchDrops,
 } from './packs.js';
 import {
+  MAX_ACHIEVEMENT_RECEIPT_STORE,
+  MIGRATION_STEP_COUNT,
   MAX_OWNED_ITEMS,
   PERSIST_VERSION,
   applyEquip,
@@ -56,13 +58,103 @@ describe('v4 -> v5', () => {
   it('migrates a real v4 profile: balance intact, inventory empty, band unknown', () => {
     const p = migrateProfile(V4_FIXTURE, 'device-fixture-v4', 1_755_100_000_000);
     expect(p.version).toBe(PERSIST_VERSION);
-    expect(PERSIST_VERSION).toBe(7);
+    expect(PERSIST_VERSION).toBe(8);
     expect(p.economy.scrap).toBe(860);
     expect(p.economy.lifetimeScrap).toBe(1200);
     expect(p.progress.xp).toBe(4200);
     expect(p.inventory).toEqual({ items: [], equippedSkin: '', title: '', variants: {} });
     expect(p.moderation).toEqual({ banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] });
     expect(p.ageBand).toBe('unknown');
+    expect(p.achievements).toEqual({ done: [], owed: [] });
+  });
+
+  it('has one migration step per version, and lands v6 and v7 on the same shape', () => {
+    /* THE COUNT IS THE TEST, and the outputs below are not.
+     *
+     * The first version of this asserted that a v6 profile came out with the
+     * right sections, and it passed with the 6 -> 7 step deleted. It had to:
+     * `migrateProfile` indexes `MIGRATIONS[version - 1]`, so removing a
+     * function shifts every later one down instead of leaving a hole, and a v6
+     * profile just runs the next transition's body. The output is identical.
+     * That is precisely why v7 shipped with the gap and nobody saw it — a
+     * sanitiser defaulted the section the absent step would have written.
+     *
+     * So the discriminating assertion is structural: one step per transition.
+     * The shape assertions stay because they are worth having, but they are
+     * documented as unable to see a missing step, which is the honest account
+     * of what they prove. */
+    expect(MIGRATION_STEP_COUNT).toBe(PERSIST_VERSION - 1);
+    const v6 = {
+      ...V4_FIXTURE, version: 6,
+      inventory: { items: [], equippedSkin: '', title: '' },
+      moderation: { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] },
+      ageBand: 'unknown',
+      challenges: { day: '2026-08-22', week: '2026-W35', counts: { 'daily.kill-5': 3 }, done: [], owed: [] },
+    };
+    const fromV6 = migrateProfile(v6, 'device-v6', 1_755_100_000_000);
+    expect(fromV6.version).toBe(PERSIST_VERSION);
+    expect(fromV6.adRewards).toEqual({ day: '', count: 0, lastMs: 0 });
+    expect(fromV6.achievements).toEqual({ done: [], owed: [] });
+    // The section it already had must survive the two new steps untouched.
+    expect(fromV6.challenges.counts['daily.kill-5']).toBe(3);
+
+    const v7 = { ...v6, version: 7, adRewards: { day: '2026-08-22', count: 2, lastMs: 5 } };
+    const fromV7 = migrateProfile(v7, 'device-v7', 1_755_100_000_000);
+    expect(fromV7.version).toBe(PERSIST_VERSION);
+    expect(fromV7.adRewards).toEqual({ day: '2026-08-22', count: 2, lastMs: 5 });
+    expect(fromV7.achievements).toEqual({ done: [], owed: [] });
+  });
+
+  it('carries receipts and promises through a migration, and derives the sourceId', () => {
+    /* A stored sourceId is never trusted: one that disagreed with its own id
+     * would aim a payment at another award's idempotency key, so the journal
+     * would be answering a question about a different debt. The defective
+     * implementation copies `o.sourceId` off the document. */
+    const v8 = {
+      ...V4_FIXTURE, version: 8,
+      inventory: { items: [], equippedSkin: '', title: '' },
+      moderation: { banned: false, bannedUntilMs: 0, reason: '', revokedItems: [] },
+      ageBand: 'unknown',
+      achievements: {
+        done: ['achievement.first-blood', 'achievement.first-blood', ''],
+        owed: [
+          { id: 'achievement.kills-1000', sourceId: 'achievement.SOMETHING-ELSE', scrap: 250, item: null },
+          { id: 'achievement.kills-1000', sourceId: 'achievement:achievement.kills-1000', scrap: 9999, item: null },
+          { nonsense: true },
+        ],
+      },
+    };
+    const p = migrateProfile(v8, 'device-v8', 1_755_100_000_000);
+    expect(p.achievements.done).toEqual(['achievement.first-blood']);
+    expect(p.achievements.owed).toEqual([{
+      id: 'achievement.kills-1000',
+      sourceId: 'achievement:achievement.kills-1000',
+      scrap: 250, item: null,
+    }]);
+  });
+
+  it('bounds an over-full receipt list by dropping the NEWEST, never the oldest', () => {
+    /* The opposite direction from `sanitiseChallenges`, which keeps the newest
+     * 256 — right for ids bounded by a period, wrong for ids that accumulate
+     * for the life of an account. An achievement receipt is what stops a second
+     * payment once the journal's ~48 h memory has run out, so its protective
+     * value is HIGHEST when it is old. The defective implementation is
+     * `slice(-N)`: it evicts exactly the receipts nothing else is protecting.
+     *
+     * A hostile document is the only way to get here — the settlement stops
+     * paying at a lower ceiling — but "only reachable by a bad write" is what
+     * a sanitiser is for. */
+    const over = MAX_ACHIEVEMENT_RECEIPT_STORE + 2;
+    const p = migrateProfile({
+      version: 8, deviceId: 'device-over',
+      achievements: {
+        done: Array.from({ length: over }, (_, i) => `achievement.a${i}`),
+        owed: [],
+      },
+    }, 'device-over', 1_755_100_000_000);
+    expect(p.achievements.done).toHaveLength(MAX_ACHIEVEMENT_RECEIPT_STORE);
+    expect(p.achievements.done[0]).toBe('achievement.a0');
+    expect(p.achievements.done.at(-1)).toBe(`achievement.a${MAX_ACHIEVEMENT_RECEIPT_STORE - 1}`);
   });
 
   it('migrates a frozen v5 profile: challenges seeded empty, the v5 economy intact', () => {

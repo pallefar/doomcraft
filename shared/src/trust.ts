@@ -860,6 +860,11 @@ export const SERVER_OWNED_PROFILE_FIELDS: readonly string[] = Object.freeze([
   'favouriteWeapon', 'adsRemoved', 'entitlements', 'stats', 'items',
   'drops', 'rating', 'trophies', 'titles',
   'economy', 'accountId', 'accountSecret', '_unknown',
+  /* Lifetime achievement receipts and unpaid promises are MONEY: `done` is
+   * what stops a second payment and `owed` is what a payment is taken from.
+   * Refused here BY NAME so the attempt lands in the violation ring, rather
+   * than by omission from the merge that `POST /api/profile` performs. */
+  'achievements',
   /* V4c. `inventory.variants` decides which GUN a player fires, and
    * `POST /api/equip` is the door that validates one — ownership, revocation
    * and `VariantDef.base`. `POST /api/profile` merges a client body into the

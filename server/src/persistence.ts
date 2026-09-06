@@ -50,7 +50,7 @@ import { isPrototypePollutingKey } from '@doomcraft/shared/trust';
  * whitelist, so a migration step that adds a key the literal does not name is a
  * no-op with a version bump on it.
  */
-export const PERSIST_VERSION = 7;
+export const PERSIST_VERSION = 8;
 
 /** Hard ceiling on a stored balance. A bug, not a player, is what hits this. */
 export const MAX_SCRAP_BALANCE = 1_000_000_000;
@@ -185,6 +185,52 @@ export interface StoredAdRewards {
   lastMs: number;
 }
 
+/**
+ * One achievement earned and not yet paid — the PROMISE, snapshotted.
+ *
+ * A lifetime stat is never wiped, which makes it tempting to say the counter
+ * is itself the durable debt. It is not: the counter preserves the STAT, and
+ * what a player is owed is the DEF, which lives in a content pack that can be
+ * re-cut between earning and paying. Remove the def, raise its target, or undo
+ * the merge that supplied the stats, and a promise made in a session that
+ * could not pay it would silently evaporate. So the reward is copied out of
+ * the def AT DETECTION and paid from the copy.
+ *
+ * There is no period key, unlike `ChallengeOwed`: an achievement is earned
+ * once, ever, so `achievement:<id>` is the whole idempotency source and it is
+ * stable for the life of the account. That single difference is what decides
+ * the reset rule below.
+ */
+export interface AchievementOwed {
+  readonly id: string;
+  /** `achievement:<id>` — derived from `id` and checked against it at read time. */
+  readonly sourceId: string;
+  readonly scrap: number;
+  /** Items-manifest local id, or null. */
+  readonly item: string | null;
+}
+
+/**
+ * Lifetime one-shot awards: the PAID receipts and the unpaid promises. There
+ * is no counter here — progress is `profile.stats`, the block the player is
+ * already shown (shared/src/achievements.ts explains why).
+ *
+ * `done` MUST NOT EVICT. `sanitiseChallenges` keeps the newest 256 ids and
+ * that is right for challenges, whose ids are bounded per period; achievement
+ * ids accumulate for the life of the account, and dropping the oldest receipt
+ * re-opens payment for that id the moment the journal's ~48 h dedup window
+ * forgets the key. So the settlement REFUSES TO PAY a new achievement at the
+ * ceiling rather than making room, and this store's own bound keeps the
+ * OLDEST — a receipt's protective value is highest exactly where the journal's
+ * memory has run out.
+ */
+export interface StoredAchievements {
+  /** Achievement ids completed AND PAID. Permanent; never pruned by a period roll. */
+  done: string[];
+  /** Completions earned but not yet paid, each carrying the reward it was promised. */
+  owed: AchievementOwed[];
+}
+
 export interface StoredChallenges {
   /** UTC 'YYYY-MM-DD' the daily counters belong to. */
   day: string;
@@ -261,6 +307,7 @@ export interface StoredProfile {
   inventory: StoredInventory;
   moderation: StoredModeration;
   challenges: StoredChallenges;
+  achievements: StoredAchievements;
   adRewards: StoredAdRewards;
   ageBand: AgeBand;
   /**
@@ -290,7 +337,8 @@ export interface StoredProfile {
 export const KNOWN_PROFILE_KEYS: readonly string[] = Object.freeze([
   'version', 'deviceId', 'accountId', 'accountSecret', 'createdMs', 'updatedMs',
   'progress', 'settings', 'bindings', 'loadout', 'entitlements', 'stats',
-  'economy', 'inventory', 'moderation', 'challenges', 'adRewards', 'ageBand', '_unknown',
+  'economy', 'inventory', 'moderation', 'challenges', 'achievements', 'adRewards',
+  'ageBand', '_unknown',
 ]);
 
 /**
@@ -313,7 +361,7 @@ export const KNOWN_PROFILE_KEYS: readonly string[] = Object.freeze([
  */
 export const GUARDED_PROFILE_SECTIONS: readonly string[] = Object.freeze([
   'progress', 'settings', 'loadout', 'entitlements', 'stats', 'economy',
-  'inventory', 'moderation', 'challenges',
+  'inventory', 'moderation', 'challenges', 'achievements',
 ]);
 
 /**
@@ -466,6 +514,7 @@ export function createProfile(deviceId: string, nowMs = Date.now()): StoredProfi
     inventory: defaultInventory(),
     moderation: defaultModeration(),
     challenges: defaultChallenges(),
+    achievements: defaultAchievements(),
     adRewards: defaultAdRewards(),
     ageBand: 'unknown',
   };
@@ -476,6 +525,9 @@ function defaultInventory(): StoredInventory {
 }
 function defaultChallenges(): StoredChallenges {
   return { day: '', week: '', counts: {}, done: [], owed: [] };
+}
+function defaultAchievements(): StoredAchievements {
+  return { done: [], owed: [] };
 }
 function defaultAdRewards(): StoredAdRewards {
   return { day: '', count: 0, lastMs: 0 };
@@ -585,7 +637,41 @@ const MIGRATIONS: Array<(raw: AnyRecord) => AnyRecord> = [
     raw.version = 6;
     return raw;
   },
+  /* 6 -> 7: rewarded-ad grants. THIS STEP DID NOT EXIST — v7 shipped with only
+   * `sanitiseAdRewards`' defaults behind it, and `migrateProfile`'s loop broke
+   * on the missing index instead of running it. That worked, because the only
+   * change was an additive section a sanitiser could default. What it cost was
+   * the CHAIN: a v6 profile could not reach any step past the gap, so every
+   * future migration would have been unreachable for it. Filled here, in the
+   * same change that adds one, rather than repeated. Idempotent, the 3 -> 4
+   * argument. */
+  (raw) => {
+    raw.adRewards = raw.adRewards ?? { day: '', count: 0, lastMs: 0 };
+    raw.version = 7;
+    return raw;
+  },
+  // 7 -> 8: lifetime achievements — receipts and unpaid promises. No counter:
+  // progress is `stats`, which every profile already has.
+  (raw) => {
+    raw.achievements = raw.achievements ?? { done: [], owed: [] };
+    raw.version = 8;
+    return raw;
+  },
 ];
+
+/**
+ * One step per version transition, asserted against `PERSIST_VERSION` by the
+ * test beside this file.
+ *
+ * This exists because the ABSENCE of a step is invisible from the outside.
+ * `migrateProfile` indexes `MIGRATIONS[version - 1]`, so deleting a function
+ * does not leave a hole — it shifts every later step down one, and a profile
+ * entering at the missing version silently runs the NEXT transition's
+ * function instead. v7 shipped that way for exactly that reason: the output
+ * looked right, because a sanitiser defaulted what the missing step would have
+ * written. Only a structural count can see it.
+ */
+export const MIGRATION_STEP_COUNT = MIGRATIONS.length;
 
 /** Bring any stored shape up to the current version and sanity-check it. */
 export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.now()): StoredProfile {
@@ -679,6 +765,7 @@ export function migrateProfile(input: unknown, deviceId: string, nowMs = Date.no
     inventory: sanitiseInventory(inv),
     moderation: sanitiseModeration(mod),
     challenges: sanitiseChallenges(chal),
+    achievements: sanitiseAchievements(asRecord(raw.achievements)),
     adRewards: sanitiseAdRewards(raw.adRewards, Date.now()),
     ageBand: ageBandOf(raw.ageBand),
   };
@@ -751,6 +838,59 @@ function sanitiseChallenges(raw: AnyRecord): StoredChallenges {
     counts,
     done: done.slice(-MAX_CHALLENGE_STATE_ENTRIES),
     owed: owed.slice(-MAX_CHALLENGE_OWED),
+  };
+}
+
+/**
+ * The ceiling the SETTLEMENT stops at: at this many receipts it refuses to pay
+ * a new achievement rather than making room. Safe failure (an operator sees an
+ * unpaid achievement) over unsafe (a silent second mint).
+ */
+export const MAX_ACHIEVEMENT_RECEIPTS = 1024;
+/**
+ * The ceiling this STORE bounds a hostile or corrupt document at, deliberately
+ * above the settlement's. The gap is headroom for a merge union to land intact
+ * before payment stops, and the slice keeps the OLDEST rather than the newest —
+ * the exact opposite of `sanitiseChallenges`, and for the exact reason that
+ * function gives for its own direction. A challenge receipt matters while its
+ * period is live. An achievement receipt matters most once the journal's ~48 h
+ * memory has run out, which is to say when it is OLD.
+ */
+export const MAX_ACHIEVEMENT_RECEIPT_STORE = 2048;
+const MAX_ACHIEVEMENT_OWED = 32;
+const MAX_ACHIEVEMENT_ID_CHARS = 64;
+
+function sanitiseAchievements(raw: AnyRecord): StoredAchievements {
+  const done: string[] = [];
+  if (Array.isArray(raw.done)) {
+    for (const id of raw.done) {
+      if (typeof id !== 'string' || id.length === 0 || id.length > MAX_ACHIEVEMENT_ID_CHARS) continue;
+      if (!done.includes(id)) done.push(id);
+    }
+  }
+  const owed: AchievementOwed[] = [];
+  if (Array.isArray(raw.owed)) {
+    for (const entry of raw.owed) {
+      const o = asRecord(entry);
+      const id = str(o.id, '').slice(0, MAX_ACHIEVEMENT_ID_CHARS);
+      if (id.length === 0) continue;
+      /* The sourceId is DERIVED, never trusted from disk. A stored one that
+       * disagrees with its own id would let a corrupt or hostile document aim
+       * a payment at another award's idempotency key — the journal would then
+       * be answering a question about a different debt. */
+      const sourceId = `achievement:${id}`;
+      if (owed.some((x) => x.id === id)) continue;
+      owed.push({
+        id, sourceId,
+        scrap: clampInt(num(o.scrap, 0), 0, MAX_SCRAP_BALANCE),
+        item: typeof o.item === 'string' && o.item.length > 0
+          ? o.item.slice(0, MAX_ACHIEVEMENT_ID_CHARS) : null,
+      });
+    }
+  }
+  return {
+    done: done.slice(0, MAX_ACHIEVEMENT_RECEIPT_STORE),
+    owed: owed.slice(0, MAX_ACHIEVEMENT_OWED),
   };
 }
 
