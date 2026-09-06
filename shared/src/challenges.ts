@@ -16,6 +16,11 @@
  */
 
 import { sanitiseContentId } from './modes.ts';
+import {
+  achievementsFingerprintInputs,
+  parseAchievementsSection,
+  type AchievementDef,
+} from './achievements.ts';
 
 export type ChallengePeriod = 'daily' | 'weekly';
 
@@ -62,6 +67,14 @@ export interface ChallengeDef {
 
 export interface ChallengesManifest {
   readonly challenges: readonly ChallengeDef[];
+  /**
+   * Lifetime one-shot awards, shipped in the same pack (shared/src/achievements.ts).
+   * ALWAYS PRESENT, possibly empty — an absent array normalises to `[]` so no
+   * caller has to decide what `undefined` means, while a present non-array is
+   * refused. A quests manifest that declares none is unchanged in every
+   * observable way, including its fingerprint.
+   */
+  readonly achievements: readonly AchievementDef[];
 }
 
 /**
@@ -120,6 +133,9 @@ export function parseChallengesManifest(text: string): ChallengesParseResult {
   }
   const list = Array.isArray(root.challenges) ? root.challenges : null;
   if (list === null) return { manifest: null, errors: ['no challenges array'] };
+  /* Parsed BEFORE the challenge loop returns, so an achievement error and a
+   * challenge error come back together rather than one release at a time. */
+  const ach = parseAchievementsSection(root.achievements);
   if (list.length > MAX_CHALLENGES_PER_PACK) {
     return {
       manifest: null,
@@ -201,7 +217,7 @@ export function parseChallengesManifest(text: string): ChallengesParseResult {
    * never pass a gate and can never be edited in place — an editor that
    * accepts what the machine will refuse forever. The parser owns the cap
    * because the studio route and the bundled manifest share it. */
-  for (const line of challengesFingerprintInputs({ challenges: defs })) {
+  for (const line of challengesFingerprintInputs({ challenges: defs, achievements: [] })) {
     const bytes = utf8Bytes(line);
     if (bytes > MAX_CHALLENGE_INPUT_BYTES) {
       errors.push(`${line.slice(0, line.indexOf(':'))}: its name and blurb make a `
@@ -209,8 +225,15 @@ export function parseChallengesManifest(text: string): ChallengesParseResult {
         + '(MAX_PACK_INPUT_BYTES — the release gate would refuse the version forever)');
     }
   }
+  errors.push(...ach.errors);
   if (errors.length > 0) return { manifest: null, errors };
-  return { manifest: Object.freeze({ challenges: Object.freeze(defs) }), errors };
+  return {
+    manifest: Object.freeze({
+      challenges: Object.freeze(defs),
+      achievements: ach.defs ?? Object.freeze([]),
+    }),
+    errors,
+  };
 }
 
 /**
@@ -218,10 +241,21 @@ export function parseChallengesManifest(text: string): ChallengesParseResult {
  * player-visible field, in id order (code-unit sort, the levelsPack rule).
  */
 export function challengesFingerprintInputs(manifest: ChallengesManifest): string[] {
-  return [...manifest.challenges]
+  const lines = [...manifest.challenges]
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((c) => `${c.id}:${c.period}/${c.stat}/${c.target}/${c.scrap}`
       + `/${c.item ?? '-'}/${c.name}/${c.blurb}`);
+  /* APPEND ONLY WHEN THERE IS SOMETHING TO APPEND. A quests pack that declares
+   * no achievements must fingerprint to exactly what it did before this module
+   * existed, or every release declaration naming an existing quests version
+   * stops verifying against the host that installed it — the `weapons@2` shape
+   * of hazard, and this time it would hit `quests@1`, which is the bundled
+   * fallback every host resolves to. An unconditional separator or an empty
+   * marker is the defect; the test beside this file pins the seven lines and
+   * the fingerprint of today's content/quests.json against it. */
+  const achievements = manifest.achievements ?? [];
+  if (achievements.length === 0) return lines;
+  return [...lines, ...achievementsFingerprintInputs(achievements)];
 }
 
 /* ------------------------------------------------------------------------ *
