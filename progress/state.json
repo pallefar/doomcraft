@@ -1,7 +1,7 @@
 {
-  "updated": "2026-09-05T20:49:39Z",
-  "phase": "THE GAUNTLET IS 2/23 — gunfeel and HUD both won blind",
-  "phaseNote": "HUD won uncontaminated, on measurement rather than impression. Our ammo readout is 56 px digits at 16.06:1 contrast on an opaque panel; the bar's is ~11 px floating on the world at a worst case of 1.58:1. Our health value is 23 px at 3.90:1 with a real outline (15.2% dark pixels); the bar's is 12 px at 1.94:1, which fails WCAG large-text, with ZERO outline pixels. The bar's crosshair is a 100x100 px box with no ink at all in the centre 9x9 — 6.9% of screen width with no aim reference — against our 38x38. And on the piece's own question, \"without cluttering the centre\", the bar carries five instructional strings in four corners PLUS a 325x33 px two-line rules block sitting on the screen centreline. BAR.md had said the bar's HUD was \"corners only, centre is clean\". Correcting the reference before judging is the only reason this verdict means anything.",
+  "updated": "2026-09-06T05:26:19Z",
+  "phase": "2/23 — and MENUS is unscorable by a subagent of this session",
+  "phaseNote": "Gunfeel and HUD are won, blind and uncontaminated. MENUS was judged FOUR times and binned four times, and the last leak cannot be masked: the critic identified both sides from its own preloaded MEMORY INDEX, which names this product's modes and level sources verbatim — \"5 modes + 3 fetchable bars (voxiom, DOOM 1993, Minecraft Classic)\", \"Horde is the mode that justifies the mash-up\", \"Basic Training episode\" — and our menu renders exactly those strings. Every subagent boots with that index. Widening the mask cannot help, because on this piece the content that IDENTIFIES the product IS the content under review. Scope checked rather than assumed: those are all menu-screen strings, and neither the gunfeel contact sheets nor the HUD frame renders a mode name or level title, so 2/23 stands. Now HANDOVER rule 39.",
   "bar": {
     "name": "voxiom.io",
     "capturedAt": "2026-08-20",
@@ -113,10 +113,10 @@
     {
       "id": "menus",
       "name": "Menus & saves",
-      "rounds": 0,
+      "rounds": 4,
       "verdict": "pending",
-      "gap": "Not built yet.",
-      "note": "In-engine background, settings, rebinding, cloud + local save."
+      "gap": "The work orders from the discarded verdicts still stand — the critics stated them side-neutrally and they do not depend on the mapping. OURS: the pre-armed DESCEND button loads \"TUTM1 Basic Training I: Move · 0 enemies\", so the biggest button on the menu opens a movement tutorial rather than a fight, and two of the four front cards read \"COMING SOON · 2026\" and do nothing when pressed — half the doors are locked and the pre-selected one has no enemies behind it. Pre-arm DESCEND with the first level that has enemies (or HORDE, already tagged MOST POPULAR), and drop the two 2026 cards below the fold. THEIRS: the entire stats panel is greyed under a padlock reading \"Login to unlock!\", and a 138,768 px third-party banner sits directly under the play buttons, 4.49x their combined fill area, spanning 100% of the play column.",
+      "note": "BLOCKED, not lost. Four verdicts, four discards — one to a mask hole (our own product name printed as live text in the house-ad slots, since fixed), three to the assistant's own memory index naming the modes on screen. Judge this from a session with the memory store detached, or accept it is unscorable and say so. Do not re-run until a verdict survives by luck."
     },
     {
       "id": "ads",

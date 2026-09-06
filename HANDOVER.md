@@ -291,6 +291,37 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
     your chosen input, the test is decoration. Write the input where they
     DIFFER, and say in the test why that input and not the obvious one.
 
+39. **NEW — THE ASSISTANT'S OWN MEMORY INDEX IS A CONTAMINATION CHANNEL FOR
+    BLIND EVALUATION, and no mask can close it.** The MENUS piece was judged
+    four times and binned four times. The last critic opened nothing outside the
+    blind directory, ran no greps, compared no timestamps — and identified both
+    sides anyway, from **its own preloaded memory index**, which names this
+    product's modes and level sources verbatim: "5 modes + 3 fetchable bars
+    (voxiom, DOOM 1993, Minecraft Classic)", "Horde is the mode that justifies
+    the mash-up", "Basic Training episode". Our menu renders exactly those
+    strings — `HORDE`, `Bar: DOOM (1993) E1M1 "Hangar"`, `Basic Training I:
+    Move` — so it read the labels off the screenshot and matched them against
+    context it never asked for.
+
+    Every subagent spawned from a session with that index boots with it.
+    Widening `MENU_MASKS` cannot help, because **on this piece the content that
+    identifies the product IS the content under review** — masking the mode grid
+    destroys the thing being judged.
+
+    SCOPE, checked rather than assumed: the leaked strings are all MENU-screen
+    strings. The gunfeel contact sheets show a wall and a muzzle flash; the HUD
+    frame shows a minimap, timer, health and ammo. Neither renders a mode name
+    or a level title, and both of those critics reported `contaminated: false`
+    unprompted — "I could argue either direction", "I hold no confident belief
+    about the mapping". Those two verdicts stand.
+
+    So: **a piece whose artifact displays proper nouns this project has written
+    down cannot be blinded by a subagent of this session.** Judge menus, mode
+    select, level select and anything else name-bearing from a session with the
+    memory store detached, or accept that it is unscorable and say so. Do not
+    re-run until a verdict happens to survive; four attempts is already three
+    too many, and the fifth would not be evidence, it would be sampling.
+
 ## 1. What this session shipped (all pushed, green, deployed)
 
 | Commit | What |
