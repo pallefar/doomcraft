@@ -12,11 +12,20 @@ bench, and click Equip on it. Every phase went to Codex as numbered clauses
 before a line was written; every one is deployed and verified by probing a value
 only that build emits.
 
-**THE GAUNTLET IS 1/23 AND IT FINALLY RAN.** Gunfeel won a blind, uncontaminated
-A/B. It took three attempts to build a comparison worth judging, and the first
-two verdicts were correctly thrown away — see rule 37 and CRITIC.md 2b. HUD is
-piece two and was in flight when this was written; check
-`progress/state.json` and `.../scratchpad/ab/hud-r1/` for where it got to.
+**THE GAUNTLET IS 2/23 AND IT FINALLY RAN.** Gunfeel and HUD both won blind and
+uncontaminated. Four verdicts were produced to get the first two: two were
+correctly thrown away, once because the bar clip had a SHOVEL in it (rule 37)
+and once because my own fairness note named architecture and mapped the labels
+(CRITIC.md 2b). HUD is the more useful precedent — it won with NO BUILD ROUND,
+judging our current HUD cold, which means judging a piece before building it is
+a legitimate and cheap first move. MENUS was piece three and was in flight when
+this was written; check `progress/state.json` and
+`.../scratchpad/ab/menus-r1/` for where it got to.
+
+Piece selection matters: prefer STILL pieces (full-page screenshots) while the
+motion asymmetry below is unfixed, and re-capture the bar for the specific
+question before judging — the reference has now been stale in OUR favour three
+separate times.
 
 **The gunfeel code is MERGED** (`52e8db8`; `main` and `gauntlet` now agree).
 Both branches had appended a parameter to the SAME damage functions — gunfeel a
