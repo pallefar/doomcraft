@@ -123,6 +123,7 @@ import {
   redactGuardAudit,
 } from './admin/model.js';
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
+import { achievementProgress } from '@doomcraft/shared/achievements';
 import { PackInventory, ReleaseService, releaseContentHash, rollMatchDrops } from './packs.js';
 import { StudioService } from './studio.js';
 import { rawDays, readRollup, rolledDays, sweepAdLog } from './adsRollup.js';
@@ -2326,6 +2327,73 @@ async function handleApi(
         };
       }),
     }, cors);
+    return true;
+  }
+
+  if (path === '/api/achievements' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const raw = cookieValue(req.headers.cookie, DEVICE_COOKIE) ?? url.searchParams.get('device') ?? '';
+    if (!isValidDeviceId(raw)) { sendJson(res, 400, { error: 'no device identity' }, cors); return true; }
+    const key = await graph.resolveProfileKey(asDeviceId(raw));
+    if (!flagOn(flags.bitsFor(key), 'economy_achievements')) {
+      sendJson(res, 404, { error: 'achievements are not enabled' }, cors);
+      return true;
+    }
+    /* THE LIVE RELEASE'S defs, which is not always the defs that will settle:
+     * a room pins its manifest for its whole life, so a match already running
+     * may be paying from an older one. The board cannot know which room a
+     * player will enter next, so it answers the only question it can — what a
+     * room started NOW would award — and the client's note says so. */
+    const live = releases.live();
+    const qdecl = live.packs.find((pk) => pk.kind === PackKind.QUESTS);
+    const qi = qdecl !== undefined
+      ? inventory.questsAt(qdecl.version)
+      : inventory.questsAt(inventory.questsVersions().at(-1) ?? 1);
+    const defs = qi?.manifest.achievements ?? [];
+    const idecl = live.packs.find((pk) => pk.kind === PackKind.ITEMS);
+    const items = inventory.itemsAt(idecl?.version ?? (inventory.itemsVersions().at(-1) ?? 1));
+    const itemName = (id: string | null): string => (id === null ? ''
+      : items?.manifest.items.find((i) => i.id === id)?.name ?? '');
+
+    const profile = await store.load(key);
+    const done = new Set(profile?.achievements.done ?? []);
+    const owed = new Map((profile?.achievements.owed ?? []).map((o) => [o.id, o]));
+    /* A career the player has not started yet is zeroes, not an error. */
+    const career = profile?.stats ?? { kills: 0, bestStreak: 0, damageDealt: 0, blocksPlaced: 0, blocksBroken: 0 };
+
+    const rows = defs.map((d) => {
+      const promise = owed.get(d.id);
+      const progress = achievementProgress(d, career);
+      /* PRECEDENCE: a paid receipt, then a recorded promise, then the career
+       * itself. The middle case is reachable in ordinary play — payment waits
+       * for a session that may grant Scrap — so it needs a state of its own
+       * rather than a bar stuck at 100%. */
+      const state = done.has(d.id) ? 'paid'
+        : promise !== undefined || progress >= d.target ? 'earned' : 'locked';
+      /* THE REWARD SHOWN IS THE REWARD THAT WILL BE PAID. Once a promise
+       * exists it is the snapshot that pays, so a def re-priced afterwards
+       * must not change the number in front of the player. */
+      const scrap = promise?.scrap ?? d.scrap;
+      const item = promise !== undefined ? promise.item : d.item;
+      return {
+        id: d.id, name: d.name, blurb: d.blurb, stat: d.stat as string, target: d.target,
+        scrap, item, itemName: itemName(item), progress, state,
+      };
+    });
+
+    /* A promise whose def has been REMOVED still pays, and an award the player
+     * cannot see is an award they will think they lost. There is no name in
+     * the snapshot, so the row says what is true and no more. */
+    const listed = new Set(defs.map((d) => d.id));
+    for (const [id, o] of owed) {
+      if (listed.has(id)) continue;
+      rows.push({
+        id, name: id, blurb: 'No longer listed — it was earned, and it will still pay.',
+        stat: '', target: 1, scrap: o.scrap, item: o.item, itemName: itemName(o.item),
+        progress: 1, state: 'earned',
+      });
+    }
+
+    sendJson(res, 200, { achievements: rows }, cors);
     return true;
   }
 

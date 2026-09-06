@@ -48,6 +48,7 @@ import { createAccountPanel, type AccountPanel, type AccountPanelOptions } from 
 import { createLoadoutTab, economyTabs, probeServerFlags, type LoadoutTab } from '@/ui/loadoutTab';
 import { createMatchShareButton } from '@/ui/shareCard';
 import { createCompetitionsTab, type CompetitionsTab } from '@/ui/competitionsTab';
+import { createAchievementsTab, type AchievementsTab } from '@/ui/achievementsTab';
 import { createTradeTab, type TradeTab } from '@/ui/tradeTab';
 import { MatchTypeNotice } from '@/ui/matchType';
 import {
@@ -273,9 +274,11 @@ export class ProfileScreen {
   private readonly loadoutWrap: HTMLElement;
   private readonly tradeWrap: HTMLElement;
   private readonly competitionsWrap: HTMLElement;
+  private readonly achievementsWrap: HTMLElement;
   private loadoutTab: LoadoutTab | null = null;
   private tradeTab: TradeTab | null = null;
   private competitionsTab: CompetitionsTab | null = null;
+  private achievementsTab: AchievementsTab | null = null;
   private tabButtons = new Map<string, HTMLButtonElement>();
   private opened = false;
   private destroyed = false;
@@ -325,6 +328,7 @@ export class ProfileScreen {
     this.loadoutWrap = el('div', 'dcp-tabwrap');
     this.tradeWrap = el('div', 'dcp-tabwrap');
     this.competitionsWrap = el('div', 'dcp-tabwrap');
+    this.achievementsWrap = el('div', 'dcp-tabwrap');
 
     /* ---- tiles ---- */
     this.tilesEl = el('div', 'dcp-tiles');
@@ -384,6 +388,7 @@ export class ProfileScreen {
     shell.appendChild(this.loadoutWrap);
     shell.appendChild(this.tradeWrap);
     shell.appendChild(this.competitionsWrap);
+    shell.appendChild(this.achievementsWrap);
 
     /* ---- the economy tabs — the server's flag probe decides existence ----
      * Async on purpose: the overlay is complete without an answer, and a
@@ -413,10 +418,11 @@ export class ProfileScreen {
   get view(): ProfileView | null { return this.last; }
 
   /** The visible tab id. The harness reads it; nothing else should. */
-  get tab(): 'overview' | 'loadout' | 'trade' | 'competitions' {
+  get tab(): 'overview' | 'loadout' | 'trade' | 'competitions' | 'achievements' {
     if (this.loadoutWrap.classList.contains('is-on')) return 'loadout';
     if (this.tradeWrap.classList.contains('is-on')) return 'trade';
     if (this.competitionsWrap.classList.contains('is-on')) return 'competitions';
+    if (this.achievementsWrap.classList.contains('is-on')) return 'achievements';
     return 'overview';
   }
 
@@ -459,7 +465,14 @@ export class ProfileScreen {
       });
       this.competitionsWrap.appendChild(this.competitionsTab.element);
     }
-    const add = (id: 'overview' | 'loadout' | 'trade' | 'competitions', label: string): void => {
+    if (tabs.includes('achievements')) {
+      this.achievementsTab = createAchievementsTab({
+        serverBase: account.serverBase,
+        deviceId: account.deviceId,
+      });
+      this.achievementsWrap.appendChild(this.achievementsTab.element);
+    }
+    const add = (id: 'overview' | 'loadout' | 'trade' | 'competitions' | 'achievements', label: string): void => {
       const b = el('button', 'dcp-tab', label);
       b.type = 'button';
       b.setAttribute('role', 'tab');
@@ -472,14 +485,16 @@ export class ProfileScreen {
     if (this.loadoutTab !== null) add('loadout', 'Loadout');
     if (this.tradeTab !== null) add('trade', 'Trade');
     if (this.competitionsTab !== null) add('competitions', 'Competitions');
+    if (this.achievementsTab !== null) add('achievements', 'Achievements');
     this.tabsEl.classList.add('is-shown');
   }
 
-  showTab(id: 'overview' | 'loadout' | 'trade' | 'competitions'): void {
+  showTab(id: 'overview' | 'loadout' | 'trade' | 'competitions' | 'achievements'): void {
     if (this.destroyed) return;
     const target = id === 'loadout' && this.loadoutTab !== null ? 'loadout'
       : id === 'trade' && this.tradeTab !== null ? 'trade'
-      : id === 'competitions' && this.competitionsTab !== null ? 'competitions' : 'overview';
+      : id === 'competitions' && this.competitionsTab !== null ? 'competitions'
+        : id === 'achievements' && this.achievementsTab !== null ? 'achievements' : 'overview';
     // The trade tab polls while visible; leaving it MUST stop the poll.
     if (target !== 'trade') this.tradeTab?.hidden();
     for (const [wrap, on] of [
@@ -487,6 +502,7 @@ export class ProfileScreen {
       [this.loadoutWrap, target === 'loadout'],
       [this.tradeWrap, target === 'trade'],
       [this.competitionsWrap, target === 'competitions'],
+      [this.achievementsWrap, target === 'achievements'],
     ] as const) {
       if (on) wrap.classList.add('is-on'); else wrap.classList.remove('is-on');
     }
@@ -496,6 +512,7 @@ export class ProfileScreen {
     if (target === 'loadout') void this.loadoutTab?.refresh();
     if (target === 'trade') void this.tradeTab?.shown();
     if (target === 'competitions') void this.competitionsTab?.refresh();
+    if (target === 'achievements') void this.achievementsTab?.refresh();
   }
 
   open(): void {
@@ -535,6 +552,7 @@ export class ProfileScreen {
     this.loadoutTab?.destroy();
     this.tradeTab?.destroy();
     this.competitionsTab?.destroy();
+    this.achievementsTab?.destroy();
     this.element.remove();
     releaseStyle();
   }

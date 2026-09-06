@@ -31,6 +31,10 @@ const BRAVO = 'bdbdbdbdbdbdbdbdbdbdbdbd';
 const STALE = 'cdcdcdcdcdcdcdcdcdcdcdcd';
 /** Challenge progress from the CURRENT period — the view must show it. */
 const FRESH = 'dddddddddddddddddddddde1';
+/** A veteran: 1,200 lifetime kills, no receipts. The retroactive case. */
+const VETERAN = 'eeeeeeeeeeeeeeeeeeeeeee1';
+/** Owed an award whose def no longer exists — the row that must not vanish. */
+const ORPHAN = 'eeeeeeeeeeeeeeeeeeeeeee2';
 const RUST = 'items@1:skin-rust-marine';
 const EMBER = 'items@1:skin-ember-core';
 const ADMIN_TOKEN = 'trade-routes-test-token';
@@ -73,6 +77,52 @@ function seedChallenger(
   }), 'utf8');
 }
 
+/**
+ * Install a quests pack that carries achievements. No release names a quests
+ * version on this host, so the inventory falls back to the newest INSTALLED
+ * one — which is how a bundled-only host picks up a pack today.
+ */
+function seedAchievementPack(dataRoot: string): void {
+  const dir = join(dataRoot, 'packs', 'quests', '2');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'quests.json'), JSON.stringify({
+    challenges: [{
+      id: 'daily.kill-25', period: 'daily', stat: 'kills', target: 25, scrap: 40,
+      name: 'Exterminator', blurb: 'Take down 25 enemies or players today.',
+    }, {
+      id: 'daily.win-1', period: 'daily', stat: 'wins', target: 1, scrap: 30,
+      name: 'Take the Day', blurb: 'Win a match today.',
+    }, {
+      id: 'weekly.wins-10', period: 'weekly', stat: 'wins', target: 10, scrap: 150,
+      name: 'Campaign Season', blurb: 'Win 10 matches this week.',
+    }, {
+      id: 'weekly.streak-8', period: 'weekly', stat: 'bestStreak', target: 8, scrap: 100,
+      item: 'title-knee-deep', name: 'Knee-Deep',
+      blurb: 'Hit an 8-kill streak in a single match this week.',
+    }],
+    achievements: [{
+      id: 'achievement.kills-1000', stat: 'kills', target: 1000, scrap: 250,
+      name: 'Exterminator', blurb: 'Take down a thousand.',
+    }, {
+      id: 'achievement.streak-15', stat: 'bestStreak', target: 15, scrap: 150,
+      item: 'trophy-first-season', name: 'Unbroken', blurb: 'Fifteen without dying.',
+    }],
+  }), 'utf8');
+}
+
+/** A profile with a career and an achievement ledger. */
+function seedCareer(
+  dataRoot: string, device: string,
+  stats: Record<string, unknown>, achievements: Record<string, unknown>,
+): void {
+  const shard = join(dataRoot, 'profiles', device.slice(0, 2));
+  mkdirSync(shard, { recursive: true });
+  writeFileSync(join(shard, `${device}.json`), JSON.stringify({
+    version: 8, deviceId: device, createdMs: Date.now() - 86_400_000,
+    stats, achievements,
+  }), 'utf8');
+}
+
 interface Boot { child: ChildProcess; origin: string; dataRoot: string }
 
 async function boot(env: Record<string, string>, seed: (dataRoot: string) => void): Promise<Boot> {
@@ -88,6 +138,7 @@ async function boot(env: Record<string, string>, seed: (dataRoot: string) => voi
       ...process.env,
       PORT: String(port), HOST: '127.0.0.1',
       DOOMCRAFT_STATIC: staticRoot, DOOMCRAFT_DATA: dataRoot,
+      DOOMCRAFT_PACKS: join(dataRoot, 'packs'),
       DOOMCRAFT_BOTS: '0', DOOMCRAFT_PREWARM: '0',
       ...env,
     },
@@ -115,7 +166,7 @@ beforeAll(async () => {
   [on, off] = await Promise.all([
     boot(
       {
-        DOOMCRAFT_FLAGS: '{"rules":{"economy_trading":{"force":true},"economy_competitions":{"force":true},"share_cards":{"force":true}}}',
+        DOOMCRAFT_FLAGS: '{"rules":{"economy_trading":{"force":true},"economy_competitions":{"force":true},"share_cards":{"force":true},"economy_achievements":{"force":true}}}',
         DOOMCRAFT_ADMIN_TOKEN: ADMIN_TOKEN,
       },
       (dataRoot) => {
@@ -126,6 +177,13 @@ beforeAll(async () => {
           counts: { 'daily.kill-25': 25, 'weekly.wins-10': 10 },
           done: ['daily.kill-25', 'weekly.wins-10'],
         });
+        seedAchievementPack(dataRoot);
+        seedCareer(dataRoot, VETERAN,
+          { kills: 1200, bestStreak: 20 },
+          { done: ['achievement.streak-15'], owed: [] });
+        seedCareer(dataRoot, ORPHAN,
+          { kills: 0, bestStreak: 0 },
+          { done: [], owed: [{ id: 'achievement.retired-one', scrap: 400, item: null }] });
       },
     ),
     boot({}, (dataRoot) => { seedTrader(dataRoot, ALFA, [RUST]); }),
@@ -249,6 +307,62 @@ describe('challenges over the wire (Studio S4)', () => {
     expect(daily?.done).toBe(false);
     expect(weekly?.progress).toBe(0);
     expect(weekly?.done).toBe(false);
+  });
+});
+
+describe('achievements over the wire', () => {
+  it('serves the board with per-caller state; the flagless host hides it', async () => {
+    const view = await call(on.origin, `/api/achievements?device=${VETERAN}`);
+    expect(view.status).toBe(200);
+    const list = (view.json?.achievements ?? []) as Array<Record<string, unknown>>;
+    expect(list.map((a) => a.id).sort())
+      .toEqual(['achievement.kills-1000', 'achievement.streak-15']);
+
+    /* 1,200 lifetime kills and no receipt: EARNED, not locked and not paid.
+     * This is the retroactive case and it is the normal one — the award is
+     * won from history the player already has, and payment waits for a
+     * settling match. */
+    const kills = list.find((a) => a.id === 'achievement.kills-1000');
+    expect(kills?.state).toBe('earned');
+    expect(kills?.progress).toBe(1000);   // clamped AT the target, never past it
+
+    // The one with a receipt is paid, and its item name resolves live.
+    const streak = list.find((a) => a.id === 'achievement.streak-15');
+    expect(streak?.state).toBe('paid');
+    expect(streak?.item).toBe('trophy-first-season');
+    expect(streak?.itemName).toBe('Season Zero Veteran');
+
+    const hidden = await call(off.origin, `/api/achievements?device=${VETERAN}`);
+    expect(hidden.status).toBe(404);
+  });
+
+  it('still shows an award whose definition was retired, and the amount it will pay', async () => {
+    /* The board is built from the LIVE defs, so a promise whose def has been
+     * re-cut away would render nowhere — and an award the player cannot see is
+     * an award they will believe they lost. The debt pays regardless, so the
+     * row has to exist. The defective implementation maps `defs` and stops. */
+    const view = await call(on.origin, `/api/achievements?device=${ORPHAN}`);
+    expect(view.status).toBe(200);
+    const list = (view.json?.achievements ?? []) as Array<Record<string, unknown>>;
+    const orphan = list.find((a) => a.id === 'achievement.retired-one');
+    expect(orphan).toBeDefined();
+    expect(orphan?.state).toBe('earned');
+    // THE PROMISED amount, which is the only amount there is: no def carries it.
+    expect(orphan?.scrap).toBe(400);
+    expect(String(orphan?.blurb)).toContain('still pay');
+  });
+
+  it('answers a player with no profile at all, rather than failing', async () => {
+    const view = await call(on.origin, `/api/achievements?device=${'ab'.repeat(12)}`);
+    expect(view.status).toBe(200);
+    const list = (view.json?.achievements ?? []) as Array<Record<string, unknown>>;
+    expect(list.every((a) => a.state === 'locked')).toBe(true);
+    expect(list.every((a) => a.progress === 0)).toBe(true);
+  });
+
+  it('refuses a request with no device identity', async () => {
+    const view = await call(on.origin, '/api/achievements');
+    expect(view.status).toBe(400);
   });
 });
 
