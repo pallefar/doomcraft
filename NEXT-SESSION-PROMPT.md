@@ -18,17 +18,18 @@ two verdicts were correctly thrown away — see rule 37 and CRITIC.md 2b. HUD is
 piece two and was in flight when this was written; check
 `progress/state.json` and `.../scratchpad/ab/hud-r1/` for where it got to.
 
-**The gunfeel code is on branch `gauntlet` at `2bc6bfa`, NOT on main.** It
-carries a real predictor desync fix (the client drew a gold headshot marker and
-a doubled damage number while the server applied single damage) plus the
-hitmarker merge. Merging it is unfinished business — run the suite in the
-worktree first, and note four tests there are LOAD-SENSITIVE (see below).
+**The gunfeel code is MERGED** (`52e8db8`; `main` and `gauntlet` now agree).
+Both branches had appended a parameter to the SAME damage functions — gunfeel a
+`flags` so a monster kill raises DMG_FATAL, V4d a `variantSlot` so the killfeed
+names the gun — and the resolution is the union with both REQUIRED. After
+resolving, the merged BODY was checked for evidence of each contribution, not
+just for a clean `tsc`: a merge's characteristic failure is silently keeping one
+side, and `e.variantSlot = variantSlot` on the pooled kill event is exactly the
+assignment V4d's rule-38 proof exists to protect.
 
 ## The order
 
-1. **Merge the `gauntlet` branch's gunfeel work to main**, or decide out loud
-   not to. It is 14 red-proved tests and two real fixes sitting on a branch.
-2. **The achievement system.** Model it on `shared/src/challenges.ts` —
+1. **The achievement system.** Model it on `shared/src/challenges.ts` —
    `ChallengeDef` is `{id, name, blurb, period, stat, target, scrap, item}` and
    the condition is DATA, never a shipped predicate. Achievements are lifetime
    and one-shot rather than periodic. `StoredChallenges.owed`
@@ -36,9 +37,9 @@ worktree first, and note four tests there are LOAD-SENSITIVE (see below).
    may not pay it. Note `CHALLENGE_STATS` deliberately excludes `seconds` —
    "a stat the player cannot fail to accumulate is a login reward wearing a
    challenge's name."
-3. **THE GAUNTLET, 21 pieces to go.** The apparatus is now trustworthy and the
+2. **THE GAUNTLET.** The apparatus is now trustworthy and the
    facts below are expensive. Keep going.
-4. Then the rest: portals/TWA, C7 analytics, the deathmatch share surface, and
+3. Then the rest: portals/TWA, C7 analytics, the deathmatch share surface, and
    the two sponsor loose ends in HANDOVER §3.4.
 
 ## Defects found and DELIBERATELY LEFT OPEN — fix or decide, do not rediscover
