@@ -14,6 +14,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import type { ChallengeDef } from '@doomcraft/shared/challenges';
 
 import { JsonJournal, newLedgerId } from './journal.js';
+import { applyMergeFields } from './merge.js';
 import {
   MAX_OWNED_ITEMS,
   MAX_SCRAP_BALANCE,
@@ -27,6 +28,7 @@ import {
 } from './persistence.js';
 
 const DEVICE = 'device-abcdef12';
+const DEVICE_B = 'device-b0b0b0b0';
 /** Friday 2026-08-28 noon UTC — day 2026-08-28, ISO week 2026-W35. */
 const NOON = Date.UTC(2026, 7, 28, 12, 0, 0);
 const DAY_MS = 86_400_000;
@@ -277,6 +279,90 @@ describe('stored challenge state survives a disk round trip', () => {
     expect(p.challenges.done).toContain('weekly.live');
     // The oldest are the ones that fall off, never the live pack's.
     expect(p.challenges.counts['weekly.stale-0']).toBeUndefined();
+  });
+
+
+  it('a merged receipt discharges the merged debt instead of paying it twice', async () => {
+    /* The two-device case, driven through the REAL merge, because the bug is
+     * not visible inside either half on its own. A banks a completion in a
+     * session that grants progress but not Scrap, so it sits in `owed` with
+     * nothing credited. B is the SAME HUMAN on another device, who completed
+     * and was PAID today, so B holds the receipt. `applyMergeFields` unions
+     * `done` within the period and unions `owed` by sourceId with no
+     * cross-check, so A ends up holding both — and the journal cannot catch
+     * it, because its key ends in the profile key and B paid under B's.
+     *
+     * The assertion is the DOWNSTREAM COST, not the flag: the balance and the
+     * ledger row, which is what a player and an auditor actually see. */
+    const a = harness();
+    const b = harness();
+
+    await settleChallenges(a.profile, a.deps({
+      grantedIds: ['daily.kill-5'], stats: stats({ kills: 5 }), mayPayScrap: false,
+    }));
+    expect(a.profile.challenges.owed.map((o) => o.id)).toEqual(['daily.kill-5']);
+    expect(a.profile.economy.scrap).toBe(0);
+
+    await settleChallenges(b.profile, b.deps({
+      grantedIds: ['daily.kill-5'], stats: stats({ kills: 5 }), deviceId: DEVICE_B,
+    }));
+    expect(b.profile.challenges.done).toEqual(['daily.kill-5']);
+    expect(b.profile.economy.scrap).toBe(40);
+
+    applyMergeFields(a.profile, b.profile, NOON);
+    // The state the merge really produces: one completion in BOTH lists.
+    expect(a.profile.challenges.done).toEqual(['daily.kill-5']);
+    expect(a.profile.challenges.owed).toHaveLength(1);
+
+    await settleChallenges(a.profile, a.deps());
+
+    const src = 'challenge:daily.kill-5:2026-08-28';
+    expect(a.profile.economy.scrap).toBe(0);
+    expect(await a.journal.has('prize', src, DEVICE)).toBe(false);
+    expect(a.profile.challenges.done).toEqual(['daily.kill-5']);
+    expect(a.profile.challenges.owed).toEqual([]);
+  });
+
+  it("an EARLIER period's debt still pays through this period's receipt", async () => {
+    /* The other side of the same guard, and the reason its period test is not
+     * decoration. The first version of this test could not fail: the day roll
+     * empties `done` before a carried debt is ever examined, so the branch was
+     * never reached and dropping the period test left it green.
+     *
+     * The state that DOES reach it is again one only the merge can build.
+     * A completed and was PAID today, so A holds today's receipt. B banked the
+     * SAME challenge YESTERDAY in a session that could not pay, so B holds a
+     * debt stamped with yesterday's period. That is a different completion,
+     * genuinely never paid, and today's receipt must not discharge it. */
+    const a = harness();
+    const b = harness();
+
+    // B, yesterday: banked and unpaid.
+    const yesterday = NOON - DAY_MS;
+    await settleChallenges(b.profile, b.deps({
+      grantedIds: ['daily.kill-5'], stats: stats({ kills: 5 }),
+      nowMs: yesterday, deviceId: DEVICE_B, mayPayScrap: false,
+    }));
+    expect(b.profile.challenges.owed[0].periodKey).toBe('2026-08-27');
+
+    // A, today: completed and paid, so today's receipt is on the profile.
+    await settleChallenges(a.profile, a.deps({
+      grantedIds: ['daily.kill-5'], stats: stats({ kills: 5 }),
+    }));
+    expect(a.profile.challenges.done).toEqual(['daily.kill-5']);
+    expect(a.profile.economy.scrap).toBe(40);
+
+    applyMergeFields(a.profile, b.profile, NOON);
+    // Today's receipt and YESTERDAY's debt, together, on one profile.
+    expect(a.profile.challenges.done).toEqual(['daily.kill-5']);
+    expect(a.profile.challenges.owed.map((o) => o.periodKey)).toEqual(['2026-08-27']);
+
+    await settleChallenges(a.profile, a.deps());
+
+    // Yesterday's completion pays: 40 for today, 40 for the carried debt.
+    expect(a.profile.economy.scrap).toBe(80);
+    expect(await a.journal.has('prize', 'challenge:daily.kill-5:2026-08-27', DEVICE)).toBe(true);
+    expect(a.profile.challenges.owed).toEqual([]);
   });
 
   it('round-trips owed entries and refuses malformed ones', () => {

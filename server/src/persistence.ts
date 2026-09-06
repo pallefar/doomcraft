@@ -1152,6 +1152,25 @@ export async function settleChallenges(
      * the same challenge done — the journal key is what stops the double
      * pay, and dropping the entry from `owed` is the durable half. */
     const current = o.periodKey === ch.day || o.periodKey === ch.week;
+    /* THE RECEIPT OUTRANKS THE DEBT, and the journal cannot stand in for it.
+     *
+     * This loop asked the journal and never asked `done`, and the two do not
+     * cover the same ground: the journal's idempotency key ends in the PROFILE
+     * KEY, so a receipt earned as device B protects nothing the moment the
+     * player is A. An account merge produces exactly that pair — `merge.ts`
+     * unions `done` within a matching period and unions `owed` by sourceId,
+     * with no cross-check between the two lists — so A could hold a receipt
+     * and a debt for the same completion and this loop paid the debt against
+     * an empty journal. Measured on the shipped build: A owes `daily.kill-25`,
+     * B has already been paid it today, merge B into A, settle A, and A is
+     * credited 25 Scrap for a completion the human was already paid for,
+     * with a duplicate id pushed onto `done`.
+     *
+     * The period test is load-bearing and is not decoration: a debt carried
+     * over from an EARLIER period is a different completion that was
+     * genuinely never paid, and must still pay even while this period's copy
+     * shows a receipt. Only a receipt for the SAME period discharges it. */
+    if (current && ch.done.includes(o.id)) continue;
     if (deps.journal !== null && await deps.journal.has('prize', o.sourceId, deps.deviceId)) {
       if (current && !ch.done.includes(o.id)) ch.done.push(o.id);
       continue;
