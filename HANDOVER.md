@@ -46,6 +46,34 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
 
 ## 0. The rules this project learned expensively. Do not relearn them.
 
+Thirty-nine is too many to read cold, so read these four first — they are the
+ones that have cost the most, and every other rule is a special case of one of
+them or an operational fact.
+
+  **2 · A green test that cannot fail is worse than no test.** Its costumes:
+     11 (a capture that cannot fail), 25 (a gate that cannot PASS),
+     38 (a proof obligation that cannot DISCRIMINATE). Six gates in this repo
+     were found green while testing nothing; one had signed off every deploy in
+     the project's history.
+  **33 · Write briefs from the CODE, not from prose.** Its costumes: 18 (agent
+     prose needs a verifier), 23 (verify a second opinion in BOTH directions).
+     Every runtime claim that entered a plan unexecuted this project has been
+     wrong — from a handover, from another model, and from my own harness.
+  **37 · A comparison only informs where both sides could plausibly win.** Its
+     costumes: 3 (measure, don't eyeball), 28 (the instrument lies first),
+     39 (the memory index leaks the answer). Three times the bar capture was
+     stale in OUR favour.
+  **29 · Two doors onto the same data must accept the SAME SET.** Its costumes:
+     30 (rank the failure modes before choosing a side to tighten), 31 (a fix
+     you order can open the hole next door).
+
+Then, by theme:
+  proofs losing their lever  21, 26, 27, 32
+  the running system vs code 1, 34, 35
+  platform and tooling       5, 8, 9, 10, 12, 13, 14, 15, 17, 19, 24
+  domain facts              6, 7, 16, 20, 22, 36
+
+
 1. **"It compiles and tests pass" is not evidence.** Demand an import trace PLUS a
    boot with a screenshot or a measurement. `client/src/ui/wiring.test.ts` fails
    the suite when a UI module ships to nobody.
@@ -57,8 +85,8 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
 4. **The bar is real and fetchable** (`ref/`) — AND IT WAS WRONG ABOUT ITSELF
    until 2026-09-05; see rule 37. The gauntlet is **1/23**: gunfeel won a blind,
    uncontaminated A/B, and HUD is piece two.
-5. **`shared/src/flags.ts` NUL bytes are FIXED** (escapes now) — plain `grep`
-   works on it again. rg is still NOT installed on this machine.
+5. **RETIRED** (the `flags.ts` NUL bytes were fixed long ago and plain `grep`
+   works). The one live fragment: **rg is still NOT installed on this machine.**
 6. **Simulated-failure tests must pick platform-identical failure inputs.**
 7. **A gate that verifies the wrong tree is worse than no gate.**
 8. **Workflow/worktree agents check out HEAD** — commit first, then audit.
@@ -348,6 +376,38 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
 
 ## 2. Architecture delta
 
+**V4 (a-f), all shipped and live.** The seam below is unchanged; this is what
+now rides on it.
+
+```
+THE VARIANT AS A THING A PLAYER OWNS
+  shared/src/items.ts    ItemKind.WEAPON_VARIANT = 5, ItemDef.variantId
+                         BICONDITIONAL: kind === WEAPON_VARIANT iff
+                         id === "weapon_variant-<variantId>"  — so the kind is
+                         readable off a REF with no pack registry, which is what
+                         lets grantDrops decide without an async lookup
+  persistence.ts         StoredInventory.variants: Record<baseWeaponId, ref>
+                         EquipSlot = 'skin' | 'title' | `variant:${number}`
+                         TRANSFER_SOURCES = {'trade'}  — an ALLOW-list, default
+                         refuse, so a sixth call site inherits the safe side
+                         VARIANT_MINT_SOURCES = {'craft'}  — V4e opens exactly
+                         one door
+  room.ts                variantClaims(conn) -> Uint8Array, supplied by the ROOM
+                         FACTORY; resolves rowIndex + 1 against THIS room's
+                         variantEntries, re-checking ownership, revocation and
+                         presence at every join
+  protocol.ts            KILL gains a 9th byte (the slot the shot was FIRED
+                         with); S2C.VARIANT_NAMES = 14 carries id -> name
+  index.ts               GET /api/variants mirrors /api/items: {id, base, name}
+                         — strictly less than the in-room wire already gives
+
+  THE OFF-BY-ONE THAT IS THE WHOLE THING: SessionArsenal.from increments `slot`
+  BEFORE filling, so overlay row i is slot i+1 and slot 0 is the compiled base.
+  Every slot contains every weapon; only the overlay's own base differs in its
+  slot. So writing rowIndex instead of rowIndex+1 serves the BASE weapon —
+  silently. Assert the DAMAGE the arsenal serves, never a slot number.
+```
+
 ```
 THE VARIANTS SEAM (new, phase V1)
   shared/src/arsenal.ts      SessionArsenal.statsFor(weaponId, variantSlot) -> EffectiveWeapon
@@ -378,81 +438,50 @@ THE PROOFS
 
 ## 3. What is left — decided order
 
-0. **V2 IS DONE and the binary is LIVE** (`b3902e0`, `883d875`, deployed
-   2026-09-05). That matters beyond "a stage finished": the pack kind's own
-   rule is that the variants-aware BINARY must be live before any release names
-   kind 7, or a host that predates it silently serves the previous release. It
-   is. `release:verify` is 17 checks now and reports
-   `variants.validate — no variants manifest installed`.
+**V4 IS DONE (a through f) AND LIVE.** Everything that section used to describe
+has shipped, so it is gone; the arc is in §1 and in git.
 
-   **V3 IS DONE and deployed** (`6529e82`, `aeff8e2`, 2026-09-05):
-   `S2C.VARIANT_TABLE = 13` and `CAP_VARIANTS = 1 << 5`, both additive; the
-   room's table at effective values in f64 plus the player's resolved slot
-   map; both ends building their arsenal from the decoded bytes; the pinned
-   manifest resolved in the room factory; a golden vector; and a live deploy
-   gate that a real origin passes. The authoritative shot number that was
-   planned as its second half was CUT — see §6, where the three findings are.
+1. **The achievement system.** Model it on `shared/src/challenges.ts` —
+   `ChallengeDef` is `{id, name, blurb, period, stat, target, scrap, item}` and
+   the condition is DATA, never a shipped predicate. Achievements are lifetime
+   and one-shot rather than periodic. `StoredChallenges.owed` is the debt shape
+   for anything banked in a session that may not pay it (rule 20).
+   `CHALLENGE_STATS` deliberately excludes `seconds`, because "a stat the player
+   cannot fail to accumulate is a login reward wearing a challenge's name."
 
-   **V4 is the first content** — `content/variants.json`,
-   `ItemKind.WEAPON_VARIANT` tokens, the equip claim (it feeds
-   `RoomOptions.variantClaims`, which V3 built and left returning nothing),
-   the craft recipe, and the two-browser bar. Two things V4 owes that V2
-   deliberately did not build, plus the four §6 items V3 added:
+2. **The gauntlet — 2/23.** Gunfeel and HUD are won. MENUS IS BLOCKED, not
+   lost: it was judged four times and binned four times, the last three because
+   a subagent boots with the memory index that names this product's modes and
+   bars (rule 39). Judge name-bearing screens from a session with the memory
+   store detached, or record them unscorable. Its work order is already written
+   and side-neutral: **our biggest button is pre-armed with a 0-enemy movement
+   tutorial, and two of the four front cards read "COMING SOON · 2026" and do
+   nothing when pressed.** Prefer STILL pieces while the motion asymmetry in
+   `NEXT-SESSION-PROMPT.md` is unfixed.
 
-   - **the admin console cannot see variants.** `PackInventory`'s summary maps
-     items and quests into the packs screen and variants is not in it, so an
-     operator has no way to look at installed versions. Harmless while no
-     content exists; not harmless the day it does.
-   - **the display readers still answer for the archetype.**
-     `maxBurstDamage`, `currentAmmoType` and `headshotScale` in
-     client/src/game/weapons.ts take a weapon id, so the HUD and killfeed will
-     show base numbers for an equipped variant. They cannot be wrong until a
-     variant exists.
+3. **Defects found and deliberately left open. Fix or decide — do not
+   rediscover.**
+   - **A pack version above 65535 silently disables EVERY item grant.**
+     `itemsVersions()` accepts any integer >= 1; `parseItemRef` is
+     `^items@(\d{1,5}):` and caps at `0xffff`. Install `items/100000/` and
+     drops, challenge items, prizes and craft output all vanish with no error.
+     Pinned by a test; the cap itself is unfixed.
+   - `equippedSkin` and `title` are still reachable through
+     `POST /api/profile`. V4c added `variants` to `SERVER_OWNED_PROFILE_FIELDS`
+     and left those two.
+   - `craft.ts` clears `equippedSkin` on consuming a last copy but not a variant
+     claim (read-time validation covers it).
+   - The `loadoutTab.ts` wiring proof is a SOURCE RATCHET, not behavioural.
+   - **The Lost Soul has three different sizes** — spawned 0.9 m, client hit
+     target 0.7 m, rendered 0.5 m. You can hit it where nothing is drawn.
+     Belongs to the ENEMIES piece.
+   - Melee headshots are client-only, for players too.
 
-1. ~~**V2 of the variants arc, and its plan needs rewriting before it is built.**~~
-   DONE — kept below because the review findings it records are still the
-   reason the code looks the way it does.
-   The plan was put to Codex as twelve numbered clauses before a line was
-   written, exactly as the standing rule says, and it came back with enough to
-   block. §6 carries the findings; the two the user has already ruled on are
-   settled (see below). What V2 must now be:
-
-   - a `shared/src/variants.ts` parser modelled on `parseItemsManifest` **but
-     not copied from it** — the null-root bug is fixed there now, and the copy
-     would have inherited it;
-   - a whitelist that BANDS EVERY FIELD IT ADMITS. The plan banded 12 of 18.
-     The six unbanded ones include `terrainDamage`, which is passed straight to
-     `world.carveSphere`, whose `for (let y = y0; y <= y1; y++)` never advances
-     when `y0` is -1e20 because `-1e20 + 1 === -1e20`. One projectile would
-     block the event loop forever;
-   - INTEGER refusals, not just numeric bands. `pellets: 1.5` is inside 1..12
-     and makes the server fire twice while the client fires once;
-     `magSize: 7.5` makes a reload destroy a reserve round and load nothing;
-   - **the budget, per the user's decision of 2026-09-05: per-archetype axes
-     and measured currency.** An axis whose BASE value is zero is dropped and
-     its weight redistributed (four of seven weapons have zero splash, so
-     `splash/base_splash` is 0/0, and `Math.abs(NaN) <= 0.12` is false — the
-     check would refuse every pistol variant rather than accept it). And an
-     axis is only chargeable where it actually reaches that archetype's firing
-     path: range is NOT an axis for projectile weapons (direct damage is stored
-     at spawn and never has falloff applied — Codex built a plasma variant
-     scoring exactly 1.0 while gaining 20% real damage), and `reloadMs` is not
-     one for shell-reloaders (the shotgun reloads on `reloadShellMs`, so
-     doubling `reloadMs` costs nothing at all);
-   - `PackKind.VARIANTS = 7` **with its `PackInventory.unsatisfied()` branch in
-     the same commit**, and — separately — the production release gate wired.
-     `runReleaseVerify()` in gate.ts and `ReleaseService.runGate()` in packs.ts
-     are two different implementations; adding a check to the first does not
-     add it to the second, and a candidate naming kind 7 currently gates GREEN
-     and then falls back at serve time;
-   - a canonical fingerprint line that fits the gate's 160-byte cap.
-
-2. **The gauntlet — 0/23.** Then portals/TWA, C7 analytics.
-3. **Deathmatch share surface** — needs its own `#ui` element.
-4. **The sponsors loose ends**: no screenshot harness for the REWARDED overlay
-   (S10's is `tools/shot-interstitial.mjs`), and no Basic Training drill for
-   either sponsor surface — the PLAYER half of the standing tutorial directive.
-   The admin half shipped as Guides 9.
+4. **Then:** portals/TWA, C7 analytics, the deathmatch share surface (needs its
+   own `#ui` element), and the two sponsor loose ends — no screenshot harness
+   for the REWARDED overlay (S10's is `tools/shot-interstitial.mjs`), and no
+   Basic Training drill for either sponsor surface, which is the PLAYER half of
+   the standing tutorial directive. The admin half shipped as Guides 9.
 
 ## 4. Deploy runbook (follow exactly)
 
@@ -539,8 +568,9 @@ $100 · a Mac with Xcode · GTA mode has no obtainable bar.
 Findings this session produced and chose NOT to act on, so none is mistaken for
 oversight.
 
-**THE SHOT CLOCKS DIVERGE, AND THE CONE SEED RIDES ON THEM. Read this before
-V3 or V4 promises anything about prediction.**
+**THE SHOT CLOCKS DIVERGE, AND THE CONE SEED RIDES ON THEM.** (V3 and V4 have
+since shipped and did NOT promise anything about prediction; this remains open
+and unfixable by matching a formula. Read it before anything else does.)
 
 The server schedules on a tick (`nextFireMs = now + interval`); the client
 accumulates into a per-frame cooldown. Neither is wrong and they cannot be made
