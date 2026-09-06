@@ -186,7 +186,7 @@ describe('a mode selection changes what the room does', () => {
     // And nothing that arrives late can hurt the builder.
     h.player.health = MAX_HEALTH;
     for (let i = 0; i < 40; i++) {
-      room.sim.damagePlayer(h.player, 0, 25, WeaponId.PISTOL, 0, 0, 0, 1);
+      room.sim.damagePlayer(h.player, 0, 25, WeaponId.PISTOL, 0, 0, 0, 1, 0);
       room.step();
     }
     expect(h.player.dead).toBe(false);
@@ -210,7 +210,7 @@ describe('a mode selection changes what the room does', () => {
     // Run the protection out, then prove damage lands again.
     steps(room, 120);
     h.player.health = MAX_HEALTH;
-    room.sim.damagePlayer(h.player, 0, 30, WeaponId.PISTOL, 0, 0, 0, 1);
+    room.sim.damagePlayer(h.player, 0, 30, WeaponId.PISTOL, 0, 0, 0, 1, 0);
     expect(h.player.health).toBeLessThan(MAX_HEALTH);
     room.stop();
   });
@@ -328,7 +328,7 @@ describe('a mode selection changes what the room does', () => {
     // Die three times; land on the same authored tile every time.
     for (let round = 0; round < 3; round++) {
       h.player.spawnProtectUntilMs = 0;
-      room.sim.damagePlayer(h.player, 0, 500, WeaponId.PISTOL, 0, 0, 0, 1);
+      room.sim.damagePlayer(h.player, 0, 500, WeaponId.PISTOL, 0, 0, 0, 1, 0);
       expect(h.player.dead).toBe(true);
       pump(h, 140);
       expect(h.player.dead).toBe(false);

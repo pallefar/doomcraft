@@ -1,111 +1,138 @@
-Continue Doomcraft (~/youtube/doomcraft). Read HANDOVER.md §0 first — rules 29-35
-are new and every one cost real time. `docs/VARIANTS.md` §5a is the live arc.
-`ref/BAR.md` is the bar.
+Continue Doomcraft (~/youtube/doomcraft). Read HANDOVER.md §0 — **rules 35-38 are
+new and every one cost real time**, and 38 is the one that changes how you write
+tests. `ref/BAR.md` is the bar and it was WRONG about the bar until today.
 
 **NOTHING IS WAITING ON ME. The order below is decided. Start building.**
 
 ## Where it stands
 
-V1-V3 are CLOSED. Their five loose ends are fixed, and so are nine more defects
-that were found while closing them — six of those by putting plans to Codex
-BEFORE writing code, which is the single highest-yield habit in this project.
+**THE V4 ARC IS COMPLETE AND LIVE — a through f.** A player can own a weapon
+variant, equip it, fire it, see it named in the killfeed, craft one at the
+bench, and click Equip on it. Every phase went to Codex as numbered clauses
+before a line was written; every one is deployed and verified by probing a value
+only that build emits.
 
-**V4 is now FIVE sub-phases** (docs/VARIANTS.md §5a), because the review refused
-it as one and broke nine of eleven clauses. Split into six-clause pieces it
-scores four of six. A phase small enough to review is a phase that survives one.
+**THE GAUNTLET IS 1/23 AND IT FINALLY RAN.** Gunfeel won a blind, uncontaminated
+A/B. It took three attempts to build a comparison worth judging, and the first
+two verdicts were correctly thrown away — see rule 37 and CRITIC.md 2b. HUD is
+piece two and was in flight when this was written; check
+`progress/state.json` and `.../scratchpad/ab/hud-r1/` for where it got to.
 
-**V4a is DONE and DEPLOYED** (`ef1100d`): `content/variants.json` ships two rows
-— `shotgun-slug` and `rocket-swift` — the `content/` fallback exists with
-packsRoot winning, the offline gate reads and emits kind 7, and a real client
-gets both rows with all sixteen effective fields. Every player still resolves to
-slot 0; nobody can own or equip anything yet.
+**The gunfeel code is on branch `gauntlet` at `2bc6bfa`, NOT on main.** It
+carries a real predictor desync fix (the client drew a gold headshot marker and
+a doubled damage number while the server applied single damage) plus the
+hitmarker merge. Merging it is unfinished business — run the suite in the
+worktree first, and note four tests there are LOAD-SENSITIVE (see below).
 
 ## The order
 
-1. **V4b — the ownership token.** `ItemKind.WEAPON_VARIANT`, `ItemDef.variantId`,
-   items serialization. Put it to Codex as numbered clauses first. Known traps:
-   - there are **NO `ITEMS_*` literals** — items are a dynamically fingerprinted
-     DATA pack, so nothing to bump, but appending a field unconditionally
-     changes every old item line AND the recomputed digests of already-installed
-     items versions. Preserve legacy serialization for non-variants or handle
-     that compatibility break explicitly;
-   - the naive new line is **177 bytes** against the 160-byte cap;
-   - `guessKind` splits an id on `-` and indexes `ITEM_KIND_NAMES`, so a token
-     must be `weapon_variant-shotgun-slug` or it renders under "Skins";
-   - do NOT add variants to the untradable pair — server trades check
-     `def.tradable` and tradable variants already fit that policy;
-   - `PackInventory.summary()` has no `variants` key, so the admin Inventory
-     screen still cannot show the installed version that now always exists.
-2. **V4c — the claim reaches the body.** The room is known BEFORE ticket
-   redemption (`router.route` returns `{key, room}` before the await at
-   `index.ts:4116`); resolve against THAT room's pinned ordering, not
-   `releases.live()`, or a reversed row order grants the wrong gun.
-   `equipVerdict` learns only an item's KIND today, so a shotgun token submitted
-   for `variant:0` returns **200** while the arsenal serves pistol damage.
-   **`trust.test.ts`'s scan does NOT cover variants** — its regex has no
-   `variant` term, so §4's claimed protection does not exist. Build it.
-3. **V4d — display truth.** The client holds no variant NAMES; a display name is
-   a separate additive message. A 9th KILL byte is compatible, but the new
-   decoder must accept 8-byte messages and RESET the reused event's slot.
-4. **V4e — acquisition.** As specified, supply stays **0 forever**: initial
-   supply 0, drops none, trading conserves, every craft needs three variants.
-   Needs a distinct ENTRY recipe.
-5. **An ACHIEVEMENT system.** Model it on `shared/src/challenges.ts` —
+1. **Merge the `gauntlet` branch's gunfeel work to main**, or decide out loud
+   not to. It is 14 red-proved tests and two real fixes sitting on a branch.
+2. **The achievement system.** Model it on `shared/src/challenges.ts` —
    `ChallengeDef` is `{id, name, blurb, period, stat, target, scrap, item}` and
    the condition is DATA, never a shipped predicate. Achievements are lifetime
    and one-shot rather than periodic. `StoredChallenges.owed`
-   (`persistence.ts:196`) is the debt shape for anything banked in a session
-   that may not pay it.
-6. **THE GAUNTLET — still 0/23, still never run blind.** The harness works:
-   `node tools/capture-ours.mjs` produced 86 frames this session and the twelve
-   baseline points line up 1:1 with `ref/voxiom/desktop-*.png`. **A default run
-   is HEADLESS, UNTHROTTLED and against the dev server — its 120 fps is a
-   capture artifact this project has already been fooled by once.** A fair A/B
-   needs `--headed --prod` with the same throttle on both sides, and the two
-   lines kept apart: beating the bar is a 1% low above **53.8**; meeting spec is
-   **55**, deliberately harder. Use `tools/blind.mjs` and let the critic score.
-   Start with GUNFEEL — it is ref/BAR.md weakness #2, the most winnable piece,
-   and `sim.ts:1698` still passes `flags = 0` for entity damage so a monster
-   kill never shows the fatal hitmarker and a monster headshot never shows the
-   headshot one. That is a gunfeel decision for a blind critic, not a
-   correctness commit, which is why it was left.
-7. Then the rest: portals/TWA, C7 analytics, the deathmatch share surface, and
+   (`persistence.ts`) is the debt shape for anything banked in a session that
+   may not pay it. Note `CHALLENGE_STATS` deliberately excludes `seconds` —
+   "a stat the player cannot fail to accumulate is a login reward wearing a
+   challenge's name."
+3. **THE GAUNTLET, 21 pieces to go.** The apparatus is now trustworthy and the
+   facts below are expensive. Keep going.
+4. Then the rest: portals/TWA, C7 analytics, the deathmatch share surface, and
    the two sponsor loose ends in HANDOVER §3.4.
+
+## Defects found and DELIBERATELY LEFT OPEN — fix or decide, do not rediscover
+
+- **A pack version above 65535 silently disables EVERY item grant.**
+  `PackInventory.itemsVersions()` accepts any integer >= 1 with no upper bound
+  while `parseItemRef` is `^items@(\d{1,5}):` and caps at `0xffff`. Install
+  `items/100000/items.json` and every ref the server mints is unparseable, so
+  `grantDrops` silently drops match drops, challenge items, competition prizes
+  AND craft output — no error anywhere. Pinned by a test (it is the lever V4e's
+  fallback proof uses); the cap itself is unfixed.
+- **`equippedSkin` and `title` are still reachable through `POST /api/profile`.**
+  V4c added `variants` to `SERVER_OWNED_PROFILE_FIELDS` and left those two.
+- **`craft.ts` clears `equippedSkin` on consuming a last copy but not a variant
+  claim.** Read-time validation covers it today.
+- **The `loadoutTab.ts` wiring proof is a SOURCE RATCHET, not behavioural.**
+  There is no jsdom here and `LoadoutTab` needs a document plus three fetches.
+  It discriminates on all three reverts but asserts the presence of a call, not
+  its effect. A behavioural version needs `profile.test.ts`'s DOM-stub
+  treatment extended.
+- **The Lost Soul has three different sizes** — `bots.ts` spawns it 0.9 m,
+  `MONSTER_LOOK` gives the client hit target 0.7 m, `drawMonster` renders a
+  0.5 m cube spanning 0.15-0.65. A shot at 0.8 m damages it on the server,
+  produces no client marker, and hits nothing the player can see. Belongs to the
+  ENEMIES gauntlet piece.
+- **Melee headshots are client-only, for players too.** `resolveMelee` is a cone
+  test with no head box on either branch.
+
+## The gauntlet apparatus — every line here was paid for
+
+- **Run pieces ONE AT A TIME.** A headed 60 fps capture is a measurement on
+  shared hardware. Concurrent captures, or a full suite run during one, corrupt
+  the frame times the critic reads.
+- **Four tests are LOAD-SENSITIVE**: `client/src/audio/synth.test.ts`'s boot
+  budget and three in `client/src/net/chunkz.test.ts`. At load average 30-70
+  they fail; alone they pass 51/51 in 12 s. A green suite claim needs the
+  machine load recorded beside it. Quiet-machine baseline: ~95-137 s for the
+  whole suite.
+- **`tools/capture-ours.mjs` CANNOT record video** — no `reccanvas` import
+  anywhere; it is screenshots plus metrics. A motion piece needs a separate
+  recorder.
+- **OUR HUD CANNOT REACH A CANVAS RECORDING.** Our crosshair, hitmarker, ammo,
+  health and minimap are separate elements that `canvas.captureStream()` misses;
+  the bar renders its crosshair and minimap INTO its canvas. So every MOTION
+  comparison silently handicaps us, and the hitmarker the gunfeel round built is
+  invisible in its own A/B. STILL comparisons (full-page screenshots) do not
+  have this problem — that is why HUD was chosen as piece two.
+- `capture-ours.mjs` **reuses whatever already listens on its port** — always
+  pass `--port`, and `lsof -i` it first, or you will photograph another tree.
+- A default capture run is headless, unthrottled, dev-server, and reports
+  ~120 fps median. **That is an uncapped-vsync artifact, not a frame cost.**
+  Use `--headed --prod`.
+- The neutral A/B metrics keys are NOT the keys either side emits. Both store
+  `tTitle`, `tPlayable`, `bytes` and a nested `fps{}`. Map them or you write
+  nulls and void the measurement half in silence.
+- **A metrics key that is null on one side and populated on the other is itself
+  a de-blinding channel.** Fill both or null both.
+- The worktree is at `~/youtube/doomcraft-gauntlet` (branch `gauntlet`). A
+  blanket `node_modules` symlink ALIASES IT BACK TO THE MAIN TREE, because the
+  workspace links are relative — build a real dir of per-entry symlinks with a
+  real `@doomcraft/` pointing inside the worktree.
 
 ## Standing rules — not optional
 
 **Put every plan to Codex as numbered CLAUSES before a line is written**, and
-require a closing section listing the clauses it judges CORRECT so a clean bill
-is a visible judgement:
+require a closing list of the clauses it judges CORRECT:
 
     codex exec --sandbox read-only --cd /Users/karstenhaldan/youtube/doomcraft - < plan.txt
 
-It refuses plans, and it has twice found defects in code committed hours
-earlier. Then verify every finding yourself, BOTH directions — two of its
-constants this session were wrong.
+**And ask it the rule-38 question every time:** *for each proof obligation, do
+the DEFECTIVE and the CORRECT implementation produce the same asserted value on
+the input as specified?* Asked on V4e it found four of six obligations were
+decoration. On V4f, three of five. It costs one sentence.
 
-**Write briefs from the CODE, not from a review.** Five of six briefs written
-this session contained a claim the builder correctly overturned. End every brief
-with an explicit instruction to report anything in it that is wrong; that
-sentence is the highest-yield line in the template.
+**Execute every runtime claim before it enters a plan.** Three of my claims were
+overturned this session and all three were sentences I READ rather than RAN —
+one from Codex, one from my own harness, one from this project's own handover.
 
-**Prove every regression test red with its fix reverted, and check WHAT went
-red.** And ask of every assertion whether the quantity is produced BY the
-mechanism under test or ALONGSIDE it. A scalar set beside a loop can be truthful
-about a loop that is lying.
+**Write briefs from the CODE**, and end every brief telling the agent to report
+anything in it that is wrong. That sentence caught something in every single
+brief this session.
 
-**The full suite runs when NO builder is in the tree, in either direction.**
-Check `git status --short` first. Match `pgrep` on the repo path — another
-session'"'"'s vitest on this machine will otherwise look like your own.
+**Prove every regression test red with its fix reverted, check WHAT went red,
+and report what the defective build produced on that same input.**
 
-**Deploy verification, in preference order:** probe `/api/version` for a content
-version only this commit declares; poll `railway deployment list` to SUCCESS
-(never the CLI'"'"'s exit code); run `node tools/smoke-signal.mjs wss://<origin>`,
-which as of `ef1100d` can finally SEE an empty table instead of just a sent
-message; confirm `data.writable`. The Vercel bundle-hash rule does NOT reproduce
-from this machine — HANDOVER §4 explains why and what replaces it.
-`railway link` needs an interactive service prompt, so do not chain it in a
-background command with output suppressed.
+**Deploy verification, in order:** `git status` clean (a builder mid-edit means
+`railway up` uploads half-written code); CI green; `railway up --detach`; poll
+`railway deployment list` to SUCCESS; then probe a value only the new build
+emits — never the build id, which lies. Re-probe `GET /api/admin/release` for
+`history: []` immediately before, because `/api/version` CANNOT tell you that
+(rule 35). Then `tools/smoke-signal.mjs` and `data.writable`.
 
-Owner seat: `~/youtube/doomcraft-owner-credentials.txt`. Sign in at
-`/api/auth/signin` — there is no `/api/admin/signin`.
+`railway link -p 32896841-c5c5-42ff-a408-a22a5807356b -e production -s doomcraft`
+works non-interactively, contrary to the older note.
+
+Owner seat: `~/youtube/doomcraft-owner-credentials.txt`, sign in at
+`/api/auth/signin`.

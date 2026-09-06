@@ -125,7 +125,12 @@ import {
 } from '@shared/version';
 import { defaultFlagBits, flagOn } from '@shared/flags';
 import {
-  createVariantTableMessage, decodeVariantTable, overlaysFromWire,
+  createVariantNamesMessage,
+  createVariantTableMessage,
+  decodeVariantNames,
+  decodeVariantTable,
+  overlaysFromWire,
+  variantDisplayName,
 } from '@shared/variants';
 import { SessionArsenal } from '@shared/arsenal';
 import type {
@@ -960,6 +965,10 @@ export class NetClient {
   private readonly welcome = createWelcomeMessage();
   private readonly sessionConfig = createSessionConfigMessage();
   private readonly variantTable = createVariantTableMessage();
+  /** The display names for this room's rows, keyed by row id (V4d). */
+  private readonly variantNames = createVariantNamesMessage();
+  /** `id -> name`, rebuilt whole whenever a names message is adopted. */
+  private variantNameById: ReadonlyMap<string, string> = new Map();
   /**
    * True once this connection has been told a table. False against a server
    * too old to send one — which is a different thing from "the table is still
@@ -1560,6 +1569,7 @@ export class NetClient {
       case S2C_MODE.CONTEXT: this.onModeContext(r); break;
       case S2C.SESSION_CONFIG: this.onSessionConfig(r); break;
       case S2C.VARIANT_TABLE: this.onVariantTable(r); break;
+      case S2C.VARIANT_NAMES: this.onVariantNames(r); break;
       case S2C.MATCH_AWARD: this.onMatchAward(r); break;
       case S2C.UPDATE_REQUIRED: this.onUpdateRequired(r); break;
       // An unknown id is a message from a NEWER server. Ignoring it is what
@@ -1609,6 +1619,44 @@ export class NetClient {
     this.variantsAdopted = true;
     this.events.onVariantTable?.(
       SessionArsenal.from(overlaysFromWire(m.variants)), m.slots,
+    );
+  }
+
+  /**
+   * The room's display names, adopted whole or not at all — the same contract
+   * the table has, for the weaker reason that this one is DISPLAY ONLY.
+   *
+   * Nothing here reaches a predictor. A refused, dropped or never-sent names
+   * message leaves `variantNameById` empty and every feed line falls back to
+   * the archetype's name, which is exactly what the feed says today.
+   *
+   * A ROOM WITH NO VARIANTS SENDS NO NAMES, so this map is NOT cleared on a
+   * reconnect into one — and it does not need to be, because the LOOKUP is
+   * gated on `variantTable.variants`, which that room DOES replace (it sends
+   * a count-0 table: `host.variantTable` is an empty array, never absent).
+   * An id from the previous room is therefore unreachable rather than merely
+   * unused. If `variantDisplayName` ever stops resolving through the entries,
+   * this map has to be cleared here.
+   */
+  private onVariantNames(r: PacketReader): void {
+    const m = decodeVariantNames(r, this.variantNames);
+    if (m === null) return;
+    const next = new Map<string, string>();
+    for (const e of m.names) next.set(e.id, e.name);
+    this.variantNameById = next;
+  }
+
+  /**
+   * What to CALL the gun a shot was fired with: the pinned row's display name,
+   * or the archetype's.
+   *
+   * `slot` is `KillEvent.variantSlot` and it is resolved through THIS ROOM's
+   * table (`variantTable.variants`), never through a compiled or live one —
+   * see `variantDisplayName`. Safe to call before either message has arrived.
+   */
+  variantWeaponName(weaponId: number, variantSlot: number): string {
+    return variantDisplayName(
+      this.variantTable.variants, this.variantNameById, weaponId, variantSlot,
     );
   }
 

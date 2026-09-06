@@ -1566,6 +1566,7 @@ class GatedStore implements PersistenceStore {
   }
 
   load(deviceId: string): Promise<StoredProfile | null> { return this.inner.load(deviceId); }
+  peek(deviceId: string): StoredProfile | null { return this.inner.peek(deviceId); }
   ensure(deviceId: string): Promise<StoredProfile> { return this.inner.ensure(deviceId); }
   save(p: StoredProfile): Promise<void> { return this.inner.save(p); }
   grantEntitlement(d: string, product: string, receipt: string | null): Promise<StoredProfile> {

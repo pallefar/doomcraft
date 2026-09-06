@@ -23,7 +23,7 @@ import {
   type PackVersion,
 } from '@doomcraft/shared/packs';
 import { weaponsFingerprintInputs } from '@doomcraft/shared/version';
-import { parseChallengesManifest } from '@doomcraft/shared/challenges';
+import { parseChallengesManifest, type ChallengesManifest } from '@doomcraft/shared/challenges';
 import { parseItemsManifest } from '@doomcraft/shared/items';
 
 import {
@@ -685,5 +685,70 @@ describe('variants.validate', () => {
     }));
     expect(hazard.ok).toBe(false);
     expect(hazard.detail).toContain('terrainDamage');
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * V4b — the fourth supply path, which nothing else could see
+ * ------------------------------------------------------------------------ */
+
+describe('quests.refs refuses a challenge that would MINT a weapon variant', () => {
+  /*
+   * Clause 20, repaired. Supply was argued to be zero from `CRAFTABLE_KINDS`,
+   * `rollMatchDrops` and trading — and `ChallengeDef.item` walked straight
+   * past all three. It is an items-manifest LOCAL id that `settleChallenges`
+   * turns into `items@<v>:<id>` with `source: 'challenge'`, and this check
+   * only ever asked whether the id EXISTS, never what KIND it is.
+   *
+   * REPRODUCED on the unfixed code, end to end: the quests manifest below
+   * parsed with zero errors, `quests.refs` returned `ok: true`, and the
+   * settlement would have granted `items@1:weapon_variant-shotgun-slug`.
+   */
+  const questDef = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'daily.kill-5', period: 'daily', stat: 'kills', target: 5, scrap: 10,
+    name: 'Five', blurb: 'Take down five.', ...over,
+  });
+
+  const ITEMS = parseItemsManifest(JSON.stringify({
+    items: [
+      { id: 'skin-a', kind: 'skin', name: 'A', rarity: 'common', tradable: true },
+      {
+        id: 'weapon_variant-shotgun-slug', kind: 'weapon_variant', name: 'Slug Shotgun',
+        rarity: 'uncommon', tradable: true, variantId: 'shotgun-slug',
+      },
+    ],
+  })).manifest;
+
+  const paying = (item: string): ChallengesManifest =>
+    parseChallengesManifest(JSON.stringify({ challenges: [questDef({ item })] })).manifest!;
+
+  it('fails, and the check that fails is quests.refs and not another one', () => {
+    // The parser has no opinion — the id is a canonical slug and the def pays
+    // something, so nothing upstream of the reference gate objects.
+    const parsed = parseChallengesManifest(JSON.stringify({
+      challenges: [questDef({ item: 'weapon_variant-shotgun-slug' })],
+    }));
+    expect(parsed.errors).toEqual([]);
+    expect(checkQuestsValidate(JSON.stringify({
+      challenges: [questDef({ item: 'weapon_variant-shotgun-slug' })],
+    })).ok, 'quests.validate must stay GREEN — this is a reference rule, not a schema rule').toBe(true);
+
+    const c = checkQuestsRefs(paying('weapon_variant-shotgun-slug'), ITEMS);
+    expect(c.id).toBe('quests.refs');
+    expect(c.ok).toBe(false);
+    expect(c.detail).toContain('craft-only');
+    expect(c.detail).toContain('weapon_variant-shotgun-slug');
+    // It is NOT the dangling-id message: the id is right there in the manifest.
+    expect(c.detail).not.toContain('not in the items manifest');
+  });
+
+  it('still passes every kind a challenge is allowed to pay', () => {
+    for (const item of ['skin-a']) {
+      expect(checkQuestsRefs(paying(item), ITEMS).ok, item).toBe(true);
+    }
+    // And the dangling-id refusal is untouched.
+    const ghost = checkQuestsRefs(paying('skin-ghost'), ITEMS);
+    expect(ghost.ok).toBe(false);
+    expect(ghost.detail).toContain('not in the items manifest');
   });
 });

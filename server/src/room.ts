@@ -65,8 +65,8 @@ import { BUILTIN_CONTENT_HASH } from '@doomcraft/shared/packs';
 import {
   MAX_VARIANT_TABLE_BYTES,
   createVariantTableMessage, decodeVariantTable, encodeVariantTable,
-  overlaysFromWire, wireEntriesFor,
-  type VariantWireEntry, type VariantsManifest,
+  overlaysFromWire, variantNamesFor, wireEntriesFor,
+  type VariantNameEntry, type VariantWireEntry, type VariantsManifest,
 } from '@doomcraft/shared/variants';
 import { BASE_SLOT, SessionArsenal } from '@doomcraft/shared/arsenal';
 import { defaultFlagBits, flagOn } from '@doomcraft/shared/flags';
@@ -98,7 +98,7 @@ import {
   type ResultSubmission,
 } from './entitlementGuard.js';
 import { buildSubmission } from './reward.js';
-import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
+import { MatchType, SessionOrigin, trustPolicyFor } from '@doomcraft/shared/trust';
 import { PlayerEntity, Simulation } from './sim.js';
 import { ServerWorld } from './world.js';
 
@@ -355,6 +355,18 @@ export class Room implements NetHost {
    * beside them on the wire is written in.
    */
   readonly variantEntries: readonly VariantWireEntry[];
+  /**
+   * The DISPLAY NAMES for those rows, in that order (V4d).
+   *
+   * Built from `variantEntries` rather than from the manifest's own array, so
+   * the thing that carries the name is the thing that carries the slot: index
+   * `i` here is row `i` there is slot `i + 1` in the arsenal. The manifest is
+   * consulted for a string and for nothing else. `variantEntries` is what the
+   * wire will carry and what `variantSlotsFor` resolves a claim against, and
+   * a name resolved through any OTHER ordering is the V4c failure again with a
+   * label instead of a gun.
+   */
+  readonly variantNames: readonly VariantNameEntry[];
   private readonly variantClaims?: (conn: Connection) => Uint8Array;
 
   seed: number;
@@ -508,6 +520,7 @@ export class Room implements NetHost {
      * and tells its clients count 0, so the two sides still agree — agreement
      * over content, every time. */
     this.variantEntries = decodeRoomVariantTable(options.variants ?? null);
+    this.variantNames = variantNamesFor(options.variants ?? null, this.variantEntries);
     this.sim = new Simulation(
       this.world, this.seed, SessionArsenal.from(overlaysFromWire(this.variantEntries)),
     );
@@ -1177,6 +1190,8 @@ export class Room implements NetHost {
 
   /** `NetHost.variantTable` — what every joiner is told this room fires with. */
   get variantTable(): readonly VariantWireEntry[] { return this.variantEntries; }
+  /** `NetHost.variantNameTable` — what those rows are CALLED. Display only. */
+  get variantNameTable(): readonly VariantNameEntry[] { return this.variantNames; }
 
   onHello(conn: Connection, name: string, skin: number, caps: number): number {
     const humans = this.humanCount;
@@ -1192,8 +1207,16 @@ export class Room implements NetHost {
      * slot decided one line later is a slot that arrived after the magazine
      * it was supposed to size. A variant that pays for its damage with four
      * shells instead of eight would hand this player eight. */
+    /* AND WHETHER THIS ROW MAY WEAR ONE AT ALL is a COLUMN, not an `if`
+     * (docs/VARIANTS.md §7.3). A ranked-adjacent row resolves everybody to
+     * slot 0; the profile keeps its claim and it lights back up in the next
+     * casual match, exactly as a dormant item does. Reading the table rather
+     * than naming a mode is what `trust.test.ts`'s tree scan enforces. */
+    const mayWearVariants = trustPolicyFor(this.plan.modeId, this.sessionIntent).variantsAllowed;
     const player = this.sim.addPlayer(
-      id, name, skin, false, resolveVariantSlots(this.variantClaims?.(conn), caps, this.sim.arsenal.slotCount),
+      id, name, skin, false, resolveVariantSlots(
+        mayWearVariants ? this.variantClaims?.(conn) : undefined, caps, this.sim.arsenal.slotCount,
+      ),
     );
     const member: Membership = {
       conn, player, isBot: false, joinedMs: this.elapsedMs,

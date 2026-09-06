@@ -64,7 +64,7 @@ function inputsOf(patch: Partial<TradeInputs> = {}): TradeInputs {
         { ref: GONE, ms: OLD, source: 'drop' },
         { ref: HAZARD, ms: OLD, source: 'drop' },
       ],
-      equippedSkin: '', title: '',
+      equippedSkin: '', title: '', variants: {},
     },
     revoked: [HAZARD],
     pack: PACK,
@@ -173,7 +173,7 @@ describe('laundering', () => {
   it('no rendered string ever says NaN, Infinity or undefined', () => {
     const hostile = inputsOf({
       trade: tradeOf({ state: 'open', code: 'trx', expiresMs: Number.NaN }),
-      inventory: { items: [{ ref: RUST, ms: Number.NaN, source: 'drop' }], equippedSkin: '', title: '' },
+      inventory: { items: [{ ref: RUST, ms: Number.NaN, source: 'drop' }], equippedSkin: '', title: '', variants: {} },
     });
     for (const v of [buildTradeView(hostile), buildTradeView(inputsOf()), buildTradeView(inputsOf({ trade: null }))]) {
       for (const s of renderedTradeStrings(v)) expect(s).not.toMatch(/NaN|Infinity|undefined/);

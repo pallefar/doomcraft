@@ -501,6 +501,7 @@ export class PackInventory {
     campaign: { version: number; episodes: number; fingerprint: number; digest: string }[];
     items: { version: number; count: number; fingerprint: number; digest: string }[];
     quests: { version: number; count: number; fingerprint: number; digest: string }[];
+    variants: { version: number; count: number; fingerprint: number; digest: string }[];
   } {
     const levels = this.levelsVersions().map((version) => {
       const record = this.recordFor(version);
@@ -548,7 +549,16 @@ export class PackInventory {
         digest: q?.pack.digest ?? '',
       };
     });
-    return { levels, campaign, items, quests };
+    const variants = this.variantsVersions().map((version) => {
+      const v = this.variantsAt(version);
+      return {
+        version,
+        count: v?.manifest.variants.length ?? 0,
+        fingerprint: v?.pack.fingerprint ?? 0,
+        digest: v?.pack.digest ?? '',
+      };
+    });
+    return { levels, campaign, items, quests, variants };
   }
 
   /**
@@ -1346,7 +1356,13 @@ export function rollMatchDrops(
   const byRarity = new Map<ItemRarity, typeof manifest.items[number][]>();
   for (const item of manifest.items) {
     // Titles and trophies never DROP — they are earned (challenges, prizes).
+    // Nor do weapon VARIANTS: docs/VARIANTS.md §7.2 makes them craft-only, and
+    // this loop skipped only TITLE and TROPHY, so the two V4b tokens were
+    // eligible from the moment they entered the manifest. Measured against a
+    // manifest whose only droppable rows were the two tokens, every one of the
+    // 902 drops in 4000 seeded rounds returned a variant ref.
     if (item.kind === ItemKind.TITLE || item.kind === ItemKind.TROPHY) continue;
+    if (item.kind === ItemKind.WEAPON_VARIANT) continue;
     const list = byRarity.get(item.rarity) ?? [];
     list.push(item);
     byRarity.set(item.rarity, list);

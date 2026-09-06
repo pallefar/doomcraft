@@ -40,7 +40,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import type { WebSocket } from 'ws';
 
-import { DEFAULT_SERVER_PORT, GameMode, WS_PATH } from '@doomcraft/shared';
+import { DEFAULT_SERVER_PORT, GameMode, WEAPON_COUNT, WS_PATH } from '@doomcraft/shared';
 import { MODE_KEYS, ModeId } from '@doomcraft/shared/modes';
 import { SIGNAL_PATH } from '@doomcraft/shared/signal';
 import { Room } from './room.js';
@@ -84,6 +84,8 @@ import { TradeService, type TradeResult } from './trades.js';
 import { CompetitionService } from './competitions.js';
 import { renderShareCard } from './shareCard.js';
 import { parseItemRef, type ItemDef, type ItemKind } from '@doomcraft/shared/items';
+import type { VariantDef } from '@doomcraft/shared/variants';
+import { variantSlotsFor } from './variantClaims.js';
 import { asAccountId, asDeviceId } from '@doomcraft/shared/identity';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
 import { levelLibrary } from './levels.js';
@@ -144,7 +146,7 @@ import {
 } from '@doomcraft/shared/flags';
 import type { RoomOptions } from './room.js';
 import { SignalHub, attachSignalSocket, iceConfigFromEnv, type WsLike } from './signal.js';
-import { JsonFileStore, MAX_SCRAP_BALANCE, applyEquip, createProfile, equipVerdict, grantDrops, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile, settleAdReward } from './persistence.js';
+import { JsonFileStore, MAX_SCRAP_BALANCE, applyEquip, createProfile, equipVerdict, grantDrops, grantRefusal, isValidDeviceId, migrateProfile, publicProfile, serialiseProfile, settleAdReward } from './persistence.js';
 import { CRAFT_COPIES, applyCraft, craftVerdict } from './craft.js';
 import type { EquipSlot, PersistenceStore, StoredProfile } from './persistence.js';
 
@@ -871,6 +873,18 @@ function liveItemIdSet(): ReadonlySet<string> {
   return new Set((installed?.manifest.items ?? []).map((i) => i.id));
 }
 
+/**
+ * The live variants pack as variantId -> def. What a weapon_variant TOKEN
+ * points at: the equip door needs `VariantDef.base` to tell a shotgun variant
+ * from a pistol one, and a token whose row no live pack defines cannot be
+ * checked against anything.
+ */
+function liveVariantDefs(): ReadonlyMap<string, VariantDef> {
+  const decl = releases.live().packs.find((pk) => pk.kind === PackKind.VARIANTS);
+  const installed = decl === undefined ? null : inventory.variantsAt(decl.version);
+  return new Map((installed?.manifest.variants ?? []).map((v) => [v.id, v]));
+}
+
 /** The live items pack as localId -> def — what "tradable" and ACTIVE mean. */
 function liveItemDefs(): ReadonlyMap<string, ItemDef> {
   const decl = releases.live().packs.find((pk) => pk.kind === PackKind.ITEMS);
@@ -1027,11 +1041,31 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
     const variantsVersion = release.packs.find((pk) => pk.kind === PackKind.VARIANTS)?.version;
     const variants = variantsVersion === undefined
       ? null : (inventory.variantsAt(variantsVersion)?.manifest ?? null);
-    const room = new Room({
+    /* Annotated because `variantClaims` below closes over `room` — the
+     * closure runs only at HELLO, long after this returns, and the room's own
+     * decoded table is the only ordering a claim may be resolved against. */
+    const room: Room = new Room({
       ...options,
       store,
       guard,
       journal,
+      /* THE PLAYER'S EQUIPPED VARIANT, resolved per join against THIS ROOM'S
+       * ordering — `room.variantTable`, the array the room decoded from the
+       * bytes it will send, and never `releases.live()`. Two releases holding
+       * the same two variants in the opposite order would otherwise hand the
+       * player the OTHER gun, and `resolveVariantSlots` cannot catch it: it
+       * clamps by COUNT and both indices are in range.
+       *
+       * `conn.deviceId` is the REDEEMED profile key — assigned immediately
+       * after `room.join()` in the upgrade handler, which also warms
+       * `store.peek` with an await, and HELLO cannot arrive before either. A
+       * miss (no ticket, or a profile this host has never read) is the base
+       * weapon, not an error.
+       *
+       * The closure reads `room` after construction, which is the only time
+       * it is ever called; the factory holds the release, so room.ts still
+       * does not learn that a release tier exists. */
+      variantClaims: (conn) => variantSlotsFor(store.peek(conn.deviceId), room.variantTable),
       /* Viral tier 1: a paying round may newly satisfy the referred
        * player's engagement threshold. Fire-and-forget by contract. */
       onProfilePersisted: (profileKey) => {
@@ -3093,6 +3127,37 @@ async function handleApi(
     return true;
   }
 
+  /*
+   * V4f — the LIVE variants pack, id -> base weapon, for a MENU surface.
+   *
+   * The Loadout tab has to name the equip slot of a weapon-variant token, and
+   * that slot is `variant:<base weapon>`. The base lives in the VARIANTS pack:
+   * `/api/items` carries `ItemDef.variantId` and nothing else, so without this
+   * the client can only guess — and a wrong guess is a claim the server
+   * accepts for the wrong gun or refuses with a 400 the player never asked
+   * for. In a ROOM the same fact already rides the wire (`S2C.VARIANT_TABLE`
+   * carries id, base AND all sixteen effective values to any CAP_VARIANTS
+   * client); the menu is not in a room, which is the only reason this exists.
+   *
+   * It answers strictly LESS than that wire message — id, base, name, never
+   * `over` — so it opens no surface the game did not already publish. Public
+   * and cacheable exactly like /api/items: nothing about the caller is read.
+   *
+   * NO PACK LIVE ANSWERS 200 WITH AN EMPTY LIST, never 404. A menu must not
+   * fail because content is absent, and `/api/items` has answered
+   * `{version: 0, items: []}` in that state since the day it shipped.
+   */
+  if (path === '/api/variants' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const live = releases.live();
+    const decl = live.packs.find((pk) => pk.kind === PackKind.VARIANTS);
+    const installed = decl === undefined ? null : inventory.variantsAt(decl.version);
+    sendJson(res, 200, {
+      version: decl?.version ?? 0,
+      variants: (installed?.manifest.variants ?? []).map((v) => ({ id: v.id, base: v.base, name: v.name })),
+    }, cors);
+    return true;
+  }
+
   /* --- equipping (docs/ECONOMY.md "Items") ------------------------------- *
    * The claim half of the ownership rule: `equippedSkin`/`title` are stored
    * claims, and every surface that WEARS an item re-derives its state through
@@ -3109,7 +3174,13 @@ async function handleApi(
       return true;
     }
     const wants = new Map<EquipSlot, string>();
-    for (const slot of ['skin', 'title'] as const) {
+    /* The two cosmetic slots, plus one `variant:<weaponId>` slot per weapon
+     * (V4c). The slot names the BASE WEAPON, never a table row: which row of
+     * which table that becomes is decided per room, against the ordering that
+     * room will actually send. */
+    const slots: EquipSlot[] = ['skin', 'title'];
+    for (let w = 0; w < WEAPON_COUNT; w++) slots.push(`variant:${w}`);
+    for (const slot of slots) {
       if (!(slot in body)) continue;
       const v = body[slot];
       if (typeof v !== 'string' || v.length > 96) {
@@ -3127,6 +3198,21 @@ async function handleApi(
       const granting = inventory.itemsAt(parsed.version);
       return granting?.manifest.items.find((i) => i.id === parsed.localId)?.kind ?? null;
     };
+    /* `ref -> ItemDef.variantId -> VariantDef.base`, the second resolver.
+     * WITHOUT IT the kind check alone accepts ANY weapon_variant token for
+     * ANY weapon slot: a shotgun token filed under `variant:0` answers 200 and
+     * then resolves through the arsenal to the PISTOL row, so the player is
+     * told yes and fires base pistol damage forever. Null when no installed
+     * variants pack names the row — refused at the door rather than stored as
+     * a claim nothing can ever satisfy. */
+    const variantBaseOf = (ref: string): number | null => {
+      const parsed = parseItemRef(ref);
+      if (parsed === null) return null;
+      const def = liveItemDefs().get(parsed.localId)
+        ?? inventory.itemsAt(parsed.version)?.manifest.items.find((i) => i.id === parsed.localId);
+      if (def === undefined || def.variantId === '') return null;
+      return liveVariantDefs().get(def.variantId)?.base ?? null;
+    };
     /* Validate then write inside ONE update callback: the callback runs
      * synchronously over the live object, so a concurrent settlement cannot
      * un-own an item between the check and the claim. A refusal writes no
@@ -3134,14 +3220,18 @@ async function handleApi(
     let refusal: string | null = null;
     const updated = await store.update(key, (p) => {
       for (const [slot, ref] of wants) {
-        const v = equipVerdict(p, slot, ref, kindOf);
+        const v = equipVerdict(p, slot, ref, kindOf, variantBaseOf);
         if (!v.ok) { refusal = v.error; return; }
       }
       applyEquip(p, wants);
     });
     if (refusal !== null) { sendJson(res, 400, { error: refusal }, cors); return true; }
     sendJson(res, 200, {
-      inventory: { equippedSkin: updated.inventory.equippedSkin, title: updated.inventory.title },
+      inventory: {
+        equippedSkin: updated.inventory.equippedSkin,
+        title: updated.inventory.title,
+        variants: { ...updated.inventory.variants },
+      },
     }, cors);
     return true;
   }
@@ -3187,9 +3277,35 @@ async function handleApi(
       }
       const v = craftVerdict(p, source, target, defs, decl.version, reserved);
       if (!v.ok) { refusal = { status: v.status, error: v.error }; return; }
+      /*
+       * V4e — ASK THE GRANT BEFORE SPENDING, and never report a ref that was
+       * not delivered.
+       *
+       * `crafted` used to be `landed[0]?.ref ?? v.plan.targetRef`: a grant that
+       * wrote NOTHING answered 200 naming the item the player did not get,
+       * after three copies and the fee had already gone. That was unreachable
+       * while every craft target was a cosmetic `grantDrops` accepts — V4e is
+       * the change that makes a refused mint reachable, so the fallback goes
+       * and the question is asked FIRST, through the same predicate the grant
+       * loop itself uses (§0 rule 29), while nothing has been consumed yet.
+       */
+      const blocked = grantRefusal(v.plan.targetRef, 'craft');
+      if (blocked !== null) {
+        refusal = { status: 400, error: `this craft cannot be delivered: ${blocked}` };
+        return;
+      }
       const outcome = applyCraft(p, v.plan);
       const landed = grantDrops(p, [v.plan.targetRef], 'craft', sourceId, now);
-      crafted = landed[0]?.ref ?? v.plan.targetRef;
+      const got = landed[0];
+      /*
+       * Unreachable by construction and loud anyway: the only refusal left in
+       * the loop is `MAX_OWNED_ITEMS`, and `applyCraft` has just freed
+       * CRAFT_COPIES slots, so a profile that could craft always has room.
+       * `craft.test.ts` ratchets `MAX_OWNED_ITEMS > CRAFT_COPIES` so the day
+       * that stops being true somebody is told (§0 rule 32).
+       */
+      if (got === undefined) throw new Error(`craft granted nothing for ${v.plan.targetRef}`);
+      crafted = got.ref;
       await journal.append([{
         id: newLedgerId(now), ms: now, kind: 'spend', sourceId,
         playerId: key, currency: 'scrap',
@@ -3806,7 +3922,19 @@ async function handleApi(
     if (!isValidDeviceId(profileKey)) { sendJson(res, 400, { error: 'bad device id' }, cors); return true; }
     const profile = await store.load(profileKey);
     if (profile === null) { sendJson(res, 404, { error: 'no such profile' }, cors); return true; }
-    sendJson(res, 200, { profile: publicProfile(profile) }, cors);
+    /*
+     * V4e — the escrow's reservations ride along.
+     *
+     * `craftVerdict` counts FREE copies (`owned - reserved`), and the Loadout
+     * tab had no way to know what the escrow holds, so it offered a craft the
+     * server then refused with 400 "1 copy is on a trade table". Reproduced on
+     * the unchanged tree. The tab reads what the rule reads, off the same
+     * source of truth (`TradeService.reservedRefs`) rather than a second
+     * implementation of it.
+     */
+    const reservedForProfile: Record<string, number> = {};
+    for (const [ref, n] of trades.reservedRefs(profileKey)) reservedForProfile[ref] = n;
+    sendJson(res, 200, { profile: publicProfile(profile), reserved: reservedForProfile }, cors);
     return true;
   }
 
@@ -4121,6 +4249,26 @@ httpServer.on('upgrade', (req, socket, head) => { void (async () => {
   if (ticket !== null && ticket.moderation === 'banned') {
     refuseUpgrade(socket, 403, 'Forbidden');
     return;
+  }
+  /* WARM THE PROFILE BEFORE THE SOCKET EXISTS. `Room.onHello` resolves the
+   * equipped variant SYNCHRONOUSLY — it has to, because `spawnPlayer` fills
+   * the first magazine through `sim.statsFor` and a slot decided one line
+   * later hands a four-shell variant an eight-shell magazine — so the claim
+   * resolver reads `store.peek`, which never touches a disk. This await is
+   * what makes that a hit. It is on a path that already awaited the ticket
+   * redemption, and a failure here is not a refusal: a player whose profile
+   * will not load still joins, and fires the base weapon.
+   *
+   * MEASURED, because it matters: deleting this line does NOT break the
+   * end-to-end socket test. Two unrelated lines already warm the cache on the
+   * paths that test drives — /api/equip's own `store.update`, and the DEVICE
+   * ticket route's ban check (`store.load(bannedKey)`) above. Neither runs on
+   * the ACCOUNT ticket path, which returns from `mintAccountTicket` before the
+   * ban check ever happens, and neither is anywhere near the code that would
+   * depend on it. `persistence.durability.test.ts` pins the property this
+   * rests on — `peek` is the cache and nothing else. */
+  if (ticket !== null) {
+    try { await store.load(ticket.profileKey); } catch { /* base weapon, not a refusal */ }
   }
 
   wss.handleUpgrade(req, socket, head, (ws) => {

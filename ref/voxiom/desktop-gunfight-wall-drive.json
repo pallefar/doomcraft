@@ -1,0 +1,75 @@
+{
+  "mode": "Capture The Gems",
+  "slot": "Digit2",
+  "seconds": 22,
+  "pointerLock": true,
+  "mouselook": {
+    "mv": {
+      "n": 350,
+      "sumAbsX": 10083,
+      "sumAbsY": 3048,
+      "trusted": 350
+    },
+    "clicks": 7
+  },
+  "fireWindows": [
+    [
+      0.39,
+      1.33
+    ],
+    [
+      1.66,
+      2.79
+    ],
+    [
+      5.19,
+      6.46
+    ],
+    [
+      6.83,
+      8.3
+    ],
+    [
+      10.64,
+      11.59
+    ],
+    [
+      11.9,
+      13.43
+    ],
+    [
+      15.7,
+      16.76
+    ]
+  ],
+  "hudSamples": [
+    [
+      1.33,
+      "Press M for full map\nSoldier#237 joined Team Sapphire\nSoldier#244 joined Team Sapphire\nEnchantedAlien.SgQ joined Team Ruby\nDreamyZombie.Im6l joined Team Sapphire\nSoldier#244 left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nPress X to open inventory\nAmmo: 25 / 150\n1\n2\n3\n45\n4\n5\n11\n08:3"
+    ],
+    [
+      2.79,
+      "Press M for full map\nSoldier#237 joined Team Sapphire\nSoldier#244 joined Team Sapphire\nEnchantedAlien.SgQ joined Team Ruby\nDreamyZombie.Im6l joined Team Sapphire\nSoldier#244 left Team Sapphire\nitzz_arbuzik left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nPress X to open inventory\nAmm"
+    ],
+    [
+      6.46,
+      "Press M for full map\nSoldier#237 joined Team Sapphire\nSoldier#244 joined Team Sapphire\nEnchantedAlien.SgQ joined Team Ruby\nDreamyZombie.Im6l joined Team Sapphire\nSoldier#244 left Team Sapphire\nitzz_arbuzik left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nSoldier#066\n  \n  \n  \nSilverSn"
+    ],
+    [
+      8.3,
+      "Press M for full map\nSoldier#237 joined Team Sapphire\nSoldier#244 joined Team Sapphire\nEnchantedAlien.SgQ joined Team Ruby\nDreamyZombie.Im6l joined Team Sapphire\nSoldier#244 left Team Sapphire\nitzz_arbuzik left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nSoldier#066\n  \n  \n  \nSilverSn"
+    ],
+    [
+      11.59,
+      "Press M for full map\nSoldier#237 joined Team Sapphire\nSoldier#244 joined Team Sapphire\nEnchantedAlien.SgQ joined Team Ruby\nDreamyZombie.Im6l joined Team Sapphire\nSoldier#244 left Team Sapphire\nitzz_arbuzik left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nSoldier#066\n  \n  \n  \nSilverSn"
+    ],
+    [
+      13.43,
+      "Press M for full map\nSoldier#237 joined Team Sapphire\nSoldier#244 joined Team Sapphire\nEnchantedAlien.SgQ joined Team Ruby\nDreamyZombie.Im6l joined Team Sapphire\nSoldier#244 left Team Sapphire\nitzz_arbuzik left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nSoldier#066\n  \n  \n  \nSilverSn"
+    ],
+    [
+      16.76,
+      "Press M for full map\nSoldier#237 joined Team Sapphire\nSoldier#244 joined Team Sapphire\nEnchantedAlien.SgQ joined Team Ruby\nDreamyZombie.Im6l joined Team Sapphire\nSoldier#244 left Team Sapphire\nitzz_arbuzik left Team Sapphire\nShift to sprint\nC to crouch\n0 / 100\n100 / 100\nAVF-Ghosts [AxZ]\n  \n  \nSoldie"
+    ]
+  ]
+}

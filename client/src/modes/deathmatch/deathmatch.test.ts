@@ -19,6 +19,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 import {
   PS_BOT_BIT,
@@ -192,5 +195,60 @@ describe('killfeed text safety', () => {
     for (let i = 1; i < STREAK_MILESTONES.length; i++) {
       expect(STREAK_MILESTONES[i - 1][0]).toBeGreaterThan(STREAK_MILESTONES[i][0]);
     }
+  });
+});
+
+
+/* ------------------------------------------------------------------------ *
+ * V4d — the display path is WIRED, not merely written
+ *
+ * `variantWeaponName` is a pure function on `NetClient` and both renderers
+ * reach it through an injected callback, so nothing in this repo's type
+ * system or test suite notices if a call site is deleted: the feed goes back
+ * to saying "Shotgun" and every other test stays green. That is rule 1's
+ * exact shape, so the three touch points are asserted as SOURCE — the same
+ * thing `client/src/ui/wiring.test.ts` does for the profile overlay.
+ *
+ * There is no jsdom in this repo, so a `Killfeed.push` DOM test would mean
+ * hand-building `innerHTML`, `classList` and `setAttribute`; these three lines
+ * are what that test would be checking and they cost nothing to keep true.
+ * ------------------------------------------------------------------------ */
+
+describe('the killfeed is wired to the room\'s variant names', () => {
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+  function src(file: string): string {
+    return readFileSync(path.join(HERE, file), 'utf8');
+  }
+
+  it('the feed row asks its injected label for the gun the SHOT was fired with', () => {
+    const s = src('killfeed.ts');
+    expect(s).toContain('this.opts.weaponLabel?.(e.weaponId, e.variantSlot)');
+    // And the fallback is still the archetype, never a blank.
+    expect(s).toContain('?? weaponName(e.weaponId)');
+  });
+
+  it('deathmatch supplies that label from the net client, not from a compiled '
+    + 'or live table', () => {
+    const s = src('deathmatch.ts');
+    expect(s).toContain(
+      'weaponLabel: (weaponId, slot) => this.host.game.net.variantWeaponName(weaponId, slot)',
+    );
+    // The death screen names the same gun the feed does.
+    expect(s).toContain('this.lastKillerVariant = e.variantSlot;');
+    expect(s).toContain(
+      'this.host.game.net.variantWeaponName(this.lastKillerWeapon, this.lastKillerVariant)',
+    );
+  });
+
+  it('the base HUD feed names it too, and no longer reads the compiled table', () => {
+    const s = readFileSync(
+      path.join(HERE, '..', '..', 'game', 'game.ts'), 'utf8',
+    );
+    const onKill = s.slice(s.indexOf('private onKill(e: KillEvent)'));
+    const body = onKill.slice(0, onKill.indexOf('\n  }\n'));
+    expect(body).toContain('this.net.variantWeaponName(e.weaponId, e.variantSlot)');
+    expect(body, 'the compiled name would ignore the variant entirely')
+      .not.toContain('getWeapon(e.weaponId).name');
   });
 });

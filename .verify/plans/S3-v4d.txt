@@ -1,0 +1,102 @@
+Doomcraft phase V4d, reviewed BEFORE a line is written. Refuse it if it is wrong.
+
+Output shape:
+  * For each clause you judge BROKEN: a CONCRETE FAILURE — the exact input or
+    sequence and the specific WRONG VALUE it produces (a byte, an index, a
+    string). "This could be a problem" is not an answer.
+  * A closing section headed CORRECT listing by number every clause you judge
+    correct as written.
+Facts below were read out of the tree at commit 8a61206. Read them yourself and
+say so if any does not hold.
+
+================================================================================
+BACKGROUND
+================================================================================
+
+V4a put a variants pack on the wire. V4b added the ownership token. V4c (just
+shipped) makes an owned token actually change the gun: `inventory.variants`,
+`POST /api/equip` with `variant:<weaponId>` slots, and a room-factory resolver
+that writes `rowIndex + 1` into the slot map after re-checking ownership,
+revocation and presence in THIS room's table.
+
+V4d is DISPLAY TRUTH. The killfeed cannot tell two shotgun variants apart.
+
+What the code says today:
+
+- The KILL message (shared/src/protocol.ts:1164) is exactly 8 bytes:
+  `u8 S2C.KILL, u16 killerId, u16 victimId, u8 weaponId, u8 flags, u8 killerStreak`.
+  `decodeKill` mutates an `out: KillEvent` IN PLACE and reads those five fields.
+- `Simulation.killEvents` (server/src/sim.ts:745,768) is a POOL of 32
+  pre-allocated objects created once at construction and reused via
+  `killCount`. Fields are assigned individually at each use.
+- `VariantWireEntry` (shared/src/variants.ts:1051) is `{ id, base, values }`.
+  There is NO name on the wire. The client cannot render "Slug Shotgun".
+- `Simulation.projVariant` (sim.ts:725) is a `Uint8Array(MAX_PROJECTILES)`
+  recording the slot a round in flight was FIRED with, written at sim.ts:1297
+  and read at sim.ts:1330 — because a rocket outlives a weapon switch.
+- V3 pinned a golden vector for the VARIANT_TABLE message. Changing that
+  message's layout moves the golden.
+
+================================================================================
+THE PLAN — V4d
+================================================================================
+
+ 1. The KILL message gains a NINTH byte: the variant slot the killing shot was
+    fired with. Additive: an old decoder reads its five fields and leaves byte
+    nine unread, so an old client against a new server is unaffected.
+
+ 2. The new decoder must accept EIGHT-byte messages (an old server, or a
+    replayed capture) and must RESET `out.variantSlot` to 0 when the byte is
+    absent. `decodeKill` mutates a caller-owned object in place, so without an
+    explicit reset the event retains the PREVIOUS kill's slot and the killfeed
+    names the wrong gun for a base-weapon kill.
+
+ 3. The same hazard exists on the SERVER and is not covered by clause 2:
+    `killEvents` is a pool of 32 objects reused across rounds, so any code path
+    that fills a kill event without assigning the new field leaves the previous
+    occupant's slot. Every field must be assigned on every path, and a test must
+    walk a pooled event through two kills with different slots.
+
+ 4. Shot identity PROPAGATES from the firing path; it is never looked up at kill
+    time. By the time a kill resolves the killer may have switched weapons, and
+    for a projectile the round outlives the switch — which is why `projVariant`
+    already exists. The hitscan path must carry the slot the same way.
+
+ 5. Display names are a SEPARATE additive message, not an extension of
+    VARIANT_TABLE, because V3 pinned a golden vector for that message and
+    widening it moves the golden for a reason unrelated to the table's contents.
+    The new message carries `id -> name` for the room's rows only.
+
+ 6. A client that never receives the names message renders the BASE weapon's
+    name, never an empty string and never an id. The killfeed degrades to what
+    it says today rather than to a blank.
+
+ 7. The name shown is the one the room PINNED, resolved through the same
+    ordering the slot map uses — not `releases.live()`, for the same reason
+    V4c's resolver does not: a room can be pinned to a different release, and
+    two tables holding the same rows in the opposite order would name the wrong
+    gun with no error anywhere.
+
+ 8. `MAX_VARIANT_NAME` is 40 and the names message must cap its total size
+    against the same wire budget the table already respects; a room with the
+    maximum rows at the maximum name length must still fit.
+
+ 9. Proof obligations, each proven RED with its own fix reverted, and what goes
+    red checked:
+    (a) an 8-byte KILL decodes with `variantSlot === 0` and does NOT retain the
+        previous event's slot — the test decodes a 9-byte kill with slot 2 into
+        the same object first, so the reset is what it is testing;
+    (b) a pooled server kill event reused across two kills with different slots
+        reports each correctly;
+    (c) a kill by a weapon the killer has since SWITCHED AWAY FROM still names
+        the gun the shot was fired with;
+    (d) a client with no names message renders the base weapon's name;
+    (e) two rooms holding the same two rows in opposite order name the same gun
+        for the same kill.
+
+10. Out of scope: any craft or grant path (V4e), the client Loadout tab's
+    variant UI, and the admin player view.
+
+================================================================================
+Which clauses are broken, with a concrete failure and a specific wrong value;
+then the CORRECT list. And name anything in the BACKGROUND that is wrong.

@@ -12,6 +12,22 @@ two things and say which one is better. Nothing else you write matters as much a
    If you find yourself writing a comparison you did not actually perform, stop — that is the single
    failure mode that destroys this whole process. A critic who invents a comparison approves everything.
 
+2b. **THE HONESTY NOTE IS PART OF THE BLIND, AND IT LEAKED ONCE.** A steward must
+   disclose every way a comparison is not apples-to-apples — that is what makes the
+   verdict worth having. But on 2026-09-05 the disclosure itself de-anonymised the
+   pair: it said one side's HUD elements were "separate DOM elements and separate
+   small canvases" while the other "renders crosshair and minimap into a single
+   WebGL canvas". That is a description of a hand-assembled web app beside a
+   shipped single-canvas game, and the critic read the labels straight off it and
+   correctly threw its own verdict away.
+
+   So: **state the ASYMMETRY, never the ARCHITECTURE.** "One side's HUD does not
+   appear in its recording" is a fair and necessary warning. "One side's HUD is
+   DOM elements" names the product. The same rule covers engine names, framework
+   names, file layouts, server topology, build tooling, and anything phrased as
+   "ours"/"theirs". Write every caveat so it would read identically if the two
+   sides were swapped.
+
 3. **It is blind, and you must keep it that way.** You get `A.png` and `B.png` in a directory with
    nothing else in it. One is ours, one is the bar. **The mapping does not exist on disk** — it is held
    in the orchestrator's memory. Do not go looking for it: do not grep the repo, do not read

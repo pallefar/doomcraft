@@ -741,13 +741,14 @@ export class MonsterManager {
         if (Math.abs(hitX - tx) > PLAYER_HALF_WIDTH + 0.15) continue;
         if (Math.abs(hitZ - tz) > PLAYER_HALF_WIDTH + 0.15) continue;
         if (hitY < target.pos[1] - 0.1 || hitY > target.pos[1] + target.height + 0.1) continue;
-        sim.damagePlayer(target, 0, a.hitscanDamage, WeaponId.PISTOL, 0, dx, dy, dz);
+        // A bot has no profile and therefore no claim: always the base.
+        sim.damagePlayer(target, 0, a.hitscanDamage, WeaponId.PISTOL, 0, dx, dy, dz, 0);
       }
       return;
     }
 
     if (a.meleeDamage > 0 && d <= a.attackRange + 0.6) {
-      sim.damagePlayer(target, 0, a.meleeDamage, WeaponId.CHAINSAW, 0, dx, dy, dz);
+      sim.damagePlayer(target, 0, a.meleeDamage, WeaponId.CHAINSAW, 0, dx, dy, dz, 0);
       target.vel[0] += dx * 4.5;
       target.vel[1] += 2.4;
       target.vel[2] += dz * 4.5;

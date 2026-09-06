@@ -1,14 +1,24 @@
 # Doomcraft — handover: where it stands, and what is left
 
-Written 2026-09-05 (second session of the day). This one did the VARIANTS arc's
-phase V1 end to end — the `SessionArsenal` seam, both predictors moved onto it,
-and a byte-compared lockstep golden proving the refactor changed nothing — and
-then, on the strength of an adversarial review of the V2 PLAN, fixed three
-things that were wrong before any of it started. The largest: **the two
-predictors have never agreed about where pellets go**, by up to 10.2 degrees on
-a shotgun. Previous handovers are in git history at `b77d907`, `56b23c5`,
-`108efa5`, `9da410b`, `bfdc647`, `557c7b6`, `ee0991c`. §0 is restated because it
-keeps earning it — rules 25–28 are new and all four cost real time today.
+Written 2026-09-05 (FOURTH session of the day). This one **closed the V4 arc
+end to end (a through f)** and **finally ran the gauntlet, which is now 1/23**.
+
+The two headline facts are uncomfortable and both are about instruments rather
+than code. First: the gauntlet's very first output was evidence that this
+project's own foundational document was wrong — `ref/BAR.md` had called gunfeel
+"the single most winnable piece" on the strength of a clip in which the bar was
+holding a SHOVEL. With a rifle the bar has muzzle flash, brass ejection, impact
+decals, per-shot recoil, a reload animation and a crosshair that blooms 57%. Two
+blind verdicts were correctly thrown away before one could stand. Second: almost
+every defect worth finding this session was inside something meant to CATCH
+defects — a probe that could not distinguish the state it was clearing, a
+byte-cap example both candidate caps reject, a regex that cannot match the
+identifier it guards, a proof obligation that passes with the bug live, and a
+fairness disclosure that de-anonymised the blind it was protecting.
+
+Previous handovers are in git history at `b77d907`, `56b23c5`, `108efa5`,
+`9da410b`, `bfdc647`, `557c7b6`, `ee0991c`. §0 is restated because it keeps
+earning it — **rules 35-38 are new and 38 changes how you write tests.**
 
 **Live:**
 - **https://doomcraft-production.up.railway.app** — the Node origin: game, rooms,
@@ -44,7 +54,9 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
    mistakes every time it is applied: this session TWO of the new tests passed
    with their own fix removed and had to be rewritten (see rules 21 and 22).
 3. **Measure, don't eyeball.**
-4. **The bar is real and fetchable** (`ref/`). The gauntlet is still **0/23**.
+4. **The bar is real and fetchable** (`ref/`) — AND IT WAS WRONG ABOUT ITSELF
+   until 2026-09-05; see rule 37. The gauntlet is **1/23**: gunfeel won a blind,
+   uncontaminated A/B, and HUD is piece two.
 5. **`shared/src/flags.ts` NUL bytes are FIXED** (escapes now) — plain `grep`
    works on it again. rg is still NOT installed on this machine.
 6. **Simulated-failure tests must pick platform-identical failure inputs.**
@@ -203,10 +215,93 @@ decisions, taken today), `docs/SPONSORS.md`, `docs/ECONOMY.md`, `docs/PACKS.md`,
     hours earlier. The hazard stays documented: it bites the first time somebody
     promotes a stored release and then ships a build-pack bump.
 
+35. **NEW — and rule 34's own probe could not have told you.** `/api/version`
+    publishes `ReleaseService.live()`, and `live()` returns `hostFallback()` —
+    revision 0, `unsatisfied: []` — in BOTH of two very different worlds: no
+    stored release exists at all, and a stored release exists that this host
+    ALREADY cannot satisfy (`server/src/packs.ts:746`). Rule 34's conclusion
+    was right and its evidence was compatible with the exact failure it was
+    clearing. A post-fallback readout cannot separate "nothing configured"
+    from "configured and already broken" — hiding that difference is what a
+    fallback is FOR. The probe that settles it is `GET /api/admin/release`,
+    which returns the raw `document`: on the live origin today `history: []`,
+    `liveRevision: 0`, `pendingRevision: 0`, so the document is genuinely
+    empty. Ask of every probe which distinct states it maps onto the same
+    output, and whether the state you are trying to rule out is one of them.
+
+36. **NEW — an effect that is both PREDICTED and ECHOED must MERGE, not
+    assign.** The brief said `sim.ts` passes a literal 0 for flags on entity
+    damage, "so a monster kill never shows the fatal hitmarker". True, and
+    understated in a way that would have produced a wrong fix. The client
+    PREDICTS the kill ring on the frame it fires, and `Hud.hitMarker` was a
+    plain assignment — so the server's flagless echo of the PREVIOUS shot
+    landed ~one RTT later and repainted it white, about 60 ms into a 460 ms
+    ring, on every demon kill in the game. The marker was not missing, it was
+    CANCELLED. Fixing only the server's flags leaves the identical class live
+    for shotguns: one predicted 70-damage marker against seven 10-damage pellet
+    echoes, which shrinks the marker's heft to a graze. The fix is a merge with
+    a monotone order inside the effect's own lifetime — plain < headshot <
+    kill, damage takes the max, a re-raise never shortens — and a clean slate
+    when the timer expires, so the latch is a window and not a mode. "The
+    server is authoritative" does not mean "the server's later message should
+    overwrite" when the two messages describe DIFFERENT events. In the same
+    pass: a monster headshot was never COMPUTED, so the client drew a gold
+    marker AND a doubled damage number while the server applied single damage.
+    **The code for this lives on the `gauntlet` branch, not on `main`** — it is
+    the gunfeel piece's round-1 build and merges when that piece wins its blind
+    A/B. The rule is what generalises; the diff is not on main yet.
+
+37. **NEW — a comparison only carries information where BOTH SIDES COULD
+    PLAUSIBLY WIN, and the bar has to be able to exhibit the thing under
+    test.** The first blind A/B this project ever ran picked ours for gunfeel
+    and then set `contaminated: true`, because the critic worked out which side
+    was which from the content alone. Its sentence is the rule:
+    **"B won a test the bar structurally could not sit."** It measured the
+    reference clip — background pan of 1 px per sampled frame against ours at
+    8-29 px, a player holding a SHOVEL, zero muzzle flashes and zero decals in
+    twelve frames — for the question "which shot feels like it hit something".
+    The bar had no shot. Winning that proves nothing about the build; it is a
+    fact about the capture. `ref/voxiom/desktop-gameplay.webm` is still the
+    right bar for movement and art and the wrong one for gunfeel;
+    `ref/voxiom/desktop-gunfight.webm` was captured to replace it, with
+    `desktop-gunfight-drive.json` recording how it was driven so the next
+    person can tell what it can and cannot answer. Before trusting any A/B, ask
+    what the BAR's frames actually contain for the specific question.
+
+38. **NEW — A CLEAN REVIEW VALIDATES THE CLAUSES; WHETHER A PROOF OBLIGATION
+    CAN DISCRIMINATE IS A SEPARATE PROPERTY, AND NOBODY WAS CHECKING IT.** The
+    V4d plan passed an adversarial review 10 of 10, "BROKEN: None" — and one of
+    its own proof obligations could not have caught the bug it was written for.
+    It asked for "a pooled event reused across two kills with DIFFERENT SLOTS".
+    The real defect is `if (variantSlot !== BASE_SLOT) e.variantSlot = slot`,
+    and two NONZERO slots pass straight through it: 1 then 2 reports 1 then 2,
+    correctly. The zero is the whole test — a base-weapon kill inheriting the
+    previous variant kill's slot. Proven both ways in thirty seconds of node.
+
+    This is the THIRD instance in one session of the instrument meant to catch a
+    bug being unable to. The others: a 434-byte example offered as proof of a
+    UTF-8 byte cap, which BOTH candidate caps reject and which therefore
+    discriminates nothing (the row that separates them is 237 bytes / 93 code
+    units); and `/\bvariant/i` proposed as the trust-scan term, which cannot
+    match `ItemKind.WEAPON_VARIANT` because `_` is a regex word character.
+
+    THE CHECK, and it is cheap: for every assertion, name the WEAKEST INPUT that
+    still satisfies the predicate, then ask whether the defect survives it. If
+    the defective implementation and the correct one produce the same value on
+    your chosen input, the test is decoration. Write the input where they
+    DIFFER, and say in the test why that input and not the obvious one.
+
 ## 1. What this session shipped (all pushed, green, deployed)
 
 | Commit | What |
 |---|---|
+| `2111f94` | **V4b — the ownership token, and the five doors that mint an inventory.** `ItemKind.WEAPON_VARIANT = 5`, `ItemDef.variantId`, and a parser BICONDITIONAL making the id prefix a rule rather than a convention. It also fixed a LIVE defect that was the bug `8c6f196` fixed in variants and never fixed in items: the kind/rarity lookups admitted `Object.prototype` members, so `kind:"constructor"` parsed with zero errors, `ItemDef.kind` became a FUNCTION, and `constructor` and `toString` emitted the IDENTICAL fingerprint line — two manifests, one digest. Five paths mint an inventory and three would have handed out variants on day one; the fix is mint-vs-transfer, not a blanket refusal, because trade settlement goes through the same chokepoint. |
+| `4bec466` | **BAR.md corrected — the bar has a gun.** Re-captured in Capture The Gems, which hands you a rifle at spawn. `tools/capture-ref-gunfight.mjs` and `tools/viewmodel-motion.mjs` are new; the latter exists because the obvious instruments lie — a plain frame-difference scored 3.3× for the shovel and 3.25× for the rifle, identical, because both boxes contain panning background. |
+| `8a61206` | **V4c — the claim reaches the body.** 23 red proofs, one honestly reported as STAYING GREEN. My own plan contained the slot off-by-one it existed to prevent, and my proposed trust-scan guard (`/\bvariant/i`) could never have matched `WEAPON_VARIANT`. The builder then overturned the repair with two verified false positives and found that `ModeId.RANKED*` self-matches the economy regex. |
+| `7109306` | **THE GAUNTLET SCORES ITS FIRST POINT — gunfeel, blind and uncontaminated.** Our shot lights the room; the bar's does not. Verified independently: per-tile left-region mean luminance swings +36.2% across our twelve frames, phase-locked to the shot cadence, against +1.6% for the bar, whose wall is flat to within one luminance level. |
+| `2f47842` | **V4d — the killfeed names the gun that fired.** A 9th KILL byte plus `S2C.VARIANT_NAMES = 14`. The plan passed review 10/10 and one of its obligations was VACUOUS — the origin of rule 38. |
+| `4a45544` | **V4e — the entry recipe.** §7.2 was circular: a variant craft needs three variants and supply was zero. Also fixed a LIVE bug (the craft UI offered what the server refused, because `craftTargetsFor` took raw copies with no escrow and no balance) and deleted a latent trap (`crafted = landed[0]?.ref ?? v.plan.targetRef` reported an item never delivered). |
+| `baebe22` | **V4f — the equip button.** V4c had landed only the server half. `GET /api/variants` mirrors `/api/items`. Two more live bugs between the claim and the screen: the profile decoder dropped `inventory.variants`, and a SUCCESSFUL equip repainted from the claims it had just replaced so the button flipped straight back. |
 | `a120c24` | **The three VARIANTS §7 decisions, asked and written down.** DPS-dominant budget (0.50 dps / 0.20 range / 0.15 splash / 0.15 handling) at ±12%, an uncommon craft-only rarity floor, and variants table-gated OUT of ranked-adjacent modes. Plus the observation the user's own preview surfaced: a weighted sum at ±12% admits an "everything up 10%" variant, so §6's no-straight-upgrades rule needs a SECOND refusal — strict dominance — which is now part of the decision. |
 | `7de757c` | **V1a — the lockstep determinism harness and its golden, minted pre-refactor.** Both shipping predictors, one script, two arenas, the same `ServerWorld` and the same shared `raycastVoxels`. Three things it took: the trigger has to be PULSED (a held trigger fires a semi-auto exactly once, so the first script recorded four pistol shots against four hundred chaingun ones); the chainsaw needs its OWN arena (2.6 m reach, so at seven metres the whole melee path went unwatched — and running all seven weapons at two metres instead recorded a rocket detonating in the shooter's face); and a respawn puts the victim on top of the shooter under a shield `resolveMelee` refuses. |
 | `dd28363` | **V1b — `SessionArsenal`, with the two representations kept APART.** `weapons.ts` holds every weapon twice — doubles in `WEAPONS[i]`, narrowed values in the derived hot tables — and the narrowing is lossy for six of them (rocket splashRadius 4.4 → 4.400000095367432, and 60000/rpm for four weapons). The shipping code reads BOTH, three lines apart. `EffectiveWeapon` therefore carries the def's doubles AND a `hot` record, and unifying them is a separate change with its own argument. The test caught a bare range check letting `1.5` index a hole in the table. |

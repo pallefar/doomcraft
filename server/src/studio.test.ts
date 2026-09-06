@@ -10,6 +10,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
+import { ItemKind } from '@doomcraft/shared/items';
+import { parseChallengesManifest } from '@doomcraft/shared/challenges';
+
+import { checkQuestsRefs } from './gate.js';
 import { PackInventory } from './packs.js';
 import { StudioService } from './studio.js';
 
@@ -221,5 +225,58 @@ describe('the challenge board editor (S4)', () => {
     expect(inv.questsVersions()).toEqual([1, 2]);
     const again = studio.saveQuests(board([def()]));
     expect(again.ok && again.label).toBe('quests@3');
+  });
+});
+
+describe('V4b: the studio and the gate agree about what a challenge may pay', () => {
+  const board = (defs: Record<string, unknown>[]): string => JSON.stringify({ challenges: defs });
+  const def = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'daily.kill-5', period: 'daily', stat: 'kills', target: 5, scrap: 10,
+    name: 'Five', blurb: 'Take down five.', ...over,
+  });
+
+  it('refuses a challenge paying a weapon_variant, in the CHECK button and at save', () => {
+    /*
+     * `validateQuestsSource` is a SECOND DOOR onto quests.refs: it does its own
+     * id lookup across every installed items version rather than calling
+     * `checkQuestsRefs`, so a rule added only to the release gate would let the
+     * studio bless a quests pack the gate then refuses forever — the editor
+     * that lies, HANDOVER §0 rule 29. Both doors call `challengeGrantRefusal`.
+     */
+    const { studio } = studioWith(seededRoot());
+    const dry = studio.validateQuestsSource(board([def({ item: 'weapon_variant-shotgun-slug' })]));
+    expect(dry.ok).toBe(false);
+    expect(dry.detail).toContain('quests.refs');
+    expect(dry.detail).toContain('craft-only');
+    // Not the dangling-id message: the id IS in the installed items manifest.
+    expect(dry.detail).not.toContain('no installed items version');
+
+    const saved = studio.saveQuests(board([def({ item: 'weapon_variant-shotgun-slug' })]));
+    expect(saved.ok).toBe(false);
+    expect(!saved.ok && saved.error).toContain('craft-only');
+  });
+
+  it('accepts EXACTLY the set the release gate accepts, id by id', () => {
+    /*
+     * The rule-29 assertion proper: not "each door refuses bad input" but
+     * "the set each door ACCEPTS is identical". Swept over every id in the
+     * bundled items manifest, so the day a kind is added the sweep covers it.
+     */
+    const root = seededRoot();
+    const { studio, inv } = studioWith(root);
+    const items = inv.itemsAt(1)!.manifest;
+    expect(items.items.some((i) => i.kind === ItemKind.WEAPON_VARIANT)).toBe(true);
+
+    const ids = [...items.items.map((i) => i.id), 'skin-ghost'];
+    for (const id of ids) {
+      const src = board([def({ item: id })]);
+      const studioOk = studio.validateQuestsSource(src).ok;
+      const gateOk = checkQuestsRefs(parseChallengesManifest(src).manifest, items).ok;
+      expect(studioOk, `studio and gate disagree about "${id}"`).toBe(gateOk);
+    }
+    // …and the sweep is not vacuous: it contains at least one of each verdict.
+    const verdicts = ids.map((id) => studio.validateQuestsSource(board([def({ item: id })])).ok);
+    expect(verdicts).toContain(true);
+    expect(verdicts).toContain(false);
   });
 });

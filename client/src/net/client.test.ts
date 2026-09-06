@@ -22,8 +22,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   C2S, CLIENT_TIMEOUT_MS, EntityType, GameMode, PacketWriter, RemoveReason,
-  encodeKill, encodeMatchAward, quantizePos,
+  encodeKill, encodeMatchAward, quantizePos, WEAPON_COUNT, WeaponId,
 } from '@shared';
+import {
+  encodeVariantNames, encodeVariantTable, parseVariantsManifest,
+  variantNamesFor, wireEntriesFor,
+  type VariantNameEntry, type VariantWireEntry,
+} from '@shared/variants';
 import { Room } from '@doomcraft/server/src/room.js';
 import type { NetTransport } from '@doomcraft/server/src/net.js';
 
@@ -564,5 +569,162 @@ describe('what the server says a round paid', () => {
     expect(f.net.status).toBe(before);
     expect(f.net.sessionXp).toBe(0);
     expect(f.net.awardsSeen).toBe(0);
+  });
+});
+
+
+/* ------------------------------------------------------------------------ *
+ * V4d — what the feed is told the gun was called
+ * ------------------------------------------------------------------------ */
+
+describe('the killing gun\'s name', () => {
+  const w = new PacketWriter(512);
+
+  /** A two-row table for this room, in the order the room would send it. */
+  function table(): { entries: VariantWireEntry[]; names: VariantNameEntry[] } {
+    const parsed = parseVariantsManifest(JSON.stringify({
+      variants: [
+        {
+          id: 'shotgun-slug', base: WeaponId.SHOTGUN, name: 'Slug Shotgun',
+          over: { pellets: 1, damage: 62, spread: 0.012, spreadMax: 0.03, falloffEnd: 44, rpm: 42 },
+        },
+        {
+          id: 'rocket-swift', base: WeaponId.ROCKET, name: 'Swift Rocket',
+          over: { damage: 82, rpm: 104, splashRadius: 3.8, projectileSpeed: 66 },
+        },
+      ],
+    }));
+    expect(parsed.errors).toEqual([]);
+    const manifest = parsed.manifest as NonNullable<typeof parsed.manifest>;
+    const entries = wireEntriesFor(manifest);
+    return { entries, names: variantNamesFor(manifest, entries) };
+  }
+
+  const SLOTS = new Uint8Array(WEAPON_COUNT);
+
+  it('names the row this room pinned once both messages have landed', () => {
+    const f = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(f, 60);
+    const t = table();
+
+    f.link.client.onmessage?.(encodeVariantTable(w, t.entries, SLOTS).copy());
+    f.link.client.onmessage?.(encodeVariantNames(w, t.names).copy());
+
+    expect(f.net.variantWeaponName(WeaponId.SHOTGUN, 1)).toBe('Slug Shotgun');
+    expect(f.net.variantWeaponName(WeaponId.ROCKET, 2)).toBe('Swift Rocket');
+    // Slot 0 is the archetype, and so is a row for another archetype.
+    expect(f.net.variantWeaponName(WeaponId.SHOTGUN, 0)).toBe('Shotgun');
+    expect(f.net.variantWeaponName(WeaponId.SHOTGUN, 2)).toBe('Shotgun');
+  });
+
+  /*
+   * CLAUSE 6 — the degradation. A client that gets the table and never the
+   * names (an older server, a dropped packet) renders the ARCHETYPE's name:
+   * never a blank, never an id, and never nothing at all.
+   */
+  it('renders the base weapon\'s name when no names message ever arrives', () => {
+    const f = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(f, 60);
+    const t = table();
+
+    f.link.client.onmessage?.(encodeVariantTable(w, t.entries, SLOTS).copy());
+
+    expect(f.net.variantWeaponName(WeaponId.SHOTGUN, 1)).toBe('Shotgun');
+    expect(f.net.variantWeaponName(WeaponId.ROCKET, 2)).toBe('Rocket Launcher');
+    // And with neither message: a room with no variants at all.
+    const g = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(g, 60);
+    expect(g.net.variantWeaponName(WeaponId.SHOTGUN, 1)).toBe('Shotgun');
+  });
+
+  /*
+   * THE RESET, ON THE OBJECT THE CLIENT REALLY REUSES. `NetClient` holds ONE
+   * `KillEvent` and hands the same instance to every listener, so an eight-byte
+   * KILL that merely left the field alone would repeat the previous kill's
+   * slot — and this is the path that happens in a real match, not a decoder
+   * unit test.
+   */
+  it('an eight-byte KILL after a nine-byte one arrives with slot 0', () => {
+    const f = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(f, 60);
+    const t = table();
+    f.link.client.onmessage?.(encodeVariantTable(w, t.entries, SLOTS).copy());
+    f.link.client.onmessage?.(encodeVariantNames(w, t.names).copy());
+
+    const seen: { weaponId: number; slot: number; label: string }[] = [];
+    f.net.events.onKill = (e): void => {
+      seen.push({
+        weaponId: e.weaponId,
+        slot: e.variantSlot,
+        label: f.net.variantWeaponName(e.weaponId, e.variantSlot),
+      });
+    };
+
+    const nine = encodeKill(w, 7, 99, WeaponId.SHOTGUN, 0, 1, 1).copy();
+    expect(nine.length).toBe(9);
+    f.link.client.onmessage?.(nine);
+
+    // An OLD SERVER's kill, or a replayed capture: eight bytes, same object.
+    f.link.client.onmessage?.(nine.slice(0, 8));
+
+    expect(seen).toEqual([
+      { weaponId: WeaponId.SHOTGUN, slot: 1, label: 'Slug Shotgun' },
+      { weaponId: WeaponId.SHOTGUN, slot: 0, label: 'Shotgun' },
+    ]);
+  });
+
+  /*
+   * CLAUSE 9(e) — two rooms holding the same two rows in the OPPOSITE order.
+   * The slug is slot 1 in one and slot 2 in the other, and both must say "Slug
+   * Shotgun". Resolving against any ordering but the one the room sent names
+   * the other gun with no error anywhere.
+   */
+  it('two rooms with the rows reversed name the same gun for the same kill', () => {
+    const parsed = parseVariantsManifest(JSON.stringify({
+      variants: [
+        {
+          id: 'rocket-swift', base: WeaponId.ROCKET, name: 'Swift Rocket',
+          over: { damage: 82, rpm: 104, splashRadius: 3.8, projectileSpeed: 66 },
+        },
+        {
+          id: 'shotgun-slug', base: WeaponId.SHOTGUN, name: 'Slug Shotgun',
+          over: { pellets: 1, damage: 62, spread: 0.012, spreadMax: 0.03, falloffEnd: 44, rpm: 42 },
+        },
+      ],
+    }));
+    expect(parsed.errors).toEqual([]);
+    const reversed = parsed.manifest as NonNullable<typeof parsed.manifest>;
+    const rEntries = wireEntriesFor(reversed);
+    expect(rEntries[1].id).toBe('shotgun-slug');
+
+    const forward = table();
+    expect(forward.entries[0].id).toBe('shotgun-slug');
+
+    const a = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(a, 60);
+    a.link.client.onmessage?.(encodeVariantTable(w, forward.entries, SLOTS).copy());
+    a.link.client.onmessage?.(encodeVariantNames(w, forward.names).copy());
+
+    const b = makeFixture({ mode: GameMode.DEATHMATCH });
+    playFor(b, 60);
+    b.link.client.onmessage?.(encodeVariantTable(w, rEntries, SLOTS).copy());
+    b.link.client.onmessage?.(
+      encodeVariantNames(w, variantNamesFor(reversed, rEntries)).copy(),
+    );
+
+    const labels: string[] = [];
+    const take = (f: Fixture): void => {
+      f.net.events.onKill = (e): void => {
+        labels.push(f.net.variantWeaponName(e.weaponId, e.variantSlot));
+      };
+    };
+    take(a);
+    take(b);
+
+    // The SAME gun, at the two slot numbers the two rooms gave it.
+    a.link.client.onmessage?.(encodeKill(w, 7, 99, WeaponId.SHOTGUN, 0, 1, 1).copy());
+    b.link.client.onmessage?.(encodeKill(w, 7, 99, WeaponId.SHOTGUN, 0, 1, 2).copy());
+
+    expect(labels).toEqual(['Slug Shotgun', 'Slug Shotgun']);
   });
 });

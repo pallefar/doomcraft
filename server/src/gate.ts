@@ -29,7 +29,9 @@ import {
   validateLevel,
   type Level,
 } from '@doomcraft/shared/level';
-import { parseItemsManifest, itemsFingerprintInputs, type ItemsManifest } from '@doomcraft/shared/items';
+import {
+  challengeGrantRefusal, parseItemsManifest, itemsFingerprintInputs, type ItemsManifest,
+} from '@doomcraft/shared/items';
 import {
   challengesFingerprintInputs,
   parseChallengesManifest,
@@ -487,21 +489,37 @@ export function checkQuestsValidate(text: string | null): GateCheck {
 
 /**
  * `quests.refs` — every item a challenge pays exists in the items manifest
- * it ships beside. The settlement formats the full `items@<v>:<id>` ref at
- * grant time from the room's pinned items version, so a dangling local id
- * would mint dormant-from-birth rewards; a PUBLISH refuses it. Input that
- * makes it fail: rename an item and forget the quests manifest.
+ * it ships beside, AND is a kind a challenge is allowed to pay. The
+ * settlement formats the full `items@<v>:<id>` ref at grant time from the
+ * room's pinned items version, so a dangling local id would mint
+ * dormant-from-birth rewards; a PUBLISH refuses it. Input that makes it fail:
+ * rename an item and forget the quests manifest.
+ *
+ * THE KIND CHECK IS V4b's, and it closes a supply path nothing else could see.
+ * This function only ever asked whether the id EXISTS. `ChallengeDef.item` is
+ * an items-manifest local id that `settleChallenges` turns into
+ * `items@<v>:<id>` with `source: 'challenge'`, so a quests manifest naming
+ * `weapon_variant-shotgun-slug` parsed with zero errors, passed this check,
+ * gated GREEN, and made weapon-variant supply 1 at the first completion —
+ * entirely around `rollMatchDrops`' exclusion and `CRAFTABLE_KINDS`.
+ * `challengeGrantRefusal` is shared with `StudioService.validateQuestsSource`
+ * so the editor and the gate cannot disagree about it (§0 rule 29).
  */
 export function checkQuestsRefs(
   manifest: ChallengesManifest | null, items: ItemsManifest | null,
 ): GateCheck {
   if (manifest === null) return ok('quests.refs');
-  const itemIds = new Set((items?.items ?? []).map((i) => i.id));
+  const defsById = new Map((items?.items ?? []).map((i) => [i.id, i]));
   const bad: string[] = [];
   for (const c of manifest.challenges) {
-    if (c.item !== null && !itemIds.has(c.item)) {
+    if (c.item === null) continue;
+    const def = defsById.get(c.item);
+    if (def === undefined) {
       bad.push(`${c.id} pays "${c.item}", which is not in the items manifest`);
+      continue;
     }
+    const refusal = challengeGrantRefusal(def);
+    if (refusal !== null) bad.push(`${c.id} pays ${refusal}`);
   }
   return bad.length === 0 ? ok('quests.refs') : fail('quests.refs', bad.join('; '));
 }

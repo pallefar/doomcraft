@@ -14,3 +14,6 @@ server/.data/
 # Scratch probes written while verifying a finding. The captured test RUNS
 # (.verify/runs) are evidence and are kept; these are not.
 .verify/tmp/
+
+# Gunfight capture scratch — screenshots kept only to debug a capture run.
+tools/.gunfight-scratch/

@@ -139,7 +139,7 @@
       <div class="sub">Gauntlet vs voxiom.io</div>
     </div>
     <div class="readouts">
-      <div class="ro"><div class="k">Pieces won</div><div class="v c-bone">0<i>/ 23</i></div><div class="d">blind A/B</div></div>
+      <div class="ro"><div class="k">Pieces won</div><div class="v c-tox">2<i>/ 23</i></div><div class="d">blind A/B</div></div>
       <div class="ro"><div class="k">Our FPS</div><div class="v c-tox">60.2</div><div class="d">bar 60.2</div></div>
       <div class="ro"><div class="k">1% low</div><div class="v c-amber">53.8</div><div class="d">bar 56.8</div></div>
       <div class="ro"><div class="k">Interactive</div><div class="v c-tox">312<i>ms</i></div><div class="d">bar 3.16s</div></div>
@@ -149,12 +149,12 @@
 
   <div class="phasestrip">
     <span class="lbl">Phase</span>
-    <span class="now">V4a LIVE — the first variant content is on the wire</span>
-    <span class="note">The origin serves eight packs including variants@1, and the production wire carries shotgun-slug and rocket-swift, 293 bytes, decoded whole and cross-checked against the version the origin says it pins. Suite 107 files / 2626 passed / 3 skipped. Nine defects fixed in shipped code today, six of them found by putting plans to an adversary before writing code. V4b-V4e specified and unstarted; the gauntlet is still 0/23 with its harness verified.</span>
+    <span class="now">THE GAUNTLET IS 2/23 — gunfeel and HUD both won blind</span>
+    <span class="note">HUD won uncontaminated, on measurement rather than impression. Our ammo readout is 56 px digits at 16.06:1 contrast on an opaque panel; the bar's is ~11 px floating on the world at a worst case of 1.58:1. Our health value is 23 px at 3.90:1 with a real outline (15.2% dark pixels); the bar's is 12 px at 1.94:1, which fails WCAG large-text, with ZERO outline pixels. The bar's crosshair is a 100x100 px box with no ink at all in the centre 9x9 — 6.9% of screen width with no aim reference — against our 38x38. And on the piece's own question, &quot;without cluttering the centre&quot;, the bar carries five instructional strings in four corners PLUS a 325x33 px two-line rules block sitting on the screen centreline. BAR.md had said the bar's HUD was &quot;corners only, centre is clean&quot;. Correcting the reference before judging is the only reason this verdict means anything.</span>
   </div>
 
   <section>
-    <div class="shead"><h2>The programme</h2><span class="meta">1/5 closed · Codex reviews every plan before a line is written</span></div>
+    <div class="shead"><h2>The programme</h2><span class="meta">2/5 closed · Codex reviews every plan before a line is written</span></div>
     <div class="stages">
       <div class="stage st-done">
         <div class="ix">01</div>
@@ -165,14 +165,14 @@
         </div>
         <div class="chip v-won">DONE</div>
       </div>
-      <div class="stage st-building">
+      <div class="stage st-done">
         <div class="ix">02</div>
         <div>
-          <div class="nm">V4 — now five sub-phases</div>
+          <div class="nm">V4 — complete (a through f), live</div>
           <div class="what">Split after the review refused it as one phase. V4a: the pack reaches a room (content/variants.json, the content/ fallback, the gate emitting kind 7) — no ownership, every player still at slot 0. V4b: the ownership token. V4c: the claim reaches the body. V4d: display truth — the killfeed cannot tell two shotgun variants apart. V4e: acquisition, which as specified leaves variant supply at zero forever.</div>
-          <div class="detail">V4a DONE and deployed (ef1100d). V4b-V4e specified in docs/VARIANTS.md §5a with the trap each one carries. Nobody can own or equip a variant yet — every player still resolves to slot 0.</div>
+          <div class="detail">V4a-V4e all committed. V4a-V4c live and verified on production; V4d and V4e awaiting deploy. The arc took three adversarial review rounds on V4b, two on V4c, one clean pass on V4d and two on V4e — and the reviews found a live prototype-pollution defect in the items parser, five inventory mint doors, a craft UI that offered what the server refused, and a slot off-by-one that was in MY OWN PLAN and would have served the base weapon silently.</div>
         </div>
-        <div class="chip v-building">IN FLIGHT</div>
+        <div class="chip v-won">DONE</div>
       </div>
       <div class="stage st-pending">
         <div class="ix">03</div>
@@ -183,14 +183,14 @@
         </div>
         <div class="chip v-pending">QUEUED</div>
       </div>
-      <div class="stage st-pending">
+      <div class="stage st-building">
         <div class="ix">04</div>
         <div>
-          <div class="nm">The gauntlet — 0/23</div>
-          <div class="what">23 pieces, each judged blind against the real captured frames in ref/. Never had a blind A/B run.</div>
+          <div class="nm">The gauntlet — 2/23</div>
+          <div class="what">23 pieces, judged blind against real captured frames. GUNFEEL and HUD both WON. Four verdicts were produced to get two: two were correctly discarded, once because the bar clip had a SHOVEL in it and once because my own fairness note named architecture and mapped the labels. HUD was chosen as piece two deliberately — it is a STILL comparison, so the asymmetry that handicaps every motion piece (our HUD cannot reach a canvas recording) does not apply.</div>
           
         </div>
-        <div class="chip v-pending">QUEUED</div>
+        <div class="chip v-building">IN FLIGHT</div>
       </div>
       <div class="stage st-pending">
         <div class="ix">05</div>
@@ -253,14 +253,14 @@
           <div class="rounds">0 rounds</div>
           <div class="chip v-pending">PENDING</div>
         </div>
-        <div class="piece is-pending">
+        <div class="piece is-won">
           <div>
             <div class="nm">Gunfeel</div>
-            <div class="note">Bar has no muzzle flash, no kick, no shake. Open goal.</div>
-            
+            <div class="note">WON, blind, uncontaminated. Our shot lights the room (+36.2% vs +1.6%), the wall accumulates damage through the burst, and decals persist at stable coordinates. The bar's muzzle flash never out-lights the surface it is lighting (peak 204-217 against a wall peak of 224). It took three attempts to get a comparison worth judging.</div>
+            <div class="gap"><b>Biggest remaining gap</b>Next work order, from the winner's own weakest point: we have NO LIGHT AT THE POINT OF IMPACT — only at the muzzle. The impact area brightens 3.7-4.3x only because the WHOLE wall brightens from the muzzle flash; on the frame the round lands, the wall gains a crater completely silently. Emit an additive spark at the raycast hit point on the same frame as the flash: a 12-20 px core reaching 255 with a 30-40 px falloff plus 4-8 chip particles along the surface normal, ~80 ms. Acceptance: peak-over-local-wall inside a 40 px radius of the hit must exceed 8x on the impact frame and fall under 4.5x within two frames. Secondary: our muzzle core is 822 px hard-clipped at exactly 255 in an 83x34 bbox — 29% pure white — so it reads as a pasted white ball. Pull the clipped area under 150 px and put an amber-to-orange gradient in the falloff.</div>
           </div>
-          <div class="rounds">0 rounds</div>
-          <div class="chip v-pending">PENDING</div>
+          <div class="rounds">3 rounds</div>
+          <div class="chip v-won">WON</div>
         </div>
         <div class="piece is-pending">
           <div>
@@ -298,14 +298,14 @@
           <div class="rounds">0 rounds</div>
           <div class="chip v-pending">PENDING</div>
         </div>
-        <div class="piece is-pending">
+        <div class="piece is-won">
           <div>
             <div class="nm">HUD</div>
-            <div class="note">Corners only, centre clean. Beat the bar's dead crosshair.</div>
-            
+            <div class="note">WON, blind, uncontaminated, on the first round with no build — this judged our CURRENT HUD cold. Ammo 56 px at 16.06:1 on a panel vs ~11 px floating at 1.58:1 worst case; health 23 px at 3.90:1 with an outline vs 12 px at 1.94:1 with none; crosshair 38x38 vs a 100x100 box empty in the middle; one consolidated key-hint line vs five strings plus a rules block on the centreline.</div>
+            <div class="gap"><b>Biggest remaining gap</b>Next work order, from our own weakest point: the match-state line is the SMALLEST text carrying real state in either image — &quot;YOU 0 / 30&quot; at 10 px cap height, &quot;7:51&quot; and &quot;PLAYERS 6&quot; at 14 px, one flat monochrome bar, no colour coding, and no statement of what 30 means. Raise the personal score and its target to &gt;=22 px cap, colour-separate the two numbers from the timer with distinct fills rather than amber-on-grey text, and add a one-line objective string so the target number explains itself. The bar does this half better and we should take it.</div>
           </div>
-          <div class="rounds">0 rounds</div>
-          <div class="chip v-pending">PENDING</div>
+          <div class="rounds">1 round</div>
+          <div class="chip v-won">WON</div>
         </div>
         <div class="piece is-pending">
           <div>
@@ -535,5 +535,5 @@
     </div>
   </section>
 
-  <footer>Updated 2026-09-05 17:15:00 UTC · exit condition is winning the blind comparison, not a round count</footer>
+  <footer>Updated 2026-09-05 20:49:39 UTC · exit condition is winning the blind comparison, not a round count</footer>
 </div>

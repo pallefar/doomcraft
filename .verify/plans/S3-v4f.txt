@@ -1,0 +1,110 @@
+Doomcraft V4f — "the equip button". Reviewed BEFORE a line is written. Refuse it
+if it is wrong.
+
+Output shape:
+  * For each clause you judge BROKEN: a CONCRETE FAILURE — the exact input or
+    sequence and the specific WRONG VALUE it produces.
+  * A closing section headed CORRECT listing by number every clause judged
+    correct.
+  * AND, per HANDOVER rule 38, for EVERY proof obligation in clause 8: say
+    whether the DEFECTIVE and the CORRECT implementation produce the SAME
+    asserted value on the input as specified. Four of six obligations failed
+    that check on V4e and the rewrite is the only reason those tests mean
+    anything.
+
+Facts below were read out of the tree at commit 4a45544 (V4e). Read them
+yourself and say so if any does not hold.
+
+================================================================================
+BACKGROUND — the gap
+================================================================================
+
+V4a-V4e shipped. A player can now CRAFT a weapon-variant token. **They cannot
+equip it**, because only the server half of the variant slot landed:
+
+- `server/src/persistence.ts:1216-1235` has
+  `EquipSlot = 'skin' | 'title' | \`variant:${number}\``,
+  `variantSlotWeaponId(slot)` (canonical spelling only — `variant:01` and
+  `variant:1.0` are refused), and `kindForSlot` returning WEAPON_VARIANT.
+  `POST /api/equip` accepts those slots and `equipVerdict` follows
+  `ref -> ItemDef.variantId -> VariantDef.base` and refuses a cross-base claim.
+- `client/src/ui/loadoutModel.ts:217` still has
+  `SLOT_FOR_KIND[ItemKind.WEAPON_VARIANT]` absent/null, with a comment reading
+  "null, deliberately: V4b's token grants no equip slot ... V4c adds the slot on
+  both sides." V4c added it on ONE side.
+- The slot name needs the variant's BASE WEAPON id. The client cannot compute
+  it: `/api/items` (`server/src/index.ts:3119`) returns `{version, items}`, and
+  `ItemDef` carries `variantId` but NOT `base`. The base lives in the VARIANTS
+  pack.
+- The variants table IS already on the wire in a room — `S2C.VARIANT_TABLE`
+  carries `{id, base, values}` per row — but the Loadout tab is a MENU surface
+  and is not in a room.
+
+================================================================================
+THE PLAN — V4f
+================================================================================
+
+ 1. A new `GET /api/variants` mirrors `/api/items`: it resolves the live
+    release's variants pack and answers `{version, variants: [{id, base, name}]}`.
+    It exposes strictly LESS than the in-room wire already gives any
+    CAP_VARIANTS client (which receives id, base AND all sixteen effective
+    values), so it opens no new surface.
+
+ 2. It answers `{version: 0, variants: []}` when no variants pack is live,
+    exactly as `/api/items` answers `{version: 0, items: []}` — a menu must not
+    fail because content is absent.
+
+ 3. The Loadout tab fetches it alongside `/api/items` and passes an
+    `id -> base` map into the model. A row whose kind is WEAPON_VARIANT and
+    whose `variantId` is in that map gets slot `variant:<base>`; a row whose
+    variantId is NOT in the map gets NO equip action, because the server would
+    refuse it and an enabled button that always 400s is the bug V4c's own
+    comment was avoiding.
+
+ 4. `SLOT_FOR_KIND` is the wrong shape for this and must not be forced: it maps
+    a KIND to one fixed slot, while a variant's slot depends on the ITEM. The
+    row's slot is computed per row; `SLOT_FOR_KIND[WEAPON_VARIANT]` stays absent
+    so nothing can read a wrong constant out of it.
+
+ 5. Equipped-ness is read from `inventory.variants`, which V4c stores as
+    `Record<string, string>` keyed by the base weapon id as a decimal string
+    and valued by the owned REF. A row is equipped when
+    `inventory.variants[String(base)] === row.ref`. Comparing on the id rather
+    than the ref would light up every copy the player owns of that variant.
+
+ 6. Unequip posts `variant:<base>` with `''`, the same convention skin and title
+    already use — `equipVerdict` returns ok for an empty ref and `applyEquip`
+    clears the entry.
+
+ 7. The V4e craft UI agreement holds: whatever the server refuses, the tab must
+    not offer. A dormant variant token — one the live items pack no longer
+    defines — must render (hiding an owned item reads as loss) with NO equip
+    action.
+
+ 8. Proof obligations. Each proven RED with its own fix reverted, and each input
+    chosen so the defective and correct implementations DIFFER:
+    (a) an owned `weapon_variant-shotgun-slug` renders WITH an equip action
+        whose slot is `variant:1` — assert the SLOT STRING, not merely that an
+        action exists, because a wrong base still produces an action;
+    (b) an owned variant whose id is absent from the `/api/variants` map renders
+        with NO action — and the row must still be PRESENT, so the assertion is
+        `action === null && row exists`, not a row count;
+    (c) `/api/variants` with no pack live answers `{version:0, variants:[]}` and
+        HTTP 200, not 404 — a 404 and an empty body are the same to a caller
+        that only checks `.variants`, so assert the STATUS;
+    (d) the equipped flag lights only for the owned ref that is actually stored:
+        the player owns TWO copies of the same variant and one is equipped —
+        defective (comparing by variantId or localId) lights both, correct
+        lights one;
+    (e) the tab's offered equip slots are a SUBSET of what `/api/equip` accepts,
+        asserted as SET EQUALITY over the bundled pack plus positive membership
+        of `variant:1` and `variant:3` by name — a subset assertion alone is
+        vacuously true when the tab offers nothing, which is the exact V4f
+        failure being tested.
+
+ 9. Out of scope: the admin player view, any change to the variants or items
+    pack, and any rarity above uncommon.
+
+================================================================================
+Which clauses are broken, with a concrete failure and a specific wrong value;
+then the CORRECT list; then the per-obligation discrimination check for 8(a)-(e).

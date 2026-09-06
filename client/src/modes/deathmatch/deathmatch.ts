@@ -428,6 +428,8 @@ export class DeathmatchMode implements ModeInstance {
   private autoRespawnAtMs = 0;
   private lastKillerName = '';
   private lastKillerWeapon = 0;
+  /** The slot that shot was fired with, for the death screen's gun name. */
+  private lastKillerVariant = 0;
   private lastKillerFlags = 0;
   /** Health the killer had left when they killed you. -1 = unknown. */
   private lastKillerHealth = -1;
@@ -456,6 +458,9 @@ export class DeathmatchMode implements ModeInstance {
       localId: () => this.host.game.net.playerId,
       nameOf: (id) => this.nameOf(id),
       isBot: (id) => this.isBot(id),
+      // Through the net client, because the answer belongs to the table THIS
+      // ROOM pinned and sent. V4d.
+      weaponLabel: (weaponId, slot) => this.host.game.net.variantWeaponName(weaponId, slot),
     });
     ctx.scope.add(() => { this.feed.destroy(); });
 
@@ -800,7 +805,9 @@ export class DeathmatchMode implements ModeInstance {
     if (!dead) return;
 
     const by = this.lastKillerName === '' ? 'HELL' : this.lastKillerName;
-    const weapon = this.lastKillerName === '' ? '' : ` · ${weaponName(this.lastKillerWeapon)}`;
+    const weapon = this.lastKillerName === ''
+      ? ''
+      : ` · ${this.host.game.net.variantWeaponName(this.lastKillerWeapon, this.lastKillerVariant)}`;
     const left = this.lastKillerHealth >= 0 ? ` · ${this.lastKillerHealth} HP left` : '';
     this.cDeathBy = setText(this.deathBy, `${by}${weapon}${left}`, this.cDeathBy);
 
@@ -949,6 +956,7 @@ export class DeathmatchMode implements ModeInstance {
       const anon = e.killerId === 0 || e.killerId === e.victimId;
       this.lastKillerName = anon ? '' : this.nameOf(e.killerId);
       this.lastKillerWeapon = e.weaponId;
+      this.lastKillerVariant = e.variantSlot;
       this.lastKillerFlags = e.flags;
       // "You had them at 23" is the most useful thing a death screen can say,
       // and the snapshot already knows it.

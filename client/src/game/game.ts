@@ -1306,7 +1306,12 @@ export class Game {
   private onKill(e: KillEvent): void {
     const killer = this.nameOf(e.killerId);
     const victim = e.victimId === 0 ? 'a demon' : this.nameOf(e.victimId);
-    const weapon = getWeapon(e.weaponId).name;
+    // The gun the SHOT was fired with, named by the row this ROOM pinned —
+    // not by whatever the killer is holding now, and not by the compiled
+    // table. Falls back to the archetype's name when the room has no
+    // variants, when the names message never arrived, or when the slot
+    // names a row for another archetype (V4d).
+    const weapon = this.net.variantWeaponName(e.weaponId, e.variantSlot);
     this.hud.pushFeed(`${killer}  ›${weapon}›  ${victim}`, 'k');
     if (e.victimId === this.net.playerId) {
       this.sfx.death();
