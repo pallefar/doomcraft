@@ -465,7 +465,30 @@ has shipped, so it is gone; the arc is in §1 and in git.
      `itemsVersions()` accepts any integer >= 1; `parseItemRef` is
      `^items@(\d{1,5}):` and caps at `0xffff`. Install `items/100000/` and
      drops, challenge items, prizes and craft output all vanish with no error.
-     Pinned by a test; the cap itself is unfixed.
+     Pinned by a test; the cap itself is unfixed. RUN 2026-09-06, correcting
+     this entry's own wording: the bound is the NUMERIC check, not the digit
+     count — `items@65535:` parses, and `items@65536:` (five digits) is
+     refused just as `items@100000:` is.
+   - **NEW 2026-09-06 — the quests fingerprint encoding is AMBIGUOUS, so the
+     per-pack ratchet cannot see a change it exists to see.**
+     `challengesFingerprintInputs` joins every field with `/`, including the
+     two free-text ones. Measured: `{name:"A/B", blurb:"C"}` and
+     `{name:"A", blurb:"B/C"}` BOTH produce
+     `daily.x:daily/kills/1/1/-/A/B/C`. Two different manifests therefore
+     fingerprint identically, `questsPack()` returns the same number, and the
+     console's line-for-line diff renders no change at all. Rule 2's family: a
+     check that cannot distinguish the thing it is checking. The fix
+     (JSON-escaped free-text fields) changes EVERY declared quests digest, so
+     it is its own release and must not ride along with a content change.
+   - **NEW 2026-09-06 — an idle sole player is credited a lifetime WIN.**
+     Measured: `applyMatchResult` with `{kills:0, deaths:0, won:true,
+     damageDealt:0, blocks:0, seconds:12}` gives `roundPays = false`,
+     `economy.scrap = 0` — and `stats.wins = 1`. A hundred of them give
+     `stats.wins = 100` for a hundred rounds of doing nothing. Challenges are
+     unaffected (`buildSubmission` zeroes `challengeIds` when `roundPays` is
+     false), so this is confined to the lifetime block today — but it is
+     exactly why the achievement system may NOT price `wins`, and it would
+     become a mint the moment anything else does.
    - `equippedSkin` and `title` are still reachable through
      `POST /api/profile`. V4c added `variants` to `SERVER_OWNED_PROFILE_FIELDS`
      and left those two.
