@@ -25,6 +25,16 @@ const MENU_MASKS = [
   { x: 0.00, y: 0.11, w: 0.17, h: 0.17 },  // top-left cross-promo tile
   { x: 0.87, y: 0.00, w: 0.13, h: 0.08 },  // top-right stream badges
   { x: 0.00, y: 0.955, w: 0.20, h: 0.045 }, // footer legal links
+  // ADDED 2026-09-06. A blind critic read the product name straight off a menu
+  // screenshot and correctly binned its own verdict: the masks above cover the
+  // BAR's brand furniture and nothing else, but the challenger's front screen
+  // prints its own product name as live text inside its reserved house-ad
+  // slots. Measured at (1230,421)-(1325,437) and (671,826)-(769,841) on a
+  // 1440x900 page; padded here because glyph runs move with copy changes.
+  // Masks apply to BOTH images, so these cost the bar the same area they cost
+  // the challenger.
+  { x: 0.83, y: 0.44, w: 0.13, h: 0.05 },  // right-rail house slot, name text
+  { x: 0.44, y: 0.90, w: 0.14, h: 0.05 },  // bottom house slot, name text
 ];
 // In-game there is no wordmark; the only tells are player names in the chat feed. Masking the
 // whole HUD would hide the thing under review, so only the name column goes.

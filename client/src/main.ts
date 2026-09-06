@@ -1863,9 +1863,17 @@ function fillAdSlots(): void {
     const slot = document.getElementById(id);
     if (slot === null || slot.childElementCount > 0) continue;
     const house = el('div', 'dc-ad-house');
+    // Player-facing copy, not a build note. Until 2026-09-06 this slot printed
+    // "This slot is reserved at first paint, so filling it never shifts the
+    // layout" — a true and useful sentence about the LAYOUT, addressed to the
+    // wrong audience, on the front screen, twice. A blind critic reviewing the
+    // menu piece read it back as a defect and it was right to. The reservation
+    // discipline it described is real and unchanged; it just is not something
+    // to tell a player. The slot is clickable and sells the one-time unlock,
+    // so the copy now sells it.
     house.innerHTML =
-      '<div><b>DOOMCRAFT</b>This slot is reserved at first paint, so filling it '
-      + 'never shifts the layout.<u>Remove ads</u></div>';
+      '<div><b>DOOMCRAFT</b>Play with no ads at all. One payment, no '
+      + 'subscription.<u>Remove ads</u></div>';
     house.addEventListener('click', () => purchaseRemoveAds());
     slot.appendChild(house);
   }
