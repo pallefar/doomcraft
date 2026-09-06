@@ -25,6 +25,10 @@ import {
   type ChallengeDef,
   type ChallengeStatSource,
 } from '@doomcraft/shared/challenges';
+import {
+  achievementDone,
+  type AchievementDef,
+} from '@doomcraft/shared/achievements';
 import type { LedgerEntry } from './journal.js';
 import {
   DEFAULT_PROGRESS,
@@ -857,7 +861,13 @@ export const MAX_ACHIEVEMENT_RECEIPTS = 1024;
  * memory has run out, which is to say when it is OLD.
  */
 export const MAX_ACHIEVEMENT_RECEIPT_STORE = 2048;
-const MAX_ACHIEVEMENT_OWED = 32;
+export const MAX_ACHIEVEMENT_OWED = 32;
+/**
+ * The ceiling a MERGED account's promise list may reach. Above the per-profile
+ * one, because two legitimately-full profiles joining is not an attack and a
+ * refusal there would strand a real player; far below anything unbounded.
+ */
+export const MAX_ACHIEVEMENT_OWED_MERGED = 64;
 const MAX_ACHIEVEMENT_ID_CHARS = 64;
 
 function sanitiseAchievements(raw: AnyRecord): StoredAchievements {
@@ -1350,6 +1360,131 @@ export async function settleChallenges(
     paid.push({ id: o.id, scrap: moved.after - moved.before });
   }
   ch.owed = keep;
+  return paid;
+}
+
+/* ------------------------------------------------------------------------ *
+ * Achievements — lifetime, one-shot, detected from `stats` and paid from a
+ * snapshot. Runs in the SAME `store.update` callback as the match settlement,
+ * so the receipt, the debt, the credit, the item and the journal row commit or
+ * vanish together.
+ * ------------------------------------------------------------------------ */
+
+export interface AchievementSettlementDeps {
+  defs: readonly AchievementDef[];
+  /** ONE timestamp for the whole settlement. */
+  nowMs: number;
+  deviceId: string;
+  /** The session grants REWARD_SCRAP. Without it, the debt is RECORDED and payment waits. */
+  mayPayScrap: boolean;
+  /** The session grants REWARD_ITEM_DROP. An item-bearing award defers without it. */
+  mayGrantItems: boolean;
+  /** The paying room's pinned items version — grant-time ref formatting, as drops do. */
+  itemVersion: number;
+  /**
+   * Does the paying room's pinned items manifest still DEFINE this local id?
+   *
+   * The room filters a def whose item is missing at pin time, exactly as it
+   * does for challenges — but a DEBT outlives the def it came from, and the
+   * payment loop walks `owed`, not `defs`. So a promise snapshotted while the
+   * item existed would otherwise be discharged with a ref to an item no
+   * manifest defines. `grantDrops` cannot catch it: it is a syntactic gate with
+   * no membership lookup, and it accepts `items@1:this-does-not-exist` and puts
+   * it in the inventory. The award would read as paid and the item would be
+   * dormant from birth. (The same hole is open on `settleChallenges` today —
+   * HANDOVER §3 — and is not changed here under a shipped payout.)
+   */
+  itemKnown: (localId: string) => boolean;
+  journal: {
+    has(kind: 'prize', sourceId: string, playerId: string): Promise<boolean>;
+    append(rows: LedgerEntry[]): Promise<number>;
+  } | null;
+  rowId: (nowMs: number) => string;
+}
+
+/**
+ * Detect completions, record each as a durable promise, then pay what may be
+ * paid. Returns what actually moved.
+ *
+ * THE CRASH WINDOW, stated rather than assumed away. The journal row and the
+ * profile write are not one transaction: `store.update` serialises mutations,
+ * it does not commit both. So a row can land and the debounced profile write be
+ * lost, and after the restart the `has` check below sees "paid" while the
+ * balance shows nothing was credited — and this function then writes the
+ * receipt without crediting anything, and THE AWARD IS PERMANENTLY LOST. That
+ * is the same trade this codebase already takes for challenges and ad rewards
+ * ("a lost row is a counter; a double payout is money"), taken again on
+ * purpose, and it is written here because the next reader must not have to
+ * rediscover it. What is NOT left to chance is the pairing: the credit, the
+ * receipt and the dropping of the debt all happen in one synchronous run
+ * before the next `await`, so a torn write cannot leave a debt and a receipt
+ * for the same award.
+ */
+export async function settleAchievements(
+  profile: StoredProfile, deps: AchievementSettlementDeps,
+): Promise<{ id: string; scrap: number }[]> {
+  const ach = profile.achievements;
+
+  /* STEP 1 — DETECT AND RECORD. No money moves here and no permission is
+   * consulted, because a promise must be recorded even by a session that may
+   * not pay it: that is the whole point of the snapshot. The reward is copied
+   * out of the def AS IT STANDS NOW, so a later re-cut cannot revoke it. */
+  for (const def of deps.defs) {
+    if (ach.done.includes(def.id)) continue;
+    if (ach.owed.some((o) => o.id === def.id)) continue;
+    if (!achievementDone(def, profile.stats)) continue;
+    // Refuse rather than evict: an owed queue that rotates loses a promise.
+    if (ach.owed.length >= MAX_ACHIEVEMENT_OWED) break;
+    ach.owed.push({
+      id: def.id, sourceId: `achievement:${def.id}`, scrap: def.scrap, item: def.item,
+    });
+  }
+
+  if (!deps.mayPayScrap) return [];
+
+  const paid: { id: string; scrap: number }[] = [];
+  const keep: AchievementOwed[] = [];
+  for (const o of ach.owed) {
+    /* THE RECEIPT OUTRANKS THE DEBT, and unlike the challenge version of this
+     * rule there is no period to scope it by: an achievement is earned once,
+     * ever, so a receipt for this id settles this debt full stop. Holding both
+     * is what an account merge produces, and the journal cannot see it because
+     * its key ends in the profile key. Discharge, pay nothing, write no row. */
+    if (ach.done.includes(o.id)) continue;
+    /* At the receipt ceiling, stop paying rather than make room. Losing the
+     * oldest receipt would re-open payment for that award the moment the
+     * journal's ~48 h memory forgets the key; an unpaid award is visible to an
+     * operator, a second mint is not. */
+    if (ach.done.length >= MAX_ACHIEVEMENT_RECEIPTS) { keep.push(o); continue; }
+    if (deps.journal !== null && await deps.journal.has('prize', o.sourceId, deps.deviceId)) {
+      ach.done.push(o.id);
+      continue;
+    }
+    if (o.item !== null) {
+      if (!deps.mayGrantItems) { keep.push(o); continue; }
+      if (!deps.itemKnown(o.item)) { keep.push(o); continue; }
+      const landed = grantDrops(
+        profile, [formatItemRef(deps.itemVersion, o.item)], 'achievement', o.sourceId, deps.nowMs,
+      );
+      // BOTH halves or neither: grantDrops refuses at the inventory cap and
+      // returns what actually landed, so an item that cannot land keeps the
+      // whole award owed and it pays when space frees.
+      if (landed.length === 0) { keep.push(o); continue; }
+    }
+    const moved = creditChallengeScrap(profile, o.scrap);
+    ach.done.push(o.id);
+    if (deps.journal !== null) {
+      await deps.journal.append([{
+        id: deps.rowId(deps.nowMs), ms: deps.nowMs, kind: 'prize', sourceId: o.sourceId,
+        playerId: deps.deviceId, currency: 'scrap',
+        delta: moved.after - moved.before, balanceAfter: moved.after,
+        actor: 'system:achievement',
+        reason: `achievement ${o.id}`,
+      }]);
+    }
+    paid.push({ id: o.id, scrap: moved.after - moved.before });
+  }
+  ach.owed = keep;
   return paid;
 }
 

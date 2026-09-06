@@ -691,8 +691,36 @@ describe('grantDrops is where "no variant supply" is a fact rather than an argum
       for (const m of src.matchAll(/grantDrops\([\s\S]{0,200}?'([a-z]+)'/g)) sources.add(m[1]);
     }
     // 'drop' room.ts | 'challenge' persistence.ts | 'prize' competitions.ts
-    // | 'craft' index.ts | 'trade' trades.ts. A new one here is a decision:
-    // does it MINT (and must therefore refuse variants) or TRANSFER?
-    expect([...sources].sort()).toEqual(['challenge', 'craft', 'drop', 'prize', 'trade']);
+    // | 'craft' index.ts | 'trade' trades.ts | 'achievement' persistence.ts.
+    // A new one here is a decision: does it MINT (and must therefore refuse
+    // variants) or TRANSFER?
+    //
+    // 'achievement' MINTS. It is deliberately absent from TRANSFER_SOURCES and
+    // from VARIANT_MINT_SOURCES, so `grantRefusal` treats it as creating a copy
+    // and refuses it a weapon variant — verified by the case below rather than
+    // asserted, because "the default is right" is what this ratchet exists to
+    // stop anyone assuming.
+    expect([...sources].sort())
+      .toEqual(['achievement', 'challenge', 'craft', 'drop', 'prize', 'trade']);
+  });
+
+  it('refuses an achievement a weapon variant, because it mints like every non-craft source', () => {
+    /* The ratchet above says a new source is a DECISION. This is the decision,
+     * executed: 'achievement' is not in TRANSFER_SOURCES, so it mints, and it
+     * is not in VARIANT_MINT_SOURCES, so the craft bench stays the only route
+     * to a variant. The gate refusing an achievement that pays one is defence
+     * in depth on top of this, not instead of it. */
+    const p = createProfile('device-mintcheck', 1_000);
+    const landed = grantDrops(
+      p, ['items@1:weapon_variant-shotgun-slug'], 'achievement', 'achievement:x', 1_000,
+    );
+    expect(landed).toEqual([]);
+    expect(p.inventory.items).toEqual([]);
+
+    // And an ordinary item from the same source DOES land, so the refusal
+    // above is about the KIND and not about the source being rejected wholesale.
+    const ok = grantDrops(p, ['items@1:title-hangar-rat'], 'achievement', 'achievement:y', 1_000);
+    expect(ok.map((i) => i.ref)).toEqual(['items@1:title-hangar-rat']);
+    expect(p.inventory.items.map((i) => i.source)).toEqual(['achievement']);
   });
 });

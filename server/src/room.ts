@@ -88,8 +88,11 @@ import {
 import { Connection, NetHub, sanitiseChat } from './net.js';
 import type { NetHost, NetTransport } from './net.js';
 import type { AppliedRewards, PersistenceStore, StoredProfile } from './persistence.js';
-import { applyMatchResult, grantDrops, randomToken, settleChallenges } from './persistence.js';
+import {
+  applyMatchResult, grantDrops, randomToken, settleAchievements, settleChallenges,
+} from './persistence.js';
 import { contributingChallengeIds, type ChallengeDef } from '@doomcraft/shared/challenges';
+import type { AchievementDef } from '@doomcraft/shared/achievements';
 import type { Journal } from './journal.js';
 import { MATCH_PAYOUT, matchPayoutRows, newLedgerId } from './journal.js';
 import {
@@ -182,6 +185,10 @@ export interface RoomOptions {
    * the browser worker and every test that does not care.
    */
   challenges?: readonly ChallengeDef[];
+  /** Lifetime awards, pinned for this room's life exactly as `challenges` are. */
+  achievements?: readonly AchievementDef[];
+  /** Does the pinned items manifest still define this local id? Payment-time membership. */
+  itemKnown?: (localId: string) => boolean;
   /** The pinned items version challenge item rewards are formatted against. */
   challengeItemVersion?: number;
   /**
@@ -400,6 +407,8 @@ export class Room implements NetHost {
   private readonly levelsResolver: ContentResolver | null;
   private readonly rollDrops: RoomOptions['rollDrops'];
   private readonly challenges: readonly ChallengeDef[];
+  private readonly achievements: readonly AchievementDef[];
+  private readonly itemKnown: (localId: string) => boolean;
   private readonly challengeItemVersion: number;
   /**
    * The authored level this room's world currently holds, and its content hash.
@@ -533,6 +542,8 @@ export class Room implements NetHost {
     this.levelsResolver = options.levels ?? null;
     this.rollDrops = options.rollDrops;
     this.challenges = options.challenges ?? [];
+    this.achievements = options.achievements ?? [];
+    this.itemKnown = options.itemKnown ?? (() => false);
     this.challengeItemVersion = options.challengeItemVersion ?? 1;
     this.modeLocked = options.lockMode === true;
     this.contentVersion = options.contentVersion ?? CONTENT_VERSION;
@@ -1832,6 +1843,32 @@ export class Room implements NetHost {
             mayPayScrap: result.mayPayChallenges,
             mayGrantItems: result.mayGrantChallengeItems && flagOn(challengeFlags, 'economy_items'),
             itemVersion: this.challengeItemVersion,
+            journal,
+            rowId: newLedgerId,
+          });
+        }
+
+        /* Achievements settle after challenges and before the delta below.
+         * AFTER `applyMatchResult`, because that is what pushes the lifetime
+         * stats over a target this round; BEFORE the `landed` recomputation,
+         * because the intermission's "+N Scrap" has to describe the whole
+         * settlement — the same bug was shipped once for challenges and the
+         * comment below is the repair.
+         *
+         * The flag gates PAYMENT and nothing else. It cannot gate progress:
+         * progress is `profile.stats`, which `applyMatchResult` has already
+         * written whatever the flag says. So play during a disabled period
+         * counts, and re-enabling pays what was earned meanwhile — which is
+         * what the flag's blastRadius string tells the operator. */
+        if (this.achievements.length > 0 && flagOn(challengeFlags, 'economy_achievements')) {
+          await settleAchievements(profile, {
+            defs: this.achievements,
+            nowMs: now,
+            deviceId,
+            mayPayScrap: result.mayPayChallenges,
+            mayGrantItems: result.mayGrantChallengeItems && flagOn(challengeFlags, 'economy_items'),
+            itemVersion: this.challengeItemVersion,
+            itemKnown: this.itemKnown,
             journal,
             rowId: newLedgerId,
           });

@@ -88,12 +88,26 @@ export const FLAG_ORDER: readonly string[] = Object.freeze([
   'ads_programmatic',
   'client_update_prompt',
   'economy_items',
+  'economy_achievements',
 ]);
 
 /** Bit 31 is reserved: see the note on `SessionConfigMessage.flags`. */
 export const MAX_FLAG_BITS = 31;
 
 export const FLAGS: Readonly<Record<string, FlagDef>> = Object.freeze({
+  economy_achievements: {
+    key: 'economy_achievements',
+    kind: 'feature',
+    what: 'Lifetime one-shot achievements: the settlement that pays them and the board that shows them.',
+    blastRadius: 'It gates PAYMENT and the SURFACE. It does NOT gate progress, and saying otherwise '
+      + 'would mislead the person most likely to read this: an achievement measures the lifetime stat '
+      + 'block, which `applyMatchResult` writes on every settled match whatever this flag says. So play '
+      + 'during a disabled period still counts, and turning it back on pays what was earned meanwhile. '
+      + 'Receipts live on the profile, so turning it off deletes nobody\'s award. Like every other '
+      + 'reward bit it is read off the connection\'s handshake copy, so a player already in a match '
+      + 'keeps the value they joined with.',
+    defaultOn: false,
+  },
   online_play: {
     key: 'online_play',
     kind: 'feature',

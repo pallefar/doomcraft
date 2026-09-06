@@ -365,6 +365,69 @@ describe('stored challenge state survives a disk round trip', () => {
     expect(a.profile.challenges.owed).toEqual([]);
   });
 
+  it("a DAILY receipt does not cross on a shared WEEK, robbing today's unpaid debt", async () => {
+    /* Found by a test written for something else, and it is the interaction
+     * that matters rather than either half. The union's two loops each copied
+     * the WHOLE of B's `done`, so a daily receipt crossed whenever the profiles
+     * shared an ISO week — harmless while the payment loop ignored `done`, and
+     * a loss the moment that loop learned to let a receipt discharge a debt.
+     *
+     * A earns the daily TODAY in a session that cannot pay. B was paid the SAME
+     * daily YESTERDAY, same ISO week. The defective union hands A a receipt for
+     * a completion A never earned today, and the debt is discharged for nothing.
+     * Asserted as the BALANCE, because "was the receipt copied" is the flag and
+     * this is the cost. */
+    const a = harness();
+    const b = harness();
+
+    await settleChallenges(a.profile, a.deps({
+      grantedIds: ['daily.kill-5'], stats: stats({ kills: 5 }), mayPayScrap: false,
+    }));
+    expect(a.profile.challenges.owed).toHaveLength(1);
+
+    // B: same ISO week (Friday 2026-08-28 and Thursday the 27th are both W35),
+    // different day, and paid.
+    const yesterday = NOON - DAY_MS;
+    await settleChallenges(b.profile, b.deps({
+      grantedIds: ['daily.kill-5'], stats: stats({ kills: 5 }),
+      nowMs: yesterday, deviceId: DEVICE_B,
+    }));
+    expect(b.profile.challenges.done).toEqual(['daily.kill-5']);
+    expect(b.profile.challenges.week).toBe(a.profile.challenges.week);
+    expect(b.profile.challenges.day).not.toBe(a.profile.challenges.day);
+
+    applyMergeFields(a.profile, b.profile, NOON);
+    await settleChallenges(a.profile, a.deps());
+
+    /* THE BALANCE FIRST, deliberately: it is what the player loses, and a
+     * failure message reading "expected 0 to be 40" says so, where "expected
+     * ['daily.kill-5'] to equal []" only says a flag moved. */
+    expect(a.profile.economy.scrap).toBe(40);
+    expect(a.profile.challenges.owed).toEqual([]);
+    expect(a.profile.challenges.done).toEqual(['daily.kill-5']);
+  });
+
+  it('a WEEKLY receipt still crosses on a shared week, and a daily on a shared day', async () => {
+    /* The other direction, so the prefix scoping cannot be "fixed" by simply
+     * refusing to union anything. Both profiles sit in the same day AND the
+     * same week, so both classes must cross. */
+    const a = harness();
+    const b = harness();
+    await settleChallenges(b.profile, b.deps({
+      grantedIds: ['daily.kill-5', 'weekly.wins-2'],
+      stats: stats({ kills: 5, won: true }), deviceId: DEVICE_B,
+    }));
+    await settleChallenges(b.profile, b.deps({
+      grantedIds: ['weekly.wins-2'], stats: stats({ won: true }), deviceId: DEVICE_B,
+    }));
+    expect(b.profile.challenges.done.sort()).toEqual(['daily.kill-5', 'weekly.wins-2']);
+
+    // Put A in the same period without paying anything.
+    await settleChallenges(a.profile, a.deps({ grantedIds: [], stats: stats() }));
+    applyMergeFields(a.profile, b.profile, NOON);
+    expect(a.profile.challenges.done.sort()).toEqual(['daily.kill-5', 'weekly.wins-2']);
+  });
+
   it('round-trips owed entries and refuses malformed ones', () => {
     const p = migrateProfile({
       version: 6, deviceId: DEVICE,

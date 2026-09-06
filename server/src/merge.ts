@@ -40,7 +40,8 @@ import type { AccountGraph } from './accountGraph.js';
 import { MERGES_PER_LIFETIME, MERGES_PER_WINDOW, MERGE_WINDOW_MS, countableProfile } from './accountGraph.js';
 import { newLedgerId, type Journal, type LedgerEntry } from './journal.js';
 import {
-  MAX_SCRAP_BALANCE, migrateProfile, rollDayBucket, utcDay,
+  MAX_ACHIEVEMENT_OWED_MERGED, MAX_ACHIEVEMENT_RECEIPTS, MAX_SCRAP_BALANCE,
+  migrateProfile, rollDayBucket, utcDay,
   type PersistenceStore, type StoredProfile,
 } from './persistence.js';
 
@@ -143,11 +144,28 @@ export function applyMergeFields(a: StoredProfile, b: StoredProfile, nowMs: numb
    * person's, not two), and debts union so a merge cannot swallow one. */
   const ca = a.challenges;
   const cb = b.challenges;
+  /* SCOPED BY PREFIX, not just by clock. Each loop used to copy the WHOLE of
+   * B's `done`, so a DAILY receipt crossed whenever the two profiles shared an
+   * ISO WEEK — even with different days. The counts loop below already gets
+   * this right, and `accrueChallenges` prunes by the same prefix on the roll;
+   * only this pair disagreed.
+   *
+   * It was survivable while the payment loop ignored `done` altogether. It
+   * stopped being survivable the moment that loop learned to let a receipt
+   * discharge a debt: measured, A earns a daily TODAY in a session that cannot
+   * pay, B was paid the same daily YESTERDAY in the same ISO week, and after
+   * the merge A's debt is discharged against B's receipt and A is paid
+   * NOTHING for a completion A genuinely earned. The prefix is what makes
+   * "the same period" mean the same thing on both sides of the union. */
   if (cb.day === ca.day) {
-    for (const id of cb.done) if (!ca.done.includes(id)) ca.done.push(id);
+    for (const id of cb.done) {
+      if (id.startsWith('daily.') && !ca.done.includes(id)) ca.done.push(id);
+    }
   }
   if (cb.week === ca.week) {
-    for (const id of cb.done) if (!ca.done.includes(id)) ca.done.push(id);
+    for (const id of cb.done) {
+      if (id.startsWith('weekly.') && !ca.done.includes(id)) ca.done.push(id);
+    }
   }
   for (const [id, n] of Object.entries(cb.counts)) {
     const samePeriod = id.startsWith('daily.') ? cb.day === ca.day : cb.week === ca.week;
@@ -158,11 +176,49 @@ export function applyMergeFields(a: StoredProfile, b: StoredProfile, nowMs: numb
     if (!ca.owed.some((x) => x.sourceId === o.sourceId)) ca.owed.push(o);
   }
 
+  /* ACHIEVEMENTS — the same argument as the challenge receipts above, minus
+   * the period test, and that difference is the whole point. A challenge
+   * receipt is unioned only within a matching period because its key carries
+   * one; an achievement key is `achievement:<id>` for the life of the account,
+   * so B's receipt protects A unconditionally or not at all. Without this
+   * union B's already-paid award pays a SECOND time under A's journal key —
+   * which is not hypothetical: that exact shape was found live in
+   * `settleChallenges` and fixed in the same week (the receipt outranks the
+   * debt). Promises union by id so a merge cannot swallow one. */
+  const aa = a.achievements, ab = b.achievements;
+  for (const id of ab.done) if (!aa.done.includes(id)) aa.done.push(id);
+  for (const o of ab.owed) if (!aa.owed.some((x) => x.id === o.id)) aa.owed.push(o);
+
   // BAG — union, A wins on collision; B's bag stays on B's tombstone too.
   if (b._unknown !== undefined) a._unknown = { ...b._unknown, ...(a._unknown ?? {}) };
 
   // MONEY: never assigned here. The caller writes the journal.
   return { scrapDelta: b.economy.scrap };
+}
+
+/**
+ * Would this merge overflow A's achievement ledger? A reason to refuse, or null.
+ *
+ * Truncating either union is not an option: dropping a RECEIPT re-opens payment
+ * for that award once the journal forgets the key, and dropping a PROMISE
+ * cancels an award the player earned. Both are silent. So the merge is refused
+ * whole, BEFORE the debit-and-archive sequence begins — a refused merge is a
+ * message the player can act on, a truncated one is a loss nobody sees.
+ */
+export function achievementMergeRefusal(a: StoredProfile, b: StoredProfile): string | null {
+  const done = new Set(a.achievements.done);
+  for (const id of b.achievements.done) done.add(id);
+  if (done.size > MAX_ACHIEVEMENT_RECEIPTS) {
+    return `the merged account would hold ${done.size} achievement receipts, over the `
+      + `${MAX_ACHIEVEMENT_RECEIPTS} ceiling — refusing rather than dropping one`;
+  }
+  const owed = new Set(a.achievements.owed.map((o) => o.id));
+  for (const o of b.achievements.owed) owed.add(o.id);
+  if (owed.size > MAX_ACHIEVEMENT_OWED_MERGED) {
+    return `the merged account would hold ${owed.size} unpaid achievements, over the `
+      + `${MAX_ACHIEVEMENT_OWED_MERGED} ceiling — refusing rather than dropping one`;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -254,6 +310,13 @@ export async function mergeDeviceIntoAccount(
 
     const pa = await deps.store.load(account.primaryDeviceId);
     if (pa === null) return { ok: false as const, status: 409, error: 'the account has no profile of record yet — play one match first' };
+
+    /* Refuse BEFORE the debit-and-archive sequence, not during it: past this
+     * point B has been archived and debited, and a refusal would have to be
+     * unwound. Truncating an achievement union instead would either re-open a
+     * paid award or cancel an earned one, both silently. */
+    const overflow = achievementMergeRefusal(pa, pb);
+    if (overflow !== null) return { ok: false as const, status: 409, error: overflow };
 
     const plan = planMerge(pa, pb);
     const ids = [newLedgerId(now), newLedgerId(now + 1)];   // minted BEFORE any write (§3.4)

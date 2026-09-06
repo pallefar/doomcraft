@@ -1147,6 +1147,26 @@ const router: ModeRouter<Room> = new ModeRouter<Room>({
         const known = new Set((pinnedItems?.manifest.items ?? []).map((i) => i.id));
         return defs.filter((d) => d.item === null || known.has(d.item));
       })(),
+      /* The same pin, the same filter, out of the same manifest — resolved
+       * once so an achievement and a challenge in one room can never come from
+       * different quests versions. */
+      achievements: (() => {
+        const qdecl = release.packs.find((pk) => pk.kind === PackKind.QUESTS);
+        const qi = qdecl !== undefined
+          ? inventory.questsAt(qdecl.version)
+          : inventory.questsAt(inventory.questsVersions().at(-1) ?? 1);
+        const defs = qi?.manifest.achievements ?? [];
+        const pinnedItems = inventory.itemsAt(challengeItemVersion);
+        const known = new Set((pinnedItems?.manifest.items ?? []).map((i) => i.id));
+        return defs.filter((d) => d.item === null || known.has(d.item));
+      })(),
+      /* Payment-time membership, for the case the pin-time filter cannot
+       * reach: a DEBT outlives the def it was snapshotted from, and the
+       * payment loop walks `owed`, not `defs`. */
+      itemKnown: (localId: string) => {
+        const pinnedItems = inventory.itemsAt(challengeItemVersion);
+        return (pinnedItems?.manifest.items ?? []).some((i) => i.id === localId);
+      },
       challengeItemVersion,
     });
     room.start();
@@ -3650,6 +3670,16 @@ async function handleApi(
            * settlement, and leaves debts owed against a life that no longer
            * exists. */
           p.challenges = fresh.challenges;
+          /* ACHIEVEMENTS GO THE OTHER WAY, and the reason is the shape of the
+           * key. A challenge receipt is safe to clear because its journal key
+           * carries a period, so a re-earned copy is a different key. An
+           * achievement key is `achievement:<id>` for the life of the account:
+           * clear the receipts and the same award pays a SECOND time the moment
+           * the journal's ~48 h memory forgets it — a mint by reset. So the
+           * receipts survive, and only the unpaid promises go, for the reason
+           * the line above gives: a debt owed against a life that no longer
+           * exists. `stats` has just been zeroed, so nothing re-earns either. */
+          p.achievements = { done: p.achievements.done, owed: [] };
         });
         if (!archived) { refused = 'could not archive the profile — nothing was reset'; break; }
         if (hadScrap > 0) {
