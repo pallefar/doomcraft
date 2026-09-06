@@ -359,6 +359,60 @@ branded event. The untrusted-art rule above is the one part that shipped, and it
 — `server/src/creatives.ts` and the sha256-bound `sponsors.json` approval flow in the ad platform
 (`docs/SPONSORS.md`), which is the same rule applied to the same kind of content.
 
+## Achievements — lifetime, one-shot, retroactive
+
+Daily and weekly challenges measure A MATCH. Achievements measure A CAREER, and that difference
+runs deeper than the period field.
+
+**Progress is `profile.stats`, not a counter of their own.** The profile already keeps a lifetime
+stat block and already shows it to the player, so an achievement reads that. A second counter would
+accrue under different gates and the two would disagree on the same screen — "1,000 kills" on one
+panel and "940 / 1000" on the next. That is a DISPLAY argument and only that; it is not an
+anti-farm argument, and the first draft of this design mistook it for one.
+
+**Which stats may be priced, and why the list is short.** `shared/src/achievements.ts` admits
+`kills`, `bestStreak`, `damageDealt`, `blocksPlaced` and `blocksBroken`, and the rule is that every
+unit of the lifetime total must have required an action the simulation observed. `matches` and
+`secondsPlayed` increment for a round in which the player did nothing. So, measured, does `wins`:
+`applyMatchResult` with `{kills:0, deaths:0, won:true, damageDealt:0, blocks:0, seconds:12}` gives
+`roundPays = false` and zero Scrap, and still moves `stats.wins` to 1, because `endRound` can crown
+a sole player at zero kills. A hundred of those are a hundred lifetime wins for a hundred rounds of
+idling. Challenges never see it — `buildSubmission` zeroes `challengeIds` when `roundPays` is false
+— but the lifetime block does, so `wins` is refused by the parser rather than by convention.
+`deaths` is out on product grounds: a reward for dying pays people to die.
+
+**They are RETROACTIVE, and that is deliberate.** Adding an achievement pays every player who
+already qualifies, at their next settling match, all at once. A career award that ignores the
+career is an insult. The bound is `MAX_ACHIEVEMENT_TOTAL_SCRAP` per manifest, and the profile's
+receipt ceiling across all manifests ever.
+
+**The promise is snapshotted, because the counter preserves the STAT and not the DEF.** A
+completion earned in a session that may not pay (public Builder grants progress but not Scrap) is
+written to `achievements.owed` with the reward AS IT STOOD WHEN EARNED. Re-price the def, raise its
+target out of reach, or remove it entirely, and the promise still pays what it promised. Without
+that, a re-cut between earning and paying would silently revoke an award.
+
+**The receipt outranks the debt, with no period to scope it by.** An achievement is earned once,
+ever, so `achievement:<id>` is the whole idempotency source. A profile holding both a receipt and a
+debt for one award — which is what an account merge produces — discharges the debt and pays
+nothing. The journal cannot see that case on its own: its key ends in the PROFILE KEY, so a receipt
+earned on another device protects nothing after a merge.
+
+**Three consequences that read backwards until you see the key.**
+
+- A merge unions achievement receipts UNCONDITIONALLY, where it unions challenge receipts only
+  within a matching period.
+- `reset-progress` CLEARS challenge state and KEEPS achievement receipts. Clearing them would let
+  the same award pay again once the journal's ~48 h memory forgets it — a mint by reset.
+- A merge that would overflow either ceiling is refused whole, before anything is debited.
+  Truncating a receipt re-opens a paid award; truncating a promise cancels an earned one.
+
+**What the player sees.** Three states, not two: `locked`, `earned` and `paid`. `earned` is
+reachable in ordinary play — the award is won and payment waits for a session allowed to grant
+Scrap — so it gets its own words rather than a bar stuck at 100%. An award whose definition has
+been retired still appears, because an award the player cannot see is an award they will believe
+they lost.
+
 ## Where it surfaces in the game
 
 - HUD: Scrap and XP ticks on kill and objective.

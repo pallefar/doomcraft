@@ -1281,6 +1281,62 @@ describe('V4b moves items@1\'s digest, and the host says so out loud', () => {
     expect(inv.unsatisfied(current)).toEqual([]);
   });
 
+  it('reports exactly ["quests@1"] for a release recorded against the OLD quests digest', () => {
+    /*
+     * A4 does to `content/quests.json` what V4b did to `content/items.json`:
+     * it adds content to a BUNDLED pack, so the same version number
+     * legitimately gets a new digest and no version bump can dodge it —
+     * `questsAt()` recomputes the fingerprint and the sha256 from the file on
+     * every load.
+     *
+     * What makes it safe is the same fact about the RUNNING HOST, and it is a
+     * fact that must be RE-PROBED rather than remembered:
+     * `GET /api/admin/release` on the live origin returns `history: []`, so no
+     * stored release document records a quests digest at all. `/api/version`
+     * CANNOT tell you that — it publishes the post-fallback view, which looks
+     * identical for an empty document and for a stored release this host can
+     * no longer satisfy (HANDOVER §0 rule 35).
+     *
+     * This asserts the MECHANISM that fact makes irrelevant today: pin a
+     * release to the pre-A4 digest and the host reports it unsatisfiable
+     * rather than serving it.
+     */
+    const PRE_A4_QUESTS_DIGEST =
+      '4281605c1180892606bab079a3030816d8e5bb1c94100a34b816e8f96b5edc1e';
+
+    const { inv } = service(packsRoot());
+    const now = inv.questsAt(1);
+    expect(now, 'quests@1 stopped parsing').not.toBeNull();
+    expect(now!.pack.digest, 'the quests content did NOT move — this test is asleep')
+      .not.toBe(PRE_A4_QUESTS_DIGEST);
+
+    const stored: Release = {
+      revision: 4, state: 'live', ordinal: 1,
+      packs: inv.installedPacks().map((p) => (
+        p.kind === PackKind.QUESTS ? { ...p, digest: PRE_A4_QUESTS_DIGEST } : p
+      )),
+      rolloutBp: 10000, baseRevision: 0, gate: null,
+      createdMs: 0, publishedMs: 0, note: 'recorded before A4',
+    };
+    expect(inv.unsatisfied(stored)).toEqual(['quests@1']);
+
+    const current: Release = { ...stored, packs: inv.installedPacks() };
+    expect(inv.unsatisfied(current)).toEqual([]);
+  });
+
+  it('carries six achievements in the bundled quests@1, and none of them prices `wins`', () => {
+    /* The content half. `wins` is refused by the parser, so a manifest that
+     * priced it would not be here to check — this asserts the shipped board
+     * is what was intended, and that the two items with no other earn path
+     * now have one. */
+    const { inv } = service(packsRoot());
+    const q = inv.questsAt(1)!;
+    expect(q.manifest.achievements).toHaveLength(6);
+    expect(q.manifest.achievements.map((a) => a.stat)).not.toContain('wins');
+    const items = q.manifest.achievements.map((a) => a.item).filter((i) => i !== null);
+    expect(items.sort()).toEqual(['title-hangar-rat', 'trophy-first-season']);
+  });
+
   it('carries the two V4b ownership tokens in the bundled items@1', () => {
     const { inv } = service(packsRoot());
     const ids = inv.itemsAt(1)!.manifest.items.map((i) => i.id);

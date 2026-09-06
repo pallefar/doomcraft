@@ -80,9 +80,14 @@ export const PACKS: Readonly<Partial<Record<PackKind, PackDef>>> = Object.freeze
   },
   [PackKind.QUESTS]: {
     kind: PackKind.QUESTS, key: 'quests', cls: 'data',
-    blastRadius: 'Which daily/weekly challenges exist and what they pay. Progress and paid '
-      + 'receipts live on the profile, so a re-cut mid-period deletes nobody\'s Scrap — a '
-      + 'removed def simply stops accruing and paying from the next settlement.',
+    blastRadius: 'Which daily/weekly challenges AND which lifetime achievements exist, and what '
+      + 'they pay. Progress and paid receipts live on the profile, so a re-cut mid-period deletes '
+      + 'nobody\'s Scrap — a removed CHALLENGE simply stops accruing and paying from the next '
+      + 'settlement. A removed ACHIEVEMENT behaves differently and it is the one to think about: '
+      + 'an award already earned but not yet paid was snapshotted onto the profile when it was '
+      + 'earned, so it still pays the amount it promised, out of a def that no longer exists. '
+      + 'Achievements also pay ONCE PER PLAYER EVER and count lifetime totals, so adding one pays '
+      + 'every player who already qualifies, at their next match, all at once.',
   },
   [PackKind.ITEMS]: {
     kind: PackKind.ITEMS, key: 'items', cls: 'data',

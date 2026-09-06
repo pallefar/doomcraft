@@ -98,3 +98,32 @@ runtime — those are the studio's material.
 
   The editor landed two commits after the engine, so the console never offered a switch with
   nothing behind it.
+
+## S4b — achievements ship in the quests pack
+
+The `achievements` array lives in the same `quests.json` the challenge board does, edited in the
+same textarea and saved through the same route. No new `PackKind`: a new kind costs an enum entry,
+an inventory triple, a fallback file, a release-declaration row, two gate checks, a studio route
+and a console section, and buys nothing — quests is already the "things to do" pack.
+
+Two consequences the CHECK button now covers, and both were added as one change because they are
+one rule:
+
+- **`quests.refs` walks achievements as well as challenges.** Both pay out of the same items
+  manifest through the same `grantDrops` chokepoint. An achievement paying a `weapon_variant` does
+  NOT mint one — `grantRefusal` denies every non-`craft` source — but it would be an ADVERTISED,
+  PERMANENTLY UNPAYABLE award: the debt is recorded, the grant refused forever, and the promise
+  never discharges. An unpayable promise is worse than no promise.
+- **`validateQuestsSource` has THREE loops** — the dangling-id lookup, the forbidden-kind check and
+  the Scrap summary — and each one had to learn about achievements separately. `studio.test.ts`
+  sweeps every id in the bundled items manifest through BOTH doors and asserts they accept the same
+  set, per id, so a door that learned only two of the three is caught by name.
+
+**The summary reports the two totals apart, because they are not the same money.** A challenge
+board pays its total EVERY period; an achievement set pays its total once per player, ever.
+
+**Fingerprint note.** A quests manifest that declares no achievements produces a byte-identical
+input list to the one it produced before achievements existed, so no existing declaration moves.
+The new lines JSON-quote their free-text fields; the legacy challenge lines do not, and cannot tell
+`{name:"A/B", blurb:"C"}` from `{name:"A", blurb:"B/C"}` — a live defect recorded in HANDOVER §3
+whose fix moves every declared quests digest and therefore has to be its own release.

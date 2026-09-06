@@ -255,7 +255,12 @@ export class StudioService {
     for (const v of iv) {
       for (const i of this.inventory.itemsAt(v)?.manifest.items ?? []) known.set(i.id, i);
     }
-    const missing = parsed.manifest.challenges
+    /* Both payers, in both doors. The gate walks challenges and achievements
+     * together; if this function walked only one of them the editor would
+     * bless a quests pack the release gate then refuses FOREVER, which is the
+     * §0 rule 29 failure the shared `challengeGrantRefusal` exists to stop. */
+    const payers = [...parsed.manifest.challenges, ...parsed.manifest.achievements];
+    const missing = payers
       .filter((c) => c.item !== null && !known.has(c.item))
       .map((c) => `${c.id} pays "${c.item ?? ''}"`);
     if (missing.length > 0) {
@@ -273,7 +278,7 @@ export class StudioService {
      * call `challengeGrantRefusal`, so the set each ACCEPTS agrees by
      * construction (HANDOVER §0 rule 29). */
     const forbidden: string[] = [];
-    for (const c of parsed.manifest.challenges) {
+    for (const c of payers) {
       const def = c.item === null ? undefined : known.get(c.item);
       if (def === undefined) continue;
       const refusal = challengeGrantRefusal(def);
@@ -282,10 +287,21 @@ export class StudioService {
     if (forbidden.length > 0) {
       return { ok: false, detail: `would fail quests.refs — ${forbidden.join('; ')}` };
     }
+    /* The summary an operator reads before pressing SAVE. Counting only
+     * challenges would understate what the pack pays by however much the
+     * achievements are worth — and the achievement half is a ONE-TIME mint per
+     * player, which is the number most worth seeing before publishing. The two
+     * totals are reported apart because they are not the same kind of money:
+     * a challenge board pays that much EVERY period. */
     const total = parsed.manifest.challenges.reduce((sum, c) => sum + c.scrap, 0);
+    const lifetime = parsed.manifest.achievements.reduce((sum, a) => sum + a.scrap, 0);
+    const achievementHalf = parsed.manifest.achievements.length === 0 ? ''
+      : `; ${parsed.manifest.achievements.length} achievement(s), paying ${lifetime} Scrap `
+        + 'once per player, ever';
     return {
       ok: true,
-      detail: `${parsed.manifest.challenges.length} challenge(s), paying ${total} Scrap a full board`,
+      detail: `${parsed.manifest.challenges.length} challenge(s), paying ${total} Scrap a full board`
+        + achievementHalf,
     };
   }
 

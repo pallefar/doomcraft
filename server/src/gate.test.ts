@@ -50,6 +50,7 @@ import { SAVES_VERSION } from '@doomcraft/shared/saves';
 const here = fileURLToPath(import.meta.url);
 const CONTENT_LEVELS = join(here, '..', '..', '..', 'content', 'levels');
 const EPISODES = join(here, '..', '..', '..', 'content', 'episodes.json');
+const CONTENT_DIR = join(here, '..', '..', '..', 'content');
 
 /*
  * The two things a legitimate ratchet bump moves, named ONCE.
@@ -299,6 +300,86 @@ describe('quests.validate and quests.refs can refuse', () => {
       challenges: [questDef({ item: 'skin-a' })],
     })).manifest;
     expect(checkQuestsRefs(good, items).ok).toBe(true);
+  });
+
+  it('quests.refs walks ACHIEVEMENTS too, or the editor blesses what the gate refuses forever', () => {
+    /* The defective implementation inspects only `manifest.challenges`. Both
+     * halves pay out of the same items manifest through the same grantDrops
+     * chokepoint, so a dangling achievement id is exactly as broken — and
+     * worse in one way: a challenge that cannot pay simply stops paying, while
+     * an achievement records a DEBT first, so the promise is made and can
+     * never be discharged. */
+    const items = parseItemsManifest(JSON.stringify({
+      items: [
+        { id: 'skin-a', kind: 'skin', name: 'A', rarity: 'common' },
+        // The id must be `weapon_variant-<variantId>`; the parser refuses
+        // anything else. Asserted below, because the first draft of this
+        // fixture used `weapon_variant-x`, the whole manifest came back NULL,
+        // and BOTH refusals then passed for the wrong reason — a dangling id
+        // is dangling against an empty manifest too.
+        { id: 'weapon_variant-shotgun-slug', kind: 'weapon_variant', name: 'V', rarity: 'rare', variantId: 'shotgun-slug' },
+      ],
+    })).manifest;
+    expect(items, 'the items fixture did not parse — every refusal below would be vacuous')
+      .not.toBeNull();
+    expect(items!.items.map((i) => i.id))
+      .toEqual(['skin-a', 'weapon_variant-shotgun-slug']);
+
+    const dangling = parseChallengesManifest(JSON.stringify({
+      challenges: [questDef()],
+      achievements: [{
+        id: 'achievement.a1', stat: 'kills', target: 10, scrap: 10,
+        item: 'skin-ghost', name: 'A', blurb: 'b',
+      }],
+    })).manifest;
+    const bad = checkQuestsRefs(dangling, items);
+    expect(bad.ok).toBe(false);
+    expect(bad.detail).toContain('achievement.a1');
+    expect(bad.detail).toContain('skin-ghost');
+
+    /* A weapon_variant is refused by KIND. Not because it would mint one —
+     * `grantRefusal` denies every non-`craft` source and that was executed —
+     * but because the award would be advertised, its debt recorded, and its
+     * grant refused forever. An unpayable promise is worse than no promise. */
+    const variant = parseChallengesManifest(JSON.stringify({
+      challenges: [questDef()],
+      achievements: [{
+        id: 'achievement.a2', stat: 'kills', target: 10, scrap: 10,
+        item: 'weapon_variant-shotgun-slug', name: 'A', blurb: 'b',
+      }],
+    })).manifest;
+    const refused = checkQuestsRefs(variant, items);
+    expect(refused.ok).toBe(false);
+    expect(refused.detail).toContain('achievement.a2');
+    expect(refused.detail).toContain('craft-only');
+    // Refused by KIND, not because the id is missing — the two failure modes
+    // read almost the same and only one of them is what this test is about.
+    expect(refused.detail).not.toContain('not in the items manifest');
+
+    // The honest pass, so the two refusals above are about the item and not
+    // about achievements being rejected wholesale.
+    const good = parseChallengesManifest(JSON.stringify({
+      challenges: [questDef()],
+      achievements: [{
+        id: 'achievement.a3', stat: 'kills', target: 10, scrap: 10,
+        item: 'skin-a', name: 'A', blurb: 'b',
+      }],
+    })).manifest;
+    expect(checkQuestsRefs(good, items).ok).toBe(true);
+  });
+
+  it('quests.refs passes on the SHIPPED quests and items manifests together', () => {
+    /* The pairing that actually deploys. Both achievements that pay an item
+     * name one the live items manifest carries, and both are kinds an award
+     * may pay — asserted here rather than discovered by a release gate. */
+    const quests = parseChallengesManifest(
+      readFileSync(join(CONTENT_DIR, 'quests.json'), 'utf8')).manifest;
+    const items = parseItemsManifest(
+      readFileSync(join(CONTENT_DIR, 'items.json'), 'utf8')).manifest;
+    expect(quests).not.toBeNull();
+    expect(quests!.achievements.length).toBeGreaterThan(0);
+    const check = checkQuestsRefs(quests, items);
+    expect(check.ok, check.detail).toBe(true);
   });
 });
 

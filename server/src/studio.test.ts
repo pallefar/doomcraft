@@ -279,4 +279,63 @@ describe('V4b: the studio and the gate agree about what a challenge may pay', ()
     expect(verdicts).toContain(true);
     expect(verdicts).toContain(false);
   });
+
+  it('accepts exactly the same set for ACHIEVEMENTS, id by id', () => {
+    /*
+     * The same rule-29 sweep on the other payer. `validateQuestsSource` has
+     * THREE loops over the manifest — the dangling-id lookup, the forbidden-
+     * kind check, and the Scrap summary — and each one had to learn about
+     * achievements separately. A door that walked only two of them would
+     * disagree with the gate on a subset of ids, which is precisely what a
+     * per-id sweep sees and a single hand-picked case does not.
+     */
+    const root = seededRoot();
+    const { studio, inv } = studioWith(root);
+    const items = inv.itemsAt(1)!.manifest;
+
+    const withAchievement = (item: string): string => JSON.stringify({
+      challenges: [{
+        id: 'daily.kill-5', period: 'daily', stat: 'kills', target: 5, scrap: 10,
+        name: 'Five', blurb: 'Take down five.',
+      }],
+      achievements: [{
+        id: 'achievement.a1', stat: 'kills', target: 1000, scrap: 100,
+        item, name: 'A', blurb: 'b',
+      }],
+    });
+
+    const ids = [...items.items.map((i) => i.id), 'skin-ghost'];
+    for (const id of ids) {
+      const src = withAchievement(id);
+      const studioOk = studio.validateQuestsSource(src).ok;
+      const gateOk = checkQuestsRefs(parseChallengesManifest(src).manifest, items).ok;
+      expect(studioOk, `studio and gate disagree about achievement item "${id}"`).toBe(gateOk);
+    }
+    const verdicts = ids.map((id) => studio.validateQuestsSource(withAchievement(id)).ok);
+    expect(verdicts).toContain(true);
+    expect(verdicts).toContain(false);
+  });
+
+  it('tells the operator what the achievements cost, and that it is once per player', () => {
+    /* The summary is what an operator reads before pressing SAVE, and the two
+     * halves are not the same kind of money: a challenge board pays its total
+     * EVERY period, an achievement set pays its total once per player, ever.
+     * A summary that counted only challenges would understate a publish by
+     * however much the achievements are worth. */
+    const { studio } = studioWith(seededRoot());
+    const src = JSON.stringify({
+      challenges: [{
+        id: 'daily.kill-5', period: 'daily', stat: 'kills', target: 5, scrap: 10,
+        name: 'Five', blurb: 'Take down five.',
+      }],
+      achievements: [
+        { id: 'achievement.a1', stat: 'kills', target: 1000, scrap: 250, name: 'A', blurb: 'b' },
+        { id: 'achievement.a2', stat: 'bestStreak', target: 15, scrap: 150, name: 'B', blurb: 'b' },
+      ],
+    });
+    const dry = studio.validateQuestsSource(src);
+    expect(dry.ok, dry.detail).toBe(true);
+    expect(dry.detail).toContain('1 challenge(s), paying 10 Scrap a full board');
+    expect(dry.detail).toContain('2 achievement(s), paying 400 Scrap once per player, ever');
+  });
 });

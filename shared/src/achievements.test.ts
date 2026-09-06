@@ -33,6 +33,30 @@ import { questsPack } from './packs.ts';
 
 const QUESTS_JSON = fileURLToPath(new URL('../../content/quests.json', import.meta.url));
 
+/**
+ * `content/quests.json` as it stood before achievements existed, reduced to the
+ * fields the encoder reads. Frozen on purpose: see the first test.
+ */
+const FROZEN_PRE_ACHIEVEMENT_QUESTS = JSON.stringify({
+  challenges: [
+    { id: 'daily.kill-25', period: 'daily', stat: 'kills', target: 25, scrap: 40,
+      name: 'Exterminator', blurb: 'Take down 25 enemies or players today.' },
+    { id: 'daily.win-1', period: 'daily', stat: 'wins', target: 1, scrap: 30,
+      name: 'Take the Day', blurb: 'Win a match today.' },
+    { id: 'daily.blocks-40', period: 'daily', stat: 'blocksPlaced', target: 40, scrap: 25,
+      name: 'Field Engineer', blurb: 'Place 40 blocks today.' },
+    { id: 'daily.damage-2000', period: 'daily', stat: 'damageDealt', target: 2000, scrap: 30,
+      name: 'Heavy Ordnance', blurb: 'Deal 2000 damage today.' },
+    { id: 'weekly.kills-250', period: 'weekly', stat: 'kills', target: 250, scrap: 150,
+      name: 'War of Attrition', blurb: 'Take down 250 enemies or players this week.' },
+    { id: 'weekly.wins-10', period: 'weekly', stat: 'wins', target: 10, scrap: 150,
+      name: 'Campaign Season', blurb: 'Win 10 matches this week.' },
+    { id: 'weekly.streak-8', period: 'weekly', stat: 'bestStreak', target: 8, scrap: 100,
+      item: 'title-knee-deep', name: 'Knee-Deep',
+      blurb: 'Hit an 8-kill streak in a single match this week.' },
+  ],
+});
+
 function def(over: Partial<AchievementDef> = {}): AchievementDef {
   return {
     id: 'achievement.kills-1000', name: 'Exterminator', blurb: 'Take down a thousand.',
@@ -60,10 +84,16 @@ describe('adding achievements moved no existing fingerprint', () => {
    * `quests@1` is the bundled fallback every host resolves to, so a changed
    * list there stops every existing declaration verifying. The golden was
    * captured by running the encoder BEFORE this module existed. */
-  it('leaves the live content/quests.json at its pre-achievement seven lines and fingerprint', () => {
-    const parsed = parseChallengesManifest(readFileSync(QUESTS_JSON, 'utf8'));
+  it('encodes an achievement-free manifest exactly as it did before this module existed', () => {
+    /* A FROZEN FIXTURE, not the live file. This test's job is to pin the
+     * ENCODER, and reading `content/quests.json` would have coupled it to the
+     * CONTENT — so the moment A4 added achievements there, the correct
+     * implementation would fail its own regression test and the obvious repair
+     * would be to edit the golden, which is how a ratchet quietly stops being
+     * one. The bytes below are that file as it stood before any achievement
+     * existed. */
+    const parsed = parseChallengesManifest(FROZEN_PRE_ACHIEVEMENT_QUESTS);
     expect(parsed.errors).toEqual([]);
-    expect(parsed.manifest).not.toBeNull();
     expect(parsed.manifest!.achievements).toEqual([]);
 
     const inputs = challengesFingerprintInputs(parsed.manifest!);
@@ -77,6 +107,16 @@ describe('adding achievements moved no existing fingerprint', () => {
       'weekly.wins-10:weekly/wins/10/150/-/Campaign Season/Win 10 matches this week.',
     ]);
     expect(questsPack(inputs, 1).fingerprint).toBe(1271166066);
+  });
+
+  it('still parses the LIVE content/quests.json, whatever it now carries', () => {
+    /* The fixture above cannot see a live file that stopped parsing, so this
+     * is the half that watches the real one. It deliberately asserts nothing
+     * about the fingerprint: that number is content, and content is allowed to
+     * move — `releases.test.ts` owns what happens when it does. */
+    const parsed = parseChallengesManifest(readFileSync(QUESTS_JSON, 'utf8'));
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.manifest!.challenges.length).toBeGreaterThan(0);
   });
 
   it('appends achievement lines only when there are any, after the challenge lines', () => {

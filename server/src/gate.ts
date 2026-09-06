@@ -511,7 +511,18 @@ export function checkQuestsRefs(
   if (manifest === null) return ok('quests.refs');
   const defsById = new Map((items?.items ?? []).map((i) => [i.id, i]));
   const bad: string[] = [];
-  for (const c of manifest.challenges) {
+  /* Challenges AND achievements: both pay out of the same items manifest,
+   * through the same `grantDrops` chokepoint, with the same refusal. An
+   * achievement paying a weapon_variant does NOT mint one — `grantRefusal`
+   * treats every non-`craft` source as a mint and denies it, which was
+   * executed rather than assumed. What it produces instead is an ADVERTISED,
+   * PERMANENTLY UNPAYABLE award: the debt is recorded, the grant is refused
+   * forever, and the promise never discharges. That is why the check is here
+   * and not only in the runtime. */
+  const payers: { id: string; item: string | null }[] = [
+    ...manifest.challenges, ...manifest.achievements,
+  ];
+  for (const c of payers) {
     if (c.item === null) continue;
     const def = defsById.get(c.item);
     if (def === undefined) {

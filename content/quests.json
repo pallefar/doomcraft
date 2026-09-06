@@ -54,5 +54,53 @@
       "scrap": 100, "item": "title-knee-deep", "name": "Knee-Deep",
       "blurb": "Hit an 8-kill streak in a single match this week."
     }
+  ],
+
+  "//achievements": [
+    "Lifetime, one-shot, and paid ONCE PER PLAYER EVER. They read the lifetime",
+    "stat block the profile already keeps, so they are RETROACTIVE: adding one",
+    "pays every player who already qualifies, at their next settling match.",
+    "",
+    "`wins` is deliberately absent. A sole player who does nothing for a round",
+    "is still credited a lifetime win, so pricing it would pay for idling —",
+    "measured, and recorded in HANDOVER §3. `matches`, `secondsPlayed` and",
+    "`deaths` are out for the same family of reasons. The parser refuses all",
+    "four, so this is a rule and not a convention.",
+    "",
+    "title-hangar-rat and trophy-first-season had NO earn path before this:",
+    "rollMatchDrops skips titles and trophies because 'they are earned', and",
+    "nothing else granted them. These are the awards that earn them."
+  ],
+
+  "achievements": [
+    {
+      "id": "achievement.first-blood", "stat": "kills", "target": 1, "scrap": 25,
+      "name": "First Blood", "blurb": "Take down your first enemy or player."
+    },
+    {
+      "id": "achievement.kills-1000", "stat": "kills", "target": 1000, "scrap": 250,
+      "item": "title-hangar-rat", "name": "Hangar Rat",
+      "blurb": "Take down a thousand enemies and players, all told."
+    },
+    {
+      "id": "achievement.damage-100000", "stat": "damageDealt", "target": 100000,
+      "scrap": 200, "name": "Heavy Industry",
+      "blurb": "Deal a hundred thousand damage across your whole career."
+    },
+    {
+      "id": "achievement.builder-5000", "stat": "blocksPlaced", "target": 5000,
+      "scrap": 200, "name": "Site Foreman",
+      "blurb": "Place five thousand blocks."
+    },
+    {
+      "id": "achievement.breaker-5000", "stat": "blocksBroken", "target": 5000,
+      "scrap": 150, "name": "Demolition",
+      "blurb": "Break five thousand blocks."
+    },
+    {
+      "id": "achievement.streak-15", "stat": "bestStreak", "target": 15, "scrap": 150,
+      "item": "trophy-first-season", "name": "Unbroken",
+      "blurb": "Reach a fifteen-kill streak in a single match."
+    }
   ]
 }
