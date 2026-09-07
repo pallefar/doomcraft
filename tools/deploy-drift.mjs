@@ -74,10 +74,33 @@ async function servedBundle(origin) {
 }
 
 const head = sh('git', ['rev-parse', 'HEAD']);
-const shortId = head.slice(0, 12);
 const dirty = sh('git', ['status', '--porcelain']).length > 0;
 
+/*
+ * THE STATIC CHECK COMPARES AGAINST THE LAST COMMIT THAT COULD HAVE CHANGED THE
+ * BUNDLE, NOT HEAD — and that is a correctness fix, not a loosening.
+ *
+ * Measured on this tool's own commit: a tools-and-docs change made the Vercel
+ * check cry drift while the Railway hash check correctly said "current",
+ * because the bundle content had not moved at all. A gate that fires on a
+ * README commit is a gate people stop reading, and this repo already has the
+ * scar — an audit ring flooded by honest refusals until the refusals stopped
+ * being read (HANDOVER §0 rule 21).
+ *
+ * WHAT THIS THEREFORE DOES NOT COVER, stated rather than left to be discovered:
+ * `content/levels/*.json` is FETCHED AT RUNTIME, not bundled, so a levels
+ * re-cut changes what the static host serves without changing any bundle. This
+ * check will call that current, and it is right about the bundle and silent
+ * about the content. `tools/release-verify.mjs` is what covers packs.
+ */
+const BUNDLE_INPUTS = ['client', 'shared', 'package.json', 'package-lock.json'];
+const bundleCommit = sh('git', ['log', '-1', '--format=%H', '--', ...BUNDLE_INPUTS]);
+const shortId = bundleCommit.slice(0, 12);
+
 console.log(`HEAD    ${head.slice(0, 7)}${dirty ? '  (WORKING TREE DIRTY — comparing against uncommitted code)' : ''}`);
+if (bundleCommit !== head) {
+  console.log(`bundle  ${bundleCommit.slice(0, 7)}  (last commit touching ${BUNDLE_INPUTS.join(', ')})`);
+}
 
 if (!process.argv.includes('--no-build')) {
   console.log('building locally, the way Railway does (neither build-id variable set)…');
@@ -109,10 +132,10 @@ try {
   const served = await servedBundle(STATIC);
   const js = await fetchText(`${STATIC}/${served}`);
   const found = js.includes(shortId);
-  check('static bundle was built from this commit', found,
+  check('static bundle was built from the newest bundle commit', found,
     found ? `${served} carries ${shortId}` : `${served} does not carry ${shortId}`);
 } catch (e) {
-  check('static bundle was built from this commit', false, String(e.message ?? e));
+  check('static bundle was built from the newest bundle commit', false, String(e.message ?? e));
 }
 
 /* ---- The volume, because a live origin that cannot write is not live --- */
