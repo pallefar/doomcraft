@@ -1843,6 +1843,7 @@ export class Room implements NetHost {
             mayPayScrap: result.mayPayChallenges,
             mayGrantItems: result.mayGrantChallengeItems && flagOn(challengeFlags, 'economy_items'),
             itemVersion: this.challengeItemVersion,
+            itemKnown: this.itemKnown,
             journal,
             rowId: newLedgerId,
           });

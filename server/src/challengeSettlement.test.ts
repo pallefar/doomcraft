@@ -81,6 +81,7 @@ function harness(): {
       mayPayScrap: true,
       mayGrantItems: true,
       itemVersion: 1,
+      itemKnown: () => true,
       journal,
       rowId: newLedgerId,
       ...over,
@@ -426,6 +427,44 @@ describe('stored challenge state survives a disk round trip', () => {
     await settleChallenges(a.profile, a.deps({ grantedIds: [], stats: stats() }));
     applyMergeFields(a.profile, b.profile, NOON);
     expect(a.profile.challenges.done.sort()).toEqual(['daily.kill-5', 'weekly.wins-2']);
+  });
+
+  it('will not discharge a debt for an item the pinned manifest no longer defines', async () => {
+    /* MEASURED ON THE SHIPPED BUILD BEFORE THE FIX: a weekly banked with
+     * `title-knee-deep` owing, the items pack re-cut without that id, and
+     * settlement paid 100 Scrap, wrote the receipt, discharged the debt and
+     * granted `items@2:title-knee-deep` — whose `itemStateFor` is DORMANT. The
+     * player is handed an item that can never light up, and the receipt says
+     * they were paid for it.
+     *
+     * The room's pin-time filter cannot reach this: it drops a DEF whose item
+     * is missing, and this loop walks `owed`. A debt outlives the def it came
+     * from. `grantDrops` cannot reach it either — it is a syntactic gate with
+     * no membership lookup.
+     *
+     * The defective implementation is the one that shipped: no `itemKnown`
+     * consultation. It pays, so the asserted balance differs. */
+    const { profile, journal, deps } = harness();
+
+    await settleChallenges(profile, deps({
+      grantedIds: ['weekly.streak-3'], stats: stats({ bestStreak: 3 }), mayPayScrap: false,
+    }));
+    expect(profile.challenges.owed.map((o) => o.item)).toEqual(['title-knee-deep']);
+
+    // The re-cut: that id is gone.
+    const gone = await settleChallenges(profile, deps({ itemKnown: () => false }));
+    expect(gone).toEqual([]);
+    expect(profile.economy.scrap).toBe(0);
+    expect(profile.inventory.items).toEqual([]);
+    expect(profile.challenges.done).toEqual([]);
+    expect(profile.challenges.owed).toHaveLength(1);
+    expect(await journal.has('prize', 'challenge:weekly.streak-3:2026-W35', DEVICE)).toBe(false);
+
+    // It comes back in a later cut: the debt pays in full, both halves.
+    const paid = await settleChallenges(profile, deps());
+    expect(paid).toEqual([{ id: 'weekly.streak-3', scrap: 100 }]);
+    expect(profile.economy.scrap).toBe(100);
+    expect(profile.inventory.items.map((i) => i.ref)).toEqual(['items@1:title-knee-deep']);
   });
 
   it('round-trips owed entries and refuses malformed ones', () => {

@@ -1208,6 +1208,26 @@ export interface ChallengeSettlementDeps {
   mayGrantItems: boolean;
   /** The paying room's pinned items version — grant-time ref formatting, as drops do. */
   itemVersion: number;
+  /**
+   * Does the paying room's pinned items manifest still DEFINE this local id?
+   *
+   * REQUIRED, not optional, for the reason `challengeIds` is: a field a
+   * producer can forget is a field that will be forgotten, and the failure is
+   * silent. The room filters a def whose item is missing at pin time — "a
+   * challenge that cannot pay the reward it advertises must not be on the
+   * board at all" — but a DEBT OUTLIVES THE DEF IT CAME FROM, and this loop
+   * walks `owed`, not `defs`. So the pin-time filter cannot reach a completion
+   * banked before the re-cut.
+   *
+   * `grantDrops` cannot catch it either: it is a syntactic gate with no
+   * membership lookup. Measured on the shipped build — a weekly banked with
+   * `title-knee-deep` owing, the items pack re-cut without it, and settlement
+   * paid 100 Scrap, wrote the receipt, discharged the debt and granted
+   * `items@2:title-knee-deep`, whose `itemStateFor` is DORMANT. The player is
+   * handed an item that can never light up and the receipt says they were paid
+   * for it.
+   */
+  itemKnown: (localId: string) => boolean;
   journal: {
     has(kind: 'prize', sourceId: string, playerId: string): Promise<boolean>;
     append(rows: LedgerEntry[]): Promise<number>;
@@ -1326,6 +1346,13 @@ export async function settleChallenges(
       continue;
     }
     if (o.item !== null && !deps.mayGrantItems) { keep.push(o); continue; }
+    /* The item this debt promised is gone from the pinned manifest. Keep the
+     * whole completion owed rather than discharge it for a dormant-from-birth
+     * copy: the same "both halves or neither" rule the inventory cap gets
+     * below, for the same reason. If the id returns in a later cut it pays in
+     * full; if it never does, an operator sees an unpaid challenge, which is
+     * the visible failure rather than the silent one. */
+    if (o.item !== null && !deps.itemKnown(o.item)) { keep.push(o); continue; }
     /* BOTH halves or neither, for real: grantDrops REFUSES at the inventory
      * cap and returns what actually landed. A receipt written while the item
      * silently dropped would lose it forever, so an item that cannot land

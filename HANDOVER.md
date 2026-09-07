@@ -482,6 +482,19 @@ has shipped, so it is gone; the arc is in §1 and in git.
      directly with the ref the retired fixture produced. Rule 26, arriving from
      the other direction: fixing a bug can retire a proof just as moving code
      behind a seam can.
+   - **FIXED 2026-09-07 — a challenge debt paid out an item no manifest
+     defined, and marked itself settled.** The room drops a DEF whose item is
+     missing at pin time, but a DEBT OUTLIVES THE DEF and `settleChallenges`
+     walks `owed`, not `defs`; `grantDrops` is a syntactic gate with no
+     membership lookup. Measured on the shipped build: a weekly banked with
+     `title-knee-deep` owing, the items pack re-cut without it, and settlement
+     paid 100 Scrap, wrote the receipt, discharged the debt and granted
+     `items@2:title-knee-deep` — `itemStateFor` DORMANT. The player is handed
+     an item that can never light up and the receipt says they were paid for
+     it. `itemKnown` is now REQUIRED on the deps (a field a producer can forget
+     is a field that will be forgotten), and an unknown id keeps the whole
+     completion owed. Same hole, same fix, as the achievement settlement got a
+     day earlier.
    - **NEW 2026-09-06 — the quests fingerprint encoding is AMBIGUOUS, so the
      per-pack ratchet cannot see a change it exists to see.**
      `challengesFingerprintInputs` joins every field with `/`, including the
