@@ -294,7 +294,17 @@ export const MONSTERS: readonly MonsterArchetype[] = Object.freeze([
   }),
   archetype({
     type: EntityType.LOST_SOUL, name: 'Lost Soul',
-    health: 32, halfW: 0.35, height: 0.9, flying: true,
+    /* 0.7, NOT 0.9. The sim said 0.9 while the client's hit target and the
+     * shared render look both said 0.7 — measured, and the only monster of the
+     * five whose three tables disagreed. `entHeight` is the hitscan AABB AND
+     * the line-of-sight centre, so a shot at 0.8 m landed on the server,
+     * produced no client marker and hit nothing the player could see: a hit
+     * with no visible cause, which reads as the game lying.
+     *
+     * The hitbox follows the BODY rather than the other way round. A player
+     * can only aim at what is drawn, so where the three disagree the drawn
+     * height wins — and here two of the three already agreed with it. */
+    health: 32, halfW: 0.35, height: 0.7, flying: true,
     speed: 13.5, accel: 26, sightRange: 58, attackRange: 1.9, preferredRange: 0,
     attackCooldownMs: 1100, windupMs: 260,
     meleeDamage: 15, hitscanDamage: 0, hitscanPellets: 0, hitscanSpread: 0,

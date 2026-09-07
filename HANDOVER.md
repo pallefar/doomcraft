@@ -550,9 +550,22 @@ has shipped, so it is gone; the arc is in §1 and in git.
    - `craft.ts` clears `equippedSkin` on consuming a last copy but not a variant
      claim (read-time validation covers it).
    - The `loadoutTab.ts` wiring proof is a SOURCE RATCHET, not behavioural.
-   - **The Lost Soul has three different sizes** — spawned 0.9 m, client hit
-     target 0.7 m, rendered 0.5 m. You can hit it where nothing is drawn.
-     Belongs to the ENEMIES piece.
+   - **FIXED 2026-09-07 — the Lost Soul's hitbox did not match its body.**
+     MEASURED across all five monsters, not just the one this entry named:
+     four agreed exactly and the Lost Soul did not — sim 0.9, client hit target
+     0.7, render look 0.7. `entHeight` is the hitscan AABB AND the
+     line-of-sight centre, so a shot at 0.8 m landed on the server, produced no
+     client marker and hit nothing the player could see. The sim was the odd
+     one out and the sim moved: the hitbox follows the BODY, because a player
+     can only aim at what is drawn. (This entry's "rendered 0.5 m cube spanning
+     0.15-0.65" was not reproducible — the shared look's height is 0.70.)
+     `server/src/monsterAgreement.test.ts` now pins all three tables in
+     agreement for every monster. It reads the client's private `MONSTER_LOOK`
+     from SOURCE, deliberately — they are frozen constant tables with no
+     behaviour to drive, and the alternative is exporting an internal to serve
+     a test. Its first assertion is the scan's own guard: a regex that matches
+     nothing fails `expected +0 to be 5` rather than passing vacuously, which
+     is the failure mode a scan has to be built against.
    - Melee headshots are client-only, for players too.
 
 4. **Then:** portals/TWA, C7 analytics, the deathmatch share surface (needs its
