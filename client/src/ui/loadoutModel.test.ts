@@ -204,9 +204,26 @@ describe('the tab strip decision', () => {
     expect(economyTabsFor({ economy_items: true })).toEqual(['loadout']);
     expect(economyTabsFor({ economy_trading: true })).toEqual(['trade']);
     expect(economyTabsFor({ economy_competitions: true })).toEqual(['competitions']);
-    expect(economyTabsFor({ economy_items: true, economy_trading: true, economy_competitions: true }))
-      .toEqual(['loadout', 'trade', 'competitions']);
+    /* The achievements tab was added without this line, so nothing proved the
+     * tab appears AT ALL — the flag was flipped on in production and the only
+     * evidence the surface existed was a route answering 200. `economyTabsFor`
+     * is the whole decision: a tab absent from it is a tab nobody can reach,
+     * however finished the module behind it is (rule 1). */
+    expect(economyTabsFor({ economy_achievements: true })).toEqual(['achievements']);
+    expect(economyTabsFor({
+      economy_items: true, economy_trading: true,
+      economy_competitions: true, economy_achievements: true,
+    })).toEqual(['loadout', 'trade', 'competitions', 'achievements']);
+    /* THE LIVE SET, as production actually returned it on 2026-09-07 after the
+     * flip — so this asserts the shipped configuration and not a hypothetical. */
+    expect(economyTabsFor({
+      online_play: false, economy_scrap: true, economy_trading: true,
+      economy_competitions: true, share_cards: true, sponsor_slots: false,
+      sponsor_interstitial: false, sponsor_rewarded: false, ads_programmatic: false,
+      client_update_prompt: true, economy_items: true, economy_achievements: true,
+    })).toEqual(['loadout', 'trade', 'competitions', 'achievements']);
     expect(economyTabsFor({ economy_items: 'yes' as unknown as boolean })).toEqual([]);
+    expect(economyTabsFor({ economy_achievements: 'yes' as unknown as boolean })).toEqual([]);
   });
 });
 
