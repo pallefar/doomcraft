@@ -1,24 +1,25 @@
 # Doomcraft — handover: where it stands, and what is left
 
-Written 2026-09-05 (FOURTH session of the day). This one **closed the V4 arc
-end to end (a through f)** and **finally ran the gauntlet, which is now 1/23**.
+Written 2026-09-07. This one **built and deployed the achievement system
+(A1-A4)** and then **emptied §3** — every open defect on the list is now fixed
+or corrected. Two of the seven were live money bugs.
 
-The two headline facts are uncomfortable and both are about instruments rather
-than code. First: the gauntlet's very first output was evidence that this
-project's own foundational document was wrong — `ref/BAR.md` had called gunfeel
-"the single most winnable piece" on the strength of a clip in which the bar was
-holding a SHOVEL. With a rifle the bar has muzzle flash, brass ejection, impact
-decals, per-shot recoil, a reload animation and a crosshair that blooms 57%. Two
-blind verdicts were correctly thrown away before one could stand. Second: almost
-every defect worth finding this session was inside something meant to CATCH
-defects — a probe that could not distinguish the state it was clearing, a
-byte-cap example both candidate caps reject, a regex that cannot match the
-identifier it guards, a proof obligation that passes with the bug live, and a
-fairness disclosure that de-anonymised the blind it was protecting.
+The uncomfortable through-line is one shape, found three times, months apart in
+origin: **something protected by a CLAIM rather than by a mechanism** (rule 43).
+A comment in `items.ts` asserting a neighbour was already fixed, which kept the
+neighbour broken. An allowlist documenting itself as protecting a field while
+the shape of a merge did the work. A test skipping the one case where the two
+predictors diverged, with an aside saying there was nothing to check. Each held
+for months, and each fell the moment somebody measured.
+
+The second: **three §3 entries were wrong about their own subject** (rule 42),
+so a fourth of the day's work was re-measuring the backlog rather than trusting
+it. And I made rule 40 myself — seven commits, including the money fix, sat
+undeployed all day while I reported each as shipped.
 
 Previous handovers are in git history at `b77d907`, `56b23c5`, `108efa5`,
 `9da410b`, `bfdc647`, `557c7b6`, `ee0991c`. §0 is restated because it keeps
-earning it — **rules 35-38 are new and 38 changes how you write tests.**
+earning it — **rules 40-43 are new; 40 is the one I broke myself, and 43 is the shape the whole day had.**
 
 **Live:**
 - **https://doomcraft-production.up.railway.app** — the Node origin: game, rooms,
@@ -28,8 +29,10 @@ earning it — **rules 35-38 are new and 38 changes how you write tests.**
   **github.com/pallefar/doomcraft** — `main`.
 - Owner seat claimed and durable: creds in `~/youtube/doomcraft-owner-credentials.txt`.
 - CI: `tsc -b` + `vitest run` + `release:verify` on every push; all pushes green.
-  Suite: **107 files / 2622 tests + 3 deliberate skips** (2026-09-05, third
-  session). `release:verify` runs **17 checks** and emits 7 packs.
+  Suite: **118 files / 2865 tests + 3 deliberate skips** (2026-09-07).
+  `release:verify` runs **17 checks** and emits 7 packs.
+- **`node tools/deploy-drift.mjs`** answers "is what is LIVE this tree?" — both
+  tiers were current at `b6fb3c5`. Do not infer it from `git status` (rule 40).
 - **The live origin serves `weapons@2`** — the weapons ratchet widened from 13
   fields to 38 and the pack version moved. The live release is `revision 0,
   ordinal 1`, i.e. the COMPILED-IN builtin: no stored release document has ever
@@ -65,7 +68,15 @@ them or an operational fact.
      stale in OUR favour.
   **29 · Two doors onto the same data must accept the SAME SET.** Its costumes:
      30 (rank the failure modes before choosing a side to tighten), 31 (a fix
-     you order can open the hole next door).
+     you order can open the hole next door), 43 (a thing protected by a CLAIM
+     rather than a mechanism — ask WHICH mechanism makes it safe).
+  **26 · A change retires the proofs standing on the old behaviour.** Its
+     costume: 41 (fixing a BUG does it too, and to policies and comments as
+     well as tests).
+  **40 · "Deployed" quietly becomes "committed".** `node tools/deploy-drift.mjs`
+     before saying shipped, and say WHICH — committed, pushed, or live.
+  **42 · A defect entry is a claim.** Re-measure its shape AND width before
+     designing the fix; correct a wrong entry in place.
 
 Then, by theme:
   proofs losing their lever  21, 26, 27, 32
@@ -350,29 +361,72 @@ Then, by theme:
     re-run until a verdict happens to survive; four attempts is already three
     too many, and the fifth would not be evidence, it would be sampling.
 
-## 1. What this session shipped (all pushed, green, deployed)
+40. **NEW — "DEPLOYED" QUIETLY BECOMES "COMMITTED", and the state it hides is
+    invisible from inside the repo.** I verified one deploy carefully, then
+    fixed seven more things, committed and pushed each, reported each as
+    shipped — and deployed none of them. One was a live money bug. Nothing was
+    wrong with any single step; the word "shipped" covered two different states
+    and nothing nagged, because what is actually running cannot be seen from a
+    clean `git status`. **The fix is a command, not more discipline** — the
+    runbook already described the check and I had followed it correctly twice
+    that same day. `node tools/deploy-drift.mjs`, before saying shipped.
+    And when reporting work, say WHICH: committed, pushed, or LIVE.
+
+41. **NEW — FIXING A DEFECT RETIRES WHATEVER WAS STANDING ON IT.** Rule 26 said
+    moving code behind a seam destroys a proof's lever; closing a BUG does the
+    same, and wider. V4e's "a craft whose grant cannot deliver" test installed
+    an items pack at version 100000 as its FIXTURE — a defect used to
+    manufacture a separating input. The u16 ceiling fix made that host fall
+    back to items@1, the craft succeed, and the test fail; had it not failed it
+    would have sat there proving nothing. The sweep after closing a defect is
+    three things, not one: the TESTS that used it as a fixture, the POLICIES
+    that exist because of it (`achievements.ts` refused `wins` and had to be
+    re-decided), and the COMMENTS citing it as a live reason. Grep for the
+    SYMPTOM — the stat name, the magic number — not just the code you changed.
+
+42. **NEW — THREE §3 ENTRIES IN ONE DAY WERE WRONG ABOUT THEIR OWN SUBJECT.**
+    `equippedSkin`/`title` were NOT reachable through `POST /api/profile`; the
+    fingerprint fix did NOT need its own release (the fix was already in the
+    tree, in `items.ts`, and moved no digest); the Lost Soul's "0.5 m cube
+    spanning 0.15-0.65" was not reproducible, and the real defect was one axis
+    of one enemy out of five. A defect entry records what somebody believed
+    under time pressure, usually without measuring. **Re-measure the SHAPE and
+    the WIDTH before designing the fix** — entry three named one enemy, and the
+    honest question ("how many of the five disagree, and on which axis") turned
+    a guess into a one-line correction plus a ratchet. Correct the entry IN
+    PLACE rather than deleting it, so the next reader sees it was checked.
+
+43. **NEW — THE RECURRING SHAPE OF THE WHOLE DAY: a thing protected by a CLAIM
+    rather than by a mechanism.** Three times, months apart in origin.
+    `items.ts` said its encoder fix "matches variantsFingerprintInputs and
+    challengesFingerprintInputs" — true of variants, false of challenges, and
+    that clause is what kept the neighbour broken. The profile allowlist
+    documented itself as protecting `equippedSkin` while the shape of the merge
+    was doing the work — one `p.inventory = incoming.inventory` from being gone.
+    `agreement.test.ts` skipped melee with the aside "melee has no cone on
+    either side", false of the server, and melee is exactly where the two
+    predictors diverged. **A skip comment is load-bearing documentation: write
+    what the test CANNOT cover, never a claim that there is nothing to cover.**
+    When something is safe, ask WHICH mechanism makes it safe, and whether that
+    is the mechanism whose job it is.
+
+## 1. What this session shipped (all pushed, green; both tiers LIVE)
+
+Verify with `node tools/deploy-drift.mjs` rather than trusting this table.
 
 | Commit | What |
 |---|---|
-| `2111f94` | **V4b — the ownership token, and the five doors that mint an inventory.** `ItemKind.WEAPON_VARIANT = 5`, `ItemDef.variantId`, and a parser BICONDITIONAL making the id prefix a rule rather than a convention. It also fixed a LIVE defect that was the bug `8c6f196` fixed in variants and never fixed in items: the kind/rarity lookups admitted `Object.prototype` members, so `kind:"constructor"` parsed with zero errors, `ItemDef.kind` became a FUNCTION, and `constructor` and `toString` emitted the IDENTICAL fingerprint line — two manifests, one digest. Five paths mint an inventory and three would have handed out variants on day one; the fix is mint-vs-transfer, not a blanket refusal, because trade settlement goes through the same chokepoint. |
-| `4bec466` | **BAR.md corrected — the bar has a gun.** Re-captured in Capture The Gems, which hands you a rifle at spawn. `tools/capture-ref-gunfight.mjs` and `tools/viewmodel-motion.mjs` are new; the latter exists because the obvious instruments lie — a plain frame-difference scored 3.3× for the shovel and 3.25× for the rifle, identical, because both boxes contain panning background. |
-| `8a61206` | **V4c — the claim reaches the body.** 23 red proofs, one honestly reported as STAYING GREEN. My own plan contained the slot off-by-one it existed to prevent, and my proposed trust-scan guard (`/\bvariant/i`) could never have matched `WEAPON_VARIANT`. The builder then overturned the repair with two verified false positives and found that `ModeId.RANKED*` self-matches the economy regex. |
-| `7109306` | **THE GAUNTLET SCORES ITS FIRST POINT — gunfeel, blind and uncontaminated.** Our shot lights the room; the bar's does not. Verified independently: per-tile left-region mean luminance swings +36.2% across our twelve frames, phase-locked to the shot cadence, against +1.6% for the bar, whose wall is flat to within one luminance level. |
-| `2f47842` | **V4d — the killfeed names the gun that fired.** A 9th KILL byte plus `S2C.VARIANT_NAMES = 14`. The plan passed review 10/10 and one of its obligations was VACUOUS — the origin of rule 38. |
-| `4a45544` | **V4e — the entry recipe.** §7.2 was circular: a variant craft needs three variants and supply was zero. Also fixed a LIVE bug (the craft UI offered what the server refused, because `craftTargetsFor` took raw copies with no escrow and no balance) and deleted a latent trap (`crafted = landed[0]?.ref ?? v.plan.targetRef` reported an item never delivered). |
-| `baebe22` | **V4f — the equip button.** V4c had landed only the server half. `GET /api/variants` mirrors `/api/items`. Two more live bugs between the claim and the screen: the profile decoder dropped `inventory.variants`, and a SUCCESSFUL equip repainted from the claims it had just replaced so the button flipped straight back. |
-| `a120c24` | **The three VARIANTS §7 decisions, asked and written down.** DPS-dominant budget (0.50 dps / 0.20 range / 0.15 splash / 0.15 handling) at ±12%, an uncommon craft-only rarity floor, and variants table-gated OUT of ranked-adjacent modes. Plus the observation the user's own preview surfaced: a weighted sum at ±12% admits an "everything up 10%" variant, so §6's no-straight-upgrades rule needs a SECOND refusal — strict dominance — which is now part of the decision. |
-| `7de757c` | **V1a — the lockstep determinism harness and its golden, minted pre-refactor.** Both shipping predictors, one script, two arenas, the same `ServerWorld` and the same shared `raycastVoxels`. Three things it took: the trigger has to be PULSED (a held trigger fires a semi-auto exactly once, so the first script recorded four pistol shots against four hundred chaingun ones); the chainsaw needs its OWN arena (2.6 m reach, so at seven metres the whole melee path went unwatched — and running all seven weapons at two metres instead recorded a rocket detonating in the shooter's face); and a respawn puts the victim on top of the shooter under a shield `resolveMelee` refuses. |
-| `dd28363` | **V1b — `SessionArsenal`, with the two representations kept APART.** `weapons.ts` holds every weapon twice — doubles in `WEAPONS[i]`, narrowed values in the derived hot tables — and the narrowing is lossy for six of them (rocket splashRadius 4.4 → 4.400000095367432, and 60000/rpm for four weapons). The shipping code reads BOTH, three lines apart. `EffectiveWeapon` therefore carries the def's doubles AND a `hot` record, and unifying them is a separate change with its own argument. The test caught a bare range check letting `1.5` index a hole in the table. |
-| `786c350` | **V1c — the server predictor fires from the arsenal.** Every reader on the firing path goes through `sim.statsFor(p, weaponId)`; zero module-table reads remain. A projectile now remembers the slot it was FIRED with, because a rocket in flight outlives a weapon switch. `SessionArsenal.from` landed here rather than in V2 because rule 26 demanded it. **The golden did not move.** |
-| `e950dc4` | **V1d — the client predictor too. V1 closes.** `rt.stats(weaponId)` is the mirror of `sim.statsFor`. The failure proof became symmetric: an empty override changes nothing on either side, +1 pistol damage and +20 chaingun rpm move both, a one-centimetre splash radius moves only the server, a wider cone moves only the client. **The golden still did not move.** Verified in the real app — muzzle flash, tracer, an open dynamic crosshair, 13/20 magazine pips. |
-| `949512f` | **A deploy gate that could not pass** (rule 25). And the first fix for it was ALSO wrong — it went green with the HELLO truncated to nonsense — so it now carries a negative control: one junk byte must be told nothing. |
-| `1b7af11` | **Two live bugs the V2 plan review found in shipped code.** `parseItemsManifest('null')` threw a TypeError past every caller instead of refusing (the `root.items` access sits outside the try; `parseChallengesManifest` had it identically). And `HordeDirector.equipStart` refilled magazines from the compiled table on the JOIN path, after `spawnPlayer` had filled them through the arsenal — so a shotgun variant that pays for its damage with a smaller magazine would enter Horde holding the base's eight shells. Proven red at "expected 8 to be 4". |
-| `b3902e0` | **V2a — the variant schema.** Three refusals: whitelist+bands, the ±12% budget, and strict dominance. PER-ARCHETYPE AXES, per the user's decision: an axis is scored only where it is LIVE, so nothing is 0/0, and an override of a field that archetype's firing path never reads is REFUSED rather than priced at zero. Two bands were doing balance work and refusing the document's own §1 slug shotgun — `damage` is now a wide rail with the real bound on the PAYLOAD (damage × pellets), and the cone rails go to a tenth. Proven red five ways. |
-| `883d875` | **V2b — `PackKind.VARIANTS = 7`, its inventory branch, and BOTH gates.** `runReleaseVerify()` and `ReleaseService.runGate()` are separate implementations and the review found a candidate naming kind 7 gating GREEN through the second; reverting the new block reproduces it word for word. The inventory branch is only visible in the POSITIVE direction (the fallthrough already reports an unhandled kind), and the test says so at length. Rule 2 caught the wiring one level up: the check's own tests called it directly, so removing it from the gate's list left them all green. |
-| `8c6f196` | **Three defects in V2, found reviewing the V3 PLAN against it.** An inherited property (`over: {"toString": 1}`) threw a TypeError out of BOTH validation paths, because `BANDS.toString` finds Object.prototype's method and is not undefined — `Object.hasOwn` now. `terrainDamage` was banded but charged by no axis, so 2.6 m -> 3.9 m of carve radius cost nothing; it is off the whitelist entirely (16 fields), which also removes the `carveSphere` hazard rather than banding it. And the PRODUCTION draft route dropped `picks.variants` while every service-level test passed — the same lesson one commit later — with `installedPacks()` omitting it too, so a routine draft would have silently dropped a live variants pack. |
-| `c1a426b` | **Three more predictor disagreements fixed; the fourth named as unfixable.** A Float32Array damage tally drew kill markers for 99.99999904632568 damage. A weapon switch cleared the cone on the server and not the client (0.036 vs 0.010 rad). A pooled body inherited the last occupant's `shotSeq`. The fourth — the two schedule shots on DIFFERENT CLOCKS — cannot be reconciled by matching a formula, and trying made it worse. See §6. |
-| `fc01475` | **THE BIG ONE: the two predictors now agree about where pellets go.** Five separate causes, each proven red alone — the cone was read AFTER the shot bloomed it (0.53° on a shotgun); the seeding schemes were unrelated and the server's used the ROOM seed the client never receives (6.6°); the server did not spread projectiles at all (0.75°, plasma only); the client's accumulated cone was float32 against the server's double (8.3e-9); and the shot counter wrapped on one side only (65 536 shots in, every cone diverges). `agreement.test.ts` is the assertion the golden never was, and the golden moved DELIBERATELY: 135 damage rows → 102, 10 kills → 14, and the pistol and shotgun now finish people they never used to. |
+| `ef32f72` | **A LIVE DOUBLE-PAY.** `settleChallenges` asked the journal and never asked `done`, and the journal's key ends in the PROFILE KEY — so a receipt earned as device B protects nothing once the player is A. An account merge builds exactly that pair. Measured through the real merge: A owes `daily.kill-25`, B was paid it today, merge, settle, and A is credited 25 Scrap for a completion the human was already paid for. |
+| `69dfe3b` `50543bf` `b161e20` `1f1ef1f` `633971a` | **The achievement system, A1-A4.** Lifetime, one-shot, RETROACTIVE. Progress reads `profile.stats` — one number, so the profile and the award cannot disagree in front of the player — but the PROMISE is snapshotted at detection, because the counter preserves the STAT and what a player is owed is the DEF, which lives in a pack that can be re-cut. Three wire states, not a boolean: `earned` is reachable in ordinary play and gets its own words. A2b also fixed a regression `ef32f72` had created — see §0 rule 31. |
+| `46b354a` | **The u16 pack-version ceiling, at all three doors.** `items/100000/` was legal to install and unreadable by `parseItemRef`, so every minted ref was refused by the reader and drops, challenge items, achievement awards, prizes and craft output silently stopped landing. Discovery, lookup and the MINT — the mint worst, because a pack past the ceiling is installed, immutable and invisible with the operator told the save succeeded. |
+| `618056b` | **A challenge debt paid an item nothing defines**, and called itself settled — 100 Scrap, a receipt, and an item `itemStateFor` calls DORMANT. A debt outlives its def and the loop walks `owed`, not `defs`. |
+| `bca9cfa` | Wearable claims refused BY NAME, and a §3 entry corrected as false. |
+| `c14d0b5` | **A round nobody scored in has no winner.** A lone idle player was crowned at 0 kills and credited a lifetime win. `wins` becomes priceable as a consequence — nothing prices it yet. |
+| `3550036` | **Two free-form tokens, one fingerprint** — and the fix was already in the tree. A refusal, not a re-encoding, so no digest moved. |
+| `b845410` | **The Lost Soul's hitbox follows its body**, plus a ratchet over all three size tables. |
+| `1f1056c` | **Melee stops predicting a headshot the server never scores.** `agreement.test.ts` skipped melee, which is how it survived. |
+| `b841a1f` `15687c4` | **`tools/deploy-drift.mjs`** — "is what is LIVE the tree I am standing in?", one command, exits non-zero on drift. It caught its own first commit crying drift for a docs-only change and was narrowed. |
+| `b6fb3c5` | **An achievement pays through a REAL round**, which nothing proved until now — and the ordering is pinned: hoist the block above `applyMatchResult` and the award goes unpaid. |
 
 ## 2. Architecture delta
 
@@ -438,157 +492,44 @@ THE PROOFS
 
 ## 3. What is left — decided order
 
-**V4 IS DONE (a through f) AND LIVE.** Everything that section used to describe
-has shipped, so it is gone; the arc is in §1 and in git.
+**§3.3 IS EMPTY.** Every defect this section carried is fixed or corrected, and
+the corrections are recorded in place rather than deleted, so you can see which
+entries were wrong and how (rule 42). Do not read that as "the code is clean" —
+read it as "this list is spent, and the next one comes from measuring".
 
-1. **The achievement system.** Model it on `shared/src/challenges.ts` —
-   `ChallengeDef` is `{id, name, blurb, period, stat, target, scrap, item}` and
-   the condition is DATA, never a shipped predicate. Achievements are lifetime
-   and one-shot rather than periodic. `StoredChallenges.owed` is the debt shape
-   for anything banked in a session that may not pay it (rule 20).
-   `CHALLENGE_STATS` deliberately excludes `seconds`, because "a stat the player
-   cannot fail to accumulate is a login reward wearing a challenge's name."
+1. **THE FLAG. `economy_achievements` is OFF and the flip is the user's call.**
+   It is a FULL-REPLACE `DOOMCRAFT_FLAGS` env document carrying ALL SIX rules —
+   the live five are `economy_competitions`, `economy_items`, `economy_scrap`,
+   `economy_trading`, `share_cards` — because an admin-console flip dies at the
+   next restart (rule 14). The moment it lands, every player whose LIFETIME
+   stats already qualify is paid at their next settling match:
+   `achievement.first-blood` is one kill, so that is effectively everybody, and
+   the six awards total 975 Scrap. That is the retroactive design working, and
+   it is a one-way door for anyone it pays.
 
-2. **The gauntlet — 2/23.** Gunfeel and HUD are won. MENUS IS BLOCKED, not
-   lost: it was judged four times and binned four times, the last three because
-   a subagent boots with the memory index that names this product's modes and
-   bars (rule 39). Judge name-bearing screens from a session with the memory
-   store detached, or record them unscorable. Its work order is already written
-   and side-neutral: **our biggest button is pre-armed with a 0-enemy movement
-   tutorial, and two of the four front cards read "COMING SOON · 2026" and do
-   nothing when pressed.** Prefer STILL pieces while the motion asymmetry in
-   `NEXT-SESSION-PROMPT.md` is unfixed.
+2. **The gauntlet — 2/23.** Gunfeel and HUD are won. MENUS is BLOCKED, not lost
+   (rule 39: a subagent boots with the memory index, which names this product's
+   modes and bars). Judge name-bearing screens from a session with the memory
+   store detached, or record them unscorable. Prefer STILL pieces while the
+   motion asymmetry in `NEXT-SESSION-PROMPT.md` is unfixed. The ENEMIES piece
+   now has two fewer real defects under it — the Lost Soul's hitbox and melee
+   headshots were both closed today, so what remains there is genuinely about
+   feel rather than about bugs.
 
-3. **Defects found and deliberately left open. Fix or decide — do not
-   rediscover.**
-   - **FIXED 2026-09-07 — a pack version above 65535 silently disabled EVERY
-     item grant.** `itemsVersions()` accepted any integer >= 1 while
-     `parseItemRef` refuses above `0xffff`, so installing `items/100000/`
-     made that pack the NEWEST, every minted ref was formatted against it, and
-     every one was then refused by the reader — drops, challenge items,
-     achievement awards, prizes and craft output all vanishing with no error,
-     because a ref that does not parse is simply not an item. `MAX_PACK_VERSION`
-     and `isPackVersion` now bound all three surfaces: DISCOVERY (five kinds,
-     one shared predicate where there were five copies), LOOKUP (five doors),
-     and the MINT (`writeVersioned` refuses rather than creating a version that
-     is installed, immutable and invisible). The bound is on the DOOR, not the
-     reader. Note the ceiling is the NUMERIC check and not the digit count:
-     `items@65536:` has five digits and is refused too.
-     **This closed the lever another proof was standing on** — V4e's "a craft
-     whose grant cannot deliver" test installed a pack at 100000 as its
-     fixture, i.e. it used a defect to create its separating input. With the
-     defect fixed that host silently falls back to items@1 and the craft
-     SUCCEEDS, so the test proved nothing. It now drives `grantRefusal`
-     directly with the ref the retired fixture produced. Rule 26, arriving from
-     the other direction: fixing a bug can retire a proof just as moving code
-     behind a seam can.
-   - **FIXED 2026-09-07 — a challenge debt paid out an item no manifest
-     defined, and marked itself settled.** The room drops a DEF whose item is
-     missing at pin time, but a DEBT OUTLIVES THE DEF and `settleChallenges`
-     walks `owed`, not `defs`; `grantDrops` is a syntactic gate with no
-     membership lookup. Measured on the shipped build: a weekly banked with
-     `title-knee-deep` owing, the items pack re-cut without it, and settlement
-     paid 100 Scrap, wrote the receipt, discharged the debt and granted
-     `items@2:title-knee-deep` — `itemStateFor` DORMANT. The player is handed
-     an item that can never light up and the receipt says they were paid for
-     it. `itemKnown` is now REQUIRED on the deps (a field a producer can forget
-     is a field that will be forgotten), and an unknown id keeps the whole
-     completion owed. Same hole, same fix, as the achievement settlement got a
-     day earlier.
-   - **FIXED 2026-09-07, and NOT the way this entry predicted.**
-     `challengesFingerprintInputs` ended in TWO free-form tokens — name then
-     blurb — so `{name:"A/B", blurb:"C"}` and `{name:"A", blurb:"B/C"}` both
-     produced `daily.x:daily/kills/1/1/-/A/B/C`: two manifests, one
-     fingerprint, and a console diff that renders no change.
-     This entry said the fix "changes EVERY declared quests digest, so it is
-     its own release". That was true of the RE-ENCODING I had in mind and
-     false of the fix that was already sitting in the tree: `items.ts` had
-     closed the identical defect by REFUSING the separator in the non-terminal
-     free field, which moves no digest at all. Challenges now does the same —
-     `name` may not contain `/`, `blurb` still may, because a free-form token
-     is unambiguous exactly where it is TERMINAL. Verified: quests@1 still
-     digests to `fe8aa1a9…` / fingerprint `313769385`. No release needed.
-     **And the neighbour was left broken by the first fix.** The comment in
-     `items.ts` said its approach "matches variantsFingerprintInputs and
-     challengesFingerprintInputs" — true of variants, false of challenges,
-     asserted rather than measured. Fixing one instance of a defect and
-     declaring the neighbours already fine is how the neighbour stays broken.
-   - **FIXED 2026-09-07 — an idle sole player was credited a lifetime WIN.**
-     `endRound` seeded `best` with null and the FIRST member took it
-     unconditionally, so a lone player who did nothing for a whole round was
-     crowned at 0 kills. Measured: `applyMatchResult` with `{kills:0, deaths:0,
-     won:true, damage:0, blocks:0, seconds:12}` gave `roundPays = false` and
-     zero Scrap — and still moved `stats.wins` to 1; a hundred of them made a
-     hundred lifetime wins. Challenges never saw it (`buildSubmission` zeroes
-     `challengeIds` when `roundPays` is false), so it was confined to the
-     lifetime block. A round nobody scored in now has no winner, which also
-     stops the room broadcasting "X wins with 0". This is the same hazard the
-     `winnable` check beside it was added for — "harmless while it only
-     inflated a stat, money the moment a challenge pays for wins" — one step
-     further in.
-     **Consequence:** `wins` is now admitted to `ACHIEVEMENT_STATS`, because a
-     lifetime win implies somebody scored. NO SHIPPED CONTENT PRICES IT: the
-     door is open, nothing has walked through, and adding one is a content
-     decision that moves the quests digest again.
-   - **CORRECTED AND CLOSED 2026-09-07 — `equippedSkin` and `title` were NOT
-     in fact reachable through `POST /api/profile`.** This entry was wrong, and
-     a wrong open-defect entry costs a future session a day. MEASURED: the
-     route assigns `progress`, `settings`, `bindings` and `loadout` FIELD BY
-     FIELD and never touches `p.inventory`, so an incoming `equippedSkin`
-     landed nowhere.
-     What was true is worse-shaped and is now fixed: the ALLOWLIST ACCEPTED
-     both, so the thing protecting them was the SHAPE OF THE MERGE rather than
-     the guard that documents itself as protecting them — one
-     `p.inventory = incoming.inventory` in a tidy-up and the door opens with
-     nothing left to say no. Both are on `SERVER_OWNED_PROFILE_FIELDS` now.
-     `inventory` itself is deliberately NOT listed: the guard descends and
-     names the LEAF (`inventory.equippedSkin`), and which claim was attempted
-     is the signal an operator reads.
-     **A fifth load-sensitive test, of a new kind:** `accounts.test.ts`'s
-     `afterAll` can fail `ENOTEMPTY` removing its temp dir during a concurrent
-     full run. It passes 30/30 alone at load 55. Teardown, not timing.
-   - `craft.ts` clears `equippedSkin` on consuming a last copy but not a variant
-     claim (read-time validation covers it).
-   - The `loadoutTab.ts` wiring proof is a SOURCE RATCHET, not behavioural.
-   - **FIXED 2026-09-07 — the Lost Soul's hitbox did not match its body.**
-     MEASURED across all five monsters, not just the one this entry named:
-     four agreed exactly and the Lost Soul did not — sim 0.9, client hit target
-     0.7, render look 0.7. `entHeight` is the hitscan AABB AND the
-     line-of-sight centre, so a shot at 0.8 m landed on the server, produced no
-     client marker and hit nothing the player could see. The sim was the odd
-     one out and the sim moved: the hitbox follows the BODY, because a player
-     can only aim at what is drawn. (This entry's "rendered 0.5 m cube spanning
-     0.15-0.65" was not reproducible — the shared look's height is 0.70.)
-     `server/src/monsterAgreement.test.ts` now pins all three tables in
-     agreement for every monster. It reads the client's private `MONSTER_LOOK`
-     from SOURCE, deliberately — they are frozen constant tables with no
-     behaviour to drive, and the alternative is exporting an internal to serve
-     a test. Its first assertion is the scan's own guard: a regex that matches
-     nothing fails `expected +0 to be 5` rather than passing vacuously, which
-     is the failure mode a scan has to be built against.
-   - **FIXED 2026-09-07 — melee headshots were client-only.** This entry was
-     RIGHT, unlike three of its neighbours. `traceTargets` sets
-     `scratchHeadshot` because the hitscan path needs it, and `fireMelee` read
-     it: a swing through a head predicted `base * headshotMultiplier`, reported
-     HIT_HEAD, counted a headshot and played the headshot impact, while the
-     server's `resolveMelee` — a cone test with no head box on either branch —
-     scored a plain body blow. The CLIENT follows the server, because the server
-     is authoritative for damage and a prediction it will never confirm is a
-     fiction; `shared/src/variants.ts` already said melee has no headshots from
-     the other end, calling `headshotMultiplier` inert for a melee weapon.
-     **`agreement.test.ts` explicitly skipped melee**, which is how this
-     survived — and its aside, "melee has no cone on either side", is false of
-     the server (a ~44 degree half-cone at cosLimit 0.72). The skip is right for
-     that test (melee has no spread cone to compare) and is now narrowed to say
-     so; the head question has its own case, with a PISTOL CONTROL down the
-     identical ray, because "no headshot" is otherwise indistinguishable from
-     "the trace never reached the head".
-
-4. **Then:** portals/TWA, C7 analytics, the deathmatch share surface (needs its
+3. **Then:** portals/TWA, C7 analytics, the deathmatch share surface (needs its
    own `#ui` element), and the two sponsor loose ends — no screenshot harness
    for the REWARDED overlay (S10's is `tools/shot-interstitial.mjs`), and no
    Basic Training drill for either sponsor surface, which is the PLAYER half of
    the standing tutorial directive. The admin half shipped as Guides 9.
+
+4. **Known and deliberately not fixed:**
+   - `craft.ts` clears `equippedSkin` on consuming a last copy but not a variant
+     claim (read-time validation covers it).
+   - The `loadoutTab.ts` wiring proof is a SOURCE RATCHET, not behavioural.
+   - **A fifth load-sensitive test, of a new kind:** `accounts.test.ts`'s
+     `afterAll` can fail `ENOTEMPTY` removing its temp dir during a concurrent
+     full run; it passes 30/30 alone at load 55. TEARDOWN, not timing — the
+     other four are timing. Do not write off a green-suite claim over it.
 
 ## 4. Deploy runbook (follow exactly)
 

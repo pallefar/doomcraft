@@ -1,148 +1,105 @@
-Continue Doomcraft (~/youtube/doomcraft). Read HANDOVER.md §0 — **rules 35-38 are
-new and every one cost real time**, and 38 is the one that changes how you write
-tests. `ref/BAR.md` is the bar and it was WRONG about the bar until today.
+Continue Doomcraft (`~/youtube/doomcraft`). Read HANDOVER.md §0 — **rules 40-43
+are new; 40 is the one I broke myself and 43 is the shape the whole last day
+had.** Then run `node tools/deploy-drift.mjs` before believing anything below.
 
-**NOTHING IS WAITING ON ME. The order below is decided. Start building.**
+**NOTHING IS WAITING ON ME EXCEPT ONE DECISION (item 1). The order is decided.**
 
 ## Where it stands
 
-**THE V4 ARC IS COMPLETE AND LIVE — a through f.** A player can own a weapon
-variant, equip it, fire it, see it named in the killfeed, craft one at the
-bench, and click Equip on it. Every phase went to Codex as numbered clauses
-before a line was written; every one is deployed and verified by probing a value
-only that build emits.
+**THE ACHIEVEMENT SYSTEM IS BUILT, DEPLOYED, AND DARK.** A1-A4 shipped; the
+binary is live on both tiers at `b6fb3c5`; the flag `economy_achievements` is
+OFF. Lifetime, one-shot and RETROACTIVE: progress reads `profile.stats`, so the
+profile and the award cannot disagree in front of the player, while the PROMISE
+is snapshotted at detection because the counter preserves the STAT and what a
+player is owed is the DEF, which lives in a pack that can be re-cut.
 
-**THE GAUNTLET IS 2/23 AND IT FINALLY RAN.** Gunfeel and HUD both won blind and
-uncontaminated. Four verdicts were produced to get the first two: two were
-correctly thrown away, once because the bar clip had a SHOVEL in it (rule 37)
-and once because my own fairness note named architecture and mapped the labels
-(CRITIC.md 2b). HUD is the more useful precedent — it won with NO BUILD ROUND,
-judging our current HUD cold, which means judging a piece before building it is
-a legitimate and cheap first move. MENUS was piece three and was in flight when
-this was written; check `progress/state.json` and
-`.../scratchpad/ab/menus-r1/` for where it got to.
+**§3.3 IS EMPTY.** Every defect that section carried is fixed or corrected. Two
+were live money bugs: a merged account paid the same daily twice, and a
+challenge debt paying out an item no manifest defined and calling itself
+settled. Three entries turned out to be WRONG ABOUT THEIR OWN SUBJECT and are
+corrected in place, not deleted — read them, they are the argument for rule 42.
 
-Piece selection matters: prefer STILL pieces (full-page screenshots) while the
-motion asymmetry below is unfixed, and re-capture the bar for the specific
-question before judging — the reference has now been stale in OUR favour three
-separate times.
-
-**The gunfeel code is MERGED** (`52e8db8`; `main` and `gauntlet` now agree).
-Both branches had appended a parameter to the SAME damage functions — gunfeel a
-`flags` so a monster kill raises DMG_FATAL, V4d a `variantSlot` so the killfeed
-names the gun — and the resolution is the union with both REQUIRED. After
-resolving, the merged BODY was checked for evidence of each contribution, not
-just for a clean `tsc`: a merge's characteristic failure is silently keeping one
-side, and `e.variantSlot = variantSlot` on the pooled kill event is exactly the
-assignment V4d's rule-38 proof exists to protect.
+**The gauntlet is still 2/23** and is the next building work.
 
 ## The order
 
-1. **The achievement system.** Model it on `shared/src/challenges.ts` —
-   `ChallengeDef` is `{id, name, blurb, period, stat, target, scrap, item}` and
-   the condition is DATA, never a shipped predicate. Achievements are lifetime
-   and one-shot rather than periodic. `StoredChallenges.owed`
-   (`persistence.ts`) is the debt shape for anything banked in a session that
-   may not pay it. Note `CHALLENGE_STATS` deliberately excludes `seconds` —
-   "a stat the player cannot fail to accumulate is a login reward wearing a
-   challenge's name."
-2. **THE GAUNTLET.** The apparatus is now trustworthy and the
-   facts below are expensive. Keep going.
-3. Then the rest: portals/TWA, C7 analytics, the deathmatch share surface, and
-   the two sponsor loose ends in HANDOVER §3.4.
+1. **THE FLAG FLIP — the user's call, not yours.** `economy_achievements` ON is
+   a FULL-REPLACE `DOOMCRAFT_FLAGS` env document carrying ALL SIX rules (the
+   live five are `economy_competitions`, `economy_items`, `economy_scrap`,
+   `economy_trading`, `share_cards`); an admin-console flip dies at the next
+   restart. It pays every already-qualifying player at their next settling
+   match — `achievement.first-blood` is one kill, so effectively everybody —
+   and the six awards total 975 Scrap. Ask before flipping. After it, watch
+   `/api/admin/release` and the journal rather than assuming.
 
-## Defects found and DELIBERATELY LEFT OPEN — fix or decide, do not rediscover
+2. **THE GAUNTLET.** Prefer STILL pieces while the motion asymmetry below is
+   unfixed. MENUS is BLOCKED not lost (rule 39). The ENEMIES piece lost two
+   real defects last session — the Lost Soul's hitbox and melee headshots — so
+   what is left there is about FEEL, which is what the gauntlet is for.
 
-- **A pack version above 65535 silently disables EVERY item grant.**
-  `PackInventory.itemsVersions()` accepts any integer >= 1 with no upper bound
-  while `parseItemRef` is `^items@(\d{1,5}):` and caps at `0xffff`. Install
-  `items/100000/items.json` and every ref the server mints is unparseable, so
-  `grantDrops` silently drops match drops, challenge items, competition prizes
-  AND craft output — no error anywhere. Pinned by a test (it is the lever V4e's
-  fallback proof uses); the cap itself is unfixed.
-- **`equippedSkin` and `title` are still reachable through `POST /api/profile`.**
-  V4c added `variants` to `SERVER_OWNED_PROFILE_FIELDS` and left those two.
-- **`craft.ts` clears `equippedSkin` on consuming a last copy but not a variant
-  claim.** Read-time validation covers it today.
-- **The `loadoutTab.ts` wiring proof is a SOURCE RATCHET, not behavioural.**
-  There is no jsdom here and `LoadoutTab` needs a document plus three fetches.
-  It discriminates on all three reverts but asserts the presence of a call, not
-  its effect. A behavioural version needs `profile.test.ts`'s DOM-stub
-  treatment extended.
-- **The Lost Soul has three different sizes** — `bots.ts` spawns it 0.9 m,
-  `MONSTER_LOOK` gives the client hit target 0.7 m, `drawMonster` renders a
-  0.5 m cube spanning 0.15-0.65. A shot at 0.8 m damages it on the server,
-  produces no client marker, and hits nothing the player can see. Belongs to the
-  ENEMIES gauntlet piece.
-- **Melee headshots are client-only, for players too.** `resolveMelee` is a cone
-  test with no head box on either branch.
+3. Then: portals/TWA, C7 analytics, the deathmatch share surface, the two
+   sponsor loose ends in HANDOVER §3.
 
-## The gauntlet apparatus — every line here was paid for
+## How the last day went wrong, so you do not repeat it
 
-- **Run pieces ONE AT A TIME.** A headed 60 fps capture is a measurement on
-  shared hardware. Concurrent captures, or a full suite run during one, corrupt
-  the frame times the critic reads.
-- **Four tests are LOAD-SENSITIVE**: `client/src/audio/synth.test.ts`'s boot
-  budget and three in `client/src/net/chunkz.test.ts`. At load average 30-70
-  they fail; alone they pass 51/51 in 12 s. A green suite claim needs the
-  machine load recorded beside it. Quiet-machine baseline: ~95-137 s for the
-  whole suite.
-- **`tools/capture-ours.mjs` CANNOT record video** — no `reccanvas` import
-  anywhere; it is screenshots plus metrics. A motion piece needs a separate
-  recorder.
-- **OUR HUD CANNOT REACH A CANVAS RECORDING.** Our crosshair, hitmarker, ammo,
-  health and minimap are separate elements that `canvas.captureStream()` misses;
-  the bar renders its crosshair and minimap INTO its canvas. So every MOTION
-  comparison silently handicaps us, and the hitmarker the gunfeel round built is
-  invisible in its own A/B. STILL comparisons (full-page screenshots) do not
-  have this problem — that is why HUD was chosen as piece two.
-- `capture-ours.mjs` **reuses whatever already listens on its port** — always
-  pass `--port`, and `lsof -i` it first, or you will photograph another tree.
-- A default capture run is headless, unthrottled, dev-server, and reports
-  ~120 fps median. **That is an uncapped-vsync artifact, not a frame cost.**
+- **I reported seven commits as "shipped" while none of them was deployed**,
+  including a live money fix. `node tools/deploy-drift.mjs` exists because of
+  that. Say WHICH state you mean: committed, pushed, or LIVE.
+- **A defect list is a claim.** Three of §3's entries were wrong about their own
+  subject. Re-measure the SHAPE and the WIDTH before designing a fix — one
+  entry named a single enemy and the honest question ("how many of the five
+  disagree, and on which axis") turned a guess into a one-line correction.
+- **Fixing a bug retires whatever stood on it.** A test used an open defect as
+  its FIXTURE; closing the defect made that test vacuous rather than red. Sweep
+  tests, policies AND comments; grep for the symptom, not the code.
+- **Ask which mechanism actually makes a thing safe.** Three separate times,
+  something was protected by a comment claiming coverage rather than by code.
+
+## The apparatus — every line here was paid for
+
+- **Run gauntlet pieces ONE AT A TIME.** A headed 60 fps capture is a
+  measurement on shared hardware.
+- **Load-sensitive tests:** `client/src/audio/synth.test.ts`'s boot budget and
+  three in `client/src/net/chunkz.test.ts` fail at load 30-70. **And a fifth of
+  a different kind:** `server/src/accounts.test.ts`'s `afterAll` can fail
+  `ENOTEMPTY` in a concurrent full run — teardown, not timing. Record the
+  machine load beside any green-suite claim. Quiet baseline ~100-135 s.
+- **`tools/capture-ours.mjs` CANNOT record video** — screenshots plus metrics.
+- **OUR HUD CANNOT REACH A CANVAS RECORDING**, so every MOTION comparison
+  silently handicaps us. STILL comparisons do not have this problem.
+- `capture-ours.mjs` **reuses whatever already listens on its port** — pass
+  `--port`, and `lsof -i` first.
+- A default capture run reports ~120 fps median: an uncapped-vsync artifact.
   Use `--headed --prod`.
-- The neutral A/B metrics keys are NOT the keys either side emits. Both store
-  `tTitle`, `tPlayable`, `bytes` and a nested `fps{}`. Map them or you write
-  nulls and void the measurement half in silence.
-- **A metrics key that is null on one side and populated on the other is itself
-  a de-blinding channel.** Fill both or null both.
-- The worktree is at `~/youtube/doomcraft-gauntlet` (branch `gauntlet`). A
-  blanket `node_modules` symlink ALIASES IT BACK TO THE MAIN TREE, because the
-  workspace links are relative — build a real dir of per-entry symlinks with a
-  real `@doomcraft/` pointing inside the worktree.
+- The worktree is `~/youtube/doomcraft-gauntlet` (branch `gauntlet`). A blanket
+  `node_modules` symlink ALIASES IT BACK to the main tree.
 
 ## Standing rules — not optional
 
 **Put every plan to Codex as numbered CLAUSES before a line is written**, and
-require a closing list of the clauses it judges CORRECT:
+ask it the rule-38 question: *for each proof obligation, do the DEFECTIVE and
+the CORRECT implementation produce the same asserted value on the input as
+specified?* It refused the achievement plan twice and found a LIVE double-pay
+by running the shipped code instead of reading the plan.
 
-    codex exec --sandbox read-only --cd /Users/karstenhaldan/youtube/doomcraft - < plan.txt
+    codex exec --sandbox read-only --cd ~/youtube/doomcraft - < plan.txt
 
-**And ask it the rule-38 question every time:** *for each proof obligation, do
-the DEFECTIVE and the CORRECT implementation produce the same asserted value on
-the input as specified?* Asked on V4e it found four of six obligations were
-decoration. On V4f, three of five. It costs one sentence.
+**Execute every runtime claim before it enters a plan — including the ones you
+write in your own test comments.** "Revert X and this fails" is a to-do, not a
+statement, until the revert has been run.
 
-**Execute every runtime claim before it enters a plan.** Three of my claims were
-overturned this session and all three were sentences I READ rather than RAN —
-one from Codex, one from my own harness, one from this project's own handover.
+**Prove every regression test red with its fix reverted, and check WHAT went
+red.** Roughly ten of my own tests have passed with their fix removed. When the
+defect is something MISSING or an ORDERING, assert the STRUCTURE — a count, a
+position, an identity; output assertions are blind to absent steps.
 
-**Write briefs from the CODE**, and end every brief telling the agent to report
-anything in it that is wrong. That sentence caught something in every single
-brief this session.
-
-**Prove every regression test red with its fix reverted, check WHAT went red,
-and report what the defective build produced on that same input.**
-
-**Deploy verification, in order:** `git status` clean (a builder mid-edit means
-`railway up` uploads half-written code); CI green; `railway up --detach`; poll
-`railway deployment list` to SUCCESS; then probe a value only the new build
-emits — never the build id, which lies. Re-probe `GET /api/admin/release` for
-`history: []` immediately before, because `/api/version` CANNOT tell you that
-(rule 35). Then `tools/smoke-signal.mjs` and `data.writable`.
+**Deploy verification, in order:** `git status` clean; CI green;
+re-probe `GET /api/admin/release` for `history: []` IMMEDIATELY BEFORE (rule 35
+— `/api/version` cannot tell you); `railway up --detach`; poll
+`railway deployment list` to SUCCESS; then a CONTENT-DERIVED probe — a pack
+digest that moved, or the served bundle hash. **NEVER `build.id`**: it read
+`b453e8b` before and after three separate deploys in one day.
 
 `railway link -p 32896841-c5c5-42ff-a408-a22a5807356b -e production -s doomcraft`
-works non-interactively, contrary to the older note.
-
-Owner seat: `~/youtube/doomcraft-owner-credentials.txt`, sign in at
-`/api/auth/signin`.
+works non-interactively. Owner seat: `~/youtube/doomcraft-owner-credentials.txt`.
+The admin bearer is the Railway env `DOOMCRAFT_ADMIN_TOKEN`, NOT in that file.
