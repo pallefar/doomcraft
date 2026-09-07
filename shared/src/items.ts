@@ -301,7 +301,17 @@ export function parseItemsManifest(text: string): ItemsParseResult {
      * a different item name. A free-form token is unambiguous only where it is
      * TERMINAL, and only `name` can be. `text` is a display title, so refusing
      * a slash in it costs nothing and leaves one terminal free-form token,
-     * matching variantsFingerprintInputs and challengesFingerprintInputs. */
+     * matching variantsFingerprintInputs and challengesFingerprintInputs.
+     *
+     * 2026-09-07: that last clause was HALF FALSE when it was written and is
+     * true now. `variantsFingerprintInputs` really does end in a single
+     * free-form token, but `challengesFingerprintInputs` ended in TWO — name
+     * then blurb — and collided on exactly the pair described above; measured,
+     * `{name:"A/B", blurb:"C"}` and `{name:"A", blurb:"B/C"}` both produced
+     * `daily.x:daily/kills/1/1/-/A/B/C`. Fixing one instance of a defect and
+     * asserting the neighbours are already fine is how the neighbour stays
+     * broken. `challenges.ts` now refuses the slash in `name`, so the claim
+     * holds. */
     if (text.includes('/')) {
       errors.push(`${rawId}: title text may not contain "/" — it is a fingerprint `
         + 'column separator, and two free-form tokens either side of one make '

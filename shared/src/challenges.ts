@@ -195,6 +195,29 @@ export function parseChallengesManifest(text: string): ChallengesParseResult {
     }
     const name = typeof e.name === 'string' ? e.name.slice(0, MAX_CHALLENGE_NAME) : '';
     if (name.length === 0) { errors.push(`${rawId}: no display name`); continue; }
+    /* `name` and `blurb` BOTH trail the fingerprint line and BOTH were
+     * free-form, so `{name:"A/B", blurb:"C"}` and `{name:"A", blurb:"B/C"}`
+     * serialized to the identical line — measured, `daily.x:daily/kills/1/1/-/A/B/C`
+     * for both. Two different manifests, one fingerprint, and the console's
+     * line-for-line diff renders no change at all: the per-pack ratchet cannot
+     * see the change it exists to see.
+     *
+     * `shared/src/items.ts` already closed exactly this on its own line and
+     * its comment says the fix "matches variantsFingerprintInputs and
+     * challengesFingerprintInputs" — which was true of variants, whose single
+     * free-form token is terminal, and NOT true here. A free-form token is
+     * unambiguous only where it is TERMINAL, and only `blurb` can be.
+     *
+     * Refusing rather than re-encoding is deliberate and is what keeps this
+     * cheap: a new encoding would move EVERY declared quests digest and would
+     * have to be its own release, while a refusal moves nothing — no shipped
+     * name contains a slash. */
+    if (name.includes('/')) {
+      errors.push(`${rawId}: name may not contain "/" — it is a fingerprint column `
+        + 'separator, and two free-form tokens either side of one make two '
+        + 'different manifests serialize to the same line');
+      continue;
+    }
     const blurb = typeof e.blurb === 'string' ? e.blurb.slice(0, MAX_CHALLENGE_BLURB) : '';
     if (blurb.length === 0) {
       errors.push(`${rawId}: no blurb — a challenge with no description is a mystery box`);

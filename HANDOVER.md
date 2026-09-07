@@ -495,17 +495,24 @@ has shipped, so it is gone; the arc is in §1 and in git.
      is a field that will be forgotten), and an unknown id keeps the whole
      completion owed. Same hole, same fix, as the achievement settlement got a
      day earlier.
-   - **NEW 2026-09-06 — the quests fingerprint encoding is AMBIGUOUS, so the
-     per-pack ratchet cannot see a change it exists to see.**
-     `challengesFingerprintInputs` joins every field with `/`, including the
-     two free-text ones. Measured: `{name:"A/B", blurb:"C"}` and
-     `{name:"A", blurb:"B/C"}` BOTH produce
-     `daily.x:daily/kills/1/1/-/A/B/C`. Two different manifests therefore
-     fingerprint identically, `questsPack()` returns the same number, and the
-     console's line-for-line diff renders no change at all. Rule 2's family: a
-     check that cannot distinguish the thing it is checking. The fix
-     (JSON-escaped free-text fields) changes EVERY declared quests digest, so
-     it is its own release and must not ride along with a content change.
+   - **FIXED 2026-09-07, and NOT the way this entry predicted.**
+     `challengesFingerprintInputs` ended in TWO free-form tokens — name then
+     blurb — so `{name:"A/B", blurb:"C"}` and `{name:"A", blurb:"B/C"}` both
+     produced `daily.x:daily/kills/1/1/-/A/B/C`: two manifests, one
+     fingerprint, and a console diff that renders no change.
+     This entry said the fix "changes EVERY declared quests digest, so it is
+     its own release". That was true of the RE-ENCODING I had in mind and
+     false of the fix that was already sitting in the tree: `items.ts` had
+     closed the identical defect by REFUSING the separator in the non-terminal
+     free field, which moves no digest at all. Challenges now does the same —
+     `name` may not contain `/`, `blurb` still may, because a free-form token
+     is unambiguous exactly where it is TERMINAL. Verified: quests@1 still
+     digests to `fe8aa1a9…` / fingerprint `313769385`. No release needed.
+     **And the neighbour was left broken by the first fix.** The comment in
+     `items.ts` said its approach "matches variantsFingerprintInputs and
+     challengesFingerprintInputs" — true of variants, false of challenges,
+     asserted rather than measured. Fixing one instance of a defect and
+     declaring the neighbours already fine is how the neighbour stays broken.
    - **FIXED 2026-09-07 — an idle sole player was credited a lifetime WIN.**
      `endRound` seeded `best` with null and the FIRST member took it
      unconditionally, so a lone player who did nothing for a whole round was

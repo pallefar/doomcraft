@@ -256,3 +256,50 @@ describe('the quests pack producer', () => {
     expect(p2.fingerprint).not.toBe(p.fingerprint);
   });
 });
+
+describe('the fingerprint line cannot be forged by a slash in a name', () => {
+  const board = (name: string, blurb: string): string => JSON.stringify({
+    challenges: [{
+      id: 'daily.x', period: 'daily', stat: 'kills', target: 1, scrap: 1, name, blurb,
+    }],
+  });
+
+  it('refuses a slash in the NON-TERMINAL free-form field, and allows it in the terminal one', () => {
+    /* MEASURED BEFORE THE FIX: `{name:"A/B", blurb:"C"}` and
+     * `{name:"A", blurb:"B/C"}` both produced
+     * `daily.x:daily/kills/1/1/-/A/B/C`. Two different manifests, one
+     * fingerprint, and the console's line-for-line diff renders no change —
+     * the per-pack ratchet blind to the change it exists to see.
+     *
+     * A free-form token is unambiguous only where it is TERMINAL, and only
+     * `blurb` can be. So the slash is refused in `name` and stays legal in
+     * `blurb`: refusing both would cost a punctuation mark for nothing.
+     *
+     * The defective implementation is the one that shipped — no check. It
+     * accepts both and they collide. */
+    const forged = parseChallengesManifest(board('A/B', 'C'));
+    expect(forged.manifest).toBeNull();
+    expect(forged.errors[0]).toContain('may not contain "/"');
+    expect(forged.errors[0]).toContain('fingerprint column');
+
+    const legal = parseChallengesManifest(board('A', 'B/C'));
+    expect(legal.errors).toEqual([]);
+    expect(challengesFingerprintInputs(legal.manifest!))
+      .toEqual(['daily.x:daily/kills/1/1/-/A/B/C']);
+  });
+
+  it('leaves every shipped name alone, so no digest moves', () => {
+    /* The reason this is a refusal and not a re-encoding. A new encoding would
+     * move EVERY declared quests digest and would have to be its own release;
+     * a refusal moves nothing, PROVIDED no shipped name contains a slash. That
+     * proviso is the test. */
+    const parsed = parseChallengesManifest(readFileSync(QUESTS_JSON, 'utf8'));
+    expect(parsed.errors).toEqual([]);
+    for (const c of parsed.manifest!.challenges) {
+      expect(c.name, `${c.id} would now be refused`).not.toContain('/');
+    }
+    for (const a of parsed.manifest!.achievements) {
+      expect(a.name, `${a.id} would now be refused`).not.toContain('/');
+    }
+  });
+});
