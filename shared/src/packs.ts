@@ -108,6 +108,26 @@ export const PACKS: Readonly<Partial<Record<PackKind, PackDef>>> = Object.freeze
   },
 });
 
+/**
+ * The largest version any pack kind may carry, and it is a WIRE fact rather
+ * than a preference: `PackVersion.version` is a u16 everywhere it travels, and
+ * `parseItemRef` refuses `items@<v>:` above this number.
+ *
+ * IT WAS DOCUMENTED AND NOWHERE ENFORCED. Discovery accepted any integer >= 1,
+ * so installing `items/100000/items.json` made that pack the newest, every
+ * granted ref was formatted against it, and `parseItemRef` then refused every
+ * one — match drops, challenge items, achievement awards, competition prizes
+ * and craft output all vanishing with no error anywhere, because a ref that
+ * does not parse is simply not an item. The failure is silent at every step,
+ * which is why the bound belongs at the DOOR rather than at the reader.
+ */
+export const MAX_PACK_VERSION = 0xffff;
+
+/** Is `v` a version a pack may actually be installed at, and a ref carry? */
+export function isPackVersion(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= MAX_PACK_VERSION;
+}
+
 /** One pack at one version. This is what a release names. */
 export interface PackVersion {
   readonly kind: PackKind;

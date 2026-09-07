@@ -44,6 +44,39 @@ function seededRoot(): string {
   return root;
 }
 
+describe('the studio cannot mint a version nothing could read back', () => {
+  it('refuses the save that would create items@65536, and says why', () => {
+    /* The THIRD surface of the u16 ceiling, and the one that creates the
+     * problem rather than failing to notice it. Discovery and lookup now
+     * refuse a version above MAX_PACK_VERSION, so a pack written past it would
+     * be installed, immutable and INVISIBLE the moment it landed — with the
+     * operator told the save succeeded. A version directory can never be
+     * rewritten, so that is a permanent hole punched by a green button.
+     *
+     * The defective implementation is the mint without the guard: it returns
+     * ok with `items@65536`, and the very next `itemsVersions()` does not
+     * contain it. */
+    const root = seededRoot();
+    mkdirSync(join(root, 'items', '65535'), { recursive: true });
+    cpSync(join(repoRoot, 'content', 'items.json'), join(root, 'items', '65535', 'items.json'));
+
+    const { studio, inv } = studioWith(root);
+    expect(inv.itemsVersions(), 'the fixture never installed the ceiling version')
+      .toEqual([1, 65535]);
+
+    const manifest = { items: [{ id: 'skin-a', kind: 'skin', name: 'A', rarity: 'common' }] };
+    const r = studio.saveItems(JSON.stringify(manifest));
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error).toContain('65535 version ceiling');
+    expect(!r.ok && r.error).toContain('MAX_PACK_VERSION');
+
+    // And nothing was written: the refusal is not a report on a pack that
+    // already landed.
+    expect(existsSync(join(root, 'items', '65536'))).toBe(false);
+    expect(inv.itemsVersions()).toEqual([1, 65535]);
+  });
+});
+
 describe('the studio without a writable packs root', () => {
   it('refuses every save with the reason, and says so in status', () => {
     const { studio } = studioWith(null);

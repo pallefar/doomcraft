@@ -13,6 +13,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { formatItemRef, parseItemRef } from '@doomcraft/shared/items';
+import { MAX_PACK_VERSION } from '@doomcraft/shared/packs';
+
+import { grantRefusal } from './persistence.js';
 import { TRADE_ITEM_COOLDOWN_MS, TRADE_MIN_ACCOUNT_AGE_MS, TRADE_MIN_MATCHES } from './trades.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -91,7 +95,6 @@ async function boot(env: Record<string, string>, seedFn: (dataRoot: string) => v
 
 let on: Boot;
 let off: Boot;
-let unmintable: Boot;
 
 const FLAGS_ON = '{"rules":{"economy_items":{"force":true},"economy_trading":{"force":true}}}';
 
@@ -104,16 +107,8 @@ const FLAGS_ON = '{"rules":{"economy_items":{"force":true},"economy_trading":{"f
  * verdict. It is what obligation (a2) needs and it is also a real defect in
  * its own right — see the report.
  */
-function unmintablePacks(): string {
-  const root = mkdtempSync(join(tmpdir(), 'dc-craft-packs-'));
-  const dir = join(root, 'items', '100000');
-  mkdirSync(dir, { recursive: true });
-  copyFileSync(join(here, '..', '..', 'content', 'items.json'), join(dir, 'items.json'));
-  return root;
-}
-
 beforeAll(async () => {
-  [on, off, unmintable] = await Promise.all([
+  [on, off] = await Promise.all([
     boot(
       { DOOMCRAFT_FLAGS: FLAGS_ON },
       (dataRoot) => {
@@ -125,17 +120,12 @@ beforeAll(async () => {
       },
     ),
     boot({}, (dataRoot) => { seed(dataRoot, ALFA, [RUST, RUST, RUST], 500); }),
-    boot(
-      { DOOMCRAFT_FLAGS: FLAGS_ON, DOOMCRAFT_PACKS: unmintablePacks() },
-      (dataRoot) => { seed(dataRoot, ECHO, [RUST, RUST, RUST], 500); },
-    ),
   ]);
 }, 120_000);
 
 afterAll(() => {
   on?.child.kill('SIGKILL');
   off?.child.kill('SIGKILL');
-  unmintable?.child.kill('SIGKILL');
 });
 
 async function call(origin: string, path: string, body?: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
@@ -263,41 +253,37 @@ describe('V4e: the entry craft is where variant supply comes from', () => {
     expect(json.crafted).toBe(SLUG);
   });
 
-  it('(a2) a craft whose grant cannot deliver REFUSES, and spends nothing', async () => {
+  it('(a2) the delivery pre-check refuses a ref the grant loop would refuse', () => {
     /*
-     * (a) does NOT prove this. With minting enabled, reverting only the
-     * `?? v.plan.targetRef` fallback still leaves (a) at Slug 1 / Slug 1 —
-     * the fallback is only ever consulted when the grant lands nothing.
+     * THIS TEST LOST ITS LEVER, AND THAT IS THE GOOD OUTCOME. It used to boot a
+     * host with a live items pack at version 100000 — legal to install, because
+     * `itemsVersions` accepted any integer >= 1, and unreadable by
+     * `parseItemRef` — so `craftVerdict` said yes while `grantDrops` could
+     * deliver nothing. That was the separating input, and it was a DEFECT being
+     * used as a fixture (HANDOVER §3).
      *
-     * The separating input is a live items pack at version 100000: legal to
-     * install (`itemsVersions` accepts any integer >= 1) and unreadable by
-     * `parseItemRef` (`items@\d{1,5}`, <= 0xffff), so every ref the pack can
-     * mint is refused by `grantDrops` while `craftVerdict` still says yes.
+     * The defect is now closed at the door: `isPackVersion` bounds discovery,
+     * lookup AND minting at MAX_PACK_VERSION, so no installed pack can produce
+     * an unreadable ref and the integration fixture can no longer reach this
+     * branch. Rather than leave a test that boots a host and proves nothing —
+     * with the pack at 100000 now invisible, that host silently falls back to
+     * items@1 and crafts SUCCEED — the proof moves to the predicate the route
+     * actually calls, driven with the exact input the retired fixture produced.
      *
-     * Defective (the `??` fallback, no pre-check): 200, `crafted:
-     * "items@100000:skin-void-hazard"`, three copies and 50 Scrap gone, and
-     * the inventory holds nothing new. Correct: a refusal, and the profile is
-     * exactly as it was.
+     * The pre-check stays. It is defence in depth for a state content can no
+     * longer create, and `index.ts` asks it BEFORE anything is consumed.
      */
-    const before = await stock(ECHO, unmintable.origin);
-    expect(before.refs, 'the fixture never got its copies').toEqual([RUST, RUST, RUST]);
+    const unreadable = formatItemRef(100000, 'skin-void-hazard');
+    expect(parseItemRef(unreadable), 'the ref became readable — this test is asleep').toBeNull();
 
-    const { status, json } = await call(unmintable.origin, '/api/craft', {
-      deviceId: ECHO, source: RUST, target: HAZARD, nonce: 'craft-v4e-undeliverable-1',
-    });
-    expect(status, `answered ${status} with ${JSON.stringify(json)}`).not.toBe(200);
-    expect(String(json.error)).toContain('cannot be delivered');
-    expect(json.crafted).toBeUndefined();
+    const blocked = grantRefusal(unreadable, 'craft');
+    expect(blocked).not.toBeNull();
+    expect(String(blocked)).toContain('is not an item ref');
 
-    // And nothing was spent for it.
-    expect(await stock(ECHO, unmintable.origin)).toEqual(before);
-  });
-
-  it('the live pack really is at the version this test needs', async () => {
-    // Rule 2 in miniature: if the packs root did not take, the refusal above
-    // would be proving something else entirely.
-    const { status, json } = await call(unmintable.origin, '/api/items');
-    expect(status).toBe(200);
-    expect(json.version).toBe(100000);
+    // The control: the same id at a version a pack may actually be installed
+    // at is deliverable, so the refusal is about the VERSION and not about the
+    // item or the source.
+    expect(grantRefusal(formatItemRef(1, 'skin-void-hazard'), 'craft')).toBeNull();
+    expect(grantRefusal(formatItemRef(MAX_PACK_VERSION, 'skin-void-hazard'), 'craft')).toBeNull();
   });
 });

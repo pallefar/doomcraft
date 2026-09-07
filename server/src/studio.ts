@@ -24,6 +24,7 @@ import {
   validateLevel,
 } from '@doomcraft/shared/level';
 import { challengeGrantRefusal, parseItemsManifest, type ItemDef } from '@doomcraft/shared/items';
+import { MAX_PACK_VERSION, isPackVersion } from '@doomcraft/shared/packs';
 import { parseChallengesManifest } from '@doomcraft/shared/challenges';
 import { sanitiseContentId } from '@doomcraft/shared/modes';
 import {
@@ -102,6 +103,16 @@ export class StudioService {
 
   /** tmp-then-rename into a version directory that must not exist yet. */
   private writeVersioned(key: string, version: number, files: Record<string, string>): void {
+    /* THE MINT IS THE LAST DOOR, and it is the one that creates the problem
+     * rather than merely failing to see it. Discovery and lookup now refuse a
+     * version above the u16 ceiling, so a pack written past it would be
+     * invisible the moment it landed — installed, immutable, and unreachable,
+     * with the operator told the save succeeded. Refuse here instead. */
+    if (!isPackVersion(version)) {
+      throw new Error(`${key}@${version} is over the ${MAX_PACK_VERSION} version ceiling `
+        + '(MAX_PACK_VERSION — a pack version is a u16 on the wire and in every item ref, '
+        + 'so a version above it can be written but never read back)');
+    }
     const dir = join(this.packsRoot as string, key, String(version));
     /* Immutability protects a version that EXISTS, not the empty directory a
      * torn save left behind: the version numbering counts a version only

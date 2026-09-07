@@ -12,7 +12,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +36,8 @@ import {
   parseVariantsManifest, wireValuesFor,
 } from '@doomcraft/shared/variants';
 import { WEAPONS, WeaponId } from '@doomcraft/shared/weapons';
+
+import { formatItemRef, parseItemRef } from '@doomcraft/shared/items';
 
 import { PackInventory, ReleaseService } from './packs.js';
 import { Room } from './room.js';
@@ -1232,6 +1234,65 @@ async function helloAndCollect(port: number, caps: number): Promise<Uint8Array[]
   ws.close();
   return frames;
 }
+
+describe('the u16 version ceiling is enforced at every door', () => {
+  /*
+   * `PackVersion.version` was documented "u16" and enforced nowhere.
+   * `parseItemRef` refuses `items@<v>:` above 0xffff, while discovery accepted
+   * any integer >= 1 — so installing `items/100000/items.json` made that pack
+   * the NEWEST, every ref the server minted was formatted against it, and
+   * every one of those refs was then refused by the reader. Match drops,
+   * challenge items, achievement awards, competition prizes and craft output
+   * all stopped landing, with no error anywhere, because a ref that does not
+   * parse is simply not an item.
+   *
+   * The fix is at the DOOR rather than the reader, and it has three surfaces.
+   * Each is asserted separately because each fails differently: discovery
+   * decides what is NEWEST, lookup decides what a pinned version resolves to,
+   * and the mint decides what can be created in the first place.
+   */
+  function rootWithOversizeItems(version: number): string {
+    const root = packsRoot();
+    const dir = join(root, 'items', String(version));
+    mkdirSync(dir, { recursive: true });
+    cpSync(join(repoRoot, 'content', 'items.json'), join(dir, 'items.json'));
+    return root;
+  }
+
+  it('DISCOVERY does not report a version no ref could carry', () => {
+    const root = rootWithOversizeItems(100_000);
+    const inv = new PackInventory({ packsRoot: root, log: () => {} });
+    // The file is really there — otherwise this proves nothing about the cap.
+    expect(existsSync(join(root, 'items', '100000', 'items.json'))).toBe(true);
+    expect(inv.itemsVersions()).toEqual([1]);
+  });
+
+  it('LOOKUP refuses the same version, so a pinned release cannot resolve to it', () => {
+    const inv = new PackInventory({ packsRoot: rootWithOversizeItems(100_000), log: () => {} });
+    expect(inv.itemsAt(100_000)).toBeNull();
+    expect(inv.itemsFileFor(100_000)).toBeNull();
+    // The boundary itself is legal, and one past it is not.
+    const at = new PackInventory({ packsRoot: rootWithOversizeItems(65_535), log: () => {} });
+    expect(at.itemsVersions()).toEqual([1, 65_535]);
+    const over = new PackInventory({ packsRoot: rootWithOversizeItems(65_536), log: () => {} });
+    expect(over.itemsVersions()).toEqual([1]);
+  });
+
+  it('every ref the newest discovered items pack can mint READS BACK', () => {
+    /* The property the cap exists for, asserted end to end rather than as a
+     * number: whatever discovery calls newest, a ref formatted against it must
+     * survive `parseItemRef`. The defective build reports 100000 here and
+     * every ref below returns null. */
+    const inv = new PackInventory({ packsRoot: rootWithOversizeItems(100_000), log: () => {} });
+    const newest = inv.itemsVersions().at(-1)!;
+    const manifest = inv.itemsAt(newest)!.manifest;
+    expect(manifest.items.length).toBeGreaterThan(0);
+    for (const item of manifest.items) {
+      expect(parseItemRef(formatItemRef(newest, item.id)), `items@${newest}:${item.id}`)
+        .not.toBeNull();
+    }
+  });
+});
 
 describe('V4b moves items@1\'s digest, and the host says so out loud', () => {
   /*

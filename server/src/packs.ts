@@ -49,6 +49,7 @@ import {
   type Release,
   type ReleaseDoc,
   type ReleaseState,
+  isPackVersion,
 } from '@doomcraft/shared/packs';
 import { CONTENT_VERSION } from '@doomcraft/shared/version';
 import { formatValidation, type Level } from '@doomcraft/shared/level';
@@ -154,6 +155,7 @@ export class PackInventory {
 
   /** Directory for a levels version, or null when not installed. */
   levelsDirFor(version: number): string | null {
+    if (!isPackVersion(version)) return null;
     if (version === 1 && this.packsRoot === null) {
       return existsSync(this.levelsFallbackDir) ? this.levelsFallbackDir : null;
     }
@@ -167,6 +169,7 @@ export class PackInventory {
   }
 
   itemsFileFor(version: number): string | null {
+    if (!isPackVersion(version)) return null;
     if (this.packsRoot !== null) {
       const file = join(this.packsRoot, 'items', String(version), 'items.json');
       if (existsSync(file)) return file;
@@ -183,7 +186,7 @@ export class PackInventory {
       if (existsSync(root)) {
         for (const name of readdirSync(root)) {
           const v = Number(name);
-          if (Number.isInteger(v) && v >= 1 && this.itemsFileFor(v) !== null) out.add(v);
+          if (isPackVersion(v) && this.itemsFileFor(v) !== null) out.add(v);
         }
       }
     }
@@ -233,6 +236,7 @@ export class PackInventory {
    * mismatch rather than quietly serving the substitute.
    */
   variantsFileFor(version: number): string | null {
+    if (!isPackVersion(version)) return null;
     if (this.packsRoot !== null) {
       const file = join(this.packsRoot, 'variants', String(version), 'variants.json');
       if (existsSync(file)) return file;
@@ -249,7 +253,7 @@ export class PackInventory {
       if (existsSync(root)) {
         for (const name of readdirSync(root)) {
           const v = Number(name);
-          if (Number.isInteger(v) && v >= 1 && this.variantsFileFor(v) !== null) out.add(v);
+          if (isPackVersion(v) && this.variantsFileFor(v) !== null) out.add(v);
         }
       }
     }
@@ -268,6 +272,7 @@ export class PackInventory {
   }
 
   questsFileFor(version: number): string | null {
+    if (!isPackVersion(version)) return null;
     if (this.packsRoot !== null) {
       const file = join(this.packsRoot, 'quests', String(version), 'quests.json');
       if (existsSync(file)) return file;
@@ -284,7 +289,7 @@ export class PackInventory {
       if (existsSync(root)) {
         for (const name of readdirSync(root)) {
           const v = Number(name);
-          if (Number.isInteger(v) && v >= 1 && this.questsFileFor(v) !== null) out.add(v);
+          if (isPackVersion(v) && this.questsFileFor(v) !== null) out.add(v);
         }
       }
     }
@@ -305,6 +310,7 @@ export class PackInventory {
   }
 
   episodesFileFor(version: number): string | null {
+    if (!isPackVersion(version)) return null;
     if (this.packsRoot !== null) {
       const file = join(this.packsRoot, 'campaign', String(version), 'episodes.json');
       if (existsSync(file)) return file;
@@ -322,7 +328,7 @@ export class PackInventory {
       if (existsSync(root)) {
         for (const name of readdirSync(root)) {
           const v = Number(name);
-          if (Number.isInteger(v) && v >= 1 && this.levelsDirFor(v) !== null) out.add(v);
+          if (isPackVersion(v) && this.levelsDirFor(v) !== null) out.add(v);
         }
       }
     }
@@ -337,7 +343,7 @@ export class PackInventory {
       if (existsSync(root)) {
         for (const name of readdirSync(root)) {
           const v = Number(name);
-          if (Number.isInteger(v) && v >= 1 && this.episodesFileFor(v) !== null) out.add(v);
+          if (isPackVersion(v) && this.episodesFileFor(v) !== null) out.add(v);
         }
       }
     }

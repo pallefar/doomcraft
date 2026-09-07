@@ -461,14 +461,27 @@ has shipped, so it is gone; the arc is in §1 and in git.
 
 3. **Defects found and deliberately left open. Fix or decide — do not
    rediscover.**
-   - **A pack version above 65535 silently disables EVERY item grant.**
-     `itemsVersions()` accepts any integer >= 1; `parseItemRef` is
-     `^items@(\d{1,5}):` and caps at `0xffff`. Install `items/100000/` and
-     drops, challenge items, prizes and craft output all vanish with no error.
-     Pinned by a test; the cap itself is unfixed. RUN 2026-09-06, correcting
-     this entry's own wording: the bound is the NUMERIC check, not the digit
-     count — `items@65535:` parses, and `items@65536:` (five digits) is
-     refused just as `items@100000:` is.
+   - **FIXED 2026-09-07 — a pack version above 65535 silently disabled EVERY
+     item grant.** `itemsVersions()` accepted any integer >= 1 while
+     `parseItemRef` refuses above `0xffff`, so installing `items/100000/`
+     made that pack the NEWEST, every minted ref was formatted against it, and
+     every one was then refused by the reader — drops, challenge items,
+     achievement awards, prizes and craft output all vanishing with no error,
+     because a ref that does not parse is simply not an item. `MAX_PACK_VERSION`
+     and `isPackVersion` now bound all three surfaces: DISCOVERY (five kinds,
+     one shared predicate where there were five copies), LOOKUP (five doors),
+     and the MINT (`writeVersioned` refuses rather than creating a version that
+     is installed, immutable and invisible). The bound is on the DOOR, not the
+     reader. Note the ceiling is the NUMERIC check and not the digit count:
+     `items@65536:` has five digits and is refused too.
+     **This closed the lever another proof was standing on** — V4e's "a craft
+     whose grant cannot deliver" test installed a pack at 100000 as its
+     fixture, i.e. it used a defect to create its separating input. With the
+     defect fixed that host silently falls back to items@1 and the craft
+     SUCCEEDS, so the test proved nothing. It now drives `grantRefusal`
+     directly with the ref the retired fixture produced. Rule 26, arriving from
+     the other direction: fixing a bug can retire a proof just as moving code
+     behind a seam can.
    - **NEW 2026-09-06 — the quests fingerprint encoding is AMBIGUOUS, so the
      per-pack ratchet cannot see a change it exists to see.**
      `challengesFingerprintInputs` joins every field with `/`, including the
