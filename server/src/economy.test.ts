@@ -43,6 +43,7 @@ import {
   encodeInput,
 } from '@doomcraft/shared';
 import { FLAG_ORDER, defaultFlagBits } from '@doomcraft/shared/flags';
+import type { AchievementDef } from '@doomcraft/shared/achievements';
 import type { ChallengeDef } from '@doomcraft/shared/challenges';
 import { ModeId } from '@doomcraft/shared/modes';
 import { MatchType, SessionOrigin } from '@doomcraft/shared/trust';
@@ -142,6 +143,10 @@ interface RoomSpec {
   rollDrops?: (ctx: { deviceId: string; flagBits: number; kills: number; seconds: number; won: boolean }) => readonly string[];
   /** Challenge defs the session is OPENED with. Absent = no challenge engine. */
   challenges?: readonly ChallengeDef[];
+  /** Lifetime awards, pinned for the room's life exactly as `challenges` are. */
+  achievements?: readonly AchievementDef[];
+  /** Does the pinned items manifest still define this local id? Payment-time membership. */
+  itemKnown?: (localId: string) => boolean;
 }
 
 /**
@@ -179,6 +184,8 @@ function makeRoom(spec: RoomSpec): Room {
     resolveFlags: () => spec.flagBits ?? defaultFlagBits(),
     rollDrops: spec.rollDrops,
     challenges: spec.challenges,
+    achievements: spec.achievements,
+    itemKnown: spec.itemKnown,
   });
 }
 
@@ -305,6 +312,7 @@ function expectedScrap(kills: number, won: boolean, ticks: number): number {
 
 /** The shipped bits with the reward kill switch flipped on, as an operator would. */
 const SCRAP_ON = (defaultFlagBits() | (1 << FLAG_ORDER.indexOf('economy_scrap'))) >>> 0;
+const ACHIEVEMENTS_ON = (SCRAP_ON | (1 << FLAG_ORDER.indexOf('economy_achievements'))) >>> 0;
 
 /** Every MATCH_AWARD this socket was sent, decoded. */
 function awards(client: Client): ReturnType<typeof createMatchAwardMessage>[] {
@@ -392,6 +400,88 @@ describe('a server-hosted public deathmatch', () => {
     expect(profile.progress.gamesPlayed).toBe(1);
     expect(profile.stats.matches).toBe(1);
     expect(guard.status().accepted).toBe(1);
+  });
+
+  it('pays an achievement through a REAL round, and the round that earns it is the round that pays', async () => {
+    /*
+     * RULE 1: "it compiles and tests pass" is not evidence. Every other test of
+     * this feature drives `settleAchievements` directly. This is the only one
+     * that proves the Room actually CALLS it — the failure mode where a
+     * finished, tested, typechecked feature ships to nobody.
+     *
+     * It also pins the ORDERING, which no direct call can. `applyMatchResult`
+     * writes the lifetime block and `settleAchievements` reads it, so a
+     * settlement placed BEFORE the stats update would see a career of zero and
+     * pay nothing. First Blood needs exactly one lifetime kill and the player
+     * starts with none, so the round that earns it must be the round that pays
+     * it: put the achievement block above `applyMatchResult` and this goes red
+     * with the award unpaid.
+     */
+    const FIRST_BLOOD: AchievementDef = {
+      id: 'achievement.first-blood', name: 'First Blood', blurb: 'Your first.',
+      stat: 'kills', target: 1, scrap: 25, item: null,
+    };
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({
+      store, guard, flagBits: ACHIEVEMENTS_ON,
+      achievements: [FIRST_BLOOD], itemKnown: () => true,
+    });
+
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = 1;
+
+    const before = await store.ensure(DEVICE);
+    expect(before.stats.kills, 'the fixture already had kills — First Blood proves nothing').toBe(0);
+    expect(before.achievements).toEqual({ done: [], owed: [] });
+
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+
+    const after = await store.ensure(DEVICE);
+    expect(after.stats.kills).toBe(1);
+    expect(after.achievements.done).toEqual(['achievement.first-blood']);
+    expect(after.achievements.owed).toEqual([]);
+    /* The award's 25 Scrap is ON TOP of the match payout, so the assertion is
+     * the DIFFERENCE rather than a total — a total would move with the reward
+     * curve and this test would then be pinning the wrong thing. */
+    const noAward = new MemoryStore();
+    const plain = makeRoom({
+      store: noAward, guard: new EntitlementGuard(() => 1_000), flagBits: ACHIEVEMENTS_ON,
+    });
+    const twin = join(plain, 'Marine', DEVICE);
+    twin.player.kills = 1;
+    run(plain, [twin], PLAY_TICKS);
+    endRoundNow(plain, [twin]);
+    await settled(noAward, DEVICE);
+    const baseline = (await noAward.ensure(DEVICE)).economy.scrap;
+    expect(after.economy.scrap - baseline).toBe(25);
+  });
+
+  it('does not pay an achievement when the flag is off, though the round still counts', async () => {
+    /* The kill switch at the ROOM boundary, which is where it lives — the
+     * board route 404ing proves nothing about the mint. And the round is
+     * asserted to have happened, so this cannot pass because nothing ran. */
+    const FIRST_BLOOD: AchievementDef = {
+      id: 'achievement.first-blood', name: 'First Blood', blurb: 'Your first.',
+      stat: 'kills', target: 1, scrap: 25, item: null,
+    };
+    const store = new MemoryStore();
+    const room = makeRoom({
+      store, guard: new EntitlementGuard(() => 1_000), flagBits: SCRAP_ON,
+      achievements: [FIRST_BLOOD], itemKnown: () => true,
+    });
+    const client = join(room, 'Marine', DEVICE);
+    client.player.kills = 1;
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+
+    const p = await store.ensure(DEVICE);
+    expect(p.stats.kills, 'the round did not happen — this proves nothing').toBe(1);
+    expect(p.achievements.done).toEqual([]);
+    expect(p.achievements.owed).toEqual([]);
   });
 
   it('still credits the win when somebody actually scored', async () => {
