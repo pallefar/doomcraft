@@ -515,9 +515,23 @@ has shipped, so it is gone; the arc is in §1 and in git.
      false), so this is confined to the lifetime block today — but it is
      exactly why the achievement system may NOT price `wins`, and it would
      become a mint the moment anything else does.
-   - `equippedSkin` and `title` are still reachable through
-     `POST /api/profile`. V4c added `variants` to `SERVER_OWNED_PROFILE_FIELDS`
-     and left those two.
+   - **CORRECTED AND CLOSED 2026-09-07 — `equippedSkin` and `title` were NOT
+     in fact reachable through `POST /api/profile`.** This entry was wrong, and
+     a wrong open-defect entry costs a future session a day. MEASURED: the
+     route assigns `progress`, `settings`, `bindings` and `loadout` FIELD BY
+     FIELD and never touches `p.inventory`, so an incoming `equippedSkin`
+     landed nowhere.
+     What was true is worse-shaped and is now fixed: the ALLOWLIST ACCEPTED
+     both, so the thing protecting them was the SHAPE OF THE MERGE rather than
+     the guard that documents itself as protecting them — one
+     `p.inventory = incoming.inventory` in a tidy-up and the door opens with
+     nothing left to say no. Both are on `SERVER_OWNED_PROFILE_FIELDS` now.
+     `inventory` itself is deliberately NOT listed: the guard descends and
+     names the LEAF (`inventory.equippedSkin`), and which claim was attempted
+     is the signal an operator reads.
+     **A fifth load-sensitive test, of a new kind:** `accounts.test.ts`'s
+     `afterAll` can fail `ENOTEMPTY` removing its temp dir during a concurrent
+     full run. It passes 30/30 alone at load 55. Teardown, not timing.
    - `craft.ts` clears `equippedSkin` on consuming a last copy but not a variant
      claim (read-time validation covers it).
    - The `loadoutTab.ts` wiring proof is a SOURCE RATCHET, not behavioural.

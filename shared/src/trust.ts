@@ -874,6 +874,29 @@ export const SERVER_OWNED_PROFILE_FIELDS: readonly string[] = Object.freeze([
    * and not the guarantee — but a write that can only be wrong should be
    * REFUSED, and refused loudly: it lands in the violation ring. */
   'variants',
+  /* 2026-09-07. HANDOVER §3 listed these as "still reachable through
+   * POST /api/profile". MEASURED, they are not: the route assigns `progress`,
+   * `settings`, `bindings` and `loadout` field by field and never touches
+   * `p.inventory`, so an incoming `equippedSkin` lands nowhere.
+   *
+   * They go on the list anyway, and the reason is the interesting half. The
+   * allowlist ACCEPTED all three — only `inventory.items` was rejected — so
+   * what actually protected them was the SHAPE OF THE MERGE, not the guard
+   * that documents itself as protecting them. One `p.inventory =
+   * incoming.inventory` in a tidy-up, or a wholesale `Object.assign`, opens the
+   * door with nothing left to say no. `equippedSkin` decides which skin a
+   * player wears and `title` what their name reads as; both are validated at
+   * `POST /api/equip` against ownership, revocation and item KIND, and this
+   * door has no such check — the same second-door argument `variants` makes
+   * directly above. No client sends any of them: every client use of
+   * `/api/profile` is a GET.
+   *
+   * `inventory` itself is deliberately NOT on this list. Rejecting the whole
+   * section would work and would report worse: the guard DESCENDS into it and
+   * names the leaf, so an attempt reads `inventory.variants` or
+   * `inventory.equippedSkin` in the ring rather than a flat `inventory`, and
+   * which claim was attempted is the signal an operator is actually reading. */
+  'equippedSkin', 'title',
 ]);
 
 export function isClientOwnedProfileField(name: string): boolean {

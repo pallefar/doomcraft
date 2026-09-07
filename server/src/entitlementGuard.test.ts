@@ -587,6 +587,7 @@ describe('guardProfileWrite', () => {
   it('is not fooled by a non-object body', () => {
     expect(guardProfileWrite(null).violation).toBe(false);
     expect(guardProfileWrite('xp=999').accepted).toEqual({});
+
   });
 
   /* ---------------------------------------------------------------------- *
@@ -637,6 +638,44 @@ describe('guardProfileWrite', () => {
     // And nothing global was harmed on the way through.
     expect(({} as Record<string, unknown>).xp).toBeUndefined();
   });
+  it('refuses the wearable claims by NAME, and names the leaf it found them at', () => {
+    /* HANDOVER §3 said `equippedSkin` and `title` were "still reachable through
+     * POST /api/profile". Measured, they were not — the route assigns
+     * `progress`, `settings`, `bindings` and `loadout` field by field and never
+     * touches `p.inventory`, so an incoming claim landed nowhere.
+     *
+     * But the ALLOWLIST accepted them, so what protected them was the shape of
+     * the merge rather than the guard that documents itself as protecting them.
+     * One `p.inventory = incoming.inventory` in a tidy-up and the door opens
+     * with nothing left to say no. `POST /api/equip` validates a claim against
+     * ownership, revocation and item KIND; this door has no such check.
+     *
+     * The defective implementation is the one that shipped: both names absent
+     * from the list, so a body of nothing but wearable claims answers
+     * `rejectedFields: []` and `violation: false` and the attempt is invisible.
+     *
+     * `inventory` itself is deliberately not listed, so the guard descends and
+     * names the LEAF — which claim was attempted is the signal, not that
+     * something under `inventory` was. */
+    const v = guardProfileWrite({
+      equippedSkin: 'items@1:skin-relic-bone',
+      title: 'items@1:title-knee-deep',
+      inventory: { equippedSkin: 'items@1:skin-relic-bone', title: 'items@1:title-knee-deep' },
+    });
+    expect([...v.rejectedFields].sort()).toEqual([
+      'equippedSkin', 'inventory.equippedSkin', 'inventory.title', 'title',
+    ]);
+    expect(v.violation).toBe(true);
+
+    // The control: fields a browser really does own are accepted whole and
+    // raise nothing, so the refusal above is about these names and not about
+    // the guard having become indiscriminate.
+    const ok = guardProfileWrite({ progress: { name: 'Legit' }, settings: { showAds: true } });
+    expect(ok.rejectedFields).toEqual([]);
+    expect(ok.violation).toBe(false);
+    expect(Object.keys(ok.accepted).sort()).toEqual(['progress', 'settings']);
+  });
+
 });
 
 /* ------------------------------------------------------------------------ *
