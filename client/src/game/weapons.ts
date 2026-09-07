@@ -1300,15 +1300,34 @@ export class WeaponRuntime {
       return;
     }
 
-    const head = scratchHeadshot;
+    /* MELEE HAS NO HEADSHOTS, and this branch used to predict one.
+     *
+     * `traceTargets` sets `scratchHeadshot` because the hitscan path needs it,
+     * and this branch read it — so a swing through a head predicted
+     * `base * headshotMultiplier`, reported `HIT_HEAD`, counted a headshot and
+     * played the headshot impact. The SERVER's `resolveMelee` is a cone test
+     * with no head box on either branch, players or monsters, and it passes 0
+     * for the headshot flag. So the player was shown a headshot, a headshot
+     * damage number and a headshot marker for a hit the server scored as an
+     * ordinary body blow — and a kill the client predicted on the inflated
+     * number did not always happen.
+     *
+     * The client follows the server here rather than the other way round: the
+     * server is authoritative for damage, so a prediction it will never
+     * confirm is a fiction. `shared/src/variants.ts` already says the same
+     * thing from the other end — `headshotMultiplier` is an INERT field for a
+     * melee weapon, "`resolveMelee` has no headshot logic at all" — which is a
+     * design statement, not an oversight, and this is the client half of it.
+     *
+     * `scratchHeadshot` is deliberately not consulted at all now: reading it
+     * and discarding it is one edit away from being read and used again. */
     const base = damageAtDistanceOf(def, dist);
-    const dmg = head ? base * def.headshotMultiplier : base;
-    report.kind[0] = head ? HIT_HEAD : HIT_BODY;
+    const dmg = base;
+    report.kind[0] = HIT_BODY;
     report.targetId[0] = scratchTargetId;
     report.damage[0] = dmg;
     report.distance[0] = dist;
     report.hits = 1;
-    if (head) report.headshots = 1;
     report.totalDamage = dmg;
     report.connected = true;
     const hx = ctx.ox + ctx.dx * dist;
@@ -1318,7 +1337,7 @@ export class WeaponRuntime {
     this.tally(scratchTargetId, dmg, scratchTargetHealth);
     this.noteBestHit(dmg, hx, hy, hz, -ctx.dx, -ctx.dy, -ctx.dz, dist);
     if (this.fx?.fleshImpact) {
-      this.fx.fleshImpact(hx, hy, hz, -ctx.dx, -ctx.dy, -ctx.dz, scratchTargetId, head, id);
+      this.fx.fleshImpact(hx, hy, hz, -ctx.dx, -ctx.dy, -ctx.dz, scratchTargetId, false, id);
     }
   }
 

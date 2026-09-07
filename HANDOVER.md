@@ -566,7 +566,23 @@ has shipped, so it is gone; the arc is in §1 and in git.
      a test. Its first assertion is the scan's own guard: a regex that matches
      nothing fails `expected +0 to be 5` rather than passing vacuously, which
      is the failure mode a scan has to be built against.
-   - Melee headshots are client-only, for players too.
+   - **FIXED 2026-09-07 — melee headshots were client-only.** This entry was
+     RIGHT, unlike three of its neighbours. `traceTargets` sets
+     `scratchHeadshot` because the hitscan path needs it, and `fireMelee` read
+     it: a swing through a head predicted `base * headshotMultiplier`, reported
+     HIT_HEAD, counted a headshot and played the headshot impact, while the
+     server's `resolveMelee` — a cone test with no head box on either branch —
+     scored a plain body blow. The CLIENT follows the server, because the server
+     is authoritative for damage and a prediction it will never confirm is a
+     fiction; `shared/src/variants.ts` already said melee has no headshots from
+     the other end, calling `headshotMultiplier` inert for a melee weapon.
+     **`agreement.test.ts` explicitly skipped melee**, which is how this
+     survived — and its aside, "melee has no cone on either side", is false of
+     the server (a ~44 degree half-cone at cosLimit 0.72). The skip is right for
+     that test (melee has no spread cone to compare) and is now narrowed to say
+     so; the head question has its own case, with a PISTOL CONTROL down the
+     identical ray, because "no headshot" is otherwise indistinguishable from
+     "the trace never reached the head".
 
 4. **Then:** portals/TWA, C7 analytics, the deathmatch share surface (needs its
    own `#ui` element), and the two sponsor loose ends — no screenshot harness

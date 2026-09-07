@@ -42,7 +42,7 @@ import { createHitTargets, pushEntityTarget, pushPlayerTarget } from './weapons'
 import { Simulation } from '@doomcraft/server/src/sim.js';
 import { ServerWorld } from '@doomcraft/server/src/world.js';
 
-import { createFireContext, WeaponRuntime } from './weapons';
+import { createFireContext, HIT_BODY, HIT_HEAD, WeaponRuntime } from './weapons';
 
 const SEED = 20260905;
 const OWNER = 7;
@@ -193,7 +193,14 @@ const AIMS: Array<[number, number, string]> = [
 describe('the two predictors resolve the same pellets', () => {
   for (let weapon = 0; weapon < WEAPON_COUNT; weapon++) {
     const def = WEAPONS[weapon];
-    if (def.kind === FireKind.MELEE) continue;   // melee has no cone on either side
+    /* Melee is skipped HERE because it fires one "pellet" and has no spread
+     * cone to compare — not because the two sides agree about it. The server's
+     * `resolveMelee` very much has a cone (a ~44 degree half-cone at
+     * cosLimit 0.72); what it has no notion of is a HEAD, and the case below
+     * is where that is asserted. The old comment said "melee has no cone on
+     * either side", which is false of the server and is the sort of aside that
+     * makes a gap look intentional. */
+    if (def.kind === FireKind.MELEE) continue;
 
     it(`${def.name}: every pellet of every shot, bit for bit`, () => {
       for (const [yaw, pitch, where] of AIMS) {
@@ -602,6 +609,78 @@ describe('a predicted kill is a kill the server also scores', () => {
  * `SessionArsenal.from` — which is what the WIRE feeds, not the parser — takes
  * the overlay as given. So the arithmetic is tested where the arithmetic lives.
  * ------------------------------------------------------------------------ */
+
+describe('melee predicts no headshot, because the server scores none', () => {
+  it('reports a BODY hit through a head the same weapon class would headshot with a bullet', () => {
+    /*
+     * `traceTargets` sets `scratchHeadshot` for whoever asks, and `fireMelee`
+     * used to read it — so a saw swung through a head predicted
+     * `base * headshotMultiplier`, reported HIT_HEAD, counted a headshot and
+     * played the headshot impact. The server's `resolveMelee` is a cone test
+     * with no head box on either branch, players or monsters, and passes 0 for
+     * the headshot flag. The player was shown a headshot, a headshot number
+     * and a headshot marker for a hit the server scored as a body blow.
+     *
+     * `shared/src/variants.ts` says the same thing from the other end:
+     * `headshotMultiplier` is an INERT field for a melee weapon because
+     * "`resolveMelee` has no headshot logic at all". That is a design
+     * statement, and this is its client half.
+     *
+     * THE HITSCAN CONTROL IS THE WHOLE TEST. Without it, "no headshot" is
+     * indistinguishable from "the trace never reached the head" and the
+     * assertion is vacuous — the failure this repo keeps finding. The pistol
+     * fired from the identical origin, along the identical ray, at the
+     * identical target MUST report a head hit; only then does the saw's body
+     * hit mean anything.
+     */
+    const targets = createHitTargets();
+    // Eye-height ray straight down -Z into a target one metre away, aimed at
+    // the head box (feet at 200, PLAYER_HEAD_MIN_Y above that).
+    pushPlayerTarget(targets, 2, 0.5, 200, 200 - 1, true, 1, FULL_HEALTH);
+
+    const aim = (ctx: ReturnType<typeof createFireContext>): void => {
+      ctx.ownerId = OWNER;
+      ctx.ox = 0.5; ctx.oy = 200 + PLAYER_EYE_HEIGHT; ctx.oz = 200;
+      ctx.dx = 0; ctx.dy = 0; ctx.dz = -1;
+      ctx.targets = targets;
+      ctx.world = null;
+    };
+
+    // CONTROL: a bullet along this ray IS a headshot, so the fixture is aimed.
+    const gun = new WeaponRuntime();
+    gun.resetLoadout(ALL_WEAPON_MASK);
+    gun.current = WeaponId.PISTOL;
+    gun.heat[WeaponId.PISTOL] = 0;
+    const gunCtx = createFireContext();
+    aim(gunCtx);
+    const shot = gun.fireOnce(gunCtx);
+    expect(shot.hits, 'the control never hit — the fixture is not aimed').toBe(1);
+    expect(shot.headshots, 'the control is not a headshot — this proves nothing').toBe(1);
+    expect(shot.kind[0]).toBe(HIT_HEAD);
+
+    // THE CASE: the same ray with a saw is a body hit, at base damage.
+    const saw = new WeaponRuntime();
+    saw.resetLoadout(ALL_WEAPON_MASK);
+    saw.current = WeaponId.CHAINSAW;
+    const sawCtx = createFireContext();
+    aim(sawCtx);
+    const swing = saw.fireOnce(sawCtx);
+
+    expect(swing.connected, 'the saw never reached the target').toBe(true);
+    expect(swing.hits).toBe(1);
+    expect(swing.headshots).toBe(0);
+    expect(swing.kind[0]).toBe(HIT_BODY);
+
+    /* And the DAMAGE, which is the cost the player actually paid for the
+     * fiction. The multiplier is > 1 for this weapon, so the defective build's
+     * number is strictly larger and the assertion separates them. */
+    const sawDef = WEAPONS[WeaponId.CHAINSAW];
+    expect(sawDef.headshotMultiplier, 'a multiplier of 1 would make this vacuous')
+      .toBeGreaterThan(1);
+    expect(swing.totalDamage).toBe(swing.damage[0]);
+    expect(swing.totalDamage).toBeLessThan(swing.damage[0] * sawDef.headshotMultiplier);
+  });
+});
 
 describe('the pellet ceiling holds on both sides', () => {
   /** Pellets the SERVER actually resolved, counted off the damage events. */
