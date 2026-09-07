@@ -242,12 +242,17 @@ describe('the parser refuses rather than corrects', () => {
     expect(both.manifest!.achievements).toHaveLength(1);
   });
 
-  it('refuses an unknown stat, and `wins` is deliberately unknown', () => {
-    /* Not a spelling test. `wins` is a real lifetime field on the profile and
-     * an obvious achievement — and a hundred idle rounds move it a hundred
-     * times while paying nothing, so pricing it would mint Scrap for doing
-     * nothing (HANDOVER §3). The parser is where that decision is enforced. */
-    for (const stat of ['wins', 'matches', 'secondsPlayed', 'deaths', 'seconds']) {
+  it('refuses a stat the player cannot fail to accumulate', () => {
+    /* Not a spelling test. Each of these is a real lifetime field on the
+     * profile that increments for a round in which the player did nothing, so
+     * pricing one would mint Scrap for existing. The parser is where that
+     * decision is enforced rather than left to whoever writes the content.
+     *
+     * `wins` USED TO BE ON THIS LIST and no longer is: it was refused because
+     * `endRound` crowned a lone player at 0 kills, which is fixed at the
+     * source, so a lifetime win now implies somebody scored. No shipped
+     * content prices it — the door is open, nothing has walked through. */
+    for (const stat of ['matches', 'secondsPlayed', 'deaths', 'seconds']) {
       const r = parseAchievementsSection([{ ...def(), stat }]);
       expect(r.defs, `stat "${stat}" must be refused`).toBeNull();
       expect(r.errors[0]).toContain(`unknown lifetime stat "${stat}"`);
@@ -316,7 +321,7 @@ describe('the parser refuses rather than corrects', () => {
 
 describe('one progress function, one completion function', () => {
   const career = {
-    kills: 940, bestStreak: 12, damageDealt: 100_000,
+    kills: 940, wins: 77, bestStreak: 12, damageDealt: 100_000,
     blocksPlaced: 4999, blocksBroken: 0,
   };
 
@@ -341,9 +346,9 @@ describe('one progress function, one completion function', () => {
   it('reads the stat the def names and no other', () => {
     /* The defective implementation hard-codes `kills`. Each stat is given a
      * value no other stat has, so a wrong field cannot coincidentally match. */
-    const distinct = { kills: 11, bestStreak: 22, damageDealt: 33, blocksPlaced: 44, blocksBroken: 55 };
+    const distinct = { kills: 11, wins: 66, bestStreak: 22, damageDealt: 33, blocksPlaced: 44, blocksBroken: 55 };
     const expected: Record<string, number> = {
-      kills: 11, bestStreak: 22, damageDealt: 33, blocksPlaced: 44, blocksBroken: 55,
+      kills: 11, wins: 66, bestStreak: 22, damageDealt: 33, blocksPlaced: 44, blocksBroken: 55,
     };
     for (const stat of ACHIEVEMENT_STATS) {
       expect(achievementProgress(def({ stat, target: 1000 }), distinct)).toBe(expected[stat]);

@@ -2358,7 +2358,8 @@ async function handleApi(
     const done = new Set(profile?.achievements.done ?? []);
     const owed = new Map((profile?.achievements.owed ?? []).map((o) => [o.id, o]));
     /* A career the player has not started yet is zeroes, not an error. */
-    const career = profile?.stats ?? { kills: 0, bestStreak: 0, damageDealt: 0, blocksPlaced: 0, blocksBroken: 0 };
+    const career = profile?.stats
+      ?? { kills: 0, wins: 0, bestStreak: 0, damageDealt: 0, blocksPlaced: 0, blocksBroken: 0 };
 
     const rows = defs.map((d) => {
       const promise = owed.get(d.id);

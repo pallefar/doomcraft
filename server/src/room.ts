@@ -1426,8 +1426,28 @@ export class Room implements NetHost {
     if (this.state === RoundState.ENDED) return;
     this.state = RoundState.ENDED;
     this.stateEndsMs = this.elapsedMs + END_SCREEN_MS;
+    /* A ROUND NOBODY SCORED IN HAS NO WINNER, and the seed is why it needed
+     * saying. `best` starts null and the FIRST member takes it unconditionally,
+     * so a lone player who did nothing for eight minutes was `best` at 0 kills
+     * and was stamped `won`. Measured: `applyMatchResult` with
+     * `{kills:0, deaths:0, won:true, damageDealt:0, blocks:0, seconds:12}`
+     * gives `roundPays = false` and zero Scrap — and still moves `stats.wins`
+     * to 1. A hundred of those are a hundred lifetime wins for a hundred
+     * rounds of idling.
+     *
+     * That is the same hazard the `winnable` check below was added for, one
+     * step further in: "harmless while it only inflated a stat, money the
+     * moment a challenge pays for wins". `shared/src/achievements.ts` refuses
+     * `wins` as a lifetime stat for exactly this reason, and this is what has
+     * to be true before that refusal could ever be lifted.
+     *
+     * Requiring a kill rather than gating on `roundPays` is deliberate: the
+     * question "did anyone win" belongs to the ROUND, not to whether a
+     * particular player's round was worth paying for, and a 0-0 round is a
+     * draw for everyone in it rather than a win nobody may bank. */
     let best: PlayerEntity | null = null;
     for (const m of this.members.values()) {
+      if (m.player.kills <= 0) continue;
       if (!best || m.player.kills > best.kills) best = m.player;
     }
     /* A mode with no win condition has no winner to record. Builder's

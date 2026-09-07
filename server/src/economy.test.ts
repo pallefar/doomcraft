@@ -314,6 +314,7 @@ function awards(client: Client): ReturnType<typeof createMatchAwardMessage>[] {
 }
 
 const DEVICE = 'device-aaaa0001';
+const DEVICE_B = 'device-aaaa0002';
 const OTHER_DEVICE = 'device-bbbb0002';
 const THIRD_DEVICE = 'device-cccc0003';
 /**
@@ -357,6 +358,60 @@ describe('a server-hosted public deathmatch', () => {
     expect(guard.status().rejected).toBe(0);
     // Nothing was stripped, so a healthy round writes no audit line at all.
     expect(guard.recent()).toEqual([]);
+  });
+
+  it('credits NO win for a round nobody scored in, however long it ran', async () => {
+    /* `best` starts null and the FIRST member takes it unconditionally, so a
+     * lone player who did nothing for a whole round was `best` at 0 kills and
+     * was stamped `won`. Measured before the fix, through applyMatchResult
+     * directly: `{kills:0, deaths:0, won:true, damage:0, blocks:0, seconds:12}`
+     * gives roundPays false and zero Scrap, and still moves stats.wins to 1.
+     *
+     * The full round is played here rather than a short one, so the refusal
+     * cannot be mistaken for the 30-second pay floor doing the work: this
+     * round is long enough to pay, and it pays — there is simply no winner.
+     *
+     * The defective implementation is the seed without the kill test. It
+     * reports wins 1 and stats.wins 1 for a player who did nothing. */
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard });
+
+    const client = join(room, 'Loiterer', DEVICE);
+    // No kills, no deaths, no damage, no blocks. Present, and nothing else.
+    run(room, [client], PLAY_TICKS);
+    endRoundNow(room, [client]);
+    await settled(store, DEVICE);
+
+    const profile = await store.ensure(DEVICE);
+    expect(profile.progress.wins).toBe(0);
+    expect(profile.stats.wins).toBe(0);
+    expect(profile.stats.last?.won).toBe(false);
+    // The round still happened and is still recorded — the refusal is about
+    // the WIN, not about the match being disowned.
+    expect(profile.progress.gamesPlayed).toBe(1);
+    expect(profile.stats.matches).toBe(1);
+    expect(guard.status().accepted).toBe(1);
+  });
+
+  it('still credits the win when somebody actually scored', async () => {
+    /* The control, so the refusal above is about "nobody scored" and not about
+     * wins having quietly stopped working. Two players, one with a kill. */
+    const store = new MemoryStore();
+    const guard = new EntitlementGuard(() => 1_000);
+    const room = makeRoom({ store, guard });
+
+    const winner = join(room, 'Marine', DEVICE);
+    const loser = join(room, 'Other', DEVICE_B);
+    winner.player.kills = 1;
+
+    run(room, [winner, loser], PLAY_TICKS);
+    endRoundNow(room, [winner, loser]);
+    await settled(store, DEVICE);
+    await settled(store, DEVICE_B);
+
+    expect((await store.ensure(DEVICE)).progress.wins).toBe(1);
+    expect((await store.ensure(DEVICE_B)).progress.wins).toBe(0);
   });
 
   it('a mode with NO win condition never stamps a win — Builder has no winner to record', async () => {

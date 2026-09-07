@@ -506,15 +506,23 @@ has shipped, so it is gone; the arc is in §1 and in git.
      check that cannot distinguish the thing it is checking. The fix
      (JSON-escaped free-text fields) changes EVERY declared quests digest, so
      it is its own release and must not ride along with a content change.
-   - **NEW 2026-09-06 — an idle sole player is credited a lifetime WIN.**
-     Measured: `applyMatchResult` with `{kills:0, deaths:0, won:true,
-     damageDealt:0, blocks:0, seconds:12}` gives `roundPays = false`,
-     `economy.scrap = 0` — and `stats.wins = 1`. A hundred of them give
-     `stats.wins = 100` for a hundred rounds of doing nothing. Challenges are
-     unaffected (`buildSubmission` zeroes `challengeIds` when `roundPays` is
-     false), so this is confined to the lifetime block today — but it is
-     exactly why the achievement system may NOT price `wins`, and it would
-     become a mint the moment anything else does.
+   - **FIXED 2026-09-07 — an idle sole player was credited a lifetime WIN.**
+     `endRound` seeded `best` with null and the FIRST member took it
+     unconditionally, so a lone player who did nothing for a whole round was
+     crowned at 0 kills. Measured: `applyMatchResult` with `{kills:0, deaths:0,
+     won:true, damage:0, blocks:0, seconds:12}` gave `roundPays = false` and
+     zero Scrap — and still moved `stats.wins` to 1; a hundred of them made a
+     hundred lifetime wins. Challenges never saw it (`buildSubmission` zeroes
+     `challengeIds` when `roundPays` is false), so it was confined to the
+     lifetime block. A round nobody scored in now has no winner, which also
+     stops the room broadcasting "X wins with 0". This is the same hazard the
+     `winnable` check beside it was added for — "harmless while it only
+     inflated a stat, money the moment a challenge pays for wins" — one step
+     further in.
+     **Consequence:** `wins` is now admitted to `ACHIEVEMENT_STATS`, because a
+     lifetime win implies somebody scored. NO SHIPPED CONTENT PRICES IT: the
+     door is open, nothing has walked through, and adding one is a content
+     decision that moves the quests digest again.
    - **CORRECTED AND CLOSED 2026-09-07 — `equippedSkin` and `title` were NOT
      in fact reachable through `POST /api/profile`.** This entry was wrong, and
      a wrong open-defect entry costs a future session a day. MEASURED: the

@@ -46,14 +46,15 @@ import { sanitiseContentId } from './modes.ts';
  *     nothing at all. `CHALLENGE_STATS` excludes `seconds` for the same reason:
  *     "a stat the player cannot fail to accumulate is a login reward wearing a
  *     challenge's name."
- *   `wins` — MEASURED, not assumed: `applyMatchResult` with
- *     `{kills:0, deaths:0, won:true, damageDealt:0, blocks:0, seconds:12}`
- *     gives `roundPays = false` and zero Scrap, and still moves `stats.wins` to
- *     1. A hundred of them make a hundred lifetime wins for a hundred rounds of
- *     doing nothing, because `endRound` can crown a sole player at zero kills.
- *     Challenges never see it — `buildSubmission` zeroes `challengeIds` when
- *     `roundPays` is false — but the lifetime block does, so an achievement may
- *     not price wins until that is fixed.
+ *   `deaths`, and once upon a time `wins`. `wins` was refused here because
+ *     `endRound` seeded its winner with the first member in the map and took
+ *     them unconditionally, so a lone player who did nothing for a whole round
+ *     was crowned at 0 kills — measured, a hundred idle rounds made a hundred
+ *     lifetime wins while `roundPays` stayed false and zero Scrap moved. That
+ *     is fixed at the source (a round nobody scored in has no winner), so a
+ *     lifetime win now implies at least one kill by somebody, and `wins` is
+ *     admitted. NOTE: no shipped content prices it — the door is open, nothing
+ *     has walked through it.
  *   `deaths` — an achievement is a reward, and a reward for dying pays people
  *     to die. (`playedIdle` counts deaths as ACTIVITY, which is the opposite
  *     question and the right answer to it: being killed is not idling.)
@@ -66,7 +67,7 @@ import { sanitiseContentId } from './modes.ts';
  * short round as a long one, and the targets are large.
  */
 export const ACHIEVEMENT_STATS = Object.freeze([
-  'kills', 'bestStreak', 'damageDealt', 'blocksPlaced', 'blocksBroken',
+  'kills', 'wins', 'bestStreak', 'damageDealt', 'blocksPlaced', 'blocksBroken',
 ] as const);
 export type AchievementStat = (typeof ACHIEVEMENT_STATS)[number];
 
@@ -76,6 +77,7 @@ export type AchievementStat = (typeof ACHIEVEMENT_STATS)[number];
  */
 export interface LifetimeStatSource {
   readonly kills: number;
+  readonly wins: number;
   readonly bestStreak: number;
   readonly damageDealt: number;
   readonly blocksPlaced: number;
