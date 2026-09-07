@@ -592,6 +592,17 @@ has shipped, so it is gone; the arc is in §1 and in git.
 
 ## 4. Deploy runbook (follow exactly)
 
+- **FIRST, AND AT ANY TIME: `node tools/deploy-drift.mjs`.** Answers "is what is
+  LIVE the tree I am standing in?" in one command, exits non-zero on drift.
+  It exists because on 2026-09-07 the origin ran SEVEN COMMITS BEHIND for most
+  of a day and one of them fixed a live money bug — pushed, CI green, and
+  "deployed" had quietly become "committed". It does NOT ask the server what
+  commit it is, because the server does not know and answers wrongly: `build.id`
+  read `b453e8b` before and after three separate deploys that day (rule 17).
+  Railway is checked by SERVED BUNDLE HASH against a local `npm run build`;
+  Vercel by reading THIS COMMIT'S ID out of the served bundle, because the two
+  builds are not reproducible the same way. `--no-build` reuses `dist/`.
+
 - **Vercel (static): from the REPO ROOT** — `npx vercel --prod --yes`.
 - **Railway (origin):** from a CLEAN WORKTREE at HEAD: `git worktree add <tmp>
   HEAD && cd <tmp> && railway link --project doomcraft --service doomcraft &&
